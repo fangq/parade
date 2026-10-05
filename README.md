@@ -70,6 +70,27 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   wrapping beside floats, continuous section breaks, optimal (rather than
   greedy-with-lookback) page breaking.
 
+## Lazarus / Free Pascal (`pascal/`)
+
+- `parade.pas`: the binding for all three headers (static link by default,
+  `-dPARADE_DYNAMIC` for the shared library). Record layouts are checked
+  against the C compiler's on every `make pascal` (217 sizes/offsets).
+- `paradeedit.pas`: `TParadeEdit`, a page-view rich text editor control.
+  Glyphs are rasterized by Parade (exact-area coverage, integer only), so
+  the screen shows exactly the computed layout on every widgetset. Caret
+  and selection are document markers; typing, Enter/Shift+Enter,
+  Backspace/Delete across paragraphs, arrows/Home/End/PgUp/PgDn with
+  Shift selection, mouse click/drag/double-click, Ctrl+Z/Y/A/B/I/U/C/X/V,
+  zoom (Ctrl+wheel), paragraph styles, multi-line paste as paragraphs,
+  JData/BJData load and save.
+- `demo/paradedemo`: a small word processor on the control.
+
+```
+make pascal                                   # ABI + API tests (no GUI)
+make pascal-edit LAZDIR=/path/to/Lazarus42/   # editor driven headless under Xvfb
+make pascal-demo LAZDIR=/path/to/Lazarus42/
+```
+
 ## Build
 
     make            # build/libparade.a, build/libparade.so, tests, bench
@@ -102,10 +123,12 @@ pd_para_break(p, &prm, NULL);
 
 ## Layout
 
-    include/parade.h     public C API: fonts, paragraphs, line breaking
+    include/parade.h     public C API: fonts, rasterizer, paragraphs, line breaking
     include/parade_doc.h public C API: document model, editing, JData I/O
     include/parade_layout.h public C API: pages, display lists, carets
     src/pd_font.c        font metrics reader
+    src/pd_raster.c      glyph outlines (glyf) and the integer rasterizer
+    src/pd_cff.c         CFF Type 2 charstrings
     src/pd_para.c        content building, simple shaper, output, hit testing
     src/pd_break.c       total-fit / first-fit line breaking
     src/pd_json.c        JData/BJData codec (port of mimamo conventions)

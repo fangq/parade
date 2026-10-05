@@ -72,6 +72,40 @@ view: $(SO)
 	    --export-type=png --export-filename=build/parade_view.png --export-dpi=110 >/dev/null 2>&1) && \
 	    echo "wrote build/parade_view.png"
 
+# ---- Free Pascal / Lazarus ----
+# LAZDIR: a Lazarus tree with lazbuild (e.g. LAZDIR=/path/to/Lazarus42/); empty = lazbuild on PATH
+LAZDIR ?=
+LAZBUILD = $(if $(LAZDIR),$(LAZDIR)lazbuild --lazarusdir=$(LAZDIR) $(LAZPCP),lazbuild)
+LAZPCP ?=
+FPC ?= fpc
+XVFB_DISPLAY ?= :97
+
+$(BUILD)/pascal/lib/libparade.a: $(LIB)
+	mkdir -p $(BUILD)/pascal/lib $(BUILD)/pascal/units
+	cp $(LIB) $@
+
+# ABI (C vs Pascal record layouts) and API tests, no GUI needed
+pascal: $(BUILD)/pascal/lib/libparade.a
+	python3 tools/gen_abi.py
+	$(CC) $(PD_CFLAGS) pascal/tests/abi_c.c -o $(BUILD)/pascal/abi_c
+	$(FPC) -O2 -Fupascal -Fl$(BUILD)/pascal/lib -FU$(BUILD)/pascal/units -FE$(BUILD)/pascal pascal/tests/abi_test.pas
+	$(FPC) -O2 -Fupascal -Fl$(BUILD)/pascal/lib -FU$(BUILD)/pascal/units -FE$(BUILD)/pascal pascal/tests/api_test.pas
+	./$(BUILD)/pascal/abi_c > $(BUILD)/pascal/abi_c.txt
+	./$(BUILD)/pascal/abi_test > $(BUILD)/pascal/abi_pas.txt
+	diff $(BUILD)/pascal/abi_c.txt $(BUILD)/pascal/abi_pas.txt && echo "ABI match"
+	$(ulimit_cmd) && ./$(BUILD)/pascal/api_test
+
+# the editor control driven headless on a private Xvfb; renders PNGs into build/pascal
+pascal-edit: $(BUILD)/pascal/lib/libparade.a $(BUILD)/pd_dump
+	$(ulimit_cmd) && ./$(BUILD)/pd_dump > $(BUILD)/pages.json
+	$(LAZBUILD) pascal/tests/edit_test.lpi
+	Xvfb $(XVFB_DISPLAY) -screen 0 1280x1024x24 >/dev/null 2>&1 & echo $$! > $(BUILD)/pascal/xvfb.pid; sleep 2; \
+	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./$(BUILD)/pascal/edit_test $(BUILD)/sample.pdoc \
+	    < /dev/null); rc=$$?; kill `cat $(BUILD)/pascal/xvfb.pid`; exit $$rc
+
+pascal-demo: $(BUILD)/pascal/lib/libparade.a
+	$(LAZBUILD) pascal/demo/paradedemo.lpi
+
 # rasterizer vs fontTools: outline areas and coverage (TrueType and CFF)
 oracle-raster: $(SO)
 	python3 tools/raster_oracle.py --max-mem $(ORACLE_MAX_MEM) \
@@ -110,4 +144,4 @@ pretty:
 	    --break-blocks \
 	    "include/*.h" "src/*.c" "src/*.h" "tests/*.c" "bench/*.c"
 
-.PHONY: all test bench oracle oracle-raster view pages asan clean pretty
+.PHONY: all test bench oracle oracle-raster view pages pascal pascal-edit pascal-demo asan clean pretty

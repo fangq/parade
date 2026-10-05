@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Generate the C and Pascal halves of the ABI check from one table.
+
+Each program prints "struct size" and "struct.field offset" lines; the two
+outputs must be identical (make pascal-abi).
+"""
+STRUCTS = {
+    "pd_font_metrics": "units_per_em ascender descender line_gap x_height cap_height num_glyphs has_kerning",
+    "pd_outline_sink": "move_to line_to quad_to cubic_to close",
+    "pd_glyph_image": "width height left top",
+    "pd_style": "font size space_stretch space_shrink kerning color user",
+    "pd_params": "mode align width indent line_penalty adj_demerits double_hyphen_demerits final_hyphen_demerits "
+                 "hyphen_penalty ex_hyphen_penalty tex_badness rag_stretch baseline_skip line_spacing hysteresis "
+                 "freeze_offset",
+    "pd_break_info": "lines demerits overfull underfull reused_breakpoints frozen_lines height",
+    "pd_line": "text_start text_end x baseline width ascent descent ratio badness hyphenated overfull underfull",
+    "pd_glyph": "glyph cluster x y advance style kind user",
+    "pd_pos": "block offset",
+    "pd_range": "start end",
+    "pd_block_info": "kind id parent child_count index role level list_level style list break_kind text_length "
+                     "revision",
+    "pd_char_props": "mask family size weight italic color background underline strike shift letter_space kerning "
+                     "lang small_caps link_target",
+    "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
+                     "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
+                     "border_color border_width shading",
+    "pd_list_level": "format start text indent hanging",
+    "pd_run": "start end format",
+    "pd_inline": "kind resource width height depth field target level name source source_len user",
+    "pd_float_props": "placement wrap width width_fraction span_columns gap sequence",
+    "pd_section_props": "page_width page_height margin_top margin_bottom margin_left margin_right header_distance "
+                        "footer_distance columns column_gap first_page_number page_number_format title_page "
+                        "facing_pages header header_first header_even footer footer_first footer_even",
+    "pd_change": "kind block style revision",
+    "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull",
+    "pd_page_info": "width height section number label float_page first last",
+    "pd_draw": "kind x y w h glyph font size color resource block offset region",
+}
+PASCAL_NAME = {"end": "finish", "label": "label_"}
+
+c = ['#include <stdio.h>', '#include <stddef.h>', '#include "parade_layout.h"', 'int main(void) {']
+p = ['program abi_test;', '{$mode objfpc}{$H+}', 'uses parade;', 'var']
+for s in STRUCTS:
+    p.append(f'  v_{s}: {s};')
+p.append('begin')
+for s, fields in STRUCTS.items():
+    c.append(f'    printf("{s} %zu\\n", sizeof({s}));')
+    p.append(f"  WriteLn('{s} ', SizeOf({s}));")
+    for f in fields.split():
+        c.append(f'    printf("{s}.{f} %zu\\n", offsetof({s}, {f}));')
+        pf = PASCAL_NAME.get(f, f)
+        p.append(f"  WriteLn('{s}.{f} ', PtrUInt(@v_{s}.{pf}) - PtrUInt(@v_{s}));")
+c += ['    return 0;', '}']
+p.append('end.')
+open('pascal/tests/abi_c.c', 'w').write('\n'.join(c) + '\n')
+open('pascal/tests/abi_test.pas', 'w').write('\n'.join(p) + '\n')
+print('generated pascal/tests/abi_c.c and pascal/tests/abi_test.pas')
