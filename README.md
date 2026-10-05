@@ -261,5 +261,7 @@ pd_para_break(p, &prm, NULL);
 
 ## Next
 
-A vectorized breaker loop (candidate starts in branchless batches); the
-4-way fitness relaxation alone gains about 1% on current CPUs.
+Vectorizing the breaker does not pay: a branchless, batched evaluation of
+candidate starts (branch `vectorized-breaker`, bit-identical results) is
+slower with gcc -O2 and only ties with clang -O3 -march=native (AVX-512);
+the time is in the per-candidate state relaxation, not the arithmetic.
