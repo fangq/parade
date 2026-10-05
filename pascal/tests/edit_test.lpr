@@ -55,6 +55,7 @@ var
   I: Integer;
   N: Int32;
   Runs: array of pd_run;
+  Ms: TMemoryStream;
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -179,6 +180,21 @@ begin
   Check(E.DocumentText = T, 'docx round trip: ' + E.DocumentText);
   E.LoadFromFile(Dir + 'edit_test.md');
   Check(E.DocumentText = T, 'markdown round trip: ' + E.DocumentText);
+  { the same through streams, as a host holding the bytes itself does it }
+  Ms := TMemoryStream.Create;
+  try
+    E.SaveToStream(Ms, PD_CONV_DOCX);
+    Ms.Position := 0;
+    E.LoadFromStream(Ms, PD_CONV_DOCX, 'memory.docx');
+    Check((E.DocumentText = T) and (E.FileName = 'memory.docx') and not E.Modified, 'docx stream round trip');
+    Ms.Clear;
+    E.SaveToStream(Ms, PD_CONV_MARKDOWN);
+    Ms.Position := 0;
+    E.LoadFromStream(Ms, -1);
+    Check(E.DocumentText = T, 'markdown stream round trip, format detected');
+  finally
+    Ms.Free;
+  end;
 
   { 6. up/down keep the column; clicking places the caret }
   E.ProcessKey(VK_UP, []);

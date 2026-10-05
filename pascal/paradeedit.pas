@@ -116,6 +116,12 @@ type
     procedure NewDocument;
     procedure LoadFromFile(const FileName: string);
     procedure SaveToFile(const FileName: string);
+    { the whole of a stream as a document in a format (PD_CONV_*, PD_CONV_JDATA, -1 = detect);
+      FileName is only remembered, for a host that holds the bytes itself }
+    procedure LoadFromStream(Stream: TStream; Format: Int32; const FileName: string = '');
+    { the document in a format (PD_CONV_*; PD_CONV_JDATA is the native document, binary
+      JData when Binary); leaves Modified alone }
+    procedure SaveToStream(Stream: TStream; Format: Int32; Binary: Boolean = False);
     procedure ExportPDF(const FileName: string);
 
     { editing, also usable for automation }
@@ -415,19 +421,30 @@ end;
 procedure TParadeEdit.LoadFromFile(const FileName: string);
 var
   Ms: TMemoryStream;
-  D: Ppd_doc;
-  Fmt: Int32;
 begin
   Ms := TMemoryStream.Create;
   try
     Ms.LoadFromFile(FileName);
-    Fmt := FormatOfFile(FileName);
-    if Fmt < 0 then
-      Fmt := pd_conv_detect(Ms.Memory, Ms.Size);
-    if Fmt = PD_CONV_JDATA then
+    LoadFromStream(Ms, FormatOfFile(FileName), FileName);
+  finally
+    Ms.Free;
+  end;
+end;
+
+procedure TParadeEdit.LoadFromStream(Stream: TStream; Format: Int32; const FileName: string);
+var
+  Ms: TMemoryStream;
+  D: Ppd_doc;
+begin
+  Ms := TMemoryStream.Create;
+  try
+    Ms.CopyFrom(Stream, Stream.Size - Stream.Position);
+    if Format < 0 then
+      Format := pd_conv_detect(Ms.Memory, Ms.Size);
+    if Format = PD_CONV_JDATA then
       ParadeCheck(pd_doc_load(Ms.Memory, Ms.Size, PD_JDATA_AUTO, D), 'load ' + FileName)
     else
-      ParadeCheck(pd_doc_import(Ms.Memory, Ms.Size, Fmt, D), 'import ' + FileName);
+      ParadeCheck(pd_doc_import(Ms.Memory, Ms.Size, Format, D), 'import ' + FileName);
   finally
     Ms.Free;
   end;
@@ -459,27 +476,33 @@ begin
     Exit;
   end;
   Fmt := FormatOfFile(FileName);
+  if Fmt < 0 then
+    Fmt := PD_CONV_JDATA;
   Fs := TFileStream.Create(FileName, fmCreate);
   try
-    if (Fmt = PD_CONV_JDATA) or (Fmt < 0) then
-    begin
-      if LowerCase(ExtractFileExt(FileName)) = '.bpdoc' then
-        Fmt := PD_JDATA_BINARY
-      else
-        Fmt := PD_JDATA_TEXT;
-      ParadeCheck(pd_doc_save(FDoc, Fmt, @WriteToStream, Fs), 'save ' + FileName);
-    end
-    else
-      ParadeCheck(pd_doc_export(FDoc, Fmt, @WriteToStream, Fs), 'export ' + FileName);
+    SaveToStream(Fs, Fmt, LowerCase(ExtractFileExt(FileName)) = '.bpdoc');
   finally
     Fs.Free;
   end;
   { only the native format is the document's own file }
-  if (Fmt = PD_JDATA_TEXT) or (Fmt = PD_JDATA_BINARY) then
+  if Fmt = PD_CONV_JDATA then
   begin
     FFileName := FileName;
     FModified := False;
   end;
+end;
+
+procedure TParadeEdit.SaveToStream(Stream: TStream; Format: Int32; Binary: Boolean);
+begin
+  if Format = PD_CONV_JDATA then
+  begin
+    if Binary then
+      ParadeCheck(pd_doc_save(FDoc, PD_JDATA_BINARY, @WriteToStream, Stream), 'save')
+    else
+      ParadeCheck(pd_doc_save(FDoc, PD_JDATA_TEXT, @WriteToStream, Stream), 'save');
+  end
+  else
+    ParadeCheck(pd_doc_export(FDoc, Format, @WriteToStream, Stream), 'export');
 end;
 
 procedure TParadeEdit.ExportPDF(const FileName: string);
