@@ -654,8 +654,10 @@ static void test_random_undo(void) {
 static pd_doc* rich_doc(void) {
     pd_doc* d;
     pd_res_id res;
-    pd_block_id sec, story, fl, p;
+    pd_block_id sec, story, fl, p, tb, sec2;
     pd_section_props sp;
+    pd_table_props tp;
+    pd_cell_props cep;
     pd_inline o;
     pd_char_props cp;
     pd_list_level lv;
@@ -714,7 +716,33 @@ static pd_doc* rich_doc(void) {
     pd_doc_insert_block(d, sec, -1, PD_BLOCK_PARAGRAPH, &p);
     pd_doc_set_list(d, p, list, 0);
     pd_doc_insert_block(d, sec, -1, PD_BLOCK_BREAK, NULL);
-    pd_doc_insert_block(d, sec, -1, PD_BLOCK_TABLE, NULL);
+    pd_doc_insert_block(d, sec, -1, PD_BLOCK_TABLE, &tb);
+    pd_doc_table_props(d, tb, &tp);
+    tp.header_rows = 1;
+    tp.align = PD_ALIGN_CENTER;
+    tp.ncols = 2;
+    tp.col_width[0] = PD_PT(72);
+    tp.border_color = 0xFF336699u;
+    CHECK(pd_doc_set_table_props(d, tb, &tp) == PD_OK);
+    tp.ncols = PD_TABLE_MAX_COLS + 1;
+    CHECK(pd_doc_set_table_props(d, tb, &tp) == PD_ERR_ARG);
+    tp.ncols = 2;
+    tp.col_width[1] = -1;
+    CHECK(pd_doc_set_table_props(d, tb, &tp) == PD_ERR_ARG);
+    pd_doc_insert_block(d, tb, -1, PD_BLOCK_ROW, NULL);
+    memset(&cep, 0, sizeof(cep));
+    cep.col_span = 2;
+    cep.valign = 1;
+    cep.background = 0xFFEEEEEEu;
+    CHECK(pd_doc_set_cell_props(d, pd_doc_child(d, pd_doc_child(d, tb, 1), 0), &cep) == PD_OK);
+    cep.col_span = 0;
+    CHECK(pd_doc_set_cell_props(d, pd_doc_child(d, pd_doc_child(d, tb, 1), 0), &cep) == PD_ERR_ARG);
+    pd_doc_insert_block(d, pd_doc_root(d), -1, PD_BLOCK_SECTION, &sec2);
+    pd_doc_section_props(d, sec2, &sp);
+    sp.continuous = 1;
+    sp.page_breaking = PD_PAGES_OPTIMAL;
+    sp.footnote_skip = PD_PT(9);
+    CHECK(pd_doc_set_section_props(d, sec2, &sp) == PD_OK);
     pd_doc_style_define(d, "Custom", PD_STYLE_PARAGRAPH, pd_doc_style_find(d, "Quote"), NULL, NULL, NULL);
     pd_doc_style_define(d, "Undone", PD_STYLE_PARAGRAPH, 0, NULL, NULL, NULL);
     pd_doc_undo(d);     /* leaves a dead style slot, which must survive a round trip */
@@ -739,6 +767,27 @@ static void test_jdata(void) {
         CHECK(same(txt, txt2));     /* text -> doc -> text is lossless */
         CHECK(same(txt, txt3));     /* binary -> doc -> text equals the original text */
         CHECK(invariants(t) && invariants(b));
+        {
+            /* table, cell and section properties survive */
+            pd_table_props x;
+            pd_section_props y;
+            pd_block_id tb2 = 0, s2 = pd_doc_child(t, pd_doc_root(t), 1);
+            int32_t k;
+
+            for (k = 0; k < 64 && !tb2; k++) {
+                pd_block_info bi;
+
+                if (pd_doc_block_info(t, pd_doc_child(t, pd_doc_child(t, pd_doc_root(t), 0), k), &bi) == PD_OK &&
+                        bi.kind == PD_BLOCK_TABLE) {
+                    tb2 = bi.id;
+                }
+            }
+
+            CHECK(tb2 && pd_doc_table_props(t, tb2, &x) == PD_OK && x.header_rows == 1 && x.ncols == 2 &&
+                  x.col_width[0] == PD_PT(72) && x.align == PD_ALIGN_CENTER && x.border_color == 0xFF336699u);
+            CHECK(pd_doc_section_props(t, s2, &y) == PD_OK && y.continuous == 1 && y.page_breaking == PD_PAGES_OPTIMAL &&
+                  y.footnote_skip == PD_PT(9));
+        }
         /* the loaded document is editable and undoable */
         CHECK(pd_doc_insert_text(t, at(first_para(t), 0), "New ", 4, PD_FORMAT_INHERIT, NULL) == PD_OK);
         CHECK(pd_doc_undo(t) == PD_OK);

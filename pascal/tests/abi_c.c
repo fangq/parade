@@ -49,6 +49,7 @@ int main(void) {
     printf("pd_params.hysteresis %zu\n", offsetof(pd_params, hysteresis));
     printf("pd_params.freeze_offset %zu\n", offsetof(pd_params, freeze_offset));
     printf("pd_params.direction %zu\n", offsetof(pd_params, direction));
+    printf("pd_params.looseness %zu\n", offsetof(pd_params, looseness));
     printf("pd_break_info %zu\n", sizeof(pd_break_info));
     printf("pd_break_info.lines %zu\n", offsetof(pd_break_info, lines));
     printf("pd_break_info.demerits %zu\n", offsetof(pd_break_info, demerits));
@@ -188,6 +189,22 @@ int main(void) {
     printf("pd_section_props.footer %zu\n", offsetof(pd_section_props, footer));
     printf("pd_section_props.footer_first %zu\n", offsetof(pd_section_props, footer_first));
     printf("pd_section_props.footer_even %zu\n", offsetof(pd_section_props, footer_even));
+    printf("pd_section_props.continuous %zu\n", offsetof(pd_section_props, continuous));
+    printf("pd_section_props.page_breaking %zu\n", offsetof(pd_section_props, page_breaking));
+    printf("pd_section_props.footnote_skip %zu\n", offsetof(pd_section_props, footnote_skip));
+    printf("pd_table_props %zu\n", sizeof(pd_table_props));
+    printf("pd_table_props.width %zu\n", offsetof(pd_table_props, width));
+    printf("pd_table_props.align %zu\n", offsetof(pd_table_props, align));
+    printf("pd_table_props.header_rows %zu\n", offsetof(pd_table_props, header_rows));
+    printf("pd_table_props.cell_padding %zu\n", offsetof(pd_table_props, cell_padding));
+    printf("pd_table_props.border %zu\n", offsetof(pd_table_props, border));
+    printf("pd_table_props.border_color %zu\n", offsetof(pd_table_props, border_color));
+    printf("pd_table_props.ncols %zu\n", offsetof(pd_table_props, ncols));
+    printf("pd_table_props.col_width %zu\n", offsetof(pd_table_props, col_width));
+    printf("pd_cell_props %zu\n", sizeof(pd_cell_props));
+    printf("pd_cell_props.col_span %zu\n", offsetof(pd_cell_props, col_span));
+    printf("pd_cell_props.valign %zu\n", offsetof(pd_cell_props, valign));
+    printf("pd_cell_props.background %zu\n", offsetof(pd_cell_props, background));
     printf("pd_change %zu\n", sizeof(pd_change));
     printf("pd_change.kind %zu\n", offsetof(pd_change, kind));
     printf("pd_change.block %zu\n", offsetof(pd_change, block));
@@ -199,6 +216,7 @@ int main(void) {
     printf("pd_layout_info.paragraphs_reused %zu\n", offsetof(pd_layout_info, paragraphs_reused));
     printf("pd_layout_info.float_pages %zu\n", offsetof(pd_layout_info, float_pages));
     printf("pd_layout_info.overfull %zu\n", offsetof(pd_layout_info, overfull));
+    printf("pd_layout_info.variants %zu\n", offsetof(pd_layout_info, variants));
     printf("pd_page_info %zu\n", sizeof(pd_page_info));
     printf("pd_page_info.width %zu\n", offsetof(pd_page_info, width));
     printf("pd_page_info.height %zu\n", offsetof(pd_page_info, height));

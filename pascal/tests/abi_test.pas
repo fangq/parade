@@ -20,6 +20,8 @@ var
   v_pd_inline: pd_inline;
   v_pd_float_props: pd_float_props;
   v_pd_section_props: pd_section_props;
+  v_pd_table_props: pd_table_props;
+  v_pd_cell_props: pd_cell_props;
   v_pd_change: pd_change;
   v_pd_layout_info: pd_layout_info;
   v_pd_page_info: pd_page_info;
@@ -73,6 +75,7 @@ begin
   WriteLn('pd_params.hysteresis ', PtrUInt(@v_pd_params.hysteresis) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.freeze_offset ', PtrUInt(@v_pd_params.freeze_offset) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.direction ', PtrUInt(@v_pd_params.direction) - PtrUInt(@v_pd_params));
+  WriteLn('pd_params.looseness ', PtrUInt(@v_pd_params.looseness) - PtrUInt(@v_pd_params));
   WriteLn('pd_break_info ', SizeOf(pd_break_info));
   WriteLn('pd_break_info.lines ', PtrUInt(@v_pd_break_info.lines) - PtrUInt(@v_pd_break_info));
   WriteLn('pd_break_info.demerits ', PtrUInt(@v_pd_break_info.demerits) - PtrUInt(@v_pd_break_info));
@@ -212,6 +215,22 @@ begin
   WriteLn('pd_section_props.footer ', PtrUInt(@v_pd_section_props.footer) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.footer_first ', PtrUInt(@v_pd_section_props.footer_first) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.footer_even ', PtrUInt(@v_pd_section_props.footer_even) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.continuous ', PtrUInt(@v_pd_section_props.continuous) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.page_breaking ', PtrUInt(@v_pd_section_props.page_breaking) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.footnote_skip ', PtrUInt(@v_pd_section_props.footnote_skip) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_table_props ', SizeOf(pd_table_props));
+  WriteLn('pd_table_props.width ', PtrUInt(@v_pd_table_props.width) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.align ', PtrUInt(@v_pd_table_props.align) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.header_rows ', PtrUInt(@v_pd_table_props.header_rows) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.cell_padding ', PtrUInt(@v_pd_table_props.cell_padding) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.border ', PtrUInt(@v_pd_table_props.border) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.border_color ', PtrUInt(@v_pd_table_props.border_color) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.ncols ', PtrUInt(@v_pd_table_props.ncols) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.col_width ', PtrUInt(@v_pd_table_props.col_width) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_cell_props ', SizeOf(pd_cell_props));
+  WriteLn('pd_cell_props.col_span ', PtrUInt(@v_pd_cell_props.col_span) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.valign ', PtrUInt(@v_pd_cell_props.valign) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.background ', PtrUInt(@v_pd_cell_props.background) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_change ', SizeOf(pd_change));
   WriteLn('pd_change.kind ', PtrUInt(@v_pd_change.kind) - PtrUInt(@v_pd_change));
   WriteLn('pd_change.block ', PtrUInt(@v_pd_change.block) - PtrUInt(@v_pd_change));
@@ -223,6 +242,7 @@ begin
   WriteLn('pd_layout_info.paragraphs_reused ', PtrUInt(@v_pd_layout_info.paragraphs_reused) - PtrUInt(@v_pd_layout_info));
   WriteLn('pd_layout_info.float_pages ', PtrUInt(@v_pd_layout_info.float_pages) - PtrUInt(@v_pd_layout_info));
   WriteLn('pd_layout_info.overfull ', PtrUInt(@v_pd_layout_info.overfull) - PtrUInt(@v_pd_layout_info));
+  WriteLn('pd_layout_info.variants ', PtrUInt(@v_pd_layout_info.variants) - PtrUInt(@v_pd_layout_info));
   WriteLn('pd_page_info ', SizeOf(pd_page_info));
   WriteLn('pd_page_info.width ', PtrUInt(@v_pd_page_info.width) - PtrUInt(@v_pd_page_info));
   WriteLn('pd_page_info.height ', PtrUInt(@v_pd_page_info.height) - PtrUInt(@v_pd_page_info));

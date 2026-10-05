@@ -316,6 +316,10 @@ void pd_doc_bstate_init(bstate* s, int32_t kind) {
         strcpy(s->fp.sequence, "Figure");
     } else if (kind == PD_BLOCK_SECTION) {
         pd_section_props_init(&s->sp);
+    } else if (kind == PD_BLOCK_TABLE) {
+        pd_table_props_init(&s->tp);
+    } else if (kind == PD_BLOCK_CELL) {
+        s->cell.col_span = 1;
     }
 }
 
@@ -1446,6 +1450,39 @@ void pd_section_props_init(pd_section_props* sp) {
     sp->column_gap = PD_PT(18);
     sp->first_page_number = 1;
     sp->page_number_format = PD_NUM_DECIMAL;
+    sp->footnote_skip = PD_PT(12);
+}
+
+void pd_table_props_init(pd_table_props* tp) {
+    if (tp) {
+        memset(tp, 0, sizeof(*tp));
+        tp->align = PD_ALIGN_LEFT;
+        tp->cell_padding = PD_PT(4);
+        tp->border = PD_PT(0.4);
+        tp->border_color = 0xFF000000u;
+    }
+}
+
+pd_status pd_doc_table_props(const pd_doc* d, pd_block_id id, pd_table_props* out) {
+    blk* b = pd_doc_blk(d, id);
+
+    if (!b || b->kind != PD_BLOCK_TABLE || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = b->st.tp;
+    return PD_OK;
+}
+
+pd_status pd_doc_cell_props(const pd_doc* d, pd_block_id id, pd_cell_props* out) {
+    blk* b = pd_doc_blk(d, id);
+
+    if (!b || b->kind != PD_BLOCK_CELL || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = b->st.cell;
+    return PD_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2556,8 +2593,43 @@ pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_p
              (int64_t)sp->margin_left + sp->margin_right < sp->page_width &&
              (int64_t)sp->margin_top + sp->margin_bottom < sp->page_height && sp->columns >= 1 && sp->columns <= 16 &&
              story_ok(d, sp->header) && story_ok(d, sp->header_first) && story_ok(d, sp->header_even) &&
-             story_ok(d, sp->footer) && story_ok(d, sp->footer_first) && story_ok(d, sp->footer_even),
+             story_ok(d, sp->footer) && story_ok(d, sp->footer_first) && story_ok(d, sp->footer_even) &&
+             (sp->continuous == 0 || sp->continuous == 1) && sp->page_breaking >= PD_PAGES_GREEDY &&
+             sp->page_breaking <= PD_PAGES_OPTIMAL && sp->footnote_skip >= 0,
              b->st.sp = *sp);
+}
+
+int pd_doc_table_props_ok(const pd_table_props* tp) {
+    int32_t i;
+
+    if (!tp || tp->width < 0 || tp->align < PD_ALIGN_JUSTIFY || tp->align > PD_ALIGN_CENTER || tp->header_rows < 0 ||
+            tp->header_rows > 1000 || tp->cell_padding < 0 || tp->border < 0 || tp->ncols < 0 ||
+            tp->ncols > PD_TABLE_MAX_COLS) {
+        return 0;
+    }
+
+    for (i = 0; i < tp->ncols; i++) {
+        if (tp->col_width[i] < 0) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+pd_status pd_doc_set_table_props(pd_doc* d, pd_block_id id, const pd_table_props* tp) {
+    blk* b = d ? pd_doc_blk(d, id) : NULL;
+
+    BLOCK_OP("Table", b && b->kind == PD_BLOCK_TABLE && pd_doc_table_props_ok(tp),
+             (b->st.tp = *tp, memset(b->st.tp.col_width + tp->ncols, 0,
+                                     (size_t)(PD_TABLE_MAX_COLS - tp->ncols) * sizeof(pd_sp))));
+}
+
+pd_status pd_doc_set_cell_props(pd_doc* d, pd_block_id id, const pd_cell_props* cp) {
+    blk* b = d ? pd_doc_blk(d, id) : NULL;
+
+    BLOCK_OP("Cell", b && b->kind == PD_BLOCK_CELL && cp && cp->col_span >= 1 &&
+             cp->col_span <= PD_TABLE_MAX_COLS && cp->valign >= 0 && cp->valign <= 2, b->st.cell = *cp);
 }
 
 pd_status pd_doc_set_break(pd_doc* d, pd_block_id id, pd_break_kind kind) {

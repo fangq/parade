@@ -126,6 +126,48 @@ void pd_style_init(pd_style* s, const pd_font* font, pd_sp size) {
     s->color = 0xFF000000u;
 }
 
+void pd_para_natural(const pd_para* p, pd_sp* minw, pd_sp* maxw) {
+    pd_params prm;
+    int64_t line = 0, word = 0, mn = 0, mx = 0;
+    int32_t i;
+
+    pd_params_init(&prm);
+
+    for (i = 0; i < p->n_items; i++) {
+        const pd_item* it = &p->items[i];
+
+        if (it->type == PD_ITEM_BOX) {
+            line += it->width;
+            word += it->width;
+        } else if (it->type == PD_ITEM_GLUE) {
+            if (i > 0 && p->items[i - 1].type == PD_ITEM_BOX && !(it->flags & PD_FLAG_NOBREAK)) {
+                mn = word > mn ? word : mn;
+                word = 0;
+            } else {
+                word += it->width;
+            }
+
+            line += it->width;
+        } else {
+            int32_t pen = pd_item_penalty(it, &prm);
+
+            if (pen <= -PD_INF_PENALTY) {
+                mn = word > mn ? word : mn;
+                mx = line > mx ? line : mx;
+                line = word = 0;
+            } else if (pen < PD_INF_PENALTY) {
+                mn = word + it->width > mn ? word + it->width : mn;
+                word = 0;
+            }
+        }
+    }
+
+    mn = word > mn ? word : mn;
+    mx = line > mx ? line : mx;
+    *minw = (pd_sp)(mn < INT32_MAX ? mn : INT32_MAX);
+    *maxw = (pd_sp)(mx < INT32_MAX ? mx : INT32_MAX);
+}
+
 void pd_params_init(pd_params* prm) {
     if (!prm) {
         return;

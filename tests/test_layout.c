@@ -696,6 +696,519 @@ static void test_hyphenation(void) {
     pd_hyph_free(h);
 }
 
+/* all draw items of a page (caller frees) */
+static pd_draw* items(const pd_layout* L, int32_t pg, int32_t* n) {
+    pd_draw* it;
+
+    pd_layout_page_items(L, pg, NULL, 0, n);
+    it = (pd_draw*)malloc(((size_t) * n + 1) * sizeof(pd_draw));
+    pd_layout_page_items(L, pg, it, *n, n);
+    return it;
+}
+
+/* a story holding one paragraph of text */
+static pd_block_id add_story(pd_doc* d, const char* text) {
+    pd_block_id st;
+
+    pd_doc_insert_block(d, 0, -1, PD_BLOCK_STORY, &st);
+    pd_doc_insert_text(d, at(pd_doc_child(d, st, 0), 0), text, strlen(text), PD_FORMAT_INHERIT, NULL);
+    return st;
+}
+
+static void add_footnote(pd_doc* d, pd_block_id para, uint32_t off, pd_block_id story) {
+    pd_inline o;
+
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_FOOTNOTE;
+    o.target = story;
+    pd_doc_insert_inline(d, at(para, off), &o, NULL);
+}
+
+static void test_footnotes(void) {
+    pd_block_id sec, p[30], notes[5];
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_section_props sp;
+    int32_t i, k, n, pg, ok_pages = 0;
+    char buf[64];
+
+    for (i = 0; i < 30; i++) {
+        p[i] = add_para(d, sec, frog);
+    }
+
+    for (i = 0; i < 5; i++) {
+        snprintf(buf, sizeof(buf), "Note %d: the well was deep and dark, and the ball sank.", i + 1);
+        notes[i] = add_story(d, buf);
+        add_footnote(d, p[i * 6 + 1], 20, notes[i]);
+    }
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    CHECK(info.overfull == 0);
+    pd_doc_section_props(d, sec, &sp);
+
+    for (i = 0; i < 5; i++) {   /* each body is on the page of its mark, below all body text */
+        pd_sp ymark = 0, ynote = 0, body_bottom = 0, rule_y = -1;
+        pd_draw* it;
+        int32_t mark_page = page_of(L, p[i * 6 + 1], 20, &ymark), note_lines = 0;
+        pd_block_id np = pd_doc_child(d, notes[i], 0);
+
+        pg = page_of(L, np, 0, &ynote);
+        CHECK(pg == mark_page && pg >= 0);
+
+        if (pg < 0) {
+            continue;
+        }
+
+        it = items(L, pg, &n);
+
+        for (k = 0; k < n; k++) {
+            if (it[k].region == 0 && it[k].kind == PD_DRAW_GLYPH && it[k].y > body_bottom) {
+                body_bottom = it[k].y;
+            }
+
+            if (it[k].region == 4 && it[k].kind == PD_DRAW_RULE) {
+                rule_y = it[k].y;
+            }
+
+            note_lines += it[k].region == 4 && it[k].kind == PD_DRAW_GLYPH && it[k].block == np;
+        }
+
+        CHECK(note_lines > 10);
+        CHECK(rule_y > body_bottom && ynote > rule_y);
+        CHECK(ynote < sp.page_height - sp.margin_bottom);
+        ok_pages += rule_y > body_bottom && ynote > rule_y;
+        free(it);
+    }
+
+    /* the note number is set before the body */
+    {
+        pd_draw* it;
+        int32_t found = 0;
+        pd_block_id np = pd_doc_child(d, notes[2], 0);
+
+        pg = page_of(L, np, 0, NULL);
+        it = items(L, pg, &n);
+
+        for (k = 0; k < n; k++) {
+            found += it[k].block == np && it[k].kind == PD_DRAW_GLYPH && it[k].text == '3' && it[k].offset == 0;
+        }
+
+        CHECK(found >= 1);
+        free(it);
+    }
+
+    printf("  %d notes placed on %d pages (%d checked)\n", 5, info.pages, ok_pages);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* a table of rows x cols with text from a callback */
+static pd_block_id add_table(pd_doc* d, pd_block_id sec, int32_t rows, int32_t cols, int32_t header_rows,
+                             const char* (*text)(int32_t r, int32_t c, char* buf)) {
+    pd_block_id t, row, cell;
+    pd_table_props tp;
+    int32_t r, c;
+    char buf[256];
+
+    pd_doc_insert_block(d, sec, -1, PD_BLOCK_TABLE, &t);
+    pd_doc_table_props(d, t, &tp);
+    tp.header_rows = header_rows;
+    pd_doc_set_table_props(d, t, &tp);
+
+    for (r = 0; r < rows; r++) {
+        if (r == 0) {
+            row = pd_doc_child(d, t, 0);
+        } else {
+            pd_doc_insert_block(d, t, -1, PD_BLOCK_ROW, &row);
+        }
+
+        for (c = 0; c < cols; c++) {
+            const char* s;
+
+            if (c > 0) {
+                pd_doc_insert_block(d, row, -1, PD_BLOCK_CELL, &cell);
+            } else {
+                cell = pd_doc_child(d, row, 0);
+            }
+
+            s = text(r, c, buf);
+            pd_doc_insert_text(d, at(pd_doc_child(d, cell, 0), 0), s, strlen(s), PD_FORMAT_INHERIT, NULL);
+        }
+    }
+
+    return t;
+}
+
+static const char* cell_text(int32_t r, int32_t c, char* buf) {
+    if (r == 0) {
+        return c == 0 ? "Name" : c == 1 ? "Count" : "Description";
+    }
+
+    if (c == 0) {
+        sprintf(buf, "Item %d", (int)r);
+    } else if (c == 1) {
+        sprintf(buf, "%d", (int)(r * 37 % 1000));
+    } else {
+        sprintf(buf, "%s", r % 3 ? "a short note" :
+                "a longer description that will have to wrap onto several lines in its cell");
+    }
+
+    return buf;
+}
+
+static pd_block_id cell_para(const pd_doc* d, pd_block_id t, int32_t r, int32_t c) {
+    return pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, r), c), 0);
+}
+
+static void test_tables(void) {
+    pd_block_id sec, t, span_row, span_cell;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_section_props sp;
+    pd_cell_props cp;
+    int32_t r, pg, n, k, pages, rows_ok = 1, rules = 0;
+    pd_sp x0, x1, x2, y, ya, yb;
+
+    add_para(d, sec, frog);
+    t = add_table(d, sec, 80, 3, 1, cell_text);
+    add_para(d, sec, frog);
+
+    /* a row with one cell spanning all three columns */
+    pd_doc_insert_block(d, t, 5, PD_BLOCK_ROW, &span_row);
+    span_cell = pd_doc_child(d, span_row, 0);
+    pd_doc_cell_props(d, span_cell, &cp);
+    cp.col_span = 3;
+    cp.background = 0xFFE0E0E0u;
+    CHECK(pd_doc_set_cell_props(d, span_cell, &cp) == PD_OK);
+    pd_doc_insert_text(d, at(pd_doc_child(d, span_cell, 0), 0), "spanning all columns", 20, PD_FORMAT_INHERIT, NULL);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    CHECK(info.overfull == 0);
+    pages = pd_layout_page_count(L);
+    CHECK(pages >= 3);
+    pd_doc_section_props(d, sec, &sp);
+
+    /* columns left to right inside the text column; the description column is the widest */
+    {
+        pd_sp cx[4];
+        int32_t c;
+
+        for (c = 0; c < 3; c++) {
+            pd_layout_caret(L, at(cell_para(d, t, 3, c), 0), &pg, &cx[c], &y, NULL, NULL);
+        }
+
+        x0 = cx[0];
+        x1 = cx[1];
+        x2 = cx[2];
+        CHECK(x0 >= sp.margin_left && x1 > x0 && x2 > x1);
+    }
+
+    {
+        /* the widest description ends inside the text column */
+        pd_block_id lp = cell_para(d, t, 3, 2);
+        pd_sp xe;
+        const char* tx;
+        uint32_t len;
+
+        pd_doc_para_text(d, lp, &tx, &len);
+        pd_layout_caret(L, at(lp, len), &pg, &xe, &y, NULL, NULL);
+        CHECK(xe <= sp.page_width - sp.margin_right && xe > x2);
+    }
+
+    /* every row whole on one page; the header row on every page the table touches */
+    for (r = 1; r < 81; r++) {
+        int32_t p0 = page_of(L, cell_para(d, t, r, 0), 0, &ya);
+        int32_t c, nc = r == 5 ? 1 : 3;
+
+        for (c = 1; c < nc; c++) {
+            int32_t p1 = page_of(L, cell_para(d, t, r, c), 0, &yb);
+            rows_ok &= p1 == p0 && yb == ya;
+        }
+    }
+
+    CHECK(rows_ok);
+
+    for (pg = 0; pg < pages; pg++) {
+        pd_draw* it = items(L, pg, &n);
+        int32_t hdr = 0, body = 0;
+
+        for (k = 0; k < n; k++) {
+            hdr += it[k].kind == PD_DRAW_GLYPH && it[k].block == cell_para(d, t, 0, 0);
+            body += it[k].kind == PD_DRAW_GLYPH && it[k].block == cell_para(d, t, 50, 0);
+            rules += it[k].kind == PD_DRAW_RULE;
+        }
+
+        if (pg > 0 && pg < pages - 1) {
+            CHECK(hdr == 4);    /* "Name" repeated */
+        }
+
+        free(it);
+    }
+
+    CHECK(rules > 100);
+    /* a fresh layout equals the updated one */
+    {
+        pd_layout* L2;
+        uint64_t h1 = layout_hash(L), h2;
+
+        pd_layout_new(d, &L2);
+        pd_layout_update(L2, NULL);
+        h2 = layout_hash(L2);
+        CHECK(h1 == h2);
+        pd_layout_free(L2);
+    }
+
+    printf("  80-row table on %d pages, column x %.1f/%.1f/%.1f pt\n", pages, x0 / 65536.0, x1 / 65536.0,
+           x2 / 65536.0);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+static void test_wrap(void) {
+    pd_block_id sec, fl, p1, p2;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_float_props fp;
+    pd_section_props sp;
+    pd_draw* it;
+    pd_sp fy = 0, fx = 0, fw = 0, fh = 0;
+    int32_t k, n, beside = 0, below = 0, bad = 0;
+
+    add_para(d, sec, frog);
+    fl = add_float(d, sec, -1, PD_PT(120), PD_PT(90), PD_PLACE_HERE);
+    pd_doc_float_props(d, fl, &fp);
+    fp.wrap = PD_WRAP_LEFT;
+    fp.width = PD_PT(120);
+    fp.gap = PD_PT(8);
+    pd_doc_set_float_props(d, fl, &fp);
+    p1 = add_para(d, sec, frog);
+    p2 = add_para(d, sec, frog);
+    pd_doc_section_props(d, sec, &sp);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, NULL) == PD_OK);
+    it = items(L, 0, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_IMAGE) {
+            fx = it[k].x;
+            fy = it[k].y;
+            fw = it[k].w;
+            fh = it[k].h;
+        }
+    }
+
+    CHECK(fh == PD_PT(90) && fx == sp.margin_left);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind != PD_DRAW_GLYPH || (it[k].block != p1 && it[k].block != p2)) {
+            continue;
+        }
+
+        if (it[k].y - PD_PT(8) < fy + fh) {     /* a line overlapping the float's height */
+            beside++;
+            bad += it[k].x < fx + fw + PD_PT(8);
+        } else {
+            below++;
+        }
+    }
+
+    CHECK(beside > 50 && below > 50 && bad == 0);
+    printf("  %d glyphs beside the float, %d below\n", beside, below);
+    free(it);
+
+    /* right side */
+    fp.wrap = PD_WRAP_RIGHT;
+    pd_doc_set_float_props(d, fl, &fp);
+    pd_layout_update(L, NULL);
+    it = items(L, 0, &n);
+    bad = beside = 0;
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_IMAGE) {
+            fx = it[k].x;
+        }
+    }
+
+    CHECK(fx + PD_PT(120) == sp.page_width - sp.margin_right);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].block == p1 && it[k].y - PD_PT(8) < fy + fh) {
+            beside++;
+            bad += it[k].x + it[k].w > fx;
+        }
+    }
+
+    CHECK(beside > 50 && bad == 0);
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+static void test_continuous(void) {
+    pd_block_id s1, s2, s3, q[16];
+    pd_doc* d = new_doc(&s1);
+    pd_layout* L;
+    pd_section_props sp;
+    pd_sp y_last1 = 0, y_first2 = 0, y, ybot[2] = { 0, 0 }, xcol;
+    int32_t i, pg;
+
+    for (i = 0; i < 2; i++) {
+        add_para(d, s1, frog);
+    }
+
+    pd_doc_insert_block(d, pd_doc_root(d), -1, PD_BLOCK_SECTION, &s2);
+    pd_doc_section_props(d, s2, &sp);
+    sp.continuous = 1;
+    sp.columns = 2;
+    CHECK(pd_doc_set_section_props(d, s2, &sp) == PD_OK);
+
+    for (i = 0; i < 5; i++) {
+        q[i] = add_para(d, s2, frog);
+    }
+
+    pd_doc_insert_block(d, pd_doc_root(d), -1, PD_BLOCK_SECTION, &s3);
+    pd_doc_section_props(d, s3, &sp);
+    sp.continuous = 1;
+    pd_doc_set_section_props(d, s3, &sp);
+    add_para(d, s3, frog);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, NULL) == PD_OK);
+    CHECK(pd_layout_page_count(L) == 1);
+    page_of(L, pd_doc_child(d, s1, 2), 0, &y_last1);
+    pg = page_of(L, q[0], 0, &y_first2);
+    CHECK(pg == 0 && y_first2 > y_last1);
+
+    /* balanced: both columns end within a line of each other */
+    xcol = sp.margin_left + (sp.page_width - sp.margin_left - sp.margin_right) / 2;
+
+    for (i = 0; i < 5; i++) {
+        pd_sp x;
+        uint32_t len = (uint32_t)strlen(frog), o;
+
+        for (o = 0; o <= len; o += 8) {
+            pd_layout_caret(L, at(q[i], o), &pg, &x, &y, NULL, NULL);
+            ybot[x >= xcol] = y > ybot[x >= xcol] ? y : ybot[x >= xcol];
+        }
+    }
+
+    CHECK(ybot[0] > 0 && ybot[1] > 0);
+    CHECK(ybot[0] - ybot[1] < PD_PT(15) && ybot[1] - ybot[0] < PD_PT(15));
+    page_of(L, pd_doc_child(d, s3, 1), 0, &y);
+    CHECK(y > ybot[0] && y > ybot[1]);
+    printf("  balanced columns end at %.1f / %.1f pt; next section at %.1f pt\n", ybot[0] / 65536.0,
+           ybot[1] / 65536.0, y / 65536.0);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* sum of squared empty space at the bottom of every column but the last */
+static double page_slack(const pd_layout* L, const pd_section_props* sp) {
+    double s = 0;
+    int32_t pg, k, n, c, nc = sp->columns < 1 ? 1 : sp->columns, np = pd_layout_page_count(L);
+    pd_sp colw = (sp->page_width - sp->margin_left - sp->margin_right + sp->column_gap) / nc;
+
+    for (pg = 0; pg < np; pg++) {
+        pd_draw* it = items(L, pg, &n);
+        pd_sp bottom[16];
+
+        memset(bottom, 0, sizeof(bottom));
+
+        for (k = 0; k < n; k++) {
+            c = (int32_t)((it[k].x - sp->margin_left) / colw);
+            c = c < 0 ? 0 : c >= nc ? nc - 1 : c;
+
+            if (it[k].region == 0 && it[k].y > bottom[c]) {
+                bottom[c] = it[k].y;
+            }
+        }
+
+        for (c = 0; c < nc && bottom[c] > 0; c++) {
+            double gap = (double)(sp->page_height - sp->margin_bottom - bottom[c]) / 65536.0;
+
+            if (pg + 1 < np || (c + 1 < nc && bottom[c + 1] > 0)) {
+                s += gap * gap;
+            }
+        }
+
+        free(it);
+    }
+
+    return s;
+}
+
+static void test_optimal_pages(void) {
+    pd_block_id sec;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info gi, oi;
+    pd_section_props sp;
+    pd_para_props pp;
+    double gs, os;
+    int32_t i;
+    unsigned seed = 7;
+
+    for (i = 0; i < 40; i++) {  /* unbreakable paragraphs of 12-20 lines leave gaps at column bottoms */
+        pd_block_id p;
+        uint32_t len = (uint32_t)strlen(frog), cut;
+
+        seed = seed * 1103515245u + 12345u;
+        cut = 100 + (seed >> 8) % (len - 100);
+
+        while (cut < len && frog[cut] != ' ') {
+            cut++;
+        }
+
+        pd_doc_insert_block(d, sec, -1, PD_BLOCK_PARAGRAPH, &p);
+        pd_doc_insert_text(d, at(p, 0), frog, strlen(frog), PD_FORMAT_INHERIT, NULL);
+        pd_doc_insert_text(d, at(p, (uint32_t)strlen(frog)), frog, cut, PD_FORMAT_INHERIT, NULL);
+        memset(&pp, 0, sizeof(pp));
+        pp.mask = PD_PP_KEEP_LINES;
+        pp.keep_lines = 1;
+        pd_doc_set_para_props(d, p, &pp);
+    }
+
+    pd_doc_section_props(d, sec, &sp);
+    sp.page_height = PD_PT(500);
+    sp.columns = 2;
+    pd_doc_set_section_props(d, sec, &sp);
+    pd_layout_new(d, &L);
+    pd_layout_update(L, &gi);
+    gs = page_slack(L, &sp);
+
+    sp.page_breaking = PD_PAGES_OPTIMAL;
+    pd_doc_set_section_props(d, sec, &sp);
+    CHECK(pd_layout_update(L, &oi) == PD_OK);
+    os = page_slack(L, &sp);
+    CHECK(oi.overfull == 0 && oi.pages <= gi.pages);
+    CHECK(os < gs && oi.variants > 0);
+    printf("  greedy: %d pages, slack %.0f; optimal: %d pages, slack %.0f, %d paragraph variants\n", gi.pages, gs,
+           oi.pages, os, oi.variants);
+
+    {
+        /* deterministic, and a fresh layout agrees */
+        pd_layout* L2;
+
+        pd_layout_new(d, &L2);
+        pd_layout_update(L2, NULL);
+        CHECK(layout_hash(L) == layout_hash(L2));
+        pd_layout_free(L2);
+    }
+
+    /* the caret finds lines of variant layouts */
+    for (i = 0; i < 40; i++) {
+        CHECK(page_of(L, pd_doc_child(d, sec, i + 1), 0, NULL) >= 0);
+    }
+
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -720,6 +1233,16 @@ int main(void) {
     printf("font fallback\n");
     test_fallback();
     test_hyphenation();
+    printf("footnotes\n");
+    test_footnotes();
+    printf("tables\n");
+    test_tables();
+    printf("wrap beside floats\n");
+    test_wrap();
+    printf("continuous sections\n");
+    test_continuous();
+    printf("optimal page breaking\n");
+    test_optimal_pages();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

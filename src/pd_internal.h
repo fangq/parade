@@ -161,6 +161,9 @@ static inline int32_t pd_item_penalty(const pd_item* it, const pd_params* prm) {
     return it->penalty;
 }
 
+/* narrowest width without overfull words, and the width of the longest unbroken line */
+void pd_para_natural(const pd_para* p, pd_sp* minw, pd_sp* maxw);
+
 /* hyphenation (pd_hyph.c): points[i] = 1 for a hyphen before letter i */
 int pd_hyph_points(const pd_hyph* h, const uint32_t* word, int32_t n, uint8_t* points);
 

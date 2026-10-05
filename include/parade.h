@@ -201,6 +201,7 @@ typedef struct {
     int64_t hysteresis;     /**< extra demerits for a break that differs from the previous layout (0 = off) */
     int32_t freeze_offset;  /**< keep previous lines that end at or before this byte offset (-1 = off) */
     int32_t direction;      /**< pd_direction: paragraph direction (UAX #9); auto = first strong character */
+    int32_t looseness;      /**< TeX \looseness: aim for this many lines more (or fewer) than optimal */
 } pd_params;
 
 PD_API void pd_params_init(pd_params* params);

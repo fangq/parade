@@ -12,6 +12,8 @@
 #define PD_STORYROOT_ID 2       /* hidden container of all STORY blocks */
 #define PD_MAX_BLOCKS 0x10000000
 
+int pd_doc_table_props_ok(const pd_table_props* tp);
+
 /* an inline object; obj.source points at the owned copy */
 typedef struct {
     uint32_t offset;
@@ -36,6 +38,8 @@ typedef struct {
     pd_format_id empty_format;  /* format for typing into the empty paragraph */
     pd_float_props fp;
     pd_section_props sp;
+    pd_table_props tp;
+    pd_cell_props cell;
 } bstate;
 
 typedef struct {

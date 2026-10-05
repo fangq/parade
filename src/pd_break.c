@@ -303,6 +303,112 @@ static void total_fit(ctx_t* c, int32_t from, int32_t lo) {
     }
 }
 
+/*
+ * TeX's \looseness: the best breaks whose line count is as close as
+ * possible to target. States are kept per (breakpoint, line count,
+ * fitness); the line class follows from the count. Returns the number of
+ * lines written to seq, or 0 if nothing is feasible.
+ */
+static int32_t loose_fit(ctx_t* c, int32_t target, int32_t maxl, int32_t* seq) {
+    pd_para* p = c->p;
+    int32_t b, a, k, fa, M = maxl + 1, best_k = -1, best_f = 0, n;
+    int64_t ns = (int64_t)p->n_bp * M * NFIT, best = DEM_INF;
+    pd_state* S;
+
+    if (ns > INT32_MAX / 2 || (S = (pd_state*)malloc((size_t)ns * sizeof(pd_state))) == NULL) {
+        return 0;
+    }
+
+#define LIDX(bp, k, f) ((((int64_t)(bp) * M + (k)) * NFIT) + (f))
+
+    for (k = 0; k < ns; k++) {
+        S[k].total = DEM_INF;
+        S[k].prev = -1;
+    }
+
+    S[LIDX(0, 0, 2)].total = 0;
+
+    for (b = 1; b < p->n_bp; b++) {
+        for (a = b - 1; a >= 0; a--) {
+            measure_t m;
+
+            measure(c, a, b, &m);
+
+            if (m.nat - m.sh > c->maxw) {
+                break;
+            }
+
+            for (k = 0; k + 1 < M; k++) {
+                int32_t lc = k < c->K ? k : c->K - 1;
+                int64_t d;
+                int fc = -2;
+
+                for (fa = 0; fa < NFIT; fa++) {
+                    const pd_state* sa = &S[LIDX(a, k, fa)];
+                    pd_state* sb;
+                    int64_t t;
+
+                    if (sa->total >= DEM_INF) {
+                        continue;
+                    }
+
+                    if (fc == -2) {
+                        fc = line_eval(c, a, b, lc, &m, &d, NULL);
+                    }
+
+                    if (fc < 0) {
+                        break;
+                    }
+
+                    sb = &S[LIDX(b, k + 1, fc)];
+                    t = sat_add(sa->total, d + ((fa - fc > 1 || fc - fa > 1) ? c->prm->adj_demerits : 0));
+
+                    if (t < sb->total) {
+                        sb->total = t;
+                        sb->prev = (int32_t)LIDX(a, k, fa);
+                    }
+                }
+            }
+
+            if (is_forced(p, c->prm, p->bp_item[a])) {
+                break;
+            }
+        }
+    }
+
+    for (k = 1; k < M; k++) {       /* closest count to the target, then fewest demerits */
+        for (fa = 0; fa < NFIT; fa++) {
+            int64_t t = S[LIDX(p->n_bp - 1, k, fa)].total;
+
+            if (t >= DEM_INF) {
+                continue;
+            }
+
+            if (best_k < 0 || abs(k - target) < abs(best_k - target) ||
+                    (abs(k - target) == abs(best_k - target) && t < best)) {
+                best_k = k;
+                best_f = fa;
+                best = t;
+            }
+        }
+    }
+
+    n = best_k > 0 ? best_k : 0;
+
+    if (n > 0) {
+        int64_t idx = LIDX(p->n_bp - 1, best_k, best_f);
+
+        for (k = n - 1; k >= 0; k--) {
+            seq[k] = (int32_t)(idx / ((int64_t)M * NFIT));
+            idx = S[idx].prev;
+        }
+    }
+
+#undef LIDX
+    free(S);
+    return n;
+}
+
 /* first-fit: as many items per line as fit at natural width */
 static int32_t greedy(ctx_t* c, int32_t* seq) {
     pd_para* p = c->p;
@@ -485,7 +591,7 @@ static int params_same(const pd_params* a, const pd_params* b) {
            a->final_hyphen_demerits == b->final_hyphen_demerits && a->hyphen_penalty == b->hyphen_penalty &&
            a->ex_hyphen_penalty == b->ex_hyphen_penalty && a->tex_badness == b->tex_badness &&
            a->rag_stretch == b->rag_stretch && a->hysteresis == b->hysteresis &&
-           a->freeze_offset == b->freeze_offset;
+           a->freeze_offset == b->freeze_offset && a->looseness == b->looseness;
 }
 
 static int item_same(const pd_item* x, const pd_item* y) {
@@ -772,6 +878,18 @@ pd_status pd_break_lines(pd_para* p, const pd_params* prm, pd_break_info* info) 
         for (idx = sidx, i = nseq - 1; i >= frozen; i--) {
             seq[i] = (int32_t)(idx / (c.K * NFIT));
             idx = p->states[idx].prev;
+        }
+    }
+
+    /* \looseness: the optimum fixes the line count to aim from */
+    if (prm->looseness != 0 && !frozen) {
+        int32_t target = nseq + prm->looseness, maxl = target > nseq ? target : nseq, nl;
+
+        target = target < 1 ? 1 : target;
+        nl = loose_fit(&c, target, maxl, seq);   /* 0: infeasible without emergency lines, keep the optimum */
+
+        if (nl > 0) {
+            nseq = nl;
         }
     }
 

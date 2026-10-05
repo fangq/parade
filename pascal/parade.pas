@@ -174,6 +174,9 @@ const
   PD_WRAP_NONE = 0;
   PD_WRAP_LEFT = 1;
   PD_WRAP_RIGHT = 2;
+  PD_PAGES_GREEDY = 0;
+  PD_PAGES_OPTIMAL = 1;
+  PD_TABLE_MAX_COLS = 32;
 
   PD_GRAVITY_LEFT = 0;
   PD_GRAVITY_RIGHT = 1;
@@ -240,6 +243,7 @@ type
     hysteresis: Int64;
     freeze_offset: Int32;
     direction: Int32;
+    looseness: Int32;
   end;
   Ppd_params = ^pd_params;
 
@@ -363,8 +367,26 @@ type
     first_page_number, page_number_format, title_page, facing_pages: Int32;
     header, header_first, header_even: pd_block_id;
     footer, footer_first, footer_even: pd_block_id;
+    continuous, page_breaking: Int32;
+    footnote_skip: pd_sp;
   end;
   Ppd_section_props = ^pd_section_props;
+
+  pd_table_props = record
+    width: pd_sp;
+    align, header_rows: Int32;
+    cell_padding, border: pd_sp;
+    border_color: UInt32;
+    ncols: Int32;
+    col_width: array[0..PD_TABLE_MAX_COLS - 1] of pd_sp;
+  end;
+  Ppd_table_props = ^pd_table_props;
+
+  pd_cell_props = record
+    col_span, valign: Int32;
+    background: UInt32;
+  end;
+  Ppd_cell_props = ^pd_cell_props;
 
   pd_change = record
     kind: Int32;
@@ -379,7 +401,7 @@ type
 
   { ---- parade_layout.h ---- }
   pd_layout_info = record
-    pages, paragraphs_broken, paragraphs_reused, float_pages, overfull: Int32;
+    pages, paragraphs_broken, paragraphs_reused, float_pages, overfull, variants: Int32;
   end;
   Ppd_layout_info = ^pd_layout_info;
 
@@ -498,6 +520,9 @@ function pd_doc_resource(doc: Ppd_doc; res: pd_res_id; mime: PPAnsiChar; data: P
 function pd_doc_float_props(doc: Ppd_doc; flt: pd_block_id; out props: pd_float_props): pd_status; cdecl; PDEXT;
 function pd_doc_section_props(doc: Ppd_doc; section: pd_block_id; out props: pd_section_props): pd_status; cdecl; PDEXT;
 procedure pd_section_props_init(out props: pd_section_props); cdecl; PDEXT;
+function pd_doc_table_props(doc: Ppd_doc; table: pd_block_id; out props: pd_table_props): pd_status; cdecl; PDEXT;
+function pd_doc_cell_props(doc: Ppd_doc; cell: pd_block_id; out props: pd_cell_props): pd_status; cdecl; PDEXT;
+procedure pd_table_props_init(out props: pd_table_props); cdecl; PDEXT;
 
 function pd_doc_insert_text(doc: Ppd_doc; at: pd_pos; utf8: PAnsiChar; len: csize_t; format: pd_format_id; after: Ppd_pos): pd_status; cdecl; PDEXT;
 function pd_doc_delete(doc: Ppd_doc; range: pd_range; after: Ppd_pos): pd_status; cdecl; PDEXT;
@@ -515,6 +540,8 @@ function pd_doc_remove_block(doc: Ppd_doc; block: pd_block_id): pd_status; cdecl
 function pd_doc_move_block(doc: Ppd_doc; block, new_parent: pd_block_id; index: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_set_float_props(doc: Ppd_doc; flt: pd_block_id; constref props: pd_float_props): pd_status; cdecl; PDEXT;
 function pd_doc_set_section_props(doc: Ppd_doc; section: pd_block_id; constref props: pd_section_props): pd_status; cdecl; PDEXT;
+function pd_doc_set_table_props(doc: Ppd_doc; table: pd_block_id; constref props: pd_table_props): pd_status; cdecl; PDEXT;
+function pd_doc_set_cell_props(doc: Ppd_doc; cell: pd_block_id; constref props: pd_cell_props): pd_status; cdecl; PDEXT;
 function pd_doc_set_break(doc: Ppd_doc; brk: pd_block_id; kind: Int32): pd_status; cdecl; PDEXT;
 
 procedure pd_doc_begin_group(doc: Ppd_doc; label_: PAnsiChar); cdecl; PDEXT;

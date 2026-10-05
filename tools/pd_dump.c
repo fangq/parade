@@ -304,6 +304,87 @@ static pd_doc* sample(void) {
         para(&c, NULL, 0, 0, i % 2 ? light : frog);
     }
 
+    /* footnotes, a table, and text wrapped beside a figure */
+    para(&c, "Heading 1", PD_ROLE_HEADING, 1, "Tables, Notes and Wrapping");
+    p = para(&c, NULL, 0, 0, "Footnote bodies are set at the bottom of the column that shows their mark");
+    {
+        pd_block_id note;
+        pd_inline o;
+
+        pd_doc_insert_block(c.d, 0, -1, PD_BLOCK_STORY, &note);
+        static const char nt[] = "The page builder reserves room for the note together with the line that "
+                                 "refers to it, as TeX does with insertions.";
+
+        pd_doc_insert_text(c.d, end_of(c.d, pd_doc_child(c.d, note, 0)), nt, strlen(nt), PD_FORMAT_INHERIT, NULL);
+        memset(&o, 0, sizeof(o));
+        o.kind = PD_INLINE_FOOTNOTE;
+        o.target = note;
+        pd_doc_insert_inline(c.d, end_of(c.d, p), &o, NULL);
+        pd_doc_insert_text(c.d, end_of(c.d, p), ", and tables take their column widths from their content.", 57,
+                           PD_FORMAT_INHERIT, NULL);
+    }
+    {
+        static const char* names[] = { "Method", "Lines", "Notes" };
+        static const char* rows[][3] = {
+            { "first-fit", "11", "fast, uneven spacing" },
+            { "total-fit", "10", "Knuth and Plass: the whole paragraph at once" },
+            { "total-fit + looseness", "11", "a paragraph variant, one line longer" },
+            { "greedy pages", "-", "best break on each column" },
+            { "optimal pages", "-", "all column breaks of a section chosen together" },
+        };
+        pd_block_id t, row, cell;
+        pd_table_props tp;
+        pd_cell_props cep;
+        int ri, k;
+
+        pd_doc_insert_block(c.d, c.sec, -1, PD_BLOCK_TABLE, &t);
+        pd_doc_table_props(c.d, t, &tp);
+        tp.header_rows = 1;
+        tp.align = PD_ALIGN_CENTER;
+        pd_doc_set_table_props(c.d, t, &tp);
+
+        for (ri = 0; ri < 7; ri++) {
+            if (ri == 0) {
+                row = pd_doc_child(c.d, t, 0);
+            } else {
+                pd_doc_insert_block(c.d, t, -1, PD_BLOCK_ROW, &row);
+            }
+
+            for (k = 0; k < (ri == 6 ? 1 : 3); k++) {
+                const char* txt = ri == 0 ? names[k] : ri == 6 ? "A cell spanning all three columns, on a gray "
+                                  "background." : rows[ri - 1][k];
+
+                if (k == 0) {
+                    cell = pd_doc_child(c.d, row, 0);
+                } else {
+                    pd_doc_insert_block(c.d, row, -1, PD_BLOCK_CELL, &cell);
+                }
+
+                pd_doc_insert_text(c.d, end_of(c.d, pd_doc_child(c.d, cell, 0)), txt, strlen(txt),
+                                   PD_FORMAT_INHERIT, NULL);
+
+                if (ri == 0 || ri == 6) {
+                    pd_doc_cell_props(c.d, cell, &cep);
+                    cep.background = ri == 0 ? 0xFFDDE4EEu : 0xFFEEEEEEu;
+                    cep.col_span = ri == 6 ? 3 : 1;
+                    pd_doc_set_cell_props(c.d, cell, &cep);
+                }
+            }
+        }
+    }
+    {
+        pd_block_id fl = figure(&c, ": wrapped.", res, PD_PT(140), PD_PT(110), PD_PLACE_HERE);
+        pd_float_props fp;
+
+        pd_doc_float_props(c.d, fl, &fp);
+        fp.wrap = PD_WRAP_LEFT;
+        fp.width = PD_PT(150);
+        fp.gap = PD_PT(10);
+        pd_doc_set_float_props(c.d, fl, &fp);
+        para(&c, NULL, 0, 0, light);
+        para(&c, NULL, 0, 0, frog);
+    }
+
     p = para(&c, "Code", PD_ROLE_CODE, 0, "for (b = 0; b < nbreaks; b++)\n    best[b] = min over a of cost(a, b);");
     para(&c, "Quote", PD_ROLE_QUOTE, 0, "Whatever is worth doing at all is worth doing well.");
 
@@ -324,8 +405,25 @@ static pd_doc* sample(void) {
     at.offset = 0;
     pd_doc_insert_text(c.d, at, "Appendix in Two Columns", 23, PD_FORMAT_INHERIT, NULL);
 
-    for (i = 0; i < 9; i++) {
+    for (i = 0; i < 5; i++) {
         para(&c, NULL, 0, 0, i % 3 == 0 ? frog : light);
+    }
+
+    /* a continuous one-column section closes the page; the two columns above end even */
+    {
+        static const char ct[] = "A continuous section: it starts right below the balanced columns of the "
+                                 "appendix instead of on a new page.";
+        pd_block_id sec3;
+
+        pd_doc_insert_block(c.d, pd_doc_root(c.d), -1, PD_BLOCK_SECTION, &sec3);
+        pd_doc_section_props(c.d, sec3, &sp);
+        sp.continuous = 1;
+        sp.header = hdr;
+        sp.footer = ftr;
+        pd_doc_set_section_props(c.d, sec3, &sp);
+        c.sec = sec3;
+        p = pd_doc_child(c.d, sec3, 0);
+        pd_doc_insert_text(c.d, end_of(c.d, p), ct, strlen(ct), PD_FORMAT_INHERIT, NULL);
     }
 
     return c.d;

@@ -15,8 +15,11 @@
  * Updating is incremental: each paragraph's line breaking is cached and
  * redone only when the paragraph, its width or a style changed.
  *
- * Not yet: footnote bodies, table layout (cells are stacked), text
- * wrapping beside floats, continuous section breaks.
+ * Footnote bodies go to the bottom of the column that shows their mark;
+ * tables get automatic column widths, break between rows and repeat their
+ * header rows; floats with wrap have the text flow beside them; continuous
+ * sections share a page (multi-column ones balanced). Sections may ask for
+ * optimal page breaking (PD_PAGES_OPTIMAL).
  */
 
 #ifndef PARADE_LAYOUT_H
@@ -40,6 +43,7 @@ typedef struct {
     int32_t paragraphs_reused;  /**< paragraphs taken from the cache */
     int32_t float_pages;
     int32_t overfull;           /**< columns that could not hold their content */
+    int32_t variants;           /**< paragraphs set a line looser or tighter by optimal page breaking */
 } pd_layout_info;
 
 /** bring the pages up to date with the document; info may be NULL */
@@ -78,7 +82,7 @@ typedef struct {
     pd_res_id resource;
     pd_block_id block;          /**< source paragraph */
     uint32_t offset;            /**< source byte offset */
-    int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float */
+    int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float, 4 footnote */
     uint32_t text;              /**< glyphs: the code point shown (also for generated text), 0 if none */
 } pd_draw;
 

@@ -179,6 +179,32 @@ static void test_greedy_vs_optimal(const pd_font* f) {
     pd_para_free(p);
 }
 
+/* TeX \looseness: one line more or fewer than the optimum, when feasible */
+static void test_looseness(const pd_font* f) {
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    pd_params prm;
+    pd_break_info o, plus, minus, zero;
+
+    pd_params_init(&prm);
+    prm.width = PD_PT(250);
+    pd_para_break(p, &prm, &o);
+    prm.looseness = 1;
+    pd_para_break(p, &prm, &plus);
+    CHECK(plus.lines == o.lines + 1 && plus.overfull == 0);
+    CHECK(plus.demerits >= o.demerits);
+    prm.looseness = -1;
+    pd_para_break(p, &prm, &minus);
+    CHECK(minus.lines <= o.lines && minus.lines >= o.lines - 1 && minus.overfull == 0);
+    prm.looseness = 50;     /* unreachable: as long as it can get */
+    pd_para_break(p, &prm, &zero);
+    CHECK(zero.lines > plus.lines);
+    prm.looseness = 0;
+    pd_para_break(p, &prm, &zero);
+    CHECK(zero.lines == o.lines && zero.demerits == o.demerits);
+    printf("  lines: optimal %d, looser %d, tighter %d\n", o.lines, plus.lines, minus.lines);
+    pd_para_free(p);
+}
+
 static void test_determinism(const pd_font* f) {
     pd_params prm;
     uint64_t h1, h2;
@@ -774,6 +800,8 @@ int main(void) {
     test_justify(f);
     printf("greedy vs optimal\n");
     test_greedy_vs_optimal(f);
+    printf("looseness\n");
+    test_looseness(f);
     printf("determinism\n");
     test_determinism(f);
     printf("incremental\n");

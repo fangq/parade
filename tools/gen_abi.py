@@ -11,7 +11,7 @@ STRUCTS = {
     "pd_style": "font size space_stretch space_shrink kerning color user hyph",
     "pd_params": "mode align width indent line_penalty adj_demerits double_hyphen_demerits final_hyphen_demerits "
                  "hyphen_penalty ex_hyphen_penalty tex_badness rag_stretch baseline_skip line_spacing hysteresis "
-                 "freeze_offset direction",
+                 "freeze_offset direction looseness",
     "pd_break_info": "lines demerits overfull underfull reused_breakpoints frozen_lines height",
     "pd_line": "text_start text_end x baseline width ascent descent ratio badness hyphenated overfull underfull",
     "pd_glyph": "glyph cluster x y advance style kind user",
@@ -30,9 +30,12 @@ STRUCTS = {
     "pd_float_props": "placement wrap width width_fraction span_columns gap sequence",
     "pd_section_props": "page_width page_height margin_top margin_bottom margin_left margin_right header_distance "
                         "footer_distance columns column_gap first_page_number page_number_format title_page "
-                        "facing_pages header header_first header_even footer footer_first footer_even",
+                        "facing_pages header header_first header_even footer footer_first footer_even continuous page_breaking "
+                        "footnote_skip",
+    "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width",
+    "pd_cell_props": "col_span valign background",
     "pd_change": "kind block style revision",
-    "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull",
+    "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull variants",
     "pd_page_info": "width height section number label float_page first last",
     "pd_draw": "kind x y w h glyph font size color resource block offset region text",
     "pd_pdf_options": "compress outlines title author",

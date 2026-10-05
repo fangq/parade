@@ -64,11 +64,25 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   settled in a second pass as in LaTeX. List labels hang in the margin.
 - Output: per-page display lists (glyphs, images, object boxes, rules) in
   page coordinates, hit testing and caret positions across pages.
-- 3000 paragraphs / 150 pages: full layout 63 ms; a keystroke plus update
-  0.3 ms.
-- Not yet: footnote bodies, table layout (cells are stacked), text
-  wrapping beside floats, continuous section breaks, optimal (rather than
-  greedy-with-lookback) page breaking.
+- Footnotes: a line carries the bodies of the notes it marks; the column
+  keeps room for them at its bottom, under a 2in rule (TeX insertions).
+  The note opens with its raised number.
+- Tables: automatic column widths from the cells' narrowest and widest
+  content (CSS-style; fixed widths and column spans honoured), cell
+  padding, borders, backgrounds and vertical alignment. Rows are
+  unbreakable boxes; columns break between rows and header rows repeat at
+  the top of every continuation.
+- Floats with `wrap` left/right sit at their anchor and the following
+  paragraphs are re-broken with a narrower `\parshape` for the float's
+  height (kept together with it).
+- Continuous sections start below the previous one on the same page;
+  a multi-column section ending there gets balanced columns.
+- `PD_PAGES_OPTIMAL` sections choose all column breaks at once (shortest
+  path over break candidates, states by column and page) and try
+  paragraph variants a line looser or tighter (TeX `\looseness`, kept
+  within TeX's default tolerance) near the worst columns, Mittelbach-style.
+- 3000 paragraphs / 150 pages: full layout 67 ms; a keystroke plus update
+  0.35 ms (1.6 ms with optimal page breaking).
 
 ## PDF (`pd_layout_write_pdf`)
 
@@ -185,6 +199,5 @@ pd_para_break(p, &prm, NULL);
 
 ## Next
 
-Page builder: footnote bodies, tables, wrap beside floats, continuous
-sections, optimal pagination. Then import/export (HTML, Markdown, LaTeX,
-RTF, DOCX), math, microtypography, fuzzing and CI.
+Import/export (HTML, Markdown, LaTeX, RTF, DOCX), math, microtypography,
+fuzzing and CI.

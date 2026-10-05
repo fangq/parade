@@ -111,7 +111,7 @@ typedef enum {
     PD_BLOCK_SECTION = 1,
     PD_BLOCK_PARAGRAPH = 2,
     PD_BLOCK_FLOAT = 3,
-    PD_BLOCK_TABLE = 4,         /**< reserved: layout not implemented in the first version */
+    PD_BLOCK_TABLE = 4,         /**< grid of ROWs of CELLs; pd_table_props */
     PD_BLOCK_ROW = 5,
     PD_BLOCK_CELL = 6,
     PD_BLOCK_BREAK = 7,
@@ -407,12 +407,44 @@ typedef struct {
     int32_t facing_pages;       /**< 1 = even pages use header_even/footer_even, margins mirror */
     pd_block_id header, header_first, header_even;  /**< STORY blocks, 0 = none */
     pd_block_id footer, footer_first, footer_even;
+    int32_t continuous;         /**< 1 = starts on the current page below the previous section (same page size) */
+    int32_t page_breaking;      /**< pd_page_breaking */
+    pd_sp footnote_skip;        /**< space between the text and the footnotes (a rule sits in it) */
 } pd_section_props;
+
+typedef enum {
+    PD_PAGES_GREEDY = 0,        /**< fill each column, best break on it (TeX) */
+    PD_PAGES_OPTIMAL = 1        /**< breaks chosen for the whole section at once, paragraphs may run a
+                                     line longer or shorter to avoid bad pages (Mittelbach) */
+} pd_page_breaking;
+
+#define PD_TABLE_MAX_COLS 32
+
+typedef struct {
+    pd_sp width;                /**< 0 = automatic: from the content, at most the text column */
+    int32_t align;              /**< pd_align LEFT/CENTER/RIGHT: where a narrower table sits */
+    int32_t header_rows;        /**< leading rows repeated at the top of every page or column */
+    pd_sp cell_padding;
+    pd_sp border;               /**< grid rule thickness, 0 = no rules */
+    uint32_t border_color;      /**< 0xAARRGGBB */
+    int32_t ncols;              /**< entries used in col_width */
+    pd_sp col_width[PD_TABLE_MAX_COLS]; /**< fixed column widths, 0 = automatic */
+} pd_table_props;
+
+typedef struct {
+    int32_t col_span;           /**< columns this cell covers, >= 1 */
+    int32_t valign;             /**< 0 top, 1 middle, 2 bottom */
+    uint32_t background;        /**< 0xAARRGGBB, 0 = none */
+} pd_cell_props;
 
 PD_API pd_status pd_doc_float_props(const pd_doc* doc, pd_block_id flt, pd_float_props* out);
 PD_API pd_status pd_doc_section_props(const pd_doc* doc, pd_block_id section, pd_section_props* out);
 /** fill section props with A4 portrait, 1in margins, one column */
 PD_API void      pd_section_props_init(pd_section_props* props);
+PD_API pd_status pd_doc_table_props(const pd_doc* doc, pd_block_id table, pd_table_props* out);
+PD_API pd_status pd_doc_cell_props(const pd_doc* doc, pd_block_id cell, pd_cell_props* out);
+/** automatic width and columns, 4pt padding, 0.4pt black rules, no header rows */
+PD_API void      pd_table_props_init(pd_table_props* props);
 
 /* ------------------------------------------------------------------ */
 /* Operations: every change, all undoable                             */
@@ -468,6 +500,8 @@ PD_API pd_status pd_doc_remove_block(pd_doc* doc, pd_block_id block);
 PD_API pd_status pd_doc_move_block(pd_doc* doc, pd_block_id block, pd_block_id new_parent, int32_t index);
 PD_API pd_status pd_doc_set_float_props(pd_doc* doc, pd_block_id flt, const pd_float_props* props);
 PD_API pd_status pd_doc_set_section_props(pd_doc* doc, pd_block_id section, const pd_section_props* props);
+PD_API pd_status pd_doc_set_table_props(pd_doc* doc, pd_block_id table, const pd_table_props* props);
+PD_API pd_status pd_doc_set_cell_props(pd_doc* doc, pd_block_id cell, const pd_cell_props* props);
 PD_API pd_status pd_doc_set_break(pd_doc* doc, pd_block_id brk, pd_break_kind kind);
 
 /* ------------------------------------------------------------------ */

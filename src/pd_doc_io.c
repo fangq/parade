@@ -396,7 +396,59 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
             put_int(w, "Footer", p->footer);
             put_int(w, "FooterFirst", p->footer_first);
             put_int(w, "FooterEven", p->footer_even);
+
+            if (p->continuous) {
+                put_bool(w, "Continuous", p->continuous);
+            }
+
+            if (p->page_breaking) {
+                put_str(w, "PageBreaking", p->page_breaking == PD_PAGES_OPTIMAL ? "optimal" : "greedy");
+            }
+
+            put_int(w, "FootnoteSkip", p->footnote_skip);
             pj_obj_end(w);
+            break;
+        }
+
+        case PD_BLOCK_TABLE: {
+            const pd_table_props* p = &s->tp;
+
+            pj_key(w, "Table");
+            pj_obj_begin(w);
+            put_int(w, "Width", p->width);
+            put_str(w, "Align", name_of(NAMES(align_names), p->align));
+            put_int(w, "HeaderRows", p->header_rows);
+            put_int(w, "CellPadding", p->cell_padding);
+            put_int(w, "Border", p->border);
+            put_int(w, "BorderColor", (int64_t)p->border_color);
+
+            if (p->ncols) {
+                pj_key(w, "ColumnWidths");
+                pj_arr_begin(w);
+
+                for (i = 0; i < p->ncols; i++) {
+                    pj_int(w, p->col_width[i]);
+                }
+
+                pj_arr_end(w);
+            }
+
+            pj_obj_end(w);
+            break;
+        }
+
+        case PD_BLOCK_CELL: {
+            const pd_cell_props* p = &s->cell;
+
+            if (p->col_span != 1 || p->valign || p->background) {
+                pj_key(w, "Cell");
+                pj_obj_begin(w);
+                put_int(w, "ColumnSpan", p->col_span);
+                put_int(w, "VerticalAlign", p->valign);
+                put_int(w, "Background", (int64_t)p->background);
+                pj_obj_end(w);
+            }
+
             break;
         }
 
@@ -921,6 +973,16 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->footer = (pd_block_id)int_or(pj_get(x, "Footer"), 0, 0, PD_MAX_BLOCKS, L);
     p->footer_first = (pd_block_id)int_or(pj_get(x, "FooterFirst"), 0, 0, PD_MAX_BLOCKS, L);
     p->footer_even = (pd_block_id)int_or(pj_get(x, "FooterEven"), 0, 0, PD_MAX_BLOCKS, L);
+    p->continuous = (int32_t)int_or(pj_get(x, "Continuous"), 0, 0, 1, L);
+    p->footnote_skip = (pd_sp)int_or(pj_get(x, "FootnoteSkip"), p->footnote_skip, 0, SP_MAX, L);
+
+    if (pj_get(x, "PageBreaking")) {
+        static const char* const pb_names[] = { "greedy", "optimal" };
+
+        p->page_breaking = enum_of(pj_get(x, "PageBreaking"), NAMES(pb_names));
+        REQUIRE(p->page_breaking >= 0);
+    }
+
     REQUIRE((int64_t)p->margin_left + p->margin_right < p->page_width &&
             (int64_t)p->margin_top + p->margin_bottom < p->page_height);
     want_story(L, p->header);
@@ -929,6 +991,47 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     want_story(L, p->footer);
     want_story(L, p->footer_first);
     want_story(L, p->footer_even);
+}
+
+static void load_table(loader* L, const pj_node* o, pd_table_props* p) {
+    const pj_node* x = pj_get(o, "Table"), *c;
+
+    if (!x) {
+        return;
+    }
+
+    REQUIRE(x->type == PJ_OBJ);
+    p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);
+    p->align = pj_get(x, "Align") ? enum_of(pj_get(x, "Align"), NAMES(align_names)) : PD_ALIGN_LEFT;
+    REQUIRE(p->align >= 0);
+    p->header_rows = (int32_t)int_or(pj_get(x, "HeaderRows"), 0, 0, 1000, L);
+    p->cell_padding = (pd_sp)int_or(pj_get(x, "CellPadding"), p->cell_padding, 0, SP_MAX, L);
+    p->border = (pd_sp)int_or(pj_get(x, "Border"), p->border, 0, SP_MAX, L);
+    p->border_color = (uint32_t)int_or(pj_get(x, "BorderColor"), p->border_color, 0, 0xFFFFFFFFLL, L);
+
+    if ((c = pj_get(x, "ColumnWidths")) != NULL) {
+        int32_t i;
+
+        REQUIRE(c->type == PJ_ARR && c->n <= PD_TABLE_MAX_COLS);
+        p->ncols = (int32_t)c->n;
+
+        for (i = 0, c = c->child; c; c = c->next, i++) {
+            p->col_width[i] = (pd_sp)int_or(c, 0, 0, SP_MAX, L);
+        }
+    }
+}
+
+static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
+    const pj_node* x = pj_get(o, "Cell");
+
+    if (!x) {
+        return;
+    }
+
+    REQUIRE(x->type == PJ_OBJ);
+    p->col_span = (int32_t)int_or(pj_get(x, "ColumnSpan"), 1, 1, PD_TABLE_MAX_COLS, L);
+    p->valign = (int32_t)int_or(pj_get(x, "VerticalAlign"), 0, 0, 2, L);
+    p->background = (uint32_t)int_or(pj_get(x, "Background"), 0, 0, 0xFFFFFFFFLL, L);
 }
 
 static void load_float(loader* L, const pj_node* o, pd_float_props* p) {
@@ -994,6 +1097,10 @@ static pd_block_id load_tree(loader* L, const pj_node* node, pd_block_id parent,
         load_section(L, data, &b->st.sp);
     } else if (kind == PD_BLOCK_FLOAT) {
         load_float(L, data, &b->st.fp);
+    } else if (kind == PD_BLOCK_TABLE) {
+        load_table(L, data, &b->st.tp);
+    } else if (kind == PD_BLOCK_CELL) {
+        load_cell(L, data, &b->st.cell);
     } else if (kind == PD_BLOCK_BREAK && pj_get(data, "Break")) {
         b->st.break_kind = enum_of(pj_get(data, "Break"), NAMES(break_names));
         REQUIRE0(b->st.break_kind >= 0);
