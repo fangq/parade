@@ -85,6 +85,20 @@ PD_API int32_t   pd_font_glyph_advance(const pd_font* font, uint32_t glyph);
 /** horizontal pair kerning between two glyphs in design units */
 PD_API int32_t   pd_font_kerning(const pd_font* font, uint32_t left, uint32_t right);
 
+typedef enum {
+    PD_FAMILY_SERIF = 0,
+    PD_FAMILY_SANS = 1,
+    PD_FAMILY_MONO = 2
+} pd_family_class;
+
+/**
+ * What kind of face a family name is, from the name alone ("Arial" sans,
+ * "Courier New" mono, anything unknown serif): for a font resolver that
+ * does not have the family a document asks for and should substitute one
+ * of the same kind.
+ */
+PD_API int32_t   pd_font_family_class(const char* family);
+
 /** receives a glyph outline in font units x 64 (26.6), y up; NULL members are skipped */
 typedef struct {
     void (*move_to)(void* user, int32_t x, int32_t y);

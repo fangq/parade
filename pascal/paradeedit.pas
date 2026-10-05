@@ -171,7 +171,7 @@ const
 function ResolveFont(user: Pointer; family: PAnsiChar; weight, italic: Int32): Ppd_font; cdecl;
 var
   E: TParadeEdit;
-  I, Best, Score, BestScore: Integer;
+  I, Best, Score, BestScore, Cls: Integer;
   Fam: string;
 begin
   E := TParadeEdit(user);
@@ -179,12 +179,14 @@ begin
   Fam := LowerCase(StrPas(family));
   Best := -1;
   BestScore := MaxInt;
+  Cls := pd_font_family_class(family);
   for I := 0 to High(E.FFonts) do
   begin
-    { family mismatch costs most; then italic; then weight distance }
+    { family mismatch costs most, less when it is the same kind of face (a sans
+      for Arial, a mono for Courier New); then italic; then weight distance }
     Score := Abs(E.FFonts[I].Weight - weight) + 1000 * Ord((E.FFonts[I].Italic <> 0) <> (italic <> 0));
     if (Fam <> '') and (LowerCase(E.FFonts[I].Family) <> Fam) then
-      Inc(Score, 100000)
+      Inc(Score, 100000 - 50000 * Ord(pd_font_family_class(PAnsiChar(E.FFonts[I].Family)) = Cls))
     else if (Fam = '') and (I > 0) and (LowerCase(E.FFonts[I].Family) <> LowerCase(E.FFonts[0].Family)) then
       Inc(Score, 100000);
     if Score < BestScore then

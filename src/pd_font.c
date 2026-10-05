@@ -627,6 +627,43 @@ void pd_font_free(pd_font* f) {
     }
 }
 
+int32_t pd_font_family_class(const char* family) {
+    static const char* mono[] = { "mono", "courier", "consol", "code", "typewriter", "menlo", "fixed", "terminal",
+                                  "lucida console", NULL
+                                };
+    static const char* sans[] = { "sans", "arial", "helvetica", "calibri", "carlito", "verdana", "tahoma", "segoe",
+                                  "gothic", "futura", "gill", "frutiger", "avenir", "roboto", "lato", "ubuntu",
+                                  "cantarell", "inter", "aptos", "franklin", "trebuchet", "geneva", "lucida grande",
+                                  "myriad", "optima", "univers", "candara", "corbel", "noto sans", NULL
+                                };
+    char low[64];
+    size_t i;
+
+    if (!family) {
+        return PD_FAMILY_SERIF;
+    }
+
+    for (i = 0; i + 1 < sizeof(low) && family[i]; i++) {
+        low[i] = (char)(family[i] >= 'A' && family[i] <= 'Z' ? family[i] - 'A' + 'a' : family[i]);
+    }
+
+    low[i] = '\0';
+
+    for (i = 0; mono[i]; i++) {     /* before sans: "DejaVu Sans Mono" */
+        if (strstr(low, mono[i])) {
+            return PD_FAMILY_MONO;
+        }
+    }
+
+    for (i = 0; sans[i]; i++) {
+        if (strstr(low, sans[i])) {
+            return PD_FAMILY_SANS;
+        }
+    }
+
+    return PD_FAMILY_SERIF;
+}
+
 pd_status pd_font_get_metrics(const pd_font* f, pd_font_metrics* out) {
     if (!f || !out) {
         return PD_ERR_ARG;

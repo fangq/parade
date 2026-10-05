@@ -59,6 +59,10 @@ const
   PD_BREAK_OPTIMAL = 0;
   PD_BREAK_GREEDY = 1;
 
+  PD_FAMILY_SERIF = 0;
+  PD_FAMILY_SANS = 1;
+  PD_FAMILY_MONO = 2;
+
   PD_ALIGN_JUSTIFY = 0;
   PD_ALIGN_LEFT = 1;
   PD_ALIGN_RIGHT = 2;
@@ -449,6 +453,7 @@ function pd_font_load_memory(data: Pointer; len: csize_t; face_index: Int32; out
 procedure pd_font_free(font: Ppd_font); cdecl; PDEXT;
 function pd_font_get_metrics(font: Ppd_font; out m: pd_font_metrics): pd_status; cdecl; PDEXT;
 function pd_font_glyph_index(font: Ppd_font; codepoint: UInt32): UInt32; cdecl; PDEXT;
+function pd_font_family_class(family: PAnsiChar): Int32; cdecl; PDEXT;
 function pd_font_glyph_advance(font: Ppd_font; glyph: UInt32): Int32; cdecl; PDEXT;
 function pd_font_kerning(font: Ppd_font; left, right: UInt32): Int32; cdecl; PDEXT;
 function pd_font_glyph_outline(font: Ppd_font; glyph: UInt32; constref sink: pd_outline_sink; user: Pointer): pd_status; cdecl; PDEXT;

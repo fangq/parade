@@ -780,6 +780,226 @@ static void test_fuzz(void) {
     pd_doc_free(d);
 }
 
+/* ---------------- DOCX styles, defaults and theme ---------------- */
+
+static uint32_t crc32_of(const char* p, size_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    size_t i;
+    int k;
+
+    for (i = 0; i < n; i++) {
+        c ^= (unsigned char)p[i];
+
+        for (k = 0; k < 8; k++) {
+            c = c & 1 ? (c >> 1) ^ 0xEDB88320u : c >> 1;
+        }
+    }
+
+    return ~c;
+}
+
+static void le(buf_t* b, uint32_t v, int bytes) {
+    char c[4];
+    int i;
+
+    for (i = 0; i < bytes; i++) {
+        c[i] = (char)(v >> (8 * i));
+    }
+
+    to_buf(b, c, (size_t)bytes);
+}
+
+/* a zip of uncompressed entries: names[i] holds texts[i] */
+static buf_t stored_zip(const char** names, const char** texts, int n) {
+    buf_t z, cd;
+    uint32_t offs[16];
+    int i;
+
+    memset(&z, 0, sizeof(z));
+    memset(&cd, 0, sizeof(cd));
+
+    for (i = 0; i < n; i++) {
+        uint32_t len = (uint32_t)strlen(texts[i]), crc = crc32_of(texts[i], len);
+        uint16_t nl = (uint16_t)strlen(names[i]);
+
+        offs[i] = (uint32_t)z.n;
+        le(&z, 0x04034b50u, 4); le(&z, 20, 2); le(&z, 0, 2); le(&z, 0, 2); le(&z, 0, 4);
+        le(&z, crc, 4); le(&z, len, 4); le(&z, len, 4); le(&z, nl, 2); le(&z, 0, 2);
+        to_buf(&z, names[i], nl);
+        to_buf(&z, texts[i], len);
+
+        le(&cd, 0x02014b50u, 4); le(&cd, 20, 2); le(&cd, 20, 2); le(&cd, 0, 2); le(&cd, 0, 2); le(&cd, 0, 4);
+        le(&cd, crc, 4); le(&cd, len, 4); le(&cd, len, 4); le(&cd, nl, 2); le(&cd, 0, 2); le(&cd, 0, 2);
+        le(&cd, 0, 2); le(&cd, 0, 2); le(&cd, 0, 4); le(&cd, offs[i], 4);
+        to_buf(&cd, names[i], nl);
+    }
+
+    {
+        uint32_t at_cd = (uint32_t)z.n;
+
+        to_buf(&z, cd.p, cd.n);
+        le(&z, 0x06054b50u, 4); le(&z, 0, 2); le(&z, 0, 2); le(&z, (uint32_t)n, 2); le(&z, (uint32_t)n, 2);
+        le(&z, (uint32_t)cd.n, 4); le(&z, at_cd, 4); le(&z, 0, 2);
+    }
+
+    free(cd.p);
+    return z;
+}
+
+/* a paragraph's properties as laid out: its style resolved, its own on top */
+static pd_para_props para_resolved(const pd_doc* d, pd_block_id p) {
+    pd_block_info bi;
+    pd_para_props r, o;
+
+    pd_doc_block_info(d, p, &bi);
+    pd_doc_style_resolve(d, bi.style, &r, NULL);
+    pd_doc_para_props(d, p, &o);
+
+    if (o.mask & PD_PP_ALIGN) r.align = o.align;
+    if (o.mask & PD_PP_INDENT_LEFT) r.indent_left = o.indent_left;
+    if (o.mask & PD_PP_INDENT_FIRST) r.indent_first = o.indent_first;
+    if (o.mask & PD_PP_SPACE_BEFORE) r.space_before = o.space_before;
+    if (o.mask & PD_PP_SPACE_AFTER) r.space_after = o.space_after;
+    if (o.mask & PD_PP_LINE_SPACING) r.line_spacing = o.line_spacing;
+    if (o.mask & PD_PP_HYPHENATE) r.hyphenate = o.hyphenate;
+    return r;
+}
+
+/* the characters at a byte offset of a paragraph, resolved */
+static pd_char_props chars_at(const pd_doc* d, pd_block_id p, uint32_t off) {
+    pd_run runs[32];
+    int32_t n = 0, i;
+    pd_char_props cp;
+
+    memset(&cp, 0, sizeof(cp));
+    pd_doc_para_runs(d, p, runs, 32, &n);
+
+    for (i = 0; i < n; i++) {
+        if (off >= runs[i].start && off < runs[i].end) {
+            pd_doc_format_resolve(d, p, runs[i].format, &cp);
+        }
+    }
+
+    return cp;
+}
+
+/* Word keeps most of what a paragraph looks like in its styles: the
+   document defaults, a default paragraph style, styles based on styles,
+   theme fonts, character styles. The shape of a proposal written in Word:
+   Times New Roman 12 by default, the body in a custom justified Arial 11
+   style with hyphenation off. */
+static void test_docx_styles(void) {
+    static const char* names[] = { "[Content_Types].xml", "word/document.xml", "word/styles.xml",
+                                   "word/theme/theme1.xml", "word/settings.xml"
+                                 };
+    static const char* texts[] = {
+        "<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>",
+
+        "<?xml version=\"1.0\"?><w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:r><w:t>Plain body.</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pStyle w:val=\"LeadingPara\"/></w:pPr>"
+        "<w:r><w:t xml:space=\"preserve\">While the </w:t></w:r>"
+        "<w:r><w:rPr><w:u w:val=\"single\"/></w:rPr><w:t>new DOT</w:t></w:r>"
+        "<w:r><w:rPr><w:rStyle w:val=\"Emph\"/></w:rPr><w:t xml:space=\"preserve\"> works</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pStyle w:val=\"Body2\"/></w:pPr><w:r><w:t>Indented.</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:spacing w:line=\"480\" w:lineRule=\"exact\"/><w:jc w:val=\"center\"/></w:pPr>"
+        "<w:r><w:t>Exact.</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t xml:space=\"preserve\">Head </w:t></w:r>"
+        "<w:r><w:rPr><w:b w:val=\"0\"/><w:sz w:val=\"20\"/></w:rPr><w:t>light</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+
+        "<?xml version=\"1.0\"?><w:styles xmlns:w=\"w\">"
+        "<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Times New Roman\" w:hAnsi=\"Times New Roman\"/>"
+        "</w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>"
+        "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/>"
+        "<w:rPr><w:sz w:val=\"24\"/></w:rPr></w:style>"
+        "<w:style w:type=\"paragraph\" w:customStyle=\"1\" w:styleId=\"LeadingPara\"><w:name w:val=\"LeadingPara\"/>"
+        "<w:basedOn w:val=\"Normal\"/><w:pPr><w:suppressAutoHyphens/><w:jc w:val=\"both\"/>"
+        "<w:rPr><w:sz w:val=\"40\"/></w:rPr></w:pPr>"     /* the paragraph mark's run: not the text's */
+        "<w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\"/><w:sz w:val=\"22\"/></w:rPr></w:style>"
+        "<w:style w:type=\"paragraph\" w:styleId=\"Body2\"><w:name w:val=\"Body2\"/><w:basedOn w:val=\"LeadingPara\"/>"
+        "<w:pPr><w:spacing w:before=\"240\" w:after=\"120\" w:line=\"360\" w:lineRule=\"auto\"/>"
+        "<w:ind w:left=\"720\" w:firstLine=\"360\"/></w:pPr></w:style>"
+        "<w:style w:type=\"paragraph\" w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/>"
+        "<w:basedOn w:val=\"Normal\"/><w:pPr><w:keepNext/><w:outlineLvl w:val=\"0\"/></w:pPr>"
+        "<w:rPr><w:rFonts w:asciiTheme=\"majorHAnsi\" w:hAnsiTheme=\"majorHAnsi\"/><w:b/><w:sz w:val=\"32\"/>"
+        "</w:rPr></w:style>"
+        "<w:style w:type=\"character\" w:styleId=\"Emph\"><w:name w:val=\"Emph\"/><w:rPr><w:i/></w:rPr></w:style>"
+        "<w:style w:type=\"table\" w:styleId=\"Grid\"><w:name w:val=\"Grid\"/><w:pPr><w:jc w:val=\"right\"/></w:pPr>"
+        "<w:tblStylePr w:type=\"firstRow\"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>"
+        "</w:styles>",
+
+        "<?xml version=\"1.0\"?><a:theme xmlns:a=\"a\"><a:themeElements><a:fontScheme>"
+        "<a:majorFont><a:latin typeface=\"Calibri Light\"/></a:majorFont>"
+        "<a:minorFont><a:latin typeface=\"Calibri\"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>",
+
+        "<?xml version=\"1.0\"?><w:settings xmlns:w=\"w\"/>"
+    };
+    buf_t z = stored_zip(names, texts, 5);
+    pd_doc* d = NULL;
+    pd_block_id sec, p[5];
+    pd_para_props pp;
+    pd_char_props cp;
+    pd_block_info bi;
+    int i;
+
+    CHECK(pd_doc_import(z.p, z.n, PD_CONV_DOCX, &d) == PD_OK);
+    free(z.p);
+
+    if (!d) {
+        return;
+    }
+
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+
+    for (i = 0; i < 5; i++) {
+        p[i] = pd_doc_child(d, sec, i);
+    }
+
+    /* the defaults and the default paragraph style: Times New Roman 12, no hyphenation */
+    cp = chars_at(d, p[0], 0);
+    CHECK(strcmp(cp.family, "Times New Roman") == 0 && cp.size == PD_PT(12));
+    pp = para_resolved(d, p[0]);
+    CHECK(pp.align == PD_ALIGN_LEFT && pp.hyphenate == 0);
+
+    /* a custom style: justified Arial 11, its paragraph mark's size ignored */
+    pp = para_resolved(d, p[1]);
+    CHECK(pp.align == PD_ALIGN_JUSTIFY && pp.hyphenate == 0);
+    cp = chars_at(d, p[1], 0);
+    CHECK(strcmp(cp.family, "Arial") == 0 && cp.size == PD_PT(11) && !cp.underline && !cp.italic);
+    cp = chars_at(d, p[1], 10);     /* "new DOT" */
+    CHECK(strcmp(cp.family, "Arial") == 0 && cp.size == PD_PT(11) && cp.underline == 1);
+    cp = chars_at(d, p[1], 18);     /* " works", a character style */
+    CHECK(strcmp(cp.family, "Arial") == 0 && cp.italic && !cp.underline);
+
+    /* based on it: indents, spacing and a 1.5 line height on top */
+    pp = para_resolved(d, p[2]);
+    CHECK(pp.align == PD_ALIGN_JUSTIFY && pp.indent_left == PD_PT(36) && pp.indent_first == PD_PT(18));
+    CHECK(pp.space_before == PD_PT(12) && pp.space_after == PD_PT(6) && pp.line_spacing == 1500);
+    cp = chars_at(d, p[2], 0);
+    CHECK(strcmp(cp.family, "Arial") == 0 && cp.size == PD_PT(11));
+
+    /* direct paragraph properties: centred, exactly 24pt lines on 12pt text */
+    pp = para_resolved(d, p[3]);
+    CHECK(pp.align == PD_ALIGN_CENTER && pp.line_spacing > 1700 && pp.line_spacing < 1780);
+
+    /* a heading in the theme's heading font; a run that turns the bold off */
+    pd_doc_block_info(d, p[4], &bi);
+    CHECK(bi.role == PD_ROLE_HEADING && bi.level == 1);
+    cp = chars_at(d, p[4], 0);
+    CHECK(strcmp(cp.family, "Calibri Light") == 0 && cp.size == PD_PT(16) && cp.weight == 700);
+    cp = chars_at(d, p[4], 5);
+    CHECK(strcmp(cp.family, "Calibri Light") == 0 && cp.size == PD_PT(10) && cp.weight == 400);
+
+    /* fonts by kind, for a resolver that lacks the family asked for */
+    CHECK(pd_font_family_class("Arial") == PD_FAMILY_SANS && pd_font_family_class("Calibri Light") == PD_FAMILY_SANS);
+    CHECK(pd_font_family_class("Courier New") == PD_FAMILY_MONO);
+    CHECK(pd_font_family_class("DejaVu Sans Mono") == PD_FAMILY_MONO);
+    CHECK(pd_font_family_class("Times New Roman") == PD_FAMILY_SERIF && pd_font_family_class(NULL) == PD_FAMILY_SERIF);
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -793,6 +1013,8 @@ int main(void) {
     test_paste();
     printf("ranges\n");
     test_range();
+    printf("docx styles\n");
+    test_docx_styles();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

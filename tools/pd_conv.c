@@ -4,8 +4,9 @@
  *   pd_conv in.{pdoc,bpdoc,html,md,rtf,docx,txt} out.{pdoc,bpdoc,html,md,tex,rtf,docx,txt,pdf}
  *
  * Formats come from the file extensions (or, for input, the content).
- * PDF output lays the document out with Parade itself (Liberation fonts,
- * DejaVu Sans Mono for code, Noto CJK as a fallback when installed).
+ * PDF output lays the document out with Parade itself (Liberation Serif, and
+ * Liberation Sans for sans-serif families such as Arial; DejaVu Sans Mono for
+ * code, Noto CJK as a fallback when installed).
  */
 
 #include <stdio.h>
@@ -14,17 +15,21 @@
 #include "parade_convert.h"
 #include "parade_layout.h"
 
-static pd_font* fonts[6];
+#define NFONTS 10                   /* serif x4, sans x4, mono, CJK */
+static pd_font* fonts[NFONTS];
 static pd_font* mathf;
 
 static const pd_font* resolve(void* user, const char* family, int32_t weight, int32_t italic) {
+    int32_t cls = pd_font_family_class(family);
+    int face = (weight >= 600 ? 1 : 0) + (italic ? 2 : 0);
+
     (void)user;
 
-    if (family && (strstr(family, "mono") || strstr(family, "Mono") || strstr(family, "Courier"))) {
-        return fonts[4];
+    if (cls == PD_FAMILY_MONO) {
+        return fonts[8];
     }
 
-    return fonts[(weight >= 600 ? 1 : 0) + (italic ? 2 : 0)];
+    return cls == PD_FAMILY_SANS && fonts[4 + face] ? fonts[4 + face] : fonts[face];
 }
 
 static int to_file(void* user, const void* data, size_t len) {
@@ -72,11 +77,15 @@ static int fmt_of(const char* ext, int* jdata_binary) {
 }
 
 int main(int argc, char** argv) {
-    static const char* paths[6] = {
+    static const char* paths[NFONTS] = {
         "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSerif-BoldItalic.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     };
@@ -133,8 +142,8 @@ int main(int argc, char** argv) {
         pd_layout_info info;
         const pd_font* fb[1];
 
-        for (i = 0; i < 6; i++) {
-            if (pd_font_load_file(paths[i], 0, &fonts[i]) != PD_OK && i < 5) {
+        for (i = 0; i < NFONTS; i++) {     /* the sans faces and CJK are optional */
+            if (pd_font_load_file(paths[i], 0, &fonts[i]) != PD_OK && (i < 4 || i == 8)) {
                 fprintf(stderr, "cannot load %s\n", paths[i]);
                 return 1;
             }
@@ -146,8 +155,8 @@ int main(int argc, char** argv) {
             pd_doc_set_math_font(d, mathf);
         }
 
-        if (fonts[5]) {
-            fb[0] = fonts[5];
+        if (fonts[9]) {
+            fb[0] = fonts[9];
             pd_doc_set_fallback_fonts(d, fb, 1);
         }
 
@@ -171,7 +180,7 @@ int main(int argc, char** argv) {
     fclose(f);
     pd_doc_free(d);
 
-    for (i = 0; i < 6; i++) {
+    for (i = 0; i < NFONTS; i++) {
         pd_font_free(fonts[i]);
     }
 

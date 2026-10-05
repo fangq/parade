@@ -1237,12 +1237,22 @@ typedef struct {
     int external;
 } drel;
 
+/* what a w:pPr and a w:rPr say, as masked overrides. An exact or at-least line
+   height is kept as a length until the font size is known (line_abs). */
+typedef struct {
+    pd_para_props pp;
+    pd_char_props cp;
+    pd_sp line_abs;
+} dprops;
+
 typedef struct {
     char id[64];
     char name[64];
     char based_on[64];
+    int type;                   /* 1 paragraph, 2 character, 0 table/numbering (not applied) */
     int outline;                /* -1 none */
     int num_id, ilvl;           /* numbering set by the style itself */
+    dprops pr;
 } dstyle_x;
 
 typedef struct {
@@ -1275,6 +1285,9 @@ typedef struct {
     dnote* notes;
     int nnotes;
     int depth;                  /* footnote recursion */
+    dprops defaults;            /* w:docDefaults and settings.xml */
+    char def_pstyle[64];        /* the paragraph style of a paragraph that names none */
+    char theme_major[64], theme_minor[64];  /* the theme's heading and body fonts */
 } dxi;
 
 static const char* rel_target(const dxi* X, const char* id, int* external) {
@@ -1328,41 +1341,303 @@ static void read_rels(dxi* X, const char* xml, size_t n) {
     }
 }
 
+/* twentieths of a point (twips) to sp */
+static pd_sp twips(int v) {
+    return (pd_sp)((int64_t)v * 65536 / 20);
+}
+
+/* one child of a w:rPr into cp; a character style name goes to rstyle */
+static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_props* cp, char* rstyle,
+                     size_t rcap) {
+    char v[300];
+
+    if (strcmp(t, "b") == 0) {
+        cp->mask |= PD_CP_WEIGHT;
+        cp->weight = attr_on(m) ? 700 : 400;
+    } else if (strcmp(t, "i") == 0) {
+        cp->mask |= PD_CP_ITALIC;
+        cp->italic = attr_on(m);
+    } else if (strcmp(t, "u") == 0) {
+        cp->mask |= PD_CP_UNDERLINE;
+        cp->underline = attr_on(m) ? (mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "double") == 0 ? 2 : 1) : 0;
+    } else if (strcmp(t, "strike") == 0 || strcmp(t, "dstrike") == 0) {
+        cp->mask |= PD_CP_STRIKE;
+        cp->strike = attr_on(m);
+    } else if (strcmp(t, "vertAlign") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
+        cp->mask |= PD_CP_SHIFT;
+        cp->shift = strcmp(v, "superscript") == 0 ? PD_SHIFT_SUPER : strcmp(v, "subscript") == 0 ? PD_SHIFT_SUB : 0;
+    } else if (strcmp(t, "color") == 0 && mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+        cp->mask |= PD_CP_COLOR;
+        cp->color = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+    } else if (strcmp(t, "shd") == 0 && mu_attr(m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+        cp->mask |= PD_CP_BACKGROUND;
+        cp->background = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+    } else if (strcmp(t, "highlight") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
+        cp->mask |= PD_CP_BACKGROUND;
+        cp->background = strcmp(v, "none") == 0 ? 0 : strcmp(v, "yellow") == 0 ? 0xFFFFFF00u : strcmp(v, "green") == 0 ?
+                         0xFF00FF00u : strcmp(v, "cyan") == 0 ? 0xFF00FFFFu : 0xFFFFFF00u;
+    } else if (strcmp(t, "rFonts") == 0) {
+        /* a named font, else the theme's: minorHAnsi is the body font, majorHAnsi the headings' */
+        if (mu_attr(m, "w:ascii", v, sizeof(v)) || mu_attr(m, "w:hAnsi", v, sizeof(v))) {
+            cp->mask |= PD_CP_FAMILY;
+            snprintf(cp->family, sizeof(cp->family), "%.63s", v);
+        } else if ((mu_attr(m, "w:asciiTheme", v, sizeof(v)) || mu_attr(m, "w:hAnsiTheme", v, sizeof(v))) &&
+                   (strncmp(v, "major", 5) == 0 ? X->theme_major : X->theme_minor)[0]) {
+            cp->mask |= PD_CP_FAMILY;
+            snprintf(cp->family, sizeof(cp->family), "%s", strncmp(v, "major", 5) == 0 ? X->theme_major :
+                     X->theme_minor);
+        }
+    } else if (strcmp(t, "sz") == 0) {
+        int hp = attr_int(m, "w:val", 0);       /* half-points */
+
+        if (hp > 0) {
+            cp->mask |= PD_CP_SIZE;
+            cp->size = (pd_sp)((int64_t)hp * 65536 / 2);
+        }
+    } else if (strcmp(t, "smallCaps") == 0) {
+        cp->mask |= PD_CP_SMALLCAPS;
+        cp->small_caps = attr_on(m);
+    } else if (strcmp(t, "rStyle") == 0 && rstyle) {
+        mu_attr(m, "w:val", rstyle, rcap);
+    }
+}
+
+/* one child of a w:pPr into pr */
+static void ppr_elem(const pd_markup* m, const char* t, dprops* pr) {
+    pd_para_props* pp = &pr->pp;
+    char v[64];
+
+    if (strcmp(t, "jc") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
+        pp->mask |= PD_PP_ALIGN;
+        pp->align = strcmp(v, "center") == 0 ? PD_ALIGN_CENTER : strcmp(v, "right") == 0 || strcmp(v, "end") == 0 ?
+                    PD_ALIGN_RIGHT : strcmp(v, "both") == 0 || strcmp(v, "distribute") == 0 ? PD_ALIGN_JUSTIFY :
+                    PD_ALIGN_LEFT;
+    } else if (strcmp(t, "spacing") == 0) {
+        if (mu_attr(m, "w:before", v, sizeof(v))) {
+            pp->mask |= PD_PP_SPACE_BEFORE;
+            pp->space_before = twips(atoi(v));
+        }
+
+        if (mu_attr(m, "w:after", v, sizeof(v))) {
+            pp->mask |= PD_PP_SPACE_AFTER;
+            pp->space_after = twips(atoi(v));
+        }
+
+        if (mu_attr(m, "w:line", v, sizeof(v)) && atoi(v) > 0) {
+            int line = atoi(v);
+            char rule[16] = "auto";
+
+            mu_attr(m, "w:lineRule", rule, sizeof(rule));
+            pp->mask |= PD_PP_LINE_SPACING;
+
+            if (strcmp(rule, "auto") == 0) {    /* in 240ths of a line */
+                pp->line_spacing = line * 1000 / 240;
+                pr->line_abs = 0;
+            } else {                            /* exact or at least, in twips */
+                pp->line_spacing = 1000;
+                pr->line_abs = twips(line);
+            }
+        }
+    } else if (strcmp(t, "ind") == 0) {
+        if (mu_attr(m, "w:left", v, sizeof(v)) || mu_attr(m, "w:start", v, sizeof(v))) {
+            pp->mask |= PD_PP_INDENT_LEFT;
+            pp->indent_left = twips(atoi(v));
+        }
+
+        if (mu_attr(m, "w:right", v, sizeof(v)) || mu_attr(m, "w:end", v, sizeof(v))) {
+            pp->mask |= PD_PP_INDENT_RIGHT;
+            pp->indent_right = twips(atoi(v));
+        }
+
+        if (mu_attr(m, "w:hanging", v, sizeof(v))) {
+            pp->mask |= PD_PP_INDENT_FIRST;
+            pp->indent_first = -twips(atoi(v));
+        } else if (mu_attr(m, "w:firstLine", v, sizeof(v))) {
+            pp->mask |= PD_PP_INDENT_FIRST;
+            pp->indent_first = twips(atoi(v));
+        }
+    } else if (strcmp(t, "keepNext") == 0) {
+        pp->mask |= PD_PP_KEEP_NEXT;
+        pp->keep_with_next = attr_on(m);
+    } else if (strcmp(t, "keepLines") == 0) {
+        pp->mask |= PD_PP_KEEP_LINES;
+        pp->keep_lines = attr_on(m);
+    } else if (strcmp(t, "pageBreakBefore") == 0) {
+        pp->mask |= PD_PP_BREAK_BEFORE;
+        pp->page_break_before = attr_on(m);
+    } else if (strcmp(t, "suppressAutoHyphens") == 0) {
+        pp->mask |= PD_PP_HYPHENATE;
+        pp->hyphenate = !attr_on(m);
+    }
+}
+
+/* s over d: the fields s sets replace those of d */
+static void pr_over(dprops* d, const dprops* s) {
+    const pd_para_props* sp = &s->pp;
+    const pd_char_props* sc = &s->cp;
+    pd_para_props* dp = &d->pp;
+    pd_char_props* dc = &d->cp;
+
+    if (sp->mask & PD_PP_ALIGN) dp->align = sp->align;
+    if (sp->mask & PD_PP_INDENT_LEFT) dp->indent_left = sp->indent_left;
+    if (sp->mask & PD_PP_INDENT_RIGHT) dp->indent_right = sp->indent_right;
+    if (sp->mask & PD_PP_INDENT_FIRST) dp->indent_first = sp->indent_first;
+    if (sp->mask & PD_PP_SPACE_BEFORE) dp->space_before = sp->space_before;
+    if (sp->mask & PD_PP_SPACE_AFTER) dp->space_after = sp->space_after;
+    if (sp->mask & PD_PP_KEEP_NEXT) dp->keep_with_next = sp->keep_with_next;
+    if (sp->mask & PD_PP_KEEP_LINES) dp->keep_lines = sp->keep_lines;
+    if (sp->mask & PD_PP_BREAK_BEFORE) dp->page_break_before = sp->page_break_before;
+    if (sp->mask & PD_PP_HYPHENATE) dp->hyphenate = sp->hyphenate;
+
+    if (sp->mask & PD_PP_LINE_SPACING) {
+        dp->line_spacing = sp->line_spacing;
+        d->line_abs = s->line_abs;
+    }
+
+    dp->mask |= sp->mask;
+
+    if (sc->mask & PD_CP_FAMILY) memcpy(dc->family, sc->family, sizeof(dc->family));
+    if (sc->mask & PD_CP_SIZE) dc->size = sc->size;
+    if (sc->mask & PD_CP_WEIGHT) dc->weight = sc->weight;
+    if (sc->mask & PD_CP_ITALIC) dc->italic = sc->italic;
+    if (sc->mask & PD_CP_COLOR) dc->color = sc->color;
+    if (sc->mask & PD_CP_BACKGROUND) dc->background = sc->background;
+    if (sc->mask & PD_CP_UNDERLINE) dc->underline = sc->underline;
+    if (sc->mask & PD_CP_STRIKE) dc->strike = sc->strike;
+    if (sc->mask & PD_CP_SHIFT) dc->shift = sc->shift;
+    if (sc->mask & PD_CP_SMALLCAPS) dc->small_caps = sc->small_caps;
+
+    dc->mask |= sc->mask;
+}
+
+static const dstyle_x* find_style(const dxi* X, const char* id);
+
+/* a style with everything it is based on, the farthest ancestor first */
+static void style_chain(const dxi* X, const char* id, dprops* out, int depth) {
+    const dstyle_x* st = depth < 10 ? find_style(X, id) : NULL;
+
+    if (st) {
+        style_chain(X, st->based_on, out, depth + 1);
+        pr_over(out, &st->pr);
+    }
+}
+
+/* An exact line height as Parade's multiple of the font's own line height,
+   taken as 1.15 em -- near enough for the faces documents use (Times 1.15,
+   Arial 1.15, Calibri 1.22). */
+static void line_finish(dprops* pr, pd_sp size) {
+    if (pr->line_abs > 0 && size > 0) {
+        pr->pp.line_spacing = (int32_t)((int64_t)pr->line_abs * 100000 / ((int64_t)size * 115));
+    }
+}
+
 static void read_styles(dxi* X, const char* xml, size_t n) {
     pd_markup m;
-    int cap = 0, cur = -1;
+    int cap = 0, cur = -1, in_ppr = 0, in_rpr = 0, skip = 0;
+    dprops* tgt = NULL;         /* the docDefaults or the style being read */
+
+    mu_init(&m, xml, n, 0);
+
+    while (mu_next(&m) != MT_END) {
+        const char* t = mu_local(m.name);
+        int open = m.type == MT_OPEN || m.type == MT_EMPTY;
+
+        if (skip) {
+            skip += m.type == MT_OPEN ? 1 : m.type == MT_CLOSE ? -1 : 0;
+            continue;
+        }
+
+        if (open && (strcmp(t, "tblStylePr") == 0 || strcmp(t, "tblPr") == 0 || strcmp(t, "trPr") == 0 ||
+                     strcmp(t, "tcPr") == 0 || (in_ppr && strcmp(t, "rPr") == 0))) {
+            skip = m.type == MT_OPEN;   /* table conditions, and the paragraph mark's own run */
+            continue;
+        }
+
+        if (m.type == MT_OPEN && strcmp(t, "docDefaults") == 0) {
+            tgt = &X->defaults;
+        } else if (m.type == MT_CLOSE && strcmp(t, "docDefaults") == 0) {
+            tgt = NULL;
+        } else if (m.type == MT_OPEN && strcmp(t, "style") == 0) {
+            dstyle_x s;
+            char v[32];
+
+            memset(&s, 0, sizeof(s));
+            s.outline = -1;
+            s.num_id = -1;
+            mu_attr(&m, "w:styleId", s.id, sizeof(s.id));
+            s.type = !mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "paragraph") == 0 ? 1 :
+                     strcmp(v, "character") == 0 ? 2 : 0;
+
+            if (s.type == 1 && mu_attr(&m, "w:default", v, sizeof(v)) && (strcmp(v, "1") == 0 ||
+                    strcmp(v, "true") == 0)) {
+                snprintf(X->def_pstyle, sizeof(X->def_pstyle), "%s", s.id);
+            }
+
+            if (!pd_grow((void**)&X->styles, &cap, (int64_t)X->nstyles + 1, sizeof(dstyle_x))) {
+                cur = X->nstyles;
+                X->styles[X->nstyles++] = s;
+                tgt = s.type ? &X->styles[cur].pr : NULL;
+            }
+        } else if (m.type == MT_CLOSE && strcmp(t, "style") == 0) {
+            cur = -1;
+            tgt = NULL;
+        } else if (strcmp(t, "pPr") == 0) {
+            in_ppr = m.type == MT_OPEN;
+        } else if (strcmp(t, "rPr") == 0) {
+            in_rpr = m.type == MT_OPEN;
+        } else if (open && tgt && in_ppr) {
+            ppr_elem(&m, t, tgt);
+
+            if (cur >= 0 && strcmp(t, "outlineLvl") == 0) {
+                X->styles[cur].outline = attr_int(&m, "w:val", -1);
+            } else if (cur >= 0 && strcmp(t, "numId") == 0) {
+                X->styles[cur].num_id = attr_int(&m, "w:val", -1);
+            } else if (cur >= 0 && strcmp(t, "ilvl") == 0) {
+                X->styles[cur].ilvl = attr_int(&m, "w:val", 0);
+            }
+        } else if (open && tgt && in_rpr) {
+            rpr_elem(X, &m, t, &tgt->cp, NULL, 0);
+        } else if (cur >= 0 && open) {
+            if (strcmp(t, "name") == 0) {
+                mu_attr(&m, "w:val", X->styles[cur].name, sizeof(X->styles[0].name));
+            } else if (strcmp(t, "basedOn") == 0) {
+                mu_attr(&m, "w:val", X->styles[cur].based_on, sizeof(X->styles[0].based_on));
+            }
+        }
+    }
+}
+
+/* the theme's font scheme: the Latin face of the major (headings) and minor (body) fonts */
+static void read_theme(dxi* X, const char* xml, size_t n) {
+    pd_markup m;
+    char* which = NULL;
 
     mu_init(&m, xml, n, 0);
 
     while (mu_next(&m) != MT_END) {
         const char* t = mu_local(m.name);
 
-        if (m.type == MT_OPEN && strcmp(t, "style") == 0) {
-            dstyle_x s;
+        if (m.type == MT_OPEN && strcmp(t, "majorFont") == 0) {
+            which = X->theme_major;
+        } else if (m.type == MT_OPEN && strcmp(t, "minorFont") == 0) {
+            which = X->theme_minor;
+        } else if (m.type == MT_CLOSE && (strcmp(t, "majorFont") == 0 || strcmp(t, "minorFont") == 0)) {
+            which = NULL;
+        } else if (which && !which[0] && (m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(t, "latin") == 0) {
+            mu_attr(&m, "typeface", which, 64);
+        }
+    }
+}
 
-            memset(&s, 0, sizeof(s));
-            s.outline = -1;
-            s.num_id = -1;
-            mu_attr(&m, "w:styleId", s.id, sizeof(s.id));
+/* document-wide settings that are paragraph properties in Parade */
+static void read_settings(dxi* X, const char* xml, size_t n) {
+    pd_markup m;
 
-            if (!pd_grow((void**)&X->styles, &cap, (int64_t)X->nstyles + 1, sizeof(dstyle_x))) {
-                cur = X->nstyles;
-                X->styles[X->nstyles++] = s;
-            }
-        } else if (m.type == MT_CLOSE && strcmp(t, "style") == 0) {
-            cur = -1;
-        } else if (cur >= 0 && (m.type == MT_OPEN || m.type == MT_EMPTY)) {
-            if (strcmp(t, "name") == 0) {
-                mu_attr(&m, "w:val", X->styles[cur].name, sizeof(X->styles[0].name));
-            } else if (strcmp(t, "basedOn") == 0) {
-                mu_attr(&m, "w:val", X->styles[cur].based_on, sizeof(X->styles[0].based_on));
-            } else if (strcmp(t, "outlineLvl") == 0) {
-                X->styles[cur].outline = attr_int(&m, "w:val", -1);
-            } else if (strcmp(t, "numId") == 0) {
-                X->styles[cur].num_id = attr_int(&m, "w:val", -1);
-            } else if (strcmp(t, "ilvl") == 0) {
-                X->styles[cur].ilvl = attr_int(&m, "w:val", 0);
-            }
+    mu_init(&m, xml, n, 0);
+
+    while (mu_next(&m) != MT_END) {
+        if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "autoHyphenation") == 0) {
+            X->defaults.pp.hyphenate = attr_on(&m);
         }
     }
 }
@@ -1452,20 +1727,20 @@ static int list_kind_of(const dxi* X, int num_id, int ilvl) {
     return num_id > 0 ? 1 : 0;
 }
 
-typedef struct {
-    int b, i, u, strike, shift, mono;
-    uint32_t color, fill;
-} drun;
 
 typedef struct {
     dxi* X;
     /* paragraph */
     int in_p, started, in_ppr, in_rpr, in_tcpr, in_trpr, in_sect;
     char pstyle[64];
-    int num_id, ilvl, jc, outline, sect_here;
+    int num_id, ilvl, outline, sect_here;
+    dprops ppr;                 /* the paragraph's own w:pPr */
+    pd_char_props pcp;          /* character properties of the paragraph style, defaults included */
+    pd_char_props tcp;          /* what the Parade style it was given already says, resolved */
     pd_section_props sp;
     /* run */
-    drun run;
+    pd_char_props rcp;          /* the run's own w:rPr */
+    char rstyle[64];
     int in_t, in_instr, in_drawing;
     /* fields and links */
     int fld;                    /* 0 none, 1 instruction, 2 result */
@@ -1484,50 +1759,60 @@ typedef struct {
     int after_ref;              /* just after the note's own number: drop the space that follows it */
 } dw;
 
+static int same_ci(const char* a, const char* b) {
+    while (*a && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+        a++;
+        b++;
+    }
+
+    return tolower((unsigned char)*a) == tolower((unsigned char)*b);
+}
+
+/* the run's format: what the document says about its characters, less what
+   the paragraph's Parade style already says */
 static void dw_apply_run(dw* w) {
+    dprops full;
     pd_char_props cp;
+    const pd_char_props* f = &full.cp;
+    const pd_char_props* t = &w->tcp;
+
+    memset(&full, 0, sizeof(full));
+    full.cp = w->pcp;
+    style_chain(w->X, w->rstyle, &full, 0);
+
+    if (!(full.cp.mask & PD_CP_FAMILY) && !(w->rcp.mask & PD_CP_FAMILY) && w->rstyle[0] &&
+            (strstr(w->rstyle, "Code") || strstr(w->rstyle, "Verbatim"))) {
+        full.cp.mask |= PD_CP_FAMILY;   /* a code character style that names no font */
+        strcpy(full.cp.family, "monospace");
+    }
+
+    {
+        dprops run;
+
+        memset(&run, 0, sizeof(run));
+        run.cp = w->rcp;
+        pr_over(&full, &run);
+    }
 
     memset(&cp, 0, sizeof(cp));
 
-    if (w->run.b) {
-        cp.mask |= PD_CP_WEIGHT;
-        cp.weight = 700;
-    }
-
-    if (w->run.i) {
-        cp.mask |= PD_CP_ITALIC;
-        cp.italic = 1;
-    }
-
-    if (w->run.u) {
-        cp.mask |= PD_CP_UNDERLINE;
-        cp.underline = w->run.u;
-    }
-
-    if (w->run.strike) {
-        cp.mask |= PD_CP_STRIKE;
-        cp.strike = 1;
-    }
-
-    if (w->run.shift) {
-        cp.mask |= PD_CP_SHIFT;
-        cp.shift = w->run.shift;
-    }
-
-    if (w->run.mono) {
+    if ((f->mask & PD_CP_FAMILY) && !same_ci(f->family, t->family)) {
         cp.mask |= PD_CP_FAMILY;
-        strcpy(cp.family, "monospace");
+        memcpy(cp.family, f->family, sizeof(cp.family));
     }
 
-    if (w->run.color) {
-        cp.mask |= PD_CP_COLOR;
-        cp.color = w->run.color;
-    }
-
-    if (w->run.fill) {
-        cp.mask |= PD_CP_BACKGROUND;
-        cp.background = w->run.fill;
-    }
+#define DW_DIFF(bit, field) \
+    if ((f->mask & (bit)) && f->field != t->field) { cp.mask |= (bit); cp.field = f->field; }
+    DW_DIFF(PD_CP_SIZE, size)
+    DW_DIFF(PD_CP_WEIGHT, weight)
+    DW_DIFF(PD_CP_ITALIC, italic)
+    DW_DIFF(PD_CP_COLOR, color)
+    DW_DIFF(PD_CP_BACKGROUND, background)
+    DW_DIFF(PD_CP_UNDERLINE, underline)
+    DW_DIFF(PD_CP_STRIKE, strike)
+    DW_DIFF(PD_CP_SHIFT, shift)
+    DW_DIFF(PD_CP_SMALLCAPS, small_caps)
+#undef DW_DIFF
 
     bld_set_format(w->X->b, &cp);
 }
@@ -1632,9 +1917,35 @@ static void dw_begin_para(dw* w) {
         bld_list(b, list_kind_of(w->X, num_id, ilvl), ilvl < 0 ? 0 : ilvl > 8 ? 8 : ilvl);
     }
 
-    if (w->jc >= 0) {
-        b->pp.mask |= PD_PP_ALIGN;
-        b->pp.align = w->jc;
+    /* what the document says about the paragraph -- defaults, the style and
+       what it is based on, its own w:pPr -- and, of that, what the Parade
+       style it now has does not already say */
+    {
+        dprops full = w->X->defaults;
+        pd_para_props rp;
+        pd_style_id sid = pd_doc_style_find(b->d, b->pstyle[0] ? b->pstyle : "Normal");
+        const pd_para_props* f = &full.pp;
+
+        style_chain(w->X, w->pstyle[0] ? w->pstyle : w->X->def_pstyle, &full, 0);
+        pr_over(&full, &w->ppr);
+        pd_doc_style_resolve(b->d, sid, &rp, &w->tcp);
+        line_finish(&full, (full.cp.mask & PD_CP_SIZE) ? full.cp.size : w->tcp.size);
+        w->pcp = full.cp;
+
+#define DW_DIFF(bit, field) \
+        if ((f->mask & (bit)) && f->field != rp.field) { b->pp.mask |= (bit); b->pp.field = f->field; }
+        DW_DIFF(PD_PP_ALIGN, align)
+        DW_DIFF(PD_PP_INDENT_LEFT, indent_left)
+        DW_DIFF(PD_PP_INDENT_RIGHT, indent_right)
+        DW_DIFF(PD_PP_INDENT_FIRST, indent_first)
+        DW_DIFF(PD_PP_SPACE_BEFORE, space_before)
+        DW_DIFF(PD_PP_SPACE_AFTER, space_after)
+        DW_DIFF(PD_PP_LINE_SPACING, line_spacing)
+        DW_DIFF(PD_PP_KEEP_NEXT, keep_with_next)
+        DW_DIFF(PD_PP_KEEP_LINES, keep_lines)
+        DW_DIFF(PD_PP_BREAK_BEFORE, page_break_before)
+        DW_DIFF(PD_PP_HYPHENATE, hyphenate)
+#undef DW_DIFF
     }
 
     bld_begin_para(b);
@@ -1744,7 +2055,6 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
     w->X = X;
     w->note = note;
-    w->jc = -1;
     w->outline = -1;
     mu_init(&m, xml, n, 0);
 
@@ -1799,7 +2109,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->pstyle[0] = '\0';
                 w->num_id = 0;
                 w->ilvl = 0;
-                w->jc = -1;
+                memset(&w->ppr, 0, sizeof(w->ppr));
                 w->outline = -1;
                 w->sect_here = 0;
 
@@ -1842,45 +2152,18 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 } else if (strcmp(t, "ilvl") == 0) {
                     w->ilvl = attr_int(&m, "w:val", 0);
                     w->ilvl = w->ilvl < 0 ? 0 : w->ilvl > 8 ? 8 : w->ilvl;
-                } else if (strcmp(t, "jc") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
-                    w->jc = strcmp(v, "center") == 0 ? PD_ALIGN_CENTER : strcmp(v, "right") == 0 || strcmp(v, "end") == 0 ?
-                            PD_ALIGN_RIGHT : strcmp(v, "both") == 0 || strcmp(v, "distribute") == 0 ? PD_ALIGN_JUSTIFY :
-                            PD_ALIGN_LEFT;
                 } else if (strcmp(t, "outlineLvl") == 0) {
                     w->outline = attr_int(&m, "w:val", -1);
+                } else {
+                    ppr_elem(&m, t, &w->ppr);
                 }
             } else if (strcmp(t, "r") == 0) {
-                memset(&w->run, 0, sizeof(w->run));
+                memset(&w->rcp, 0, sizeof(w->rcp));
+                w->rstyle[0] = '\0';
             } else if (strcmp(t, "rPr") == 0) {
                 w->in_rpr = m.type == MT_OPEN;
             } else if (w->in_rpr) {
-                if (strcmp(t, "b") == 0) {
-                    w->run.b = attr_on(&m);
-                } else if (strcmp(t, "i") == 0) {
-                    w->run.i = attr_on(&m);
-                } else if (strcmp(t, "u") == 0) {
-                    w->run.u = attr_on(&m) ? (mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "double") == 0 ? 2 : 1) : 0;
-                } else if (strcmp(t, "strike") == 0 || strcmp(t, "dstrike") == 0) {
-                    w->run.strike = attr_on(&m);
-                } else if (strcmp(t, "vertAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
-                    w->run.shift = strcmp(v, "superscript") == 0 ? PD_SHIFT_SUPER : strcmp(v, "subscript") == 0 ?
-                                   PD_SHIFT_SUB : 0;
-                } else if (strcmp(t, "color") == 0 && mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "auto") != 0) {
-                    w->run.color = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
-                } else if (strcmp(t, "shd") == 0 && mu_attr(&m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0) {
-                    w->run.fill = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
-                } else if (strcmp(t, "highlight") == 0 && mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "none") != 0) {
-                    w->run.fill = strcmp(v, "yellow") == 0 ? 0xFFFFFF00u : strcmp(v, "green") == 0 ? 0xFF00FF00u :
-                                  strcmp(v, "cyan") == 0 ? 0xFF00FFFFu : 0xFFFFFF00u;
-                } else if (strcmp(t, "rFonts") == 0 && (mu_attr(&m, "w:ascii", v, sizeof(v)) ||
-                                                        mu_attr(&m, "w:hAnsi", v, sizeof(v)))) {
-                    w->run.mono = strstr(v, "Courier") || strstr(v, "Mono") || strstr(v, "Consolas") ||
-                                  strstr(v, "Menlo");
-                } else if (strcmp(t, "rStyle") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
-                    if (strstr(v, "Code") || strstr(v, "Verbatim")) {
-                        w->run.mono = 1;
-                    }
-                }
+                rpr_elem(X, &m, t, &w->rcp, w->rstyle, sizeof(w->rstyle));
             } else if (strcmp(t, "t") == 0) {
                 w->in_t = m.type == MT_OPEN;
             } else if (strcmp(t, "instrText") == 0) {
@@ -2112,9 +2395,46 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
         free(xml);
     }
 
+    /* Word hyphenates only when the document asks it to */
+    X.defaults.pp.mask |= PD_PP_HYPHENATE;
+    X.defaults.pp.hyphenate = 0;
+
+    if ((xml = (char*)zip_read(&X.z, "word/settings.xml", &len)) != NULL) {
+        read_settings(&X, xml, len);
+        free(xml);
+    }
+
+    if ((xml = (char*)zip_read(&X.z, "word/theme/theme1.xml", &len)) != NULL) {
+        read_theme(&X, xml, len);
+        free(xml);
+    }
+
     if ((xml = (char*)zip_read(&X.z, "word/styles.xml", &len)) != NULL) {
         read_styles(&X, xml, len);
         free(xml);
+    }
+
+    /* Parade's Normal becomes the document's: its defaults and default
+       paragraph style, which every other style is built on */
+    {
+        dprops base = X.defaults;
+        pd_style_id normal = pd_doc_style_find(d, "Normal");
+        int32_t kind = PD_STYLE_PARAGRAPH;
+        pd_style_id parent = 0;
+        dprops cur;
+
+        memset(&cur, 0, sizeof(cur));
+        style_chain(&X, X.def_pstyle, &base, 0);
+
+        if (normal && pd_doc_style_info(d, normal, &kind, &parent, &cur.pp, &cur.cp) == PD_OK) {
+            pd_para_props rp;
+            pd_char_props rc;
+
+            pd_doc_style_resolve(d, normal, &rp, &rc);
+            line_finish(&base, (base.cp.mask & PD_CP_SIZE) ? base.cp.size : rc.size);
+            pr_over(&cur, &base);
+            pd_doc_style_define(d, "Normal", (pd_style_kind)kind, parent, &cur.pp, &cur.cp, NULL);
+        }
     }
 
     if ((xml = (char*)zip_read(&X.z, "word/numbering.xml", &len)) != NULL) {
