@@ -430,6 +430,16 @@ void bld_init(pd_bld* b, pd_doc* d) {
     bld_reset_next(b);
 }
 
+/* where a new block goes: before the container's first paragraph while
+   nothing has been written into it, so that the paragraph after the block
+   is the one that takes it; at the end otherwise */
+static int32_t bld_slot(const pd_bld* b) {
+    const bld_level* L = &b->st[b->depth - 1];
+    pd_block_info bi;
+
+    return L->fresh && pd_doc_block_info(b->d, L->fresh, &bi) == PD_OK ? bi.index : -1;
+}
+
 pd_block_id bld_container(const pd_bld* b) {
     return b->st[b->depth - 1].id;
 }
@@ -637,7 +647,7 @@ void bld_table_begin(pd_bld* b) {
 
     bld_end_para(b);
 
-    if (b->ntables >= 8 || pd_doc_insert_block(b->d, bld_container(b), -1, PD_BLOCK_TABLE, &t) != PD_OK) {
+    if (b->ntables >= 8 || pd_doc_insert_block(b->d, bld_container(b), bld_slot(b), PD_BLOCK_TABLE, &t) != PD_OK) {
         b->err = b->err ? b->err : PD_ERR_RANGE;
         b->ntables++;   /* keep begin/end balanced */
         return;
@@ -792,7 +802,7 @@ pd_block_id bld_float_begin(pd_bld* b) {
 
     bld_end_para(b);
 
-    if (pd_doc_insert_block(b->d, bld_container(b), -1, PD_BLOCK_FLOAT, &fl) != PD_OK) {
+    if (pd_doc_insert_block(b->d, bld_container(b), bld_slot(b), PD_BLOCK_FLOAT, &fl) != PD_OK) {
         bld_push(b, bld_container(b));
         b->st[b->depth - 1].fresh = 0;
         return 0;

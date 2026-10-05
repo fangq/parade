@@ -810,8 +810,14 @@ static void le(buf_t* b, uint32_t v, int bytes) {
     to_buf(b, c, (size_t)bytes);
 }
 
-/* a zip of uncompressed entries: names[i] holds texts[i] */
+/* a zip of uncompressed entries: names[i] holds texts[i], lens[i] bytes of it (all of a string when NULL) */
+static buf_t stored_zip_n(const char** names, const char** texts, const size_t* lens, int n);
+
 static buf_t stored_zip(const char** names, const char** texts, int n) {
+    return stored_zip_n(names, texts, NULL, n);
+}
+
+static buf_t stored_zip_n(const char** names, const char** texts, const size_t* lens, int n) {
     buf_t z, cd;
     uint32_t offs[16];
     int i;
@@ -820,7 +826,7 @@ static buf_t stored_zip(const char** names, const char** texts, int n) {
     memset(&cd, 0, sizeof(cd));
 
     for (i = 0; i < n; i++) {
-        uint32_t len = (uint32_t)strlen(texts[i]), crc = crc32_of(texts[i], len);
+        uint32_t len = (uint32_t)(lens ? lens[i] : strlen(texts[i])), crc = crc32_of(texts[i], len);
         uint16_t nl = (uint16_t)strlen(names[i]);
 
         offs[i] = (uint32_t)z.n;
@@ -1001,11 +1007,14 @@ static void test_docx_styles(void) {
     pd_doc_free(d);
 }
 
-/* a document from the parts of a .docx: name, text, name, text, ..., NULL */
+/* a document from the parts of a .docx: name, text, name, text, ..., NULL.
+   A word/media/ part names a file whose bytes it holds. */
 static pd_doc* docx_doc(const char* first, ...) {
     const char* names[16];
     const char* texts[16];
-    int n = 0;
+    size_t lens[16];
+    char* files[16];
+    int n = 0, i;
     va_list ap;
     const char* nm;
     buf_t z;
@@ -1015,11 +1024,35 @@ static pd_doc* docx_doc(const char* first, ...) {
 
     for (nm = first; nm && n < 16; nm = va_arg(ap, const char*)) {
         names[n] = nm;
-        texts[n++] = va_arg(ap, const char*);
+        texts[n] = va_arg(ap, const char*);
+        lens[n] = strlen(texts[n]);
+        files[n] = NULL;
+
+        if (strncmp(nm, "word/media/", 11) == 0) {
+            FILE* f = fopen(texts[n], "rb");
+            long sz;
+
+            if (f && fseek(f, 0, SEEK_END) == 0 && (sz = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+                    (files[n] = (char*)malloc((size_t)sz)) != NULL && fread(files[n], 1, (size_t)sz, f) == (size_t)sz) {
+                texts[n] = files[n];
+                lens[n] = (size_t)sz;
+            }
+
+            if (f) {
+                fclose(f);
+            }
+        }
+
+        n++;
     }
 
     va_end(ap);
-    z = stored_zip(names, texts, n);
+    z = stored_zip_n(names, texts, lens, n);
+
+    for (i = 0; i < n; i++) {
+        free(files[i]);
+    }
+
 
     if (pd_doc_import(z.p, z.n, PD_CONV_DOCX, &d) != PD_OK) {
         d = NULL;
@@ -1303,6 +1336,74 @@ static void test_docx_tables(void) {
     pd_doc_free(d);
 }
 
+#define DRAWING(kind, inner) \
+    "<w:r><w:drawing><wp:" kind " distT=\"0\" distB=\"0\" distL=\"114300\" distR=\"114300\">" inner \
+    "<wp:extent cx=\"1270000\" cy=\"635000\"/>" \
+    "<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic>" \
+    "</a:graphicData></a:graphic></wp:" kind "></w:drawing></w:r>"
+
+/* Floating pictures: beside the text on the side Word put them when text
+   wraps round them, across the column when it goes above and below; before
+   the paragraph they are anchored at its start, after it otherwise. */
+static void test_docx_floats(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body>"
+        "<w:p>" DRAWING("anchor", "<wp:positionH relativeFrom=\"column\"><wp:align>right</wp:align></wp:positionH>"
+                        "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>12700</wp:posOffset></wp:positionV>"
+                        "<wp:wrapSquare wrapText=\"bothSides\"/>")
+        "<w:r><w:t>Text beside.</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">Before </w:t></w:r>"
+        DRAWING("anchor", "<wp:positionH relativeFrom=\"column\"><wp:posOffset>0</wp:posOffset></wp:positionH>"
+                "<wp:wrapTopAndBottom/>")
+        "<w:r><w:t>after.</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">In line </w:t></w:r>" DRAWING("inline", "") "</w:p>"
+        "</w:body></w:document>",
+        NULL);
+    pd_block_id sec, k[6];
+    pd_block_info bi[6];
+    pd_float_props fp;
+    const char* t;
+    uint32_t n;
+    int i;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+
+    for (i = 0; i < 6; i++) {
+        k[i] = pd_doc_child(d, sec, i);
+        memset(&bi[i], 0, sizeof(bi[i]));
+        pd_doc_block_info(d, k[i], &bi[i]);
+    }
+
+    /* the first picture before its paragraph, on the right, text round it */
+    CHECK(bi[0].kind == PD_BLOCK_FLOAT && bi[1].kind == PD_BLOCK_PARAGRAPH);
+    CHECK(pd_doc_float_props(d, k[0], &fp) == PD_OK && fp.wrap == PD_WRAP_RIGHT && fp.width == PD_PT(100));
+    CHECK(fp.gap == PD_PT(9) && (fp.placement & PD_PLACE_FORCE));
+    pd_doc_para_text(d, k[1], &t, &n);
+    CHECK(n == 12 && memcmp(t, "Text beside.", 12) == 0);
+
+    /* the second after the paragraph it was anchored in the middle of, across the column */
+    CHECK(bi[2].kind == PD_BLOCK_PARAGRAPH && bi[3].kind == PD_BLOCK_FLOAT);
+    pd_doc_para_text(d, k[2], &t, &n);
+    CHECK(n == 13 && memcmp(t, "Before after.", 13) == 0);
+    CHECK(pd_doc_float_props(d, k[3], &fp) == PD_OK && fp.wrap == PD_WRAP_NONE);
+
+    /* an inline picture stays in its line */
+    pd_doc_para_text(d, k[4], &t, &n);
+    CHECK(bi[4].kind == PD_BLOCK_PARAGRAPH && n == 11 && memcmp(t + 8, "\xEF\xBF\xBC", 3) == 0);
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1324,6 +1425,8 @@ int main(void) {
     test_docx_headers();
     printf("docx tables\n");
     test_docx_tables();
+    printf("docx floats\n");
+    test_docx_floats();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

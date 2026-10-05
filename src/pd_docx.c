@@ -1952,6 +1952,14 @@ typedef struct {
     /* drawings */
     char blip[64];
     long long cx, cy;
+    int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
+    long long posh_off, dist;
+    struct {
+        pd_res_id res;
+        pd_sp w, h, gap;
+        int wrap;
+    } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
+    int npend_fl;
     /* tables */
     int pend_row, row_header, pend_cell, span, cell_merge, cell_valign;
     uint32_t cell_bg;
@@ -2276,6 +2284,42 @@ static void dw_footnote(dw* w, int id) {
     }
 }
 
+/* Floating drawings, as Parade floats: beside the text when Word wraps text
+   round them (square, tight, through), on the side Word put them; across
+   the column when it puts text above and below or none at all. Pinned at
+   the anchor, which is where Word positions them from. */
+static void dw_floats(dw* w) {
+    pd_bld* b = w->X->b;
+    int k;
+
+    dw_begin_cell(w);
+
+    for (k = 0; k < w->npend_fl; k++) {
+        pd_block_id fl = bld_float_begin(b);
+        pd_float_props fp;
+        pd_inline o;
+
+        if (fl && pd_doc_float_props(b->d, fl, &fp) == PD_OK) {
+            fp.placement = PD_PLACE_HERE | PD_PLACE_FORCE;
+            fp.wrap = w->pend_fl[k].wrap;
+            fp.width = w->pend_fl[k].w;
+            fp.gap = w->pend_fl[k].gap > 0 ? w->pend_fl[k].gap : PD_PT(9);
+            pd_doc_set_float_props(b->d, fl, &fp);
+        }
+
+        memset(&o, 0, sizeof(o));
+        o.kind = PD_INLINE_IMAGE;
+        o.resource = w->pend_fl[k].res;
+        o.width = w->pend_fl[k].w;
+        o.height = w->pend_fl[k].h;
+        bld_begin_para(b);
+        bld_inline(b, &o);
+        bld_float_end(b);
+    }
+
+    w->npend_fl = 0;
+}
+
 static void dw_image(dw* w) {
     dxi* X = w->X;
     const char* target = rel_target(X, w->blip, NULL);
@@ -2308,8 +2352,22 @@ static void dw_image(dw* w) {
         o.height = (pd_sp)(w->cy * 65536 / 12700);
 
         if (o.width > 0 && o.height > 0 && pd_doc_add_resource(X->b->d, mime, data, len, &o.resource) == PD_OK) {
-            dw_begin_para(w);
-            bld_inline(X->b, &o);
+            if (!w->anchor) {
+                dw_begin_para(w);
+                bld_inline(X->b, &o);
+            } else if (w->npend_fl < 8) {
+                int k = w->npend_fl++;
+
+                w->pend_fl[k].res = o.resource;
+                w->pend_fl[k].w = o.width;
+                w->pend_fl[k].h = o.height;
+                w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
+                w->pend_fl[k].wrap = w->wrap;
+
+                if (!w->started) {  /* anchored before any text: the float goes first */
+                    dw_floats(w);
+                }
+            }
         }
 
         free(data);
@@ -2422,6 +2480,23 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->skip++;
             } else if (m.type == MT_CLOSE) {
                 w->skip--;
+            }
+
+            continue;
+        }
+
+        if (m.type == MT_TEXT && (w->in_align || w->in_offset)) {
+            char tv[32];
+            size_t tn = m.tlen < sizeof(tv) - 1 ? m.tlen : sizeof(tv) - 1;
+
+            memcpy(tv, m.text, tn);
+            tv[tn] = '\0';
+
+            if (w->in_align) {
+                w->posh_align = strstr(tv, "right") || strstr(tv, "outside") ? PD_WRAP_RIGHT :
+                                strstr(tv, "center") ? PD_WRAP_NONE : PD_WRAP_LEFT;
+            } else {
+                w->posh_off = atoll(tv);
             }
 
             continue;
@@ -2571,6 +2646,34 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->in_drawing = m.type == MT_OPEN;
                 w->blip[0] = '\0';
                 w->cx = w->cy = 0;
+                w->anchor = 0;
+                w->wrap = PD_WRAP_NONE;
+                w->posh_align = -1;
+                w->posh_off = 0;
+                w->dist = 0;
+            } else if (w->in_drawing && strcmp(t, "anchor") == 0) {
+                w->anchor = 1;
+                w->dist = atoll(mu_attr(&m, "distL", v, sizeof(v)) ? v : "0");
+
+                if (mu_attr(&m, "distR", v, sizeof(v)) && atoll(v) > w->dist) {
+                    w->dist = atoll(v);
+                }
+            } else if (w->in_drawing && w->anchor && (strcmp(t, "wrapSquare") == 0 || strcmp(t, "wrapTight") == 0 ||
+                       strcmp(t, "wrapThrough") == 0)) {
+                /* text on the left only puts the drawing on the right, and the other way round */
+                if (mu_attr(&m, "wrapText", v, sizeof(v)) && strcmp(v, "left") == 0) {
+                    w->wrap = -PD_WRAP_RIGHT;
+                } else if (mu_attr(&m, "wrapText", v, sizeof(v)) && strcmp(v, "right") == 0) {
+                    w->wrap = -PD_WRAP_LEFT;
+                } else {
+                    w->wrap = -9;       /* by its position, once that is read */
+                }
+            } else if (w->in_drawing && strcmp(t, "positionH") == 0) {
+                w->in_posh = m.type == MT_OPEN;
+            } else if (w->in_posh && strcmp(t, "align") == 0) {
+                w->in_align = m.type == MT_OPEN;
+            } else if (w->in_posh && strcmp(t, "posOffset") == 0) {
+                w->in_offset = m.type == MT_OPEN;
             } else if (w->in_drawing && strcmp(t, "extent") == 0) {
                 if (mu_attr(&m, "cx", v, sizeof(v))) {
                     w->cx = atoll(v);
@@ -2752,6 +2855,10 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         if (strcmp(t, "p") == 0 && w->in_p) {
             dw_begin_para(w);   /* an empty paragraph is still one */
             bld_end_para(X->b);
+
+            if (w->npend_fl) {
+                dw_floats(w);
+            }
             w->in_p = 0;
             w->started = 0;
 
@@ -2783,7 +2890,18 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             w->in_t = 0;
         } else if (strcmp(t, "instrText") == 0) {
             w->in_instr = 0;
+        } else if (strcmp(t, "positionH") == 0) {
+            w->in_posh = 0;
+        } else if (strcmp(t, "align") == 0) {
+            w->in_align = 0;
+        } else if (strcmp(t, "posOffset") == 0) {
+            w->in_offset = 0;
         } else if (strcmp(t, "drawing") == 0) {
+            if (w->wrap < 0) {      /* wrapped: which side it is on */
+                w->wrap = w->wrap == -9 ? (w->posh_align >= 0 ? w->posh_align :
+                                           w->posh_off > 2286000 ? PD_WRAP_RIGHT : PD_WRAP_LEFT) : -w->wrap;
+            }
+
             if (w->in_drawing && w->blip[0]) {
                 dw_image(w);
             }
