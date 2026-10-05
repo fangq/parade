@@ -1397,7 +1397,7 @@ static void md_inline(mctx* m, size_t a, size_t b) {
                 o.kind = PD_INLINE_EQUATION;
                 o.source = m->s + x->a;
                 o.source_len = (int32_t)(x->b - x->a);
-                o.width = (pd_sp)(x->b - x->a) * PD_PT(5);
+                o.width = pd_conv_equation_width((size_t)(x->b - x->a));
                 o.height = PD_PT(8);
                 o.depth = PD_PT(2);
                 bld_inline(m->b, &o);
@@ -1949,7 +1949,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
             o.kind = PD_INLINE_EQUATION;
             o.source = tex.p ? tex.p : "";
             o.source_len = (int32_t)tex.n;
-            o.width = (pd_sp)tex.n * PD_PT(5);
+            o.width = pd_conv_equation_width(tex.n);
             o.height = PD_PT(10);
             bld_para_style(&b, NULL, PD_ROLE_EQUATION, 0);
             bld_begin_para(&b);

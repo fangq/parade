@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# the tests read system fonts and hyphenation patterns; missing ones are skipped, not failed
+env:
+  TEST_PACKAGES: fonts-liberation fonts-dejavu-core fonts-noto-cjk fonts-lmodern hyphen-en-us
+
+jobs:
+  test:
+    name: test (${{ matrix.cc }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y $TEST_PACKAGES
+      - run: make -j4 all CC=${{ matrix.cc }} CFLAGS="-O2 -Werror"
+      - run: make test CC=${{ matrix.cc }}
+
+  sanitizers:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y $TEST_PACKAGES
+      - run: make -j4 asan
+
+  harfbuzz:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y $TEST_PACKAGES libharfbuzz-dev pkg-config
+      - run: make -j4 test HARFBUZZ=1 BUILD=build-hb
+
+  fuzz:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y $TEST_PACKAGES clang
+      # replay and deterministic mutations under ASan/UBSan, then a short coverage-guided run per target
+      - run: make -j4 fuzz-smoke
+      - run: for t in font doc import para math; do make fuzz FUZZ=$t FUZZ_TIME=60 || exit 1; done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashes
+          path: build/fuzz/crash/
+
+  conformance:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: build/ucd
+          key: ucd-15.1.0
+      - run: make -j4 conformance
+
+  external-readers:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y $TEST_PACKAGES ghostscript poppler-utils
+      # Ubuntu's python3-mistune is 0.8, conv_check needs the 2.x+ API
+      - run: pip install lxml python-docx "mistune>=2"
+      - run: make -j4 pdf-check
+      - run: make conv-check
+
+  pascal:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y $TEST_PACKAGES fpc
+      - run: make -j4 pascal
+
+  format:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y astyle
+      - run: make pretty && git diff --exit-code
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # no system test fonts: font-dependent checks are skipped; ulimit -v is unsupported there
+      - run: make -j4 all CFLAGS="-O2 -Werror"
+      - run: make test MEMLIMIT_KB=0

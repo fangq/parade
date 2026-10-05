@@ -83,6 +83,11 @@ int pd_conv_list_kind(const pd_doc* d, pd_block_id para, int32_t* level);
 
 #define BLD_DEPTH 24
 
+/* placeholder width of an imported equation until the math font sizes it: 5pt per source byte, capped */
+static inline pd_sp pd_conv_equation_width(size_t source_len) {
+    return (pd_sp)(source_len < 4096 ? source_len : 4096) * PD_PT(5);
+}
+
 typedef struct {
     pd_block_id id;
     pd_block_id fresh;          /* its initial empty paragraph, still unused */

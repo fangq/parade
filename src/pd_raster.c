@@ -16,6 +16,8 @@
 #include "pd_internal.h"
 
 #define ONE 256                 /* subpixels per pixel */
+/* bound for accumulated glyf deltas: real outlines stay within int16, so 26.6 values fit int32 */
+#define CLAMP_COORD(v) ((v) > (1 << 24) ? (1 << 24) : (v) < -(1 << 24) ? -(1 << 24) : (v))
 #define MAX_COMPOSITE_DEPTH 8
 
 static uint32_t RU16(const pd_font* f, uint64_t off) {
@@ -170,9 +172,14 @@ typedef struct {
     int32_t a, b, c, d, dx, dy;
 } xform;
 
+/* composite transforms of a malformed font can grow without bound: saturate */
+static int32_t sat(int64_t v) {
+    return v > (1 << 29) ? (1 << 29) : v < -(1 << 29) ? -(1 << 29) : (int32_t)v;     /* midpoints stay in int32 */
+}
+
 static void apply(const xform* t, int32_t x, int32_t y, int32_t* ox, int32_t* oy) {
-    *ox = (int32_t)(((int64_t)t->a * x + (int64_t)t->c * y) >> 14) + t->dx;
-    *oy = (int32_t)(((int64_t)t->b * x + (int64_t)t->d * y) >> 14) + t->dy;
+    *ox = sat((((int64_t)t->a * x + (int64_t)t->c * y) >> 14) + t->dx);
+    *oy = sat((((int64_t)t->b * x + (int64_t)t->d * y) >> 14) + t->dy);
 }
 
 static int tt_glyph(const pd_font* f, uint32_t g, const xform* t, path_t* p, int depth) {
@@ -249,6 +256,7 @@ static int tt_glyph(const pd_font* f, uint32_t g, const xform* t, path_t* p, int
                 xq += 2;
             }
 
+            x = CLAMP_COORD(x);
             px[i] = x;
         }
 
@@ -263,6 +271,7 @@ static int tt_glyph(const pd_font* f, uint32_t g, const xform* t, path_t* p, int
                 yq += 2;
             }
 
+            y = CLAMP_COORD(y);
             py[i] = y;
         }
 
@@ -339,10 +348,10 @@ static int tt_glyph(const pd_font* f, uint32_t g, const xform* t, path_t* p, int
             c.dy = (flags & 2) ? a2 * 64 : 0;
 
             /* compose: parent t after component c */
-            m.a = (int32_t)(((int64_t)t->a * c.a + (int64_t)t->c * c.b) >> 14);
-            m.b = (int32_t)(((int64_t)t->b * c.a + (int64_t)t->d * c.b) >> 14);
-            m.c = (int32_t)(((int64_t)t->a * c.c + (int64_t)t->c * c.d) >> 14);
-            m.d = (int32_t)(((int64_t)t->b * c.c + (int64_t)t->d * c.d) >> 14);
+            m.a = sat(((int64_t)t->a * c.a + (int64_t)t->c * c.b) >> 14);
+            m.b = sat(((int64_t)t->b * c.a + (int64_t)t->d * c.b) >> 14);
+            m.c = sat(((int64_t)t->a * c.c + (int64_t)t->c * c.d) >> 14);
+            m.d = sat(((int64_t)t->b * c.c + (int64_t)t->d * c.d) >> 14);
             apply(t, c.dx, c.dy, &m.dx, &m.dy);
 
             if (tt_glyph(f, comp, &m, p, depth + 1)) {
@@ -563,6 +572,16 @@ static int32_t steps_for(int64_t devx, int64_t devy) {
     return n > 64 ? 64 : n;
 }
 
+/* a 26.6 coordinate in subpixels, clamped so offsets and negation cannot overflow */
+static int32_t scale_coord(int32_t v, int64_t scale) {
+    int64_t r;
+
+    v = v > (1 << 22) ? (1 << 22) : v < -(1 << 22) ? -(1 << 22) : v;     /* scale < 2^41: no int64 overflow */
+    r = ((int64_t)v * scale) >> 32;
+
+    return r > (1 << 30) ? (1 << 30) : r < -(1 << 30) ? -(1 << 30) : (int32_t)r;
+}
+
 pd_status pd_font_glyph_render(const pd_font* f, uint32_t g, pd_sp px_per_em, int32_t subpixel, uint8_t* buf,
                                int32_t cap, pd_glyph_image* info) {
     path_t p;
@@ -585,8 +604,8 @@ pd_status pd_font_glyph_render(const pd_font* f, uint32_t g, pd_sp px_per_em, in
     /* subpixels per 26.6 unit = px_per_em/65536 * ONE / (upem * 64) */
     scale = ((int64_t)px_per_em << 16) * ONE / ((int64_t)f->m.units_per_em * 64) ;
 
-#define SX(v) ((int32_t)(((int64_t)(v) * scale) >> 32) + subpixel)
-#define SY(v) (-(int32_t)(((int64_t)(v) * scale) >> 32))
+#define SX(v) (scale_coord(v, scale) + subpixel)
+#define SY(v) (-scale_coord(v, scale))
 
     for (i = 0; i < p.n; i++) {
         int npts = p.s[i].op == OP_CUBIC ? 3 : p.s[i].op == OP_QUAD ? 2 : 1;
@@ -608,16 +627,18 @@ pd_status pd_font_glyph_render(const pd_font* f, uint32_t g, pd_sp px_per_em, in
 
     ox = (minx >> 8);
     oy = (miny >> 8);
+
+    /* bounds of a malformed outline may span the whole int32 range */
+    if ((int64_t)(maxx >> 8) - ox + 1 > 4096 || (int64_t)(maxy >> 8) - oy + 1 > 4096) {
+        free(p.s);
+        return PD_ERR_RANGE;
+    }
+
     info->left = ox;
     info->top = -oy;
     info->width = (maxx >> 8) - ox + 1;
     info->height = (maxy >> 8) - oy + 1;
     need = info->width * info->height;
-
-    if (info->width > 4096 || info->height > 4096) {
-        free(p.s);
-        return PD_ERR_RANGE;
-    }
 
     if (!buf) {
         free(p.s);

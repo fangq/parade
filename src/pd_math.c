@@ -128,6 +128,17 @@ typedef struct {
     int32_t items;              /* total items made: a bound against pathological input */
 } mctx;
 
+/*
+ * every length is kept within +-MATH_MAX (1024pt) so that the sums and
+ * doublings of TeX's rules cannot overflow int32, whatever a malformed
+ * MATH table or a deeply nested formula produces
+ */
+#define MATH_MAX (1 << 26)
+
+static pd_sp clampd(int64_t v) {
+    return v > MATH_MAX ? MATH_MAX : v < -MATH_MAX ? -MATH_MAX : (pd_sp)v;
+}
+
 static void box_free(mbox* b) {
     free(b->v);
     memset(b, 0, sizeof(*b));
@@ -160,15 +171,15 @@ static void box_place(mctx* M, mbox* dst, const mbox* src, pd_sp x, pd_sp shift)
     for (i = 0; i < src->n; i++) {
         pd_math_item it = src->v[i];
 
-        it.x += x;
-        it.y += shift;
+        it.x = clampd((int64_t)it.x + x);
+        it.y = clampd((int64_t)it.y + shift);
         box_push(M, dst, &it);
     }
 
     dst->err |= src->err;
-    dst->h = src->h - shift > dst->h ? src->h - shift : dst->h;
-    dst->d = src->d + shift > dst->d ? src->d + shift : dst->d;
-    dst->w = x + src->w > dst->w ? x + src->w : dst->w;
+    dst->h = clampd((int64_t)src->h - shift > dst->h ? (int64_t)src->h - shift : dst->h);
+    dst->d = clampd((int64_t)src->d + shift > dst->d ? (int64_t)src->d + shift : dst->d);
+    dst->w = clampd((int64_t)x + src->w > dst->w ? (int64_t)x + src->w : dst->w);
 }
 
 static void box_rule(mctx* M, mbox* b, pd_sp x, pd_sp top, pd_sp w, pd_sp h) {
@@ -181,9 +192,9 @@ static void box_rule(mctx* M, mbox* b, pd_sp x, pd_sp top, pd_sp w, pd_sp h) {
     it.w = w;
     it.h = h;
     box_push(M, b, &it);
-    b->h = -top > b->h ? -top : b->h;
-    b->d = top + h > b->d ? top + h : b->d;
-    b->w = x + w > b->w ? x + w : b->w;
+    b->h = clampd(-(int64_t)top > b->h ? -(int64_t)top : b->h);
+    b->d = clampd((int64_t)top + h > b->d ? (int64_t)top + h : b->d);
+    b->w = clampd((int64_t)x + w > b->w ? (int64_t)x + w : b->w);
 }
 
 /* ------------------------------------------------------------------ */
@@ -191,7 +202,9 @@ static void box_rule(mctx* M, mbox* b, pd_sp x, pd_sp top, pd_sp w, pd_sp h) {
 /* ------------------------------------------------------------------ */
 
 static pd_sp SC(const mctx* M, int32_t units, pd_sp size) {
-    return pd_scale(units, size, M->upem);
+    int64_t v = (int64_t)units * size;
+
+    return clampd(v >= 0 ? (v + M->upem / 2) / M->upem : -((-v + M->upem / 2) / M->upem));
 }
 
 static int32_t mconst(const mctx* M, int k) {
@@ -401,20 +414,20 @@ static mbox stretchy(mctx* M, uint32_t g, pd_sp target, pd_sp size) {
                     pd_sp sc = SC(M, (int32_t)U16(M->f, P + 2), size), ec = SC(M, (int32_t)U16(M->f, P + 4), size);
                     int32_t times = ext ? reps : 1;
 
-                    full += adv * times;
+                    full = clampd((int64_t)full + (int64_t)adv * times);
                     joints += times;
                     ovl_max = sc < ovl_max && times ? sc : ovl_max;
                     ovl_max = ec < ovl_max && times ? ec : ovl_max;
                 }
 
-                total = full - (joints > 0 ? joints : 0) * omin;
+                total = clampd((int64_t)full - (int64_t)(joints > 0 ? joints : 0) * omin);
 
                 if (total >= target || reps == 63) {
-                    pd_sp ovl = joints > 0 ? (full - target) / joints : 0, y;
+                    pd_sp ovl = joints > 0 ? clampd(((int64_t)full - target) / joints) : 0, y;
                     mbox b;
 
                     ovl = ovl < omin ? omin : ovl > ovl_max ? ovl_max : ovl;
-                    total = full - (joints > 0 ? joints : 0) * ovl;
+                    total = clampd((int64_t)full - (int64_t)(joints > 0 ? joints : 0) * ovl);
                     box_init(&b);
                     y = 0;  /* the bottom of the next part, up from the box bottom */
 
@@ -428,9 +441,9 @@ static mbox stretchy(mctx* M, uint32_t g, pd_sp target, pd_sp size) {
                             mbox part = box_glyph(M, pg, size);
 
                             /* the part's ink bottom sits at y above the box's baseline (its bottom) */
-                            box_place(M, &b, &part, 0, -(y + part.d));
+                            box_place(M, &b, &part, 0, clampd(-((int64_t)y + part.d)));
                             box_free(&part);
-                            y += adv - ovl;
+                            y = clampd((int64_t)y + adv - ovl);
                         }
                     }
 
@@ -692,6 +705,13 @@ static void skip_space(mctx* M) {
     }
 }
 
+/* the input is length-delimited (not NUL-terminated): compare within it */
+static int looking_at(const mctx* M, const char* lit) {
+    size_t k = strlen(lit);
+
+    return M->pos + k <= M->n && memcmp(M->s + M->pos, lit, k) == 0;
+}
+
 /* \name or \x; name into buf */
 static int read_command(mctx* M, char* buf, size_t cap) {
     size_t k = 0;
@@ -853,7 +873,7 @@ static mbox parse_text(mctx* M, mstyle st, int alphabet) {
         if (c == ' ') {
             uint32_t sg = pd_font_glyph_index(M->f, ' ');
 
-            b.w += sg ? SC(M, pd_font_glyph_advance(M->f, sg), size) : size / 4;
+            b.w = clampd((int64_t)b.w + (sg ? SC(M, pd_font_glyph_advance(M->f, sg), size) : size / 4));
             continue;
         }
 
@@ -1180,7 +1200,7 @@ static mbox make_matrix(mctx* M, mstyle st, const char* env) {
 
         skip_space(M);
 
-        if (M->pos + 4 <= M->n && memcmp(M->s + M->pos, "\\end", 4) == 0) {
+        if (looking_at(M, "\\end")) {
             char name[16];
 
             mbox tmp;
@@ -1427,8 +1447,7 @@ static mbox parse_list(mctx* M, mstyle st, int* ended) {
 
                 skip_space(M);
 
-                if (M->pos + 1 < M->n && M->s[M->pos] == '\\' && (strncmp(M->s + M->pos, "\\limits", 7) == 0 ||
-                        strncmp(M->s + M->pos, "\\nolimits", 9) == 0)) {
+                if (looking_at(M, "\\limits") || looking_at(M, "\\nolimits")) {
                     break;
                 }
             }
@@ -1901,7 +1920,7 @@ pd_status pd_math_layout(const pd_font* f, pd_sp size, const char* tex, size_t l
     int ended, k;
     pd_status rc = PD_OK;
 
-    if (!f || !count || (!tex && len) || size <= 0 || cap < 0) {
+    if (!f || !count || (!tex && len) || size <= 0 || size > PD_PT(4096) || cap < 0) {
         return PD_ERR_ARG;
     }
 

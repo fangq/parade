@@ -869,7 +869,7 @@ static void test_tables(void) {
     pd_layout_info info;
     pd_section_props sp;
     pd_cell_props cp;
-    int32_t r, pg, n, k, pages, rows_ok = 1, rules = 0;
+    int32_t r, pg, n, k, pages, rows_ok = 1, rules = 0, row50_pages = 0;
     pd_sp x0, x1, x2, y, ya = 0, yb = 0;
 
     add_para(d, sec, frog);
@@ -946,9 +946,11 @@ static void test_tables(void) {
             CHECK(hdr == 4);    /* "Name" repeated */
         }
 
+        row50_pages += body > 0;
         free(it);
     }
 
+    CHECK(row50_pages == 1);    /* a one-line row is never split across pages */
     CHECK(rules > 100);
     /* a fresh layout equals the updated one */
     {

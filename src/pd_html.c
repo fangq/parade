@@ -1385,7 +1385,7 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                 pd_buf src;
                 pd_inline o;
 
-                while (end < s + n && strncmp(end, "</span>", 7) != 0) {
+                while (end < s + n && (s + n - end < 7 || memcmp(end, "</span>", 7) != 0)) {
                     end++;
                 }
 
@@ -1401,7 +1401,7 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                 o.kind = PD_INLINE_EQUATION;
                 o.source = src.p ? src.p : "";
                 o.source_len = (int32_t)src.n;
-                o.width = (pd_sp)src.n * PD_PT(5);
+                o.width = pd_conv_equation_width(src.n);
                 o.height = PD_PT(8);
 
                 if (!h->b->para) {

@@ -153,8 +153,10 @@ PD_API int32_t   pd_font_has_math(const pd_font* font);
  * the font's MATH constants): fractions, scripts, radicals, big operators
  * with limits, \left..\right delimiters grown from size variants and glyph
  * assemblies, accents, matrices, \text, \mathbf/\mathbb/\mathcal/\mathrm.
- * display selects display style. Same size-query convention as
- * pd_para_get_glyphs; m may be NULL. Unknown commands are shown by name.
+ * display selects display style. size is at most 4096pt (else PD_ERR_ARG);
+ * lengths saturate at 1024pt, so a malformed font cannot overflow them.
+ * Same size-query convention as pd_para_get_glyphs; m may be NULL.
+ * Unknown commands are shown by name.
  */
 PD_API pd_status pd_math_layout(const pd_font* font, pd_sp size, const char* tex, size_t len, int32_t display,
                                 pd_math_item* items, int32_t cap, int32_t* count, pd_math_metrics* m);

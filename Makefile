@@ -159,6 +159,52 @@ oracle-raster: $(SO)
 	    /usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf \
 	    /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
 
+# ---- fuzzing ----
+FUZZ_TARGETS := font doc import para math
+FUZZ_RUNS ?= 2000
+FUZZ_SEED ?= 1
+FUZZ_TIME ?= 60
+FUZZ_SAN := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
+FUZZ_SRC := $(SRC) fuzz/fuzz_common.h
+
+# seed corpora: committed text seeds plus the converter and sample outputs;
+# import seeds carry a leading format byte (0 text, 1 HTML, 2 md, 3 RTF, 4 DOCX, 5 JData)
+$(BUILD)/fuzz/seeds/.done: $(BUILD)/pd_dump $(BUILD)/test_convert
+	rm -rf $(BUILD)/fuzz/seeds && mkdir -p $(addprefix $(BUILD)/fuzz/seeds/,$(FUZZ_TARGETS))
+	$(ulimit_cmd) && ./$(BUILD)/pd_dump > /dev/null && PARADE_CONV_OUT=$(BUILD)/conv ./$(BUILD)/test_convert > /dev/null
+	for t in $(FUZZ_TARGETS); do [ ! -d fuzz/seeds/$$t ] || cp fuzz/seeds/$$t/* $(BUILD)/fuzz/seeds/$$t/; done
+	cp $(BUILD)/sample.pdoc $(BUILD)/conv/rich.pdoc $(BUILD)/conv/rich.md $(BUILD)/conv/rich.html $(BUILD)/fuzz/seeds/doc/
+	cp tests/data/*.png /usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf $(BUILD)/fuzz/seeds/font/
+	set -e; s=$(BUILD)/fuzz/seeds/import; \
+	    for x in txt:0 html:1 md:2 rtf:3 docx:4 pdoc:5; do \
+	        e=$${x%:*}; printf "\\$$(printf %03o $${x#*:})" > $$s/rich.$$e; cat $(BUILD)/conv/rich.$$e >> $$s/rich.$$e; \
+	    done; printf '\377' > $$s/detect.html; cat $(BUILD)/conv/rich.html >> $$s/detect.html
+	touch $@
+
+# replay + deterministic mutations under ASan/UBSan with the stand-in driver (any compiler; CI)
+$(BUILD)/fuzz/smoke_%: fuzz/fuzz_%.c fuzz/driver.c $(FUZZ_SRC)
+	mkdir -p $(BUILD)/fuzz
+	$(CC) $(PD_CFLAGS) $(FUZZ_SAN) -Ifuzz $< fuzz/driver.c $(SRC) -o $@ -lm
+
+fuzz-smoke: $(addprefix $(BUILD)/fuzz/smoke_,$(FUZZ_TARGETS)) $(BUILD)/fuzz/seeds/.done
+	set -e; for t in $(FUZZ_TARGETS); do \
+	    ASAN_OPTIONS=hard_rss_limit_mb=2048 UBSAN_OPTIONS=print_stacktrace=1 \
+	    ./$(BUILD)/fuzz/smoke_$$t -runs=$(FUZZ_RUNS) -seed=$(FUZZ_SEED) $(BUILD)/fuzz/seeds/$$t; done
+
+# coverage-guided fuzzing with libFuzzer (clang): make fuzz FUZZ=doc FUZZ_TIME=600
+# clang 14's sanitizer runtime crashes at startup on kernels with 32-bit mmap
+# randomization (Linux 6.5+, about 1 run in 4): run it without ASLR
+FUZZ ?= doc
+NOASLR := $(if $(shell command -v setarch),setarch $(shell uname -m) -R)
+$(BUILD)/fuzz/lf_%: fuzz/fuzz_%.c $(FUZZ_SRC)
+	mkdir -p $(BUILD)/fuzz
+	clang $(PD_CFLAGS) -O1 -g -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -Ifuzz $< $(SRC) -o $@ -lm
+
+fuzz: $(BUILD)/fuzz/lf_$(FUZZ) $(BUILD)/fuzz/seeds/.done
+	mkdir -p $(BUILD)/fuzz/corpus/$(FUZZ) $(BUILD)/fuzz/crash
+	$(NOASLR) ./$(BUILD)/fuzz/lf_$(FUZZ) -max_total_time=$(FUZZ_TIME) -rss_limit_mb=2048 -timeout=10 -max_len=65536 \
+	    -artifact_prefix=$(BUILD)/fuzz/crash/$(FUZZ)- $(BUILD)/fuzz/corpus/$(FUZZ) $(BUILD)/fuzz/seeds/$(FUZZ)
+
 # address and undefined-behaviour sanitizers
 # sanitizer build in its own directory, so the normal build stays loadable
 asan:
@@ -189,6 +235,6 @@ pretty:
 	    --suffix=none \
 	    --formatted \
 	    --break-blocks \
-	    "include/*.h" "src/*.c" "src/*.h" "tests/*.c" "bench/*.c"
+	    "include/*.h" "src/*.c" "src/*.h" "tests/*.c" "bench/*.c" "fuzz/*.c" "fuzz/*.h"
 
-.PHONY: all test bench conv-check conformance unidata oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-demo asan clean pretty
+.PHONY: all test bench fuzz fuzz-smoke conv-check conformance unidata oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-demo asan clean pretty
