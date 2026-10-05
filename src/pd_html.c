@@ -408,10 +408,32 @@ static void hx_cell_content(hx* x, pd_block_id cell) {
     }
 }
 
+/* whether the cell of a row starting at grid column col continues the one above */
+static int hx_merges_at(const hx* x, pd_block_id row, int32_t col) {
+    pd_block_info ri;
+    int32_t c, at = 0;
+
+    pd_doc_block_info(x->d, row, &ri);
+
+    for (c = 0; c < ri.child_count && at <= col; c++) {
+        pd_cell_props cp;
+
+        pd_doc_cell_props(x->d, pd_doc_child(x->d, row, c), &cp);
+
+        if (at == col) {
+            return cp.merge_up;
+        }
+
+        at += cp.col_span;
+    }
+
+    return 0;
+}
+
 static void hx_table(hx* x, pd_block_id t) {
     pd_block_info ti;
     pd_table_props tp;
-    int32_t r, c;
+    int32_t r, c, col;
 
     pd_doc_block_info(x->d, t, &ti);
     pd_doc_table_props(x->d, t, &tp);
@@ -430,16 +452,33 @@ static void hx_table(hx* x, pd_block_id t) {
 
         pd_doc_block_info(x->d, row, &ri);
         pb_puts(x->o, "<tr>");
+        col = 0;
 
         for (c = 0; c < ri.child_count; c++) {
             pd_block_id cell = pd_doc_child(x->d, row, c);
             pd_cell_props cp;
+            int32_t down = 1;
 
             pd_doc_cell_props(x->d, cell, &cp);
+
+            if (cp.merge_up) {  /* covered by the rowspan of the cell above */
+                col += cp.col_span;
+                continue;
+            }
+
+            while (r + down < ti.child_count && hx_merges_at(x, pd_doc_child(x->d, t, r + down), col)) {
+                down++;
+            }
+
+            col += cp.col_span;
             pb_puts(x->o, head ? "<th" : "<td");
 
             if (cp.col_span > 1) {
                 pb_printf(x->o, " colspan=\"%d\"", (int)cp.col_span);
+            }
+
+            if (down > 1) {
+                pb_printf(x->o, " rowspan=\"%d\"", (int)down);
             }
 
             if (cp.background || cp.valign) {
@@ -642,7 +681,35 @@ typedef struct {
     int32_t nnotes;
     int skip_anchor;            /* inside a footnote back-link or reference: drop its text */
     const char* src;
+    /* rowspan: per table being built, the rows each grid column is still covered for */
+    int rs_left[8][PD_TABLE_MAX_COLS], rs_span[8][PD_TABLE_MAX_COLS], rs_col[8];
 } hi;
+
+/* The cells a rowspan above covers, as cells continuing it: those at the
+   current column, or (at the end of a row) every one still owed. */
+static void hi_merged_cells(hi* h, int to_end) {
+    int t = h->b->ntables - 1;
+
+    if (t < 0 || t >= 8) {
+        return;
+    }
+
+    while (h->rs_col[t] < PD_TABLE_MAX_COLS) {
+        int c = h->rs_col[t];
+
+        if (h->rs_left[t][c] > 0) {
+            bld_cell_begin(h->b, h->rs_span[t][c], 0);
+            bld_cell_merge_up(h->b);
+            bld_cell_end(h->b);
+            h->rs_left[t][c]--;
+            h->rs_col[t] += h->rs_span[t][c] > 0 ? h->rs_span[t][c] : 1;
+        } else if (to_end) {
+            h->rs_col[t]++;
+        } else {
+            break;
+        }
+    }
+}
 
 static int css_color(const char* v, uint32_t* out) {
     static const struct {
@@ -1146,6 +1213,7 @@ static void close_from(hi* h, int32_t i) {
 
             case E_TABLE:
                 hi_end_para(h);
+                hi_merged_cells(h, 1);
                 bld_table_end(h->b);
                 break;
 
@@ -1515,6 +1583,14 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                 case E_TABLE:
                     hi_end_para(h);
                     bld_table_begin(h->b);
+
+                    if (h->b->ntables >= 1 && h->b->ntables <= 8) {
+                        int t = h->b->ntables - 1;
+
+                        memset(h->rs_left[t], 0, sizeof(h->rs_left[t]));
+                        h->rs_col[t] = 0;
+                    }
+
                     break;
 
                 case E_TR: {
@@ -1528,6 +1604,14 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                         hi_close(h, "tr");
                     }
 
+                    if (h->b->ntables >= 1 && h->b->ntables <= 8 && h->b->nrows[h->b->ntables - 1] > 0) {
+                        hi_merged_cells(h, 1);  /* the row before ends with what its rowspans owe */
+                    }
+
+                    if (h->b->ntables >= 1 && h->b->ntables <= 8) {
+                        h->rs_col[h->b->ntables - 1] = 0;
+                    }
+
                     bld_row_begin(h->b, innermost(h, E_THEAD) >= 0);
                     break;
                 }
@@ -1535,7 +1619,7 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                 case E_CELL: {
                     int32_t c = innermost(h, E_CELL);
                     uint32_t bg = 0;
-                    int span = 1;
+                    int span = 1, rows = 1;
 
                     if (c >= 0) {
                         hi_close(h, h->stack[c].name);
@@ -1547,6 +1631,10 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
 
                     if (mu_attr(&m, "colspan", v, sizeof(v))) {
                         span = atoi(v);
+                    }
+
+                    if (mu_attr(&m, "rowspan", v, sizeof(v))) {
+                        rows = atoi(v);
                     }
 
                     if (mu_attr(&m, "style", v, sizeof(v))) {
@@ -1567,7 +1655,27 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                     }
 
                     hi_end_para(h);
+
+                    if (innermost(h, E_TR) < 0 && h->b->ntables >= 1 && h->b->ntables <= 8 &&
+                            h->b->nrows[h->b->ntables - 1] == 0) {
+                        h->rs_col[h->b->ntables - 1] = 0;   /* a row begun by its first cell */
+                    }
+
+                    hi_merged_cells(h, 0);
                     bld_cell_begin(h->b, span, bg);
+
+                    if (h->b->ntables >= 1 && h->b->ntables <= 8) {
+                        int t = h->b->ntables - 1, c0 = h->rs_col[t];
+
+                        span = span < 1 ? 1 : span > PD_TABLE_MAX_COLS ? PD_TABLE_MAX_COLS : span;
+
+                        if (rows > 1 && c0 < PD_TABLE_MAX_COLS) {
+                            h->rs_left[t][c0] = rows - 1 > 1000 ? 1000 : rows - 1;
+                            h->rs_span[t][c0] = span;
+                        }
+
+                        h->rs_col[t] = c0 + span;
+                    }
 
                     if (!strcmp(m.name, "th") && innermost(h, E_THEAD) < 0) {
                         int32_t t = h->b->ntables - 1;

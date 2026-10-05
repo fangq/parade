@@ -234,6 +234,7 @@ begin
   WriteLn('pd_cell_props.col_span ', PtrUInt(@v_pd_cell_props.col_span) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.valign ', PtrUInt(@v_pd_cell_props.valign) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.background ', PtrUInt(@v_pd_cell_props.background) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.merge_up ', PtrUInt(@v_pd_cell_props.merge_up) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_change ', SizeOf(pd_change));
   WriteLn('pd_change.kind ', PtrUInt(@v_pd_change.kind) - PtrUInt(@v_pd_change));
   WriteLn('pd_change.block ', PtrUInt(@v_pd_change.block) - PtrUInt(@v_pd_change));

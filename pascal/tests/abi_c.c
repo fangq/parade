@@ -208,6 +208,7 @@ int main(void) {
     printf("pd_cell_props.col_span %zu\n", offsetof(pd_cell_props, col_span));
     printf("pd_cell_props.valign %zu\n", offsetof(pd_cell_props, valign));
     printf("pd_cell_props.background %zu\n", offsetof(pd_cell_props, background));
+    printf("pd_cell_props.merge_up %zu\n", offsetof(pd_cell_props, merge_up));
     printf("pd_change %zu\n", sizeof(pd_change));
     printf("pd_change.kind %zu\n", offsetof(pd_change, kind));
     printf("pd_change.block %zu\n", offsetof(pd_change, block));

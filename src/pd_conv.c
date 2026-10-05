@@ -718,6 +718,18 @@ void bld_cell_end(pd_bld* b) {
     bld_pop(b);
 }
 
+void bld_cell_merge_up(pd_bld* b) {
+    pd_block_id cell = bld_container(b);
+    pd_cell_props cp;
+    pd_block_info bi;
+
+    if (pd_doc_block_info(b->d, cell, &bi) == PD_OK && bi.kind == PD_BLOCK_CELL &&
+            pd_doc_cell_props(b->d, cell, &cp) == PD_OK) {
+        cp.merge_up = 1;
+        pd_doc_set_cell_props(b->d, cell, &cp);
+    }
+}
+
 void bld_table_end(pd_bld* b) {
     int32_t k;
 

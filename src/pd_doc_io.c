@@ -440,12 +440,16 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
         case PD_BLOCK_CELL: {
             const pd_cell_props* p = &s->cell;
 
-            if (p->col_span != 1 || p->valign || p->background) {
+            if (p->col_span != 1 || p->valign || p->background || p->merge_up) {
                 pj_key(w, "Cell");
                 pj_obj_begin(w);
                 put_int(w, "ColumnSpan", p->col_span);
                 put_int(w, "VerticalAlign", p->valign);
                 put_int(w, "Background", (int64_t)p->background);
+
+                if (p->merge_up) {
+                    put_int(w, "MergeUp", p->merge_up);
+                }
                 pj_obj_end(w);
             }
 
@@ -1032,6 +1036,7 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     p->col_span = (int32_t)int_or(pj_get(x, "ColumnSpan"), 1, 1, PD_TABLE_MAX_COLS, L);
     p->valign = (int32_t)int_or(pj_get(x, "VerticalAlign"), 0, 0, 2, L);
     p->background = (uint32_t)int_or(pj_get(x, "Background"), 0, 0, 0xFFFFFFFFLL, L);
+    p->merge_up = (int32_t)int_or(pj_get(x, "MergeUp"), 0, 0, 1, L);
 }
 
 static void load_float(loader* L, const pj_node* o, pd_float_props* p) {

@@ -2759,7 +2759,8 @@ pd_status pd_doc_set_cell_props(pd_doc* d, pd_block_id id, const pd_cell_props* 
     blk* b = d ? pd_doc_blk(d, id) : NULL;
 
     BLOCK_OP("Cell", b && b->kind == PD_BLOCK_CELL && cp && cp->col_span >= 1 &&
-             cp->col_span <= PD_TABLE_MAX_COLS && cp->valign >= 0 && cp->valign <= 2, b->st.cell = *cp);
+             cp->col_span <= PD_TABLE_MAX_COLS && cp->valign >= 0 && cp->valign <= 2 && cp->merge_up >= 0 &&
+             cp->merge_up <= 1, b->st.cell = *cp);
 }
 
 pd_status pd_doc_set_break(pd_doc* d, pd_block_id id, pd_break_kind kind) {

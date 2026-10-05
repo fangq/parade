@@ -1269,6 +1269,78 @@ static void test_underline_spaces(void) {
     pd_doc_free(d);
 }
 
+/* A cell merged down two rows below it: its text does not make its own row
+   tall, the last row it covers grows to hold it, no rule crosses it, and
+   the text after the table starts below it. */
+static void test_merged_cells(void) {
+    pd_block_id sec, t, after;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_cell_props cp;
+    pd_draw* it;
+    int32_t r, n, k, pg, hrules = 0;
+    pd_sp y0, y1, y2, ylong, yafter, x0, x1, xe;
+    const char* tx;
+    uint32_t len;
+
+    t = add_table(d, sec, 3, 2, 0, cell_text);
+    pd_doc_delete(d, (pd_range) {
+        at(cell_para(d, t, 0, 0), 0), at(cell_para(d, t, 0, 0), 4)
+    }, NULL);
+    pd_doc_insert_text(d, at(cell_para(d, t, 0, 0), 0), frog, strlen(frog), PD_FORMAT_INHERIT, NULL);
+
+    for (r = 1; r < 3; r++) {
+        pd_block_id cell = pd_doc_child(d, pd_doc_child(d, t, r), 0);
+
+        pd_doc_cell_props(d, cell, &cp);
+        cp.merge_up = 1;
+        CHECK(pd_doc_set_cell_props(d, cell, &cp) == PD_OK);
+    }
+
+    {
+        pd_table_props tp;
+
+        pd_doc_table_props(d, t, &tp);     /* narrow, so the merged text needs more than its rows */
+        tp.ncols = 2;
+        tp.col_width[0] = PD_PT(120);
+        tp.col_width[1] = PD_PT(120);
+        pd_doc_set_table_props(d, t, &tp);
+    }
+
+    after = add_para(d, sec, "After the table.");
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+
+    page_of(L, cell_para(d, t, 0, 1), 0, &y0);
+    page_of(L, cell_para(d, t, 1, 1), 0, &y1);
+    page_of(L, cell_para(d, t, 2, 1), 0, &y2);
+    pd_doc_para_text(d, cell_para(d, t, 0, 0), &tx, &len);
+    page_of(L, cell_para(d, t, 0, 0), len, &ylong);
+    page_of(L, after, 0, &yafter);
+    CHECK(y1 - y0 < PD_PT(30) && y2 - y1 < PD_PT(30));     /* the rows stay one line high */
+    printf("  rows at %.1f %.1f %.1f, merged text ends %.1f, after %.1f pt\n", y0 / 65536.0, y1 / 65536.0, y2 / 65536.0, ylong / 65536.0, yafter / 65536.0);
+    CHECK(ylong > y2 + PD_PT(20));                         /* its text runs past the last row's first line */
+    CHECK(yafter > ylong);                                 /* and the table ends below it */
+
+    pd_layout_caret(L, at(cell_para(d, t, 0, 0), 0), &pg, &x0, &y0, NULL, NULL);
+    pd_layout_caret(L, at(cell_para(d, t, 0, 1), 0), &pg, &x1, &y0, NULL, NULL);
+    it = items(L, 0, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_RULE && it[k].w > it[k].h && it[k].x < x1 - PD_PT(6) &&
+                it[k].x + it[k].w > x0 + PD_PT(1)) {
+            hrules++;   /* across the merged cell's column: only its top and bottom */
+        }
+    }
+
+    CHECK(hrules == 2);
+    free(it);
+    (void)xe;
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1305,6 +1377,8 @@ int main(void) {
     test_optimal_pages();
     printf("underlines through spaces\n");
     test_underline_spaces();
+    printf("cells merged across rows\n");
+    test_merged_cells();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

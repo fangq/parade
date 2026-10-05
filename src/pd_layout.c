@@ -141,6 +141,8 @@ typedef struct {                /* a table: column grid and header rows */
     pd_sp x, width;             /* offset in the column, total width */
     pd_sp colx[PD_TABLE_MAX_COLS + 1];
     int32_t* hdr_item;          /* vitem index of each header row */
+    pd_sp* rowh;                /* every row's height, for cells merged across rows */
+    int32_t nrows;
     pd_sp header_h;
     pd_table_props tp;
 } ptable;
@@ -908,6 +910,40 @@ static int32_t cell_span(const ptable* T, const blk* cell, int32_t col) {
     return col + span > T->ncols ? T->ncols - col : span;
 }
 
+/* the cell of a row that starts at a grid column, NULL if none does */
+static const blk* cell_at(const pd_doc* d, const ptable* T, const blk* row, int32_t col) {
+    int32_t k, c = 0;
+
+    for (k = 0; row && k < row->nkids && c < T->ncols; k++) {
+        const blk* cell = d->tab[row->kids[k]];
+
+        if (c == col) {
+            return cell;
+        }
+
+        c += cell_span(T, cell, c);
+    }
+
+    return NULL;
+}
+
+/* how many rows a cell covers: itself and the cells below that continue it */
+static int32_t merge_rows(const pd_doc* d, const ptable* T, const blk* t, int32_t r, int32_t col) {
+    int32_t n = 1;
+
+    while (r + n < t->nkids) {
+        const blk* below = cell_at(d, T, d->tab[t->kids[r + n]], col);
+
+        if (!below || !below->st.cell.merge_up) {
+            break;
+        }
+
+        n++;
+    }
+
+    return n;
+}
+
 /* a table: column widths from the content (CSS automatic layout), then one box per row */
 static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* prev_keep, int* first) {
     const pd_doc* d = F->L->doc;
@@ -955,7 +991,7 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
                 int32_t span = cell_span(&T, cell, c), j;
                 pd_sp a, b;
 
-                if ((span == 1) != (pass == 0)) {
+                if ((span == 1) != (pass == 0) || cell->st.cell.merge_up) {
                     c += span;
                     continue;
                 }
@@ -1055,27 +1091,63 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
 
     push(F, VI_GLUE, *first ? 0 : *prev_after, 0, NULL, 0, 0);
 
+    if ((F->tb[ti].rowh = (pd_sp*)calloc((size_t)t->nkids + 1, sizeof(pd_sp))) == NULL) {
+        return PD_ERR_NOMEM;
+    }
+
+    F->tb[ti].nrows = t->nkids;
+
+    /* row heights: a cell merged down the rows below is left out of its own
+       row's and what it needs beyond the rows it covers goes to the last */
+    for (pass = 0; pass < 2; pass++) {
+        for (r = 0; r < t->nkids; r++) {
+            const blk* row = d->tab[t->kids[r]];
+
+            for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
+                const blk* cell = d->tab[row->kids[k]];
+                int32_t span = cell_span(&T, cell, c), down = merge_rows(d, &T, t, r, c), j;
+                pd_sp inner = T.colx[c + span] - T.colx[c] - 2 * pad, h, have = 0;
+
+                c += span;
+
+                if (cell->st.cell.merge_up || (down > 1) != (pass == 1)) {
+                    continue;
+                }
+
+                h = stack_height(F->L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, &st);
+
+                if (h < 0) {
+                    return st;
+                }
+
+                h += 2 * pad;
+
+                for (j = r; j < r + down; j++) {
+                    have += F->tb[ti].rowh[j];
+                }
+
+                if (down == 1) {
+                    F->tb[ti].rowh[r] = h > have ? h : have;
+                } else if (h > have) {
+                    F->tb[ti].rowh[r + down - 1] += h - have;
+                }
+            }
+        }
+    }
+
     for (r = 0; r < t->nkids; r++) {
         const blk* row = d->tab[t->kids[r]];
-        pd_sp rowh = 0;
+        pd_sp rowh = F->tb[ti].rowh[r];
+        int merged = 0;
 
-        for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
-            const blk* cell = d->tab[row->kids[k]];
-            int32_t span = cell_span(&T, cell, c);
-            pd_sp inner = T.colx[c + span] - T.colx[c] - 2 * pad, h;
+        for (c = 0; c < T.ncols; c++) {     /* a row continuing a merged cell stays with the row above */
+            const blk* cell = cell_at(d, &T, row, c);
 
-            h = stack_height(F->L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, &st);
-
-            if (h < 0) {
-                return st;
-            }
-
-            rowh = h + 2 * pad > rowh ? h + 2 * pad : rowh;
-            c += span;
+            merged |= cell && cell->st.cell.merge_up;
         }
 
         if (r > 0) {    /* header rows stay together and with the first body row */
-            push(F, VI_PEN, 0, r <= F->tb[ti].header_rows ? INF_PEN : 0, NULL, 0, 0);
+            push(F, VI_PEN, 0, merged || r <= F->tb[ti].header_rows ? INF_PEN : 0, NULL, 0, 0);
         }
 
         if (push(F, VI_ROW, rowh, 0, NULL, r, row->id)) {
@@ -1257,6 +1329,7 @@ static pd_status rebuild_flow(filler* F) {
 
     for (i = 0; i < F->ntb; i++) {
         free(F->tb[i].hdr_item);
+        free(F->tb[i].rowh);
     }
 
     F->n = F->nfl = F->nnotes = F->ntb = 0;
@@ -1379,6 +1452,8 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
     const pd_doc* d = F->L->doc;
     const ptable* T = &F->tb[v->tbl];
     const blk* row = pd_doc_blk(d, v->block);
+    const blk* t = pd_doc_blk(d, T->block);
+    const blk* next = t && v->line + 1 < t->nkids ? d->tab[t->kids[v->line + 1]] : NULL;
     pd_sp pad = T->tp.cell_padding, bw = T->tp.border, tx = x + T->x;
     uint32_t bc = T->tp.border_color;
     int32_t k, c = 0;
@@ -1390,27 +1465,44 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
     for (k = 0; k < row->nkids && c < T->ncols; k++) {
         const blk* cell = d->tab[row->kids[k]];
-        int32_t span = cell_span(T, cell, c);
+        const blk* below = next ? cell_at(d, T, next, c) : NULL;
+        int32_t span = cell_span(T, cell, c), down = t ? merge_rows(d, T, t, v->line, c) : 1, j;
         pd_sp cx = tx + T->colx[c], cw = T->colx[c + span] - T->colx[c], inner = cw - 2 * pad, h, off = 0;
+        pd_sp ch = 0;
 
+        for (j = v->line; j < v->line + down && T->rowh && j < T->nrows; j++) {
+            ch += T->rowh[j];   /* the merged cell's height: every row it covers */
+        }
+
+        ch = down > 1 && ch > 0 ? ch : v->h;
         inner = inner < PD_PT(1) ? PD_PT(1) : inner;
 
-        if (cell->st.cell.background) {
-            add_rule(F->L, F->page, cx, y, cw, v->h, cell->st.cell.background, 0, cell->id);
+        if (!cell->st.cell.merge_up) {
+            if (cell->st.cell.background) {
+                add_rule(F->L, F->page, cx, y, cw, ch, cell->st.cell.background, 0, cell->id);
+            }
+
+            h = stack_height(F->L, cell->id, inner, &st);
+
+            if (h >= 0 && cell->st.cell.valign == 1) {
+                off = (ch - 2 * pad - h) / 2;
+            } else if (h >= 0 && cell->st.cell.valign == 2) {
+                off = ch - 2 * pad - h;
+            }
+
+            place_stack(F->L, cell->id, inner, F->page, cx + pad, y + pad + (off > 0 ? off : 0), 0);
         }
-
-        h = stack_height(F->L, cell->id, inner, &st);
-
-        if (h >= 0 && cell->st.cell.valign == 1) {
-            off = (v->h - 2 * pad - h) / 2;
-        } else if (h >= 0 && cell->st.cell.valign == 2) {
-            off = v->h - 2 * pad - h;
-        }
-
-        place_stack(F->L, cell->id, inner, F->page, cx + pad, y + pad + (off > 0 ? off : 0), 0);
 
         if (bw > 0) {
             add_rule(F->L, F->page, cx - bw / 2, y, bw, v->h, bc, 0, cell->id);
+
+            if (!cell->st.cell.merge_up) {      /* no rule inside a merged cell */
+                add_rule(F->L, F->page, cx - bw / 2, y - bw / 2, cw + bw, bw, bc, 0, cell->id);
+            }
+
+            if (!below || !below->st.cell.merge_up) {
+                add_rule(F->L, F->page, cx - bw / 2, y + v->h - bw / 2, cw + bw, bw, bc, 0, cell->id);
+            }
         }
 
         c += span;
@@ -1418,8 +1510,6 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
     if (bw > 0) {
         add_rule(F->L, F->page, tx + T->colx[c] - bw / 2, y, bw, v->h, bc, 0, v->block);
-        add_rule(F->L, F->page, tx - bw / 2, y - bw / 2, T->colx[c] + bw, bw, bc, 0, v->block);
-        add_rule(F->L, F->page, tx - bw / 2, y + v->h - bw / 2, T->colx[c] + bw, bw, bc, 0, v->block);
     }
 }
 
@@ -2487,6 +2577,7 @@ static pd_status paginate(pd_layout* L) {
 
         for (i = 0; i < F.ntb; i++) {
             free(F.tb[i].hdr_item);
+            free(F.tb[i].rowh);
         }
 
         free(F.it);

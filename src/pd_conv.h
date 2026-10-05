@@ -132,6 +132,8 @@ void bld_table_begin(pd_bld* b);
 void bld_row_begin(pd_bld* b, int header);
 void bld_cell_begin(pd_bld* b, int32_t col_span, uint32_t background);
 void bld_cell_end(pd_bld* b);
+/* the cell just begun continues the one above it (vertical merge) */
+void bld_cell_merge_up(pd_bld* b);
 void bld_table_end(pd_bld* b);
 pd_block_id bld_footnote_begin(pd_bld* b);
 void bld_footnote_end(pd_bld* b);

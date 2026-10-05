@@ -1199,6 +1199,110 @@ static void test_docx_headers(void) {
     pd_doc_free(d);
 }
 
+static pd_block_id first_table(const pd_doc* d) {
+    pd_block_id sec = pd_doc_child(d, pd_doc_root(d), 0);
+    pd_block_info si, bi;
+    int32_t i;
+
+    pd_doc_block_info(d, sec, &si);
+
+    for (i = 0; i < si.child_count; i++) {
+        pd_block_id k = pd_doc_child(d, sec, i);
+
+        if (pd_doc_block_info(d, k, &bi) == PD_OK && bi.kind == PD_BLOCK_TABLE) {
+            return k;
+        }
+    }
+
+    return 0;
+}
+
+static pd_cell_props cell_props_at(const pd_doc* d, pd_block_id t, int32_t r, int32_t c) {
+    pd_cell_props cp;
+
+    memset(&cp, 0, sizeof(cp));
+    pd_doc_cell_props(d, pd_doc_child(d, pd_doc_child(d, t, r), c), &cp);
+    return cp;
+}
+
+static int has_text(const pd_doc* d, pd_block_id t, int32_t r, int32_t c, const char* s) {
+    const char* tx;
+    uint32_t n;
+
+    pd_doc_para_text(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, r), c), 0), &tx, &n);
+    return n == strlen(s) && memcmp(tx, s, n) == 0;
+}
+
+/* Word's table grid, width, alignment and borders; cells merged down the
+   rows (vMerge) and their vertical alignment -- and the merge through the
+   HTML and DOCX writers and back. */
+static void test_docx_tables(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body><w:tbl>"
+        "<w:tblPr><w:tblW w:w=\"5000\" w:type=\"dxa\"/><w:jc w:val=\"center\"/><w:tblBorders>"
+        "<w:top w:val=\"none\" w:sz=\"0\"/><w:left w:val=\"nil\"/><w:bottom w:val=\"none\"/><w:right w:val=\"none\"/>"
+        "<w:insideH w:val=\"none\"/><w:insideV w:val=\"none\"/></w:tblBorders></w:tblPr>"
+        "<w:tblGrid><w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"3000\"/></w:tblGrid>"
+        "<w:tr><w:tc><w:tcPr><w:vMerge w:val=\"restart\"/><w:vAlign w:val=\"center\"/></w:tcPr>"
+        "<w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc></w:tr>"
+        "<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc></w:tr>"
+        "<w:tr><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>D</w:t></w:r></w:p></w:tc></w:tr>"
+        "</w:tbl><w:p/></w:body></w:document>",
+        NULL);
+    pd_doc* back = NULL;
+    pd_block_id t;
+    pd_table_props tp;
+    pd_cell_props cp;
+    buf_t b;
+    int pass;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    t = first_table(d);
+    CHECK(pd_doc_table_props(d, t, &tp) == PD_OK);
+    CHECK(tp.width == 5000 * 65536 / 20 && tp.align == PD_ALIGN_CENTER && tp.border == 0);
+    CHECK(tp.ncols == 2 && tp.col_width[0] == 2000 * 65536 / 20 && tp.col_width[1] == 3000 * 65536 / 20);
+    cp = cell_props_at(d, t, 0, 0);
+    CHECK(cp.merge_up == 0 && cp.valign == 1);
+    CHECK(cell_props_at(d, t, 1, 0).merge_up == 1 && cell_props_at(d, t, 1, 1).merge_up == 0);
+    CHECK(cell_props_at(d, t, 2, 0).merge_up == 0);
+
+    /* out and back in: HTML as a rowspan, DOCX as vMerge */
+    for (pass = 0; pass < 2; pass++) {
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_DOCX : PD_CONV_HTML, to_buf, &b) == PD_OK);
+
+        if (!pass) {
+            CHECK(b.p && strstr(b.p, "rowspan=\"2\"") != NULL);
+        }
+
+        back = NULL;
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_DOCX : PD_CONV_HTML, &back) == PD_OK);
+        free(b.p);
+
+        if (back) {
+            pd_block_id bt = first_table(back);
+
+            CHECK(cell_props_at(back, bt, 1, 0).merge_up == 1 && has_text(back, bt, 1, 1, "B2"));
+            CHECK(has_text(back, bt, 0, 0, "A") && has_text(back, bt, 2, 0, "C") && has_text(back, bt, 2, 1, "D"));
+            CHECK(cell_props_at(back, bt, 2, 0).merge_up == 0);
+
+            if (pass) {
+                CHECK(pd_doc_table_props(back, bt, &tp) == PD_OK && tp.col_width[1] == 3000 * 65536 / 20);
+            }
+
+            pd_doc_free(back);
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1218,6 +1322,8 @@ int main(void) {
     test_docx_lists();
     printf("docx headers and footers\n");
     test_docx_headers();
+    printf("docx tables\n");
+    test_docx_tables();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

@@ -391,6 +391,7 @@ type
   pd_cell_props = record
     col_span, valign: Int32;
     background: UInt32;
+    merge_up: Int32;         { continues the cell above (vertical merge) }
   end;
   Ppd_cell_props = ^pd_cell_props;
 

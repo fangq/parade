@@ -456,6 +456,10 @@ typedef struct {
     int32_t col_span;           /**< columns this cell covers, >= 1 */
     int32_t valign;             /**< 0 top, 1 middle, 2 bottom */
     uint32_t background;        /**< 0xAARRGGBB, 0 = none */
+    int32_t merge_up;           /**< 1 = continues the cell above it (a vertical merge, Word's vMerge, HTML's
+                                     rowspan): the first cell of the run holds the content and is drawn
+                                     across every row of it, with no rules in between; the run's rows are
+                                     kept on one page. The continuing cells' own content is not shown. */
 } pd_cell_props;
 
 PD_API pd_status pd_doc_float_props(const pd_doc* doc, pd_block_id flt, pd_float_props* out);
