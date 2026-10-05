@@ -90,7 +90,7 @@ type
     procedure ToggleCharProp(Mask: UInt32);
     function PropsAt(const P: pd_pos): pd_char_props;
     function FormatAt(const P: pd_pos): pd_format_id;
-    procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; Scale: Double; DrawCaret: Boolean);
+    procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
   protected
     procedure Paint; override;
     procedure Resize; override;
@@ -1570,7 +1570,7 @@ begin
   Result := (UInt32(V and $FF) shl 16) or (UInt32((V shr 8) and $FF) shl 8) or UInt32((V shr 16) and $FF);
 end;
 
-procedure TParadeEdit.PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; Scale: Double; DrawCaret: Boolean);
+procedure TParadeEdit.PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
 var
   Info: pd_page_info;
   Items: array of pd_draw;
@@ -1582,9 +1582,11 @@ var
   CPage: Int32;
   CX, CBase, CAsc, CDesc: pd_sp;
 begin
+  { PxScale, not Scale: pd_draw has a field named scale, and the WITH below
+    would read that one -- 65536, font expansion -- in place of this }
   pd_layout_page_info(FLayout, Page, Info);
-  PW := Round(Info.width * Scale);
-  PH := Round(Info.height * Scale);
+  PW := Round(Info.width * PxScale);
+  PH := Round(Info.height * PxScale);
   FillRectImg(Img, OX - 1, OY - 1, OX + PW + 1, OY + PH + 1, $00909090, 255);   { frame }
   FillRectImg(Img, OX, OY, OX + PW, OY + PH, $00FFFFFF, 255);
   if pd_layout_page_items(FLayout, Page, nil, 0, N) <> PD_OK then
@@ -1603,8 +1605,8 @@ begin
       begin
         Q := PdPos(Items[I].block, Items[I].offset);
         if (Compare(Q, A) >= 0) and (Compare(Q, B) < 0) then
-          FillRectImg(Img, OX + Floor0(Items[I].x * Scale), OY + Round((Items[I].y - Items[I].size * 4 div 5) * Scale),
-            OX + Round((Items[I].x + Items[I].w) * Scale) + 1, OY + Round((Items[I].y + Items[I].size div 4) * Scale),
+          FillRectImg(Img, OX + Floor0(Items[I].x * PxScale), OY + Round((Items[I].y - Items[I].size * 4 div 5) * PxScale),
+            OX + Round((Items[I].x + Items[I].w) * PxScale) + 1, OY + Round((Items[I].y + Items[I].size div 4) * PxScale),
             $003390FF, 80);
       end;
   end;
@@ -1613,22 +1615,22 @@ begin
     with Items[I] do
       case kind of
         PD_DRAW_RULE:
-          FillRectImg(Img, OX + Round(x * Scale), OY + Round(y * Scale), OX + Round((x + w) * Scale) + 1,
-            OY + Round((y + h) * Scale) + 1, color and $FFFFFF, 255);
+          FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale) + 1,
+            OY + Round((y + h) * PxScale) + 1, color and $FFFFFF, 255);
         PD_DRAW_IMAGE:
           begin
-            FillRectImg(Img, OX + Round(x * Scale), OY + Round(y * Scale), OX + Round((x + w) * Scale),
-              OY + Round((y + h) * Scale), $004A90D9, 255);
-            FillRectImg(Img, OX + Round(x * Scale) + 1, OY + Round(y * Scale) + 1, OX + Round((x + w) * Scale) - 1,
-              OY + Round((y + h) * Scale) - 1, $00DFE9F5, 255);
+            FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale),
+              OY + Round((y + h) * PxScale), $004A90D9, 255);
+            FillRectImg(Img, OX + Round(x * PxScale) + 1, OY + Round(y * PxScale) + 1, OX + Round((x + w) * PxScale) - 1,
+              OY + Round((y + h) * PxScale) - 1, $00DFE9F5, 255);
           end;
         PD_DRAW_BOX:
-          FillRectImg(Img, OX + Round(x * Scale), OY + Round(y * Scale), OX + Round((x + w) * Scale),
-            OY + Round((y + h) * Scale), $00FBE3C0, 255);
+          FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale),
+            OY + Round((y + h) * PxScale), $00FBE3C0, 255);
         PD_DRAW_GLYPH:
           if font <> nil then
           begin
-            PX := OX + x * Scale;
+            PX := OX + x * PxScale;
             IX := Floor0(PX);
             Sub := Round((PX - IX) * 4) * 64;   { quarter-pixel positions keep the cache small }
             if Sub >= 256 then
@@ -1636,16 +1638,16 @@ begin
               Inc(IX);
               Sub := 0;
             end;
-            IY := OY + Round(y * Scale);
-            G := GetGlyphBmp(font, glyph, Round(size * Scale * PD_SP_PER_PT), Sub);
+            IY := OY + Round(y * PxScale);
+            G := GetGlyphBmp(font, glyph, Round(size * PxScale * PD_SP_PER_PT), Sub);
             if G^.W > 0 then
               BlendGlyph(Img, G, IX, IY, color and $FFFFFF);
           end;
       end;
 
   if DrawCaret and (pd_layout_caret(FLayout, CaretPos, CPage, CX, CBase, CAsc, CDesc) = PD_OK) and (CPage = Page) then
-    FillRectImg(Img, OX + Round(CX * Scale), OY + Round((CBase - CAsc) * Scale), OX + Round(CX * Scale) + 2,
-      OY + Round((CBase + CDesc) * Scale), $00000000, 255);
+    FillRectImg(Img, OX + Round(CX * PxScale), OY + Round((CBase - CAsc) * PxScale), OX + Round(CX * PxScale) + 2,
+      OY + Round((CBase + CDesc) * PxScale), $00000000, 255);
 end;
 
 procedure TParadeEdit.Paint;

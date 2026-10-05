@@ -6,7 +6,7 @@ program edit_test;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, parade, paradeedit;
+  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, IntfGraphics, FPImage, parade, paradeedit;
 
 var
   Failures: Integer = 0;
@@ -28,6 +28,24 @@ begin
   end;
 end;
 
+{ a page with text on it has dark pixels; a blank page passes every other check }
+function DarkPixels(Bmp: TBitmap): Integer;
+var
+  Img: TLazIntfImage;
+  X, Y: Integer;
+begin
+  Result := 0;
+  Img := Bmp.CreateIntfImage;
+  try
+    for Y := 0 to Img.Height - 1 do
+      for X := 0 to Img.Width - 1 do
+        if Img.Colors[X, Y].green < $8000 then
+          Inc(Result);
+  finally
+    Img.Free;
+  end;
+end;
+
 procedure SavePage(E: TParadeEdit; Page: Integer; const FileName: string; Scale: Double);
 var
   Bmp: TBitmap;
@@ -37,6 +55,7 @@ begin
   Png := TPortableNetworkGraphic.Create;
   try
     E.RenderPage(Page, Bmp, Scale);
+    Check(DarkPixels(Bmp) > 1000, 'ink on ' + ExtractFileName(FileName));
     Png.Assign(Bmp);
     Png.SaveToFile(FileName);
   finally
