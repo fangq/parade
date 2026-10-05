@@ -71,6 +71,7 @@ begin
   WriteLn('pd_params.line_spacing ', PtrUInt(@v_pd_params.line_spacing) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.hysteresis ', PtrUInt(@v_pd_params.hysteresis) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.freeze_offset ', PtrUInt(@v_pd_params.freeze_offset) - PtrUInt(@v_pd_params));
+  WriteLn('pd_params.direction ', PtrUInt(@v_pd_params.direction) - PtrUInt(@v_pd_params));
   WriteLn('pd_break_info ', SizeOf(pd_break_info));
   WriteLn('pd_break_info.lines ', PtrUInt(@v_pd_break_info.lines) - PtrUInt(@v_pd_break_info));
   WriteLn('pd_break_info.demerits ', PtrUInt(@v_pd_break_info.demerits) - PtrUInt(@v_pd_break_info));
@@ -157,6 +158,7 @@ begin
   WriteLn('pd_para_props.border_color ', PtrUInt(@v_pd_para_props.border_color) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.border_width ', PtrUInt(@v_pd_para_props.border_width) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.shading ', PtrUInt(@v_pd_para_props.shading) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.direction ', PtrUInt(@v_pd_para_props.direction) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_list_level ', SizeOf(pd_list_level));
   WriteLn('pd_list_level.format ', PtrUInt(@v_pd_list_level.format) - PtrUInt(@v_pd_list_level));
   WriteLn('pd_list_level.start ', PtrUInt(@v_pd_list_level.start) - PtrUInt(@v_pd_list_level));

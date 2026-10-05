@@ -45,6 +45,7 @@ static const char* const break_names[] = { "page", "column", "oddpage", "evenpag
 static const char* const shift_names[] = { "none", "super", "sub" };
 static const char* const mode_names[] = { "optimal", "greedy" };
 static const char* const style_kind_names[] = { "paragraph", "character" };
+static const char* const dir_names[] = { "auto", "ltr", "rtl" };
 
 #define NAMES(t) (t), (int32_t)(sizeof(t) / sizeof((t)[0]))
 
@@ -160,6 +161,10 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
 
     if (m & PD_PP_SHADING) {
         put_int(w, "Shading", p->shading);
+    }
+
+    if (m & PD_PP_DIRECTION) {
+        put_str(w, "Direction", name_of(NAMES(dir_names), p->direction));
     }
 
     pj_obj_end(w);
@@ -700,6 +705,12 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
     if ((x = pj_get(o, "Shading"))) {
         p->mask |= PD_PP_SHADING;
         p->shading = (uint32_t)int_or(x, 0, 0, 0xFFFFFFFFLL, L);
+    }
+
+    if ((x = pj_get(o, "Direction"))) {
+        p->mask |= PD_PP_DIRECTION;
+        p->direction = enum_of(x, NAMES(dir_names));
+        REQUIRE(p->direction >= 0);
     }
 
 #undef F

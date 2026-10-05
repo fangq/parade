@@ -670,6 +670,86 @@ static void test_unicode(const pd_font* f) {
     pd_para_free(p);
 }
 
+/* glyph clusters of line 0 in visual order */
+static int32_t visual_clusters(pd_para* p, uint32_t* out, int32_t cap) {
+    pd_glyph g[256];
+    int32_t n = 0, i;
+
+    pd_para_get_glyphs(p, 0, g, 256, &n);
+
+    for (i = 0; i < n && i < cap; i++) {
+        out[i] = g[i].cluster;
+    }
+
+    return n;
+}
+
+static void test_bidi(const pd_font* f) {
+    /* "ab " + Hebrew alef bet gimel + " (cd)" : the Hebrew word is reversed in place */
+    const char* mixed = "ab \xD7\x90\xD7\x91\xD7\x92 cd";
+    const char* rtl = "\xD7\x90\xD7\x91 (x) \xD7\x92";
+    pd_params prm;
+    pd_para* p;
+    uint32_t cl[64], off;
+    int32_t n, i, line, bad = 0;
+    pd_sp x, y;
+
+    pd_params_init(&prm);
+    prm.width = PD_PT(400);
+    prm.align = PD_ALIGN_LEFT;
+
+    p = make_para(f, mixed, PD_PT(12));
+    CHECK(pd_para_break(p, &prm, NULL) == PD_OK);
+    n = visual_clusters(p, cl, 64);
+    /* a b | gimel bet alef | c d */
+    CHECK(n == 7 && cl[0] == 0 && cl[1] == 1 && cl[2] == 7 && cl[3] == 5 && cl[4] == 3 && cl[5] == 10 && cl[6] == 11);
+
+    /* caret and hit test agree inside each run */
+    for (off = 0; off <= 12; off++) {
+        uint32_t back;
+
+        if (off == 3 || off == 9 || (off > 3 && off < 9 && (off % 2) == 0)) {
+            continue;   /* run boundaries are visually ambiguous; skip continuation bytes */
+        }
+
+        if (off > 3 && off < 9 && (off % 2) == 0) {
+            continue;
+        }
+
+        pd_para_caret(p, off, &line, &x, &y);
+        pd_para_hit_test(p, x + (off >= 3 && off < 9 ? -PD_PT(0.5) : PD_PT(0.5)), y, &back, NULL);
+        bad += back != off;
+    }
+
+    CHECK(bad == 0);
+    pd_para_free(p);
+
+    /* an RTL paragraph: runs reversed, brackets mirrored, the line end on the left */
+    prm.direction = PD_DIR_RTL;
+    p = make_para(f, rtl, PD_PT(12));
+    CHECK(pd_para_break(p, &prm, NULL) == PD_OK);
+    n = visual_clusters(p, cl, 64);
+    /* visual: gimel ( x ) bet alef  -> clusters 10, 7(')' mirrored), 6, 5('(' mirrored), 2, 0 */
+    CHECK(n == 6 && cl[0] == 9 && cl[1] == 7 && cl[2] == 6 && cl[3] == 5 && cl[4] == 2 && cl[5] == 0);
+    {
+        pd_glyph g[16];
+
+        pd_para_get_glyphs(p, 0, g, 16, &n);
+        CHECK(g[1].glyph == pd_font_glyph_index(f, '('));   /* ')' at cluster 7 is drawn as '(' */
+        CHECK(g[3].glyph == pd_font_glyph_index(f, ')'));
+    }
+    pd_para_caret(p, (uint32_t)strlen(rtl), &line, &x, &y);
+    {
+        pd_line L;
+
+        pd_para_get_line(p, 0, &L);
+        CHECK(x == L.x);    /* the end of an RTL line is its left edge */
+    }
+
+    pd_para_free(p);
+    (void)i;
+}
+
 int main(void) {
     pd_font* f = load_env_font("PARADE_TEST_FONT", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf");
     pd_font* cjk = load_env_font("PARADE_TEST_CJK_FONT", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
@@ -687,6 +767,8 @@ int main(void) {
     test_raster(f);
     printf("unicode segmentation\n");
     test_unicode(f);
+    printf("bidi\n");
+    test_bidi(f);
     test_liberation(f);
     printf("justify\n");
     test_justify(f);

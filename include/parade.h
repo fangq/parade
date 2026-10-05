@@ -156,6 +156,12 @@ typedef enum {
 } pd_break_mode;
 
 typedef enum {
+    PD_DIR_AUTO = 0,
+    PD_DIR_LTR = 1,
+    PD_DIR_RTL = 2
+} pd_direction;
+
+typedef enum {
     PD_ALIGN_JUSTIFY = 0,
     PD_ALIGN_LEFT = 1,      /**< ragged right, spaces at natural width */
     PD_ALIGN_RIGHT = 2,
@@ -180,6 +186,7 @@ typedef struct {
     /* editing stability */
     int64_t hysteresis;     /**< extra demerits for a break that differs from the previous layout (0 = off) */
     int32_t freeze_offset;  /**< keep previous lines that end at or before this byte offset (-1 = off) */
+    int32_t direction;      /**< pd_direction: paragraph direction (UAX #9); auto = first strong character */
 } pd_params;
 
 PD_API void pd_params_init(pd_params* params);

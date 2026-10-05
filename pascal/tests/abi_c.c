@@ -47,6 +47,7 @@ int main(void) {
     printf("pd_params.line_spacing %zu\n", offsetof(pd_params, line_spacing));
     printf("pd_params.hysteresis %zu\n", offsetof(pd_params, hysteresis));
     printf("pd_params.freeze_offset %zu\n", offsetof(pd_params, freeze_offset));
+    printf("pd_params.direction %zu\n", offsetof(pd_params, direction));
     printf("pd_break_info %zu\n", sizeof(pd_break_info));
     printf("pd_break_info.lines %zu\n", offsetof(pd_break_info, lines));
     printf("pd_break_info.demerits %zu\n", offsetof(pd_break_info, demerits));
@@ -133,6 +134,7 @@ int main(void) {
     printf("pd_para_props.border_color %zu\n", offsetof(pd_para_props, border_color));
     printf("pd_para_props.border_width %zu\n", offsetof(pd_para_props, border_width));
     printf("pd_para_props.shading %zu\n", offsetof(pd_para_props, shading));
+    printf("pd_para_props.direction %zu\n", offsetof(pd_para_props, direction));
     printf("pd_list_level %zu\n", sizeof(pd_list_level));
     printf("pd_list_level.format %zu\n", offsetof(pd_list_level, format));
     printf("pd_list_level.start %zu\n", offsetof(pd_list_level, start));

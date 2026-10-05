@@ -216,6 +216,7 @@ typedef struct {
 #define PD_PP_NEXT_STYLE   (1u << 14)
 #define PD_PP_BORDER       (1u << 15)
 #define PD_PP_SHADING      (1u << 16)
+#define PD_PP_DIRECTION    (1u << 17)
 
 typedef struct {
     uint32_t mask;              /**< PD_PP_* bits that are set */
@@ -237,6 +238,7 @@ typedef struct {
     uint32_t border_color;      /**< 0 = no border */
     pd_sp border_width;
     uint32_t shading;           /**< 0 = none */
+    int32_t direction;          /**< pd_direction: auto (first strong character), LTR or RTL */
 } pd_para_props;
 
 /**

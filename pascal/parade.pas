@@ -133,6 +133,11 @@ const
   PD_PP_NEXT_STYLE = 1 shl 14;
   PD_PP_BORDER = 1 shl 15;
   PD_PP_SHADING = 1 shl 16;
+  PD_PP_DIRECTION = 1 shl 17;
+
+  PD_DIR_AUTO = 0;
+  PD_DIR_LTR = 1;
+  PD_DIR_RTL = 2;
 
   PD_NUM_BULLET = 0;
   PD_NUM_DECIMAL = 1;
@@ -233,6 +238,7 @@ type
     line_spacing: Int32;
     hysteresis: Int64;
     freeze_offset: Int32;
+    direction: Int32;
   end;
   Ppd_params = ^pd_params;
 
@@ -307,6 +313,7 @@ type
     border_color: UInt32;
     border_width: pd_sp;
     shading: UInt32;
+    direction: Int32;
   end;
   Ppd_para_props = ^pd_para_props;
 
@@ -423,6 +430,10 @@ function pd_font_glyph_render(font: Ppd_font; glyph: UInt32; px_per_em: pd_sp; s
   cap: Int32; out info: pd_glyph_image): pd_status; cdecl; PDEXT;
 
 procedure pd_style_init(out style: pd_style; font: Ppd_font; size: pd_sp); cdecl; PDEXT;
+
+function pd_text_next_grapheme(utf8: PAnsiChar; len, offset: csize_t): csize_t; cdecl; PDEXT;
+function pd_text_prev_grapheme(utf8: PAnsiChar; len, offset: csize_t): csize_t; cdecl; PDEXT;
+function pd_text_line_breaks(utf8: PAnsiChar; len: csize_t; out_: PByte): pd_status; cdecl; PDEXT;
 procedure pd_params_init(out params: pd_params); cdecl; PDEXT;
 
 function pd_para_new(out para: Ppd_para): pd_status; cdecl; PDEXT;

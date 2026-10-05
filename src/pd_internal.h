@@ -130,6 +130,9 @@ struct pd_para {
     int32_t n_old_lines, cap_old_lines;
     int32_t broken;
     int32_t finalized;      /* paragraph-end items are appended */
+    uint8_t* blev;          /* bidi level per text byte (n_text + 1), NULL if all left-to-right */
+    int32_t cap_blev;
+    int32_t para_level;
     pd_sp height;
 };
 
@@ -159,6 +162,11 @@ static inline int32_t pd_item_penalty(const pd_item* it, const pd_params* prm) {
 int32_t pd_text_decode(const char* utf8, size_t len, uint32_t** cps, uint32_t** offs);
 int     pd_linebreaks(const uint32_t* cp, int32_t n, uint8_t* brk);    /* brk[0..n]: 0 no, 1 allow, 2 must */
 int     pd_grapheme_boundary(const uint32_t* cp, int32_t n, int32_t i);
+
+/* bidi (pd_bidi.c): levels per code point (0xFF = removed by X9); returns the paragraph level */
+int     pd_bidi_levels(const uint32_t* cp, int32_t n, int dir, uint8_t* levels);
+int32_t pd_bidi_line(const uint32_t* cp, const uint8_t* levels, int32_t from, int32_t to, int para, uint8_t* lev,
+                     int32_t* order);
 
 /* zlib streams (pd_zlib.c): 0 on success, *out malloc'ed */
 int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);

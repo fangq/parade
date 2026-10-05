@@ -598,11 +598,7 @@ begin
   Result := P;
   S := ParaText(P.block);
   if P.offset < UInt32(Length(S)) then
-  begin
-    Inc(Result.offset);
-    while (Result.offset < UInt32(Length(S))) and ((Ord(S[Result.offset + 1]) and $C0) = $80) do
-      Inc(Result.offset);
-  end
+    Result.offset := pd_text_next_grapheme(PAnsiChar(S), Length(S), P.offset)   { a whole grapheme cluster }
   else
   begin
     N := pd_doc_next_paragraph(FDoc, P.block);
@@ -620,9 +616,7 @@ begin
   if P.offset > 0 then
   begin
     S := ParaText(P.block);
-    Dec(Result.offset);
-    while (Result.offset > 0) and ((Ord(S[Result.offset + 1]) and $C0) = $80) do
-      Dec(Result.offset);
+    Result.offset := pd_text_prev_grapheme(PAnsiChar(S), Length(S), P.offset);
   end
   else
   begin

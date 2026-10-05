@@ -71,6 +71,7 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
     OVER(PD_PP_BREAK_BEFORE, page_break_before);
     OVER(PD_PP_HYPHENATE, hyphenate);
     OVER(PD_PP_BREAK_MODE, break_mode);
+    OVER(PD_PP_DIRECTION, direction);
 #undef OVER
 
     if (label_x) {
@@ -141,6 +142,7 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
     prm->align = pp.align;
     prm->mode = pp.break_mode;
     prm->line_spacing = pp.line_spacing;
+    prm->direction = pp.direction;
 
     w = column - pp.indent_left - pp.indent_right;
 

@@ -182,6 +182,7 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
     }
 
     KEEP(PD_PP_SHADING, shading);
+    KEEP(PD_PP_DIRECTION, direction);
 #undef KEEP
     *pp = z;
 }
@@ -273,6 +274,7 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
     }
 
     SET(PD_PP_SHADING, shading);
+    SET(PD_PP_DIRECTION, direction);
 #undef SET
     dst->mask |= m;
 }

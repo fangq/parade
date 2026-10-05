@@ -92,6 +92,7 @@ void pd_para_free(pd_para* p) {
     free(p->sum_sh);
     free(p->lines);
     free(p->old_lines);
+    free(p->blev);
     free(p);
 }
 
@@ -653,6 +654,51 @@ pd_status pd_para_break(pd_para* p, const pd_params* prm, pd_break_info* info) {
         p->finalized = 1;
     }
 
+    /* bidi levels for the whole paragraph (none kept when it is all left-to-right) */
+    {
+        uint32_t* cps, *offs;
+        int32_t ncp = pd_text_decode(p->text ? p->text : "", p->n_text, &cps, &offs), k;
+        uint8_t* lev;
+        int any = 0, dir = prm->direction == PD_DIR_LTR ? 0 : prm->direction == PD_DIR_RTL ? 1 : -1;
+
+        if (ncp < 0) {
+            return PD_ERR_NOMEM;
+        }
+
+        lev = (uint8_t*)malloc((size_t)ncp + 1);
+        p->para_level = 0;
+
+        if (lev) {
+            p->para_level = pd_bidi_levels(cps, ncp, dir, lev);
+
+            for (k = 0; k < ncp; k++) {
+                if (lev[k] == 0xFF) {   /* removed controls take the previous level */
+                    lev[k] = k > 0 ? lev[k - 1] : (uint8_t)p->para_level;
+                }
+
+                any |= lev[k] & 1;
+            }
+        }
+
+        any |= p->para_level & 1;
+
+        if (lev && any && pd_grow((void**)&p->blev, &p->cap_blev, (int64_t)p->n_text + 1, 1) == 0) {
+            for (k = 0; k < ncp; k++) {
+                memset(p->blev + offs[k], lev[k], offs[k + 1] - offs[k]);
+            }
+
+            p->blev[p->n_text] = (uint8_t)p->para_level;
+        } else if (!any) {
+            free(p->blev);
+            p->blev = NULL;
+            p->cap_blev = 0;
+        }
+
+        free(lev);
+        free(cps);
+        free(offs);
+    }
+
     return pd_break_lines(p, prm, info);
 }
 
@@ -712,17 +758,69 @@ static int64_t share(int64_t num, int64_t slack, int64_t den) {
 
 #define PD_STOP_GLUE 2  /* internal pd_glyph.kind: caret stop at a space */
 
+/* the glyph for the mirrored form of a character (UAX #9 L4), or the glyph itself */
+static uint32_t mirror_glyph(const pd_para* p, const pd_glyph* g) {
+    const pd_style* st;
+    uint32_t cp, m;
+    const unsigned char* s;
+    int n, k;
+
+    if (g->style < 0 || g->cluster >= p->n_text) {
+        return g->glyph;
+    }
+
+    st = &p->styles[g->style];
+    s = (const unsigned char*)p->text + g->cluster;
+    cp = s[0];
+    n = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+    cp &= n ? 0x3F >> n : 0x7F;
+
+    for (k = 1; k <= n && g->cluster + (uint32_t)k < p->n_text; k++) {
+        cp = (cp << 6) | (s[k] & 0x3F);
+    }
+
+    m = pd_uni_mirror(cp);
+
+    if (m != cp) {
+        uint32_t mg = pd_font_glyph_index(st->font, m);
+
+        return mg ? mg : g->glyph;
+    }
+
+    return g->glyph;
+}
+
 /*
- * Walk one line, emitting positioned glyphs (and, with stops, a caret stop
- * at every glue). Glue is set by distributing the slack in proportion to
- * stretch or shrink with cumulative integer rounding, so the pieces sum
- * exactly to the slack and the result is reproducible everywhere.
+ * Walk one line: glyphs, objects and (with stops) a caret stop at every
+ * glue, in visual order. Glue is set by distributing the slack in
+ * proportion to stretch or shrink with cumulative integer rounding, so the
+ * pieces sum exactly to the slack. With right-to-left text the atoms are
+ * reordered by their bidi levels (L1 for trailing spaces, L2 reversal) and
+ * mirrored characters swapped (L4). lev_out, if given, receives each
+ * emitted entry's level.
  */
-static int32_t walk_line(const pd_para* p, int32_t li, pd_glyph* out, int32_t cap, int stops) {
+static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t cap, int stops, uint8_t* lev_out) {
     const pd_lineinfo* L = &p->lines[li];
-    int64_t x = L->pub.x, slack = L->slack, cum = 0, den = 0, given = 0;
-    int32_t i, n = 0, mode = 0;     /* 0 none, 1 finite stretch, 2 fil, 3 shrink */
+    int64_t slack = L->slack, cum = 0, den = 0, given = 0;
+    int32_t i, n = 0, mode = 0, na = 0, capa = 64;     /* mode: 0 none, 1 finite stretch, 2 fil, 3 shrink */
     pd_sp y = L->pub.baseline;
+    pd_glyph* at = (pd_glyph*)malloc((size_t)capa * sizeof(pd_glyph));
+    uint8_t* lv = NULL;
+
+    if (!at) {
+        return 0;
+    }
+
+#define ATOM(...) do { \
+        if (na == capa) { \
+            pd_glyph* q_ = (pd_glyph*)realloc(at, (size_t)capa * 2 * sizeof(pd_glyph)); \
+            if (!q_) { free(at); return 0; } \
+            at = q_; capa *= 2; \
+        } \
+        memset(&at[na], 0, sizeof(pd_glyph)); \
+        __VA_ARGS__; \
+        na++; \
+    } while (0)
 
     if (slack > 0 && L->total_stretch[1] > 0) {
         mode = 2;
@@ -741,40 +839,17 @@ static int32_t walk_line(const pd_para* p, int32_t li, pd_glyph* out, int32_t ca
 
         if (it->type == PD_ITEM_BOX) {
             if (it->flags & PD_FLAG_OBJECT) {
-                if (n < cap) {
-                    pd_glyph* g = &out[n];
-                    memset(g, 0, sizeof(*g));
-                    g->cluster = it->text_start;
-                    g->x = (pd_sp)x;
-                    g->y = y;
-                    g->advance = it->width;
-                    g->style = -1;
-                    g->kind = PD_OBJECT;
-                    g->user = it->user;
-                }
-
-                n++;
-                x += it->width;
+                ATOM(at[na].cluster = it->text_start; at[na].advance = it->width; at[na].style = -1;
+                     at[na].kind = PD_OBJECT; at[na].user = it->user);
             } else {
                 uint32_t k;
 
                 for (k = 0; k < it->glyph_count; k++) {
                     const pd_gl* gl = &p->glyphs[it->glyph_start + k];
 
-                    if (n < cap) {
-                        pd_glyph* g = &out[n];
-                        g->glyph = gl->glyph;
-                        g->cluster = gl->cluster;
-                        g->x = (pd_sp)x;
-                        g->y = y;
-                        g->advance = gl->advance;
-                        g->style = it->style;
-                        g->kind = PD_GLYPH;
-                        g->user = it->style >= 0 ? p->styles[it->style].user : 0;
-                    }
-
-                    n++;
-                    x += gl->advance;
+                    ATOM(at[na].glyph = gl->glyph; at[na].cluster = gl->cluster; at[na].advance = gl->advance;
+                         at[na].style = it->style; at[na].kind = PD_GLYPH;
+                         at[na].user = it->style >= 0 ? p->styles[it->style].user : 0);
                 }
             }
         } else if (it->type == PD_ITEM_GLUE) {
@@ -795,22 +870,9 @@ static int32_t walk_line(const pd_para* p, int32_t li, pd_glyph* out, int32_t ca
                 cum += part;
             }
 
-            if (stops && it->text_end > it->text_start) {
-                if (n < cap) {
-                    pd_glyph* g = &out[n];
-                    memset(g, 0, sizeof(*g));
-                    g->cluster = it->text_start;
-                    g->x = (pd_sp)x;
-                    g->y = y;
-                    g->advance = (pd_sp)w;
-                    g->style = it->style;
-                    g->kind = PD_STOP_GLUE;
-                }
-
-                n++;
-            }
-
-            x += w;
+            /* glue is always an atom (it moves with reordering); it is emitted only as a stop */
+            ATOM(at[na].cluster = it->text_start; at[na].advance = (pd_sp)w; at[na].style = it->style;
+                 at[na].kind = PD_STOP_GLUE; at[na].user = it->text_end > it->text_start);
         }
     }
 
@@ -821,23 +883,120 @@ static int32_t walk_line(const pd_para* p, int32_t li, pd_glyph* out, int32_t ca
         if (it->type == PD_ITEM_PENALTY && it->glyph_count == 1) {
             const pd_gl* gl = &p->glyphs[it->glyph_start];
 
-            if (n < cap) {
-                pd_glyph* g = &out[n];
-                g->glyph = gl->glyph;
-                g->cluster = gl->cluster;
-                g->x = (pd_sp)x;
-                g->y = y;
-                g->advance = gl->advance;
-                g->style = it->style;
-                g->kind = PD_GLYPH;
-                g->user = it->style >= 0 ? p->styles[it->style].user : 0;
-            }
-
-            n++;
+            ATOM(at[na].glyph = gl->glyph; at[na].cluster = gl->cluster; at[na].advance = gl->advance;
+                 at[na].style = it->style; at[na].kind = PD_GLYPH;
+                 at[na].user = it->style >= 0 ? p->styles[it->style].user : 0);
         }
     }
 
+#undef ATOM
+
+    /* bidi: L1 (trailing spaces to the paragraph level), L2 (reverse runs), L4 (mirror) */
+    if (p->blev && na > 0) {
+        int32_t* ord = (int32_t*)malloc((size_t)na * sizeof(int32_t));
+        pd_glyph* vis = (pd_glyph*)malloc((size_t)na * sizeof(pd_glyph));
+        int maxl = 0, minodd = 255, l;
+
+        lv = (uint8_t*)malloc((size_t)na);
+
+        if (!ord || !vis || !lv) {
+            free(ord);
+            free(vis);
+            free(lv);
+            free(at);
+            return 0;
+        }
+
+        for (i = 0; i < na; i++) {
+            lv[i] = at[i].cluster < p->n_text ? p->blev[at[i].cluster] : (uint8_t)p->para_level;
+            ord[i] = i;
+        }
+
+        for (i = na - 1; i >= 0 && at[i].kind == PD_STOP_GLUE; i--) {
+            lv[i] = (uint8_t)p->para_level;
+        }
+
+        for (i = 0; i < na; i++) {
+            maxl = lv[i] > maxl ? lv[i] : maxl;
+            minodd = (lv[i] & 1) && lv[i] < minodd ? lv[i] : minodd;
+        }
+
+        for (l = maxl; l >= minodd && l > 0; l--) {
+            for (i = 0; i < na; i++) {
+                if (lv[ord[i]] >= l) {
+                    int32_t a0 = i, b0;
+
+                    while (i < na && lv[ord[i]] >= l) {
+                        i++;
+                    }
+
+                    for (b0 = i - 1; a0 < b0; a0++, b0--) {
+                        int32_t t = ord[a0];
+
+                        ord[a0] = ord[b0];
+                        ord[b0] = t;
+                    }
+                }
+            }
+        }
+
+        for (i = 0; i < na; i++) {
+            vis[i] = at[ord[i]];
+
+            if ((lv[ord[i]] & 1) && vis[i].kind == PD_GLYPH) {
+                vis[i].glyph = mirror_glyph(p, &vis[i]);
+            }
+        }
+
+        for (i = 0; i < na; i++) {  /* levels in visual order */
+            ord[i] = lv[ord[i]];
+        }
+
+        for (i = 0; i < na; i++) {
+            lv[i] = (uint8_t)ord[i];
+        }
+
+        free(ord);
+        free(at);
+        at = vis;
+    }
+
+    /* positions, left to right */
+    {
+        int64_t x = L->pub.x;
+
+        for (i = 0; i < na; i++) {
+            int emit = at[i].kind != PD_STOP_GLUE || (stops && at[i].user);
+
+            if (emit) {
+                if (n < cap) {
+                    out[n] = at[i];
+                    out[n].x = (pd_sp)x;
+                    out[n].y = y;
+
+                    if (out[n].kind == PD_STOP_GLUE) {
+                        out[n].user = 0;
+                    }
+
+                    if (lev_out) {
+                        lev_out[n] = lv ? lv[i] : 0;
+                    }
+                }
+
+                n++;
+            }
+
+            x += at[i].advance;
+        }
+    }
+
+    free(at);
+    free(lv);
     return n;
+}
+
+static int32_t walk_line(const pd_para* p, int32_t li, pd_glyph* out, int32_t cap, int stops) {
+    return walk_line_lv(p, li, out, cap, stops, NULL);
 }
 
 pd_status pd_para_get_glyphs(const pd_para* p, int32_t li, pd_glyph* buf, int32_t cap, int32_t* count) {
@@ -865,26 +1024,35 @@ pd_status pd_para_get_glyphs(const pd_para* p, int32_t li, pd_glyph* buf, int32_
     return n <= cap ? PD_OK : PD_ERR_RANGE;
 }
 
-/* caret stops of a line: glyph and space left edges plus the line end, only at
-   grapheme cluster boundaries (never between a letter and its combining mark) */
-static pd_glyph* line_stops(const pd_para* p, int32_t li, int32_t* n) {
+/* caret stops of a line, in visual order, only at grapheme cluster boundaries
+   (never between a letter and its combining mark); for each stop its bidi
+   level and the logical position just after its cluster */
+static pd_glyph* line_stops(const pd_para* p, int32_t li, int32_t* n, uint8_t** levels, uint32_t** after) {
     int32_t cnt = walk_line(p, li, NULL, 0, 1), k, o = 0, ncp;
     pd_glyph* buf = (pd_glyph*)malloc(((size_t)cnt + 1) * sizeof(pd_glyph));
+    uint8_t* lv = (uint8_t*)malloc((size_t)cnt + 1);
+    uint32_t* af = (uint32_t*)malloc(((size_t)cnt + 1) * sizeof(uint32_t));
     uint32_t* cps, *offs;
 
-    if (!buf) {
+    if (!buf || !lv || !af) {
+        free(buf);
+        free(lv);
+        free(af);
         return NULL;
     }
 
-    *n = walk_line(p, li, buf, cnt, 1);
+    *n = walk_line_lv(p, li, buf, cnt, 1, lv);
     ncp = pd_text_decode(p->text ? p->text : "", p->n_text, &cps, &offs);
 
     if (ncp < 0) {
-        return buf;
+        free(buf);
+        free(lv);
+        free(af);
+        return NULL;
     }
 
     for (k = 0; k < *n; k++) {
-        int32_t lo = 0, hi = ncp;
+        int32_t lo = 0, hi = ncp, e;
 
         while (lo < hi) {   /* the code point starting at the stop's cluster */
             int32_t mid = (lo + hi) / 2;
@@ -897,15 +1065,36 @@ static pd_glyph* line_stops(const pd_para* p, int32_t li, int32_t* n) {
         }
 
         if (lo >= ncp || offs[lo] != buf[k].cluster || pd_grapheme_boundary(cps, ncp, lo)) {
-            buf[o++] = buf[k];
-        } else if (o > 0) {
-            buf[o - 1].advance += buf[k].advance;   /* the mark widens the cluster before it */
+            for (e = lo + 1; e < ncp && !pd_grapheme_boundary(cps, ncp, e); e++) {
+            }
+
+            buf[o] = buf[k];
+            lv[o] = lv[k];
+            af[o] = lo >= ncp ? p->n_text : offs[e > ncp ? ncp : e];
+            o++;
+        } else {    /* a mark: widen the stop of its base, wherever that is */
+            int32_t q;
+
+            for (q = o - 1; q >= 0; q--) {
+                if (buf[q].cluster < buf[k].cluster) {
+                    if (buf[k].x < buf[q].x) {
+                        buf[q].advance += buf[q].x - buf[k].x;
+                        buf[q].x = buf[k].x;
+                    } else {
+                        buf[q].advance += buf[k].advance;
+                    }
+
+                    break;
+                }
+            }
         }
     }
 
     *n = o;
     free(cps);
     free(offs);
+    *levels = lv;
+    *after = af;
     return buf;
 }
 
@@ -921,9 +1110,12 @@ static uint32_t line_end_offset(const pd_para* p, int32_t li) {
 }
 
 pd_status pd_para_caret(const pd_para* p, uint32_t off, int32_t* line, pd_sp* x, pd_sp* baseline) {
-    int32_t li, n, k;
+    int32_t li, n, k, best = -1;
     pd_glyph* st;
+    uint8_t* lv;
+    uint32_t* af;
     pd_sp cx;
+    int rtl_para;
 
     if (!p || !x) {
         return PD_ERR_ARG;
@@ -943,24 +1135,31 @@ pd_status pd_para_caret(const pd_para* p, uint32_t off, int32_t* line, pd_sp* x,
         }
     }
 
-    st = line_stops(p, li, &n);
+    st = line_stops(p, li, &n, &lv, &af);
 
     if (!st) {
         return PD_ERR_NOMEM;
     }
 
-    cx = p->lines[li].pub.x + p->lines[li].pub.width;
+    /* the stop of the character at (or logically right after) off */
+    rtl_para = p->para_level & 1;
+    cx = rtl_para ? p->lines[li].pub.x : p->lines[li].pub.x + p->lines[li].pub.width;
 
     if (off < line_end_offset(p, li) || li == p->n_lines - 1) {
         for (k = 0; k < n; k++) {
-            if (st[k].cluster >= off) {
-                cx = st[k].x;
-                break;
+            if (st[k].cluster >= off && (best < 0 || st[k].cluster < st[best].cluster)) {
+                best = k;
             }
+        }
+
+        if (best >= 0) {    /* the logical start of a character: its left edge, or its right edge in RTL */
+            cx = (lv[best] & 1) ? st[best].x + st[best].advance : st[best].x;
         }
     }
 
     free(st);
+    free(lv);
+    free(af);
     *x = cx;
 
     if (line) {
@@ -977,8 +1176,11 @@ pd_status pd_para_caret(const pd_para* p, uint32_t off, int32_t* line, pd_sp* x,
 pd_status pd_para_hit_test(const pd_para* p, pd_sp x, pd_sp y, uint32_t* off, int32_t* line) {
     int32_t li, n, k;
     pd_glyph* st;
+    uint8_t* lv;
+    uint32_t* af;
     int64_t best_d;
     uint32_t best;
+    pd_sp end_x;
 
     if (!p || !off) {
         return PD_ERR_ARG;
@@ -994,40 +1196,50 @@ pd_status pd_para_hit_test(const pd_para* p, pd_sp x, pd_sp y, uint32_t* off, in
         }
     }
 
-    st = line_stops(p, li, &n);
+    st = line_stops(p, li, &n, &lv, &af);
 
     if (!st) {
         return PD_ERR_NOMEM;
     }
 
-    /* the line end is a stop too */
+    /* the line end is a stop too: on the right of a left-to-right line, the left of a right-to-left one */
+    end_x = (p->para_level & 1) ? p->lines[li].pub.x : p->lines[li].pub.x + p->lines[li].pub.width;
     best = line_end_offset(p, li);
-    best_d = (int64_t)x - (p->lines[li].pub.x + p->lines[li].pub.width);
+    best_d = (int64_t)x - end_x;
     best_d = best_d < 0 ? -best_d : best_d;
 
     for (k = 0; k < n; k++) {
+        int rtl = lv[k] & 1;
+        uint32_t left = rtl ? af[k] : st[k].cluster, right = rtl ? st[k].cluster : af[k];
         int64_t d = (int64_t)x - st[k].x;
+
+        if (right > line_end_offset(p, li) && li < p->n_lines - 1) {
+            right = line_end_offset(p, li);
+        }
+
+        if (left > line_end_offset(p, li) && li < p->n_lines - 1) {
+            left = line_end_offset(p, li);
+        }
 
         d = d < 0 ? -d : d;
 
-        if (d < best_d || (d == best_d && st[k].cluster < best)) {
+        if (d < best_d || (d == best_d && left < best)) {
             best_d = d;
-            best = st[k].cluster;
+            best = left;
         }
 
-        /* the right half of a glyph maps to the position after it */
         d = (int64_t)x - ((int64_t)st[k].x + st[k].advance);
         d = d < 0 ? -d : d;
 
         if (d < best_d) {
-            uint32_t after = (k + 1 < n) ? st[k + 1].cluster : line_end_offset(p, li);
-
             best_d = d;
-            best = after;
+            best = right;
         }
     }
 
     free(st);
+    free(lv);
+    free(af);
     *off = best;
 
     if (line) {

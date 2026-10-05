@@ -11,7 +11,7 @@ STRUCTS = {
     "pd_style": "font size space_stretch space_shrink kerning color user",
     "pd_params": "mode align width indent line_penalty adj_demerits double_hyphen_demerits final_hyphen_demerits "
                  "hyphen_penalty ex_hyphen_penalty tex_badness rag_stretch baseline_skip line_spacing hysteresis "
-                 "freeze_offset",
+                 "freeze_offset direction",
     "pd_break_info": "lines demerits overfull underfull reused_breakpoints frozen_lines height",
     "pd_line": "text_start text_end x baseline width ascent descent ratio badness hyphenated overfull underfull",
     "pd_glyph": "glyph cluster x y advance style kind user",
@@ -23,7 +23,7 @@ STRUCTS = {
                      "lang small_caps link_target",
     "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
-                     "border_color border_width shading",
+                     "border_color border_width shading direction",
     "pd_list_level": "format start text indent hanging",
     "pd_run": "start end format",
     "pd_inline": "kind resource width height depth field target level name source source_len user",
