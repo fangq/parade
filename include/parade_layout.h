@@ -1,0 +1,99 @@
+/*
+ * Parade page builder: a document laid out into pages
+ *
+ * A pd_layout turns a pd_doc into pages: sections give page geometry and
+ * columns, paragraphs are broken with the paragraph engine, lines are cut
+ * into columns TeX-style (box/glue/penalty with widow, orphan and keep
+ * rules), floats are placed LaTeX-style (here, top, bottom, float page),
+ * and headers/footers are set per page with their page-number fields.
+ *
+ * The result is a per-page display list of positioned glyphs, images,
+ * object boxes and rules, in page coordinates (sp, origin at the page's
+ * top-left, y down; glyph y is the baseline), plus hit testing and caret
+ * mapping between pages and document positions.
+ *
+ * Updating is incremental: each paragraph's line breaking is cached and
+ * redone only when the paragraph, its width or a style changed.
+ *
+ * Not yet: footnote bodies, table layout (cells are stacked), text
+ * wrapping beside floats, continuous section breaks.
+ */
+
+#ifndef PARADE_LAYOUT_H
+#define PARADE_LAYOUT_H
+
+#include "parade_doc.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct pd_layout pd_layout;
+
+/** the document must outlive the layout; the layout never modifies it */
+PD_API pd_status pd_layout_new(const pd_doc* doc, pd_layout** out);
+PD_API void      pd_layout_free(pd_layout* layout);
+
+typedef struct {
+    int32_t pages;
+    int32_t paragraphs_broken;  /**< paragraphs (re)broken by this update */
+    int32_t paragraphs_reused;  /**< paragraphs taken from the cache */
+    int32_t float_pages;
+    int32_t overfull;           /**< columns that could not hold their content */
+} pd_layout_info;
+
+/** bring the pages up to date with the document; info may be NULL */
+PD_API pd_status pd_layout_update(pd_layout* layout, pd_layout_info* info);
+/** drop all cached paragraph layouts, e.g. after changing the font resolver */
+PD_API void      pd_layout_invalidate(pd_layout* layout);
+
+PD_API int32_t   pd_layout_page_count(const pd_layout* layout);
+
+typedef struct {
+    pd_sp width, height;
+    pd_block_id section;
+    int32_t number;             /**< page number as printed */
+    char label[16];             /**< the number in the section's format ("iv", "12") */
+    int32_t float_page;         /**< 1 if the page holds only floats */
+    pd_pos first, last;         /**< first and last main-flow positions on the page (block 0 if none) */
+} pd_page_info;
+
+PD_API pd_status pd_layout_page_info(const pd_layout* layout, int32_t page, pd_page_info* out);
+
+typedef enum {
+    PD_DRAW_GLYPH = 0,          /**< glyph of font at size, x/y = pen position on the baseline */
+    PD_DRAW_IMAGE = 1,          /**< resource drawn into the rectangle x, y (top), w, h */
+    PD_DRAW_BOX = 2,            /**< an inline object the host draws (equation, user object) */
+    PD_DRAW_RULE = 3,           /**< filled rectangle: underline, strike, border, background */
+    PD_DRAW_LINK = 4            /**< link area (not drawn); source holds the URL */
+} pd_draw_kind;
+
+typedef struct {
+    int32_t kind;               /**< pd_draw_kind */
+    pd_sp x, y, w, h;
+    uint32_t glyph;
+    const pd_font* font;
+    pd_sp size;
+    uint32_t color;
+    pd_res_id resource;
+    pd_block_id block;          /**< source paragraph */
+    uint32_t offset;            /**< source byte offset */
+    int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float */
+} pd_draw;
+
+/** the display list of a page; same size-query convention as pd_para_get_glyphs */
+PD_API pd_status pd_layout_page_items(const pd_layout* layout, int32_t page, pd_draw* buf, int32_t cap,
+                                      int32_t* count);
+
+/** the document position nearest to a point on a page */
+PD_API pd_status pd_layout_hit_test(const pd_layout* layout, int32_t page, pd_sp x, pd_sp y, pd_pos* out);
+
+/** where the caret for a position is drawn: page, x, baseline and line ascent/descent */
+PD_API pd_status pd_layout_caret(const pd_layout* layout, pd_pos pos, int32_t* page, pd_sp* x, pd_sp* baseline,
+                                 pd_sp* ascent, pd_sp* descent);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* PARADE_LAYOUT_H */

@@ -47,6 +47,29 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
 - **Layout bridge**: `pd_doc_para_build` turns a document paragraph into a
   `pd_para` with fonts from a host resolver.
 
+## Page builder (`include/parade_layout.h`)
+
+- Sections give page size, margins, columns and page numbering; each
+  paragraph is broken at its real width and cached by (revision, width,
+  style revision, field values), so an edit re-breaks one paragraph.
+- Columns are cut TeX-style from line boxes, collapsed paragraph spacing
+  and penalties: widows, orphans, keep-lines and keep-with-next are rules;
+  the break is the cheapest candidate (penalty + cubic underfill badness).
+- Floats are placed LaTeX-style: here if it fits, else queued for the top
+  of a later column, the bottom of a page showing the anchor, or a float
+  page; order is kept, the queue is flushed at the section end.
+- Headers and footers (first/even variants) are laid out per page; fields
+  (page, pages, section page, SEQ counters, cross-references to number or
+  page, running headings) are sized by their values, with page references
+  settled in a second pass as in LaTeX. List labels hang in the margin.
+- Output: per-page display lists (glyphs, images, object boxes, rules) in
+  page coordinates, hit testing and caret positions across pages.
+- 3000 paragraphs / 150 pages: full layout 63 ms; a keystroke plus update
+  0.3 ms.
+- Not yet: footnote bodies, table layout (cells are stacked), text
+  wrapping beside floats, continuous section breaks, optimal (rather than
+  greedy-with-lookback) page breaking.
+
 ## Build
 
     make            # build/libparade.a, build/libparade.so, tests, bench
@@ -55,6 +78,7 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
     make bench      # greedy vs optimal quality and speed (GPL-3 text corpus)
     make oracle     # font reader vs fontTools on every installed font
     make view       # render test scenes to build/parade_view.svg/.png
+    make pages      # lay out a sample document, draw its pages to build/pages.svg
     make pretty     # astyle formatting
 
 Test fonts: `PARADE_TEST_FONT` (default Liberation Serif) and
@@ -80,6 +104,7 @@ pd_para_break(p, &prm, NULL);
 
     include/parade.h     public C API: fonts, paragraphs, line breaking
     include/parade_doc.h public C API: document model, editing, JData I/O
+    include/parade_layout.h public C API: pages, display lists, carets
     src/pd_font.c        font metrics reader
     src/pd_para.c        content building, simple shaper, output, hit testing
     src/pd_break.c       total-fit / first-fit line breaking
@@ -87,15 +112,17 @@ pd_para_break(p, &prm, NULL);
     src/pd_doc.c         document tree, styles, lists, operations, undo
     src/pd_doc_io.c      native JData/BJData save and load
     src/pd_doc_layout.c  document paragraph -> pd_para
+    src/pd_layout.c      page builder: columns, floats, headers, fields, display lists
     tests/               unit tests
     bench/               quality and speed benchmark
     tools/font_oracle.py fontTools cross-check through the C ABI (ctypes)
     tools/render.py      visual viewer: Parade positions + fontTools outlines -> SVG
+    tools/pd_dump.c      builds/loads a document, dumps its pages as JSON
+    tools/render_pages.py draws the dumped pages
     proto/               original standalone prototype (kp.c)
 
 ## Next
 
-The page builder (pages from sections, floats, headers/footers, fields,
-incremental repagination), table layout, Liang hyphenation, UAX #14/#29
+Footnote bodies and table layout in the page builder, Liang hyphenation, UAX #14/#29
 segmentation and grapheme-aware carets, bidi, a pluggable full shaper
 (kb_text_shape or HarfBuzz), and the Free Pascal binding unit.

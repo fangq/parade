@@ -657,7 +657,9 @@ void pd_doc_install_builtin_styles(pd_doc* d) {
     for (k = 0; k < 6; k++) {
         memset(&pp, 0, sizeof(pp));
         memset(&cp, 0, sizeof(cp));
-        pp.mask = PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_KEEP_NEXT | PD_PP_NEXT_STYLE | PD_PP_HYPHENATE;
+        pp.mask = PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_KEEP_NEXT | PD_PP_NEXT_STYLE | PD_PP_HYPHENATE |
+                  PD_PP_ALIGN | PD_PP_INDENT_FIRST;
+        pp.align = PD_ALIGN_LEFT;
         pp.space_before = PD_PT(hsize[k]);
         pp.space_after = PD_PT(hsize[k] / 2);
         pp.keep_with_next = 1;
@@ -671,7 +673,7 @@ void pd_doc_install_builtin_styles(pd_doc* d) {
 
     memset(&pp, 0, sizeof(pp));
     memset(&cp, 0, sizeof(cp));
-    pp.mask = PD_PP_ALIGN | PD_PP_SPACE_AFTER | PD_PP_NEXT_STYLE | PD_PP_HYPHENATE;
+    pp.mask = PD_PP_ALIGN | PD_PP_SPACE_AFTER | PD_PP_NEXT_STYLE | PD_PP_HYPHENATE | PD_PP_INDENT_FIRST;
     pp.align = PD_ALIGN_CENTER;
     pp.space_after = PD_PT(18);
     pp.next_style = normal;
@@ -682,7 +684,8 @@ void pd_doc_install_builtin_styles(pd_doc* d) {
 
     memset(&pp, 0, sizeof(pp));
     memset(&cp, 0, sizeof(cp));
-    pp.mask = PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER;
+    pp.mask = PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_ALIGN | PD_PP_INDENT_FIRST;
+    pp.align = PD_ALIGN_CENTER;
     pp.space_before = PD_PT(6);
     pp.space_after = PD_PT(10);
     cp.mask = PD_CP_SIZE | PD_CP_ITALIC;
@@ -700,7 +703,7 @@ void pd_doc_install_builtin_styles(pd_doc* d) {
 
     memset(&pp, 0, sizeof(pp));
     memset(&cp, 0, sizeof(cp));
-    pp.mask = PD_PP_ALIGN | PD_PP_HYPHENATE | PD_PP_BREAK_MODE;
+    pp.mask = PD_PP_ALIGN | PD_PP_HYPHENATE | PD_PP_BREAK_MODE | PD_PP_INDENT_FIRST;
     pp.align = PD_ALIGN_LEFT;
     pp.break_mode = PD_BREAK_GREEDY;
     cp.mask = PD_CP_FAMILY | PD_CP_SIZE | PD_CP_KERNING;
@@ -1100,7 +1103,7 @@ pd_status pd_doc_list_define(pd_doc* d, int32_t n, const pd_list_level* lv, pd_l
     return PD_OK;
 }
 
-static void format_number(int32_t v, int32_t fmt, char* buf, size_t cap) {
+void pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap) {
     static const char* rn[13] = { "m", "cm", "d", "cd", "c", "xc", "l", "xl", "x", "ix", "v", "iv", "i" };
     static const int32_t rv[13] = { 1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1 };
     size_t o = 0;
@@ -1204,8 +1207,8 @@ pd_status pd_doc_list_label(const pd_doc* d, pd_block_id para, char* buf, int32_
                     int32_t at = t[1] - '1';
                     size_t q;
 
-                    format_number(at < l->n ? cnt[at] : 0, at < l->n ? l->lv[at].format : PD_NUM_DECIMAL, num,
-                                  sizeof(num));
+                    pd_doc_format_number(at < l->n ? cnt[at] : 0, at < l->n ? l->lv[at].format : PD_NUM_DECIMAL, num,
+                                         sizeof(num));
 
                     for (q = 0; num[q] && o + 1 < (size_t)cap; q++) {
                         buf[o++] = num[q];
@@ -1634,6 +1637,7 @@ static void toggle(pd_doc* d, urec* r) {
 
         d->styles[r->style - 1] = r->sdef;
         r->sdef = t;
+        d->style_rev++;
         touch(d, PD_CHANGE_STYLE, 0, r->style);
     }
 }
@@ -2778,6 +2782,7 @@ pd_status pd_doc_style_define(pd_doc* d, const char* name, pd_style_kind kind, p
     r->style = id;
     r->sdef = d->styles[id - 1];
     d->styles[id - 1] = ns;
+    d->style_rev++;
     touch(d, PD_CHANGE_STYLE, 0, id);
 
     if (out) {

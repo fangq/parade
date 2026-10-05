@@ -19,7 +19,7 @@ static const pd_font* resolve_font(const pd_doc* d, const pd_char_props* cp) {
     return f ? f : d->default_font;
 }
 
-static pd_status style_for(const pd_doc* d, pd_block_id para, pd_format_id fmt, pd_style* st, pd_char_props* cp) {
+pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, pd_style* st, pd_char_props* cp) {
     const pd_font* f;
 
     if (pd_doc_format_resolve(d, para, fmt, cp) != PD_OK) {
@@ -32,7 +32,8 @@ static pd_status style_for(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
         return PD_ERR_STATE;    /* no resolver answer and no default font */
     }
 
-    pd_style_init(st, f, cp->size);
+    /* super/subscripts are smaller in the layout too, so their advances shrink */
+    pd_style_init(st, f, cp->shift == PD_SHIFT_SUPER || cp->shift == PD_SHIFT_SUB ? cp->size * 7 / 10 : cp->size);
     st->kerning = cp->kerning;
     st->color = cp->color;
     st->user = (int32_t)fmt;
@@ -49,7 +50,78 @@ static pd_sp char_width(const pd_style* st, uint32_t cp, int n) {
     return (pd_sp)((int64_t)adv * st->size / m.units_per_em) * n;
 }
 
+void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp* label_x) {
+    const bstate* s = &b->st;
+
+    pd_doc_style_resolve(d, s->style, pp, NULL);
+
+    /* direct properties over the style's */
+#define OVER(bit, f) if (s->pp.mask & (bit)) { pp->f = s->pp.f; }
+    OVER(PD_PP_ALIGN, align);
+    OVER(PD_PP_INDENT_LEFT, indent_left);
+    OVER(PD_PP_INDENT_RIGHT, indent_right);
+    OVER(PD_PP_INDENT_FIRST, indent_first);
+    OVER(PD_PP_SPACE_BEFORE, space_before);
+    OVER(PD_PP_SPACE_AFTER, space_after);
+    OVER(PD_PP_LINE_SPACING, line_spacing);
+    OVER(PD_PP_KEEP_NEXT, keep_with_next);
+    OVER(PD_PP_KEEP_LINES, keep_lines);
+    OVER(PD_PP_WIDOWS, widows);
+    OVER(PD_PP_ORPHANS, orphans);
+    OVER(PD_PP_BREAK_BEFORE, page_break_before);
+    OVER(PD_PP_HYPHENATE, hyphenate);
+    OVER(PD_PP_BREAK_MODE, break_mode);
+#undef OVER
+
+    if (label_x) {
+        *label_x = 0;
+    }
+
+    /* a list item's text sits at the level's indent; its label hangs to the left */
+    if (s->list && (int32_t)s->list <= d->nlists) {
+        const pd_list_level* L = &d->lists[s->list - 1].lv[s->list_level];
+
+        pp->indent_left += L->indent;
+
+        if (label_x) {
+            *label_x = pp->indent_left - L->hanging;
+        }
+    }
+}
+
+/* advance width of a short UTF-8 text in a style, without kerning */
+static pd_sp text_width(const pd_style* st, const char* s) {
+    pd_font_metrics m;
+    const unsigned char* p = (const unsigned char*)s;
+    int64_t units = 0;
+
+    pd_font_get_metrics(st->font, &m);
+
+    while (*p) {
+        uint32_t cp = *p++;
+
+        if (cp >= 0xC0) {   /* a multi-byte sequence (input is valid UTF-8) */
+            int n = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : 1;
+
+            cp &= 0x3F >> n;
+
+            while (n-- && (*p & 0xC0) == 0x80) {
+                cp = (cp << 6) | (*p++ & 0x3F);
+            }
+        }
+
+        units += pd_font_glyph_advance(st->font, pd_font_glyph_index(st->font, cp));
+    }
+
+    return (pd_sp)(units * st->size / m.units_per_em);
+}
+
 pd_status pd_doc_para_build(const pd_doc* d, pd_block_id para, pd_sp column, pd_para* out, pd_params* prm) {
+    return pd_doc_para_build_ex(d, para, column, out, prm, NULL, NULL);
+}
+
+pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, pd_para* out, pd_params* prm,
+                               pd_field_fn fn, void* user) {
     blk* b = pd_doc_blk(d, para);
     const bstate* s;
     pd_para_props pp;
@@ -62,24 +134,7 @@ pd_status pd_doc_para_build(const pd_doc* d, pd_block_id para, pd_sp column, pd_
     }
 
     s = &b->st;
-    pd_doc_style_resolve(d, s->style, &pp, NULL);
-
-    /* direct properties over the style's */
-#define OVER(bit, f) if (s->pp.mask & (bit)) { pp.f = s->pp.f; }
-    OVER(PD_PP_ALIGN, align);
-    OVER(PD_PP_INDENT_LEFT, indent_left);
-    OVER(PD_PP_INDENT_RIGHT, indent_right);
-    OVER(PD_PP_INDENT_FIRST, indent_first);
-    OVER(PD_PP_LINE_SPACING, line_spacing);
-    OVER(PD_PP_BREAK_MODE, break_mode);
-#undef OVER
-
-    if (s->list && (int32_t)s->list <= d->nlists) {   /* a list level sets the text indent */
-        const pd_list_level* L = &d->lists[s->list - 1].lv[s->list_level];
-
-        pp.indent_left += L->indent;
-        pp.indent_first -= L->hanging;
-    }
+    pd_doc_effective_pp(d, b, &pp, NULL);
 
     pd_para_clear(out);
     pd_params_init(prm);
@@ -105,7 +160,7 @@ pd_status pd_doc_para_build(const pd_doc* d, pd_block_id para, pd_sp column, pd_
         pd_style ps;
         pd_char_props cp;
 
-        st = style_for(d, para, s->runs[r].format, &ps, &cp);
+        st = pd_doc_run_style(d, para, s->runs[r].format, &ps, &cp);
 
         if (st != PD_OK) {
             return st;
@@ -134,11 +189,23 @@ pd_status pd_doc_para_build(const pd_doc* d, pd_block_id para, pd_sp column, pd_
 
                 switch (o->kind) {
                     case PD_INLINE_FIELD:
-                    case PD_INLINE_FOOTNOTE:    /* placeholder until pages give values */
-                        ow = char_width(&ps, '0', o->kind == PD_INLINE_FIELD ? 2 : 1);
+                    case PD_INLINE_FOOTNOTE: {  /* its value's width, or a placeholder until known */
+                        char val[96];
+
+                        if (fn && fn(user, b, &s->inl[k], val, sizeof(val))) {
+                            ow = text_width(&ps, val);
+
+                            if (o->kind == PD_INLINE_FOOTNOTE) {
+                                ow = ow * 7 / 10;   /* drawn smaller and raised */
+                            }
+                        } else {
+                            ow = char_width(&ps, '0', o->kind == PD_INLINE_FIELD ? 2 : 1);
+                        }
+
                         oh = cp.size * 7 / 10;
                         od = 0;
                         break;
+                    }
 
                     case PD_INLINE_TAB:
                         ow = char_width(&ps, ' ', 4);
@@ -165,7 +232,7 @@ pd_status pd_doc_para_build(const pd_doc* d, pd_block_id para, pd_sp column, pd_
         pd_style ps;
         pd_char_props cp;
 
-        st = style_for(d, para, s->empty_format, &ps, &cp);
+        st = pd_doc_run_style(d, para, s->empty_format, &ps, &cp);
 
         if (st != PD_OK) {
             return st;

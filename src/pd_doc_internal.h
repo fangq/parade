@@ -129,6 +129,7 @@ struct pd_doc {
     pd_doc_listener listener;
     void* listener_user;
     uint64_t revision;
+    uint64_t style_rev;         /* bumped by every style change, including undo/redo */
     /* undo */
     ustep* undo;
     int32_t nundo, capundo;
@@ -160,6 +161,15 @@ void      pd_doc_pp_normalize(pd_para_props* pp);
 pd_doc*   pd_doc_alloc(void);
 void      pd_doc_install_builtin_styles(pd_doc* d);
 int       pd_doc_intern_raw(pd_doc* d, const dformat* f, pd_format_id* out);
+void      pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap);
+/* a paragraph's effective properties: style chain, direct properties, list indent */
+void      pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp* label_x);
+/* the text of a field or footnote mark if known yet (returns 1), for sizing it */
+typedef int (*pd_field_fn)(void* user, const blk* b, const dinline* q, char* buf, size_t cap);
+pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, pd_para* out, pd_params* prm,
+                               pd_field_fn fn, void* user);
+/* the paragraph-engine style (font through the resolver) of a format in a paragraph */
+pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, pd_style* st, pd_char_props* cp);
 
 #define PD_CP_ALL ((1u << 14) - 1)
 #define PD_PP_ALL ((1u << 17) - 1)
