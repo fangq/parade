@@ -396,8 +396,16 @@ type
     block: pd_block_id;
     offset: UInt32;
     region: Int32;
+    text: UInt32;
   end;
   Ppd_draw = ^pd_draw;
+
+  pd_pdf_options = record
+    compress, outlines: Int32;
+    title: array[0..255] of AnsiChar;
+    author: array[0..127] of AnsiChar;
+  end;
+  Ppd_pdf_options = ^pd_pdf_options;
 
 { ---- parade.h ---- }
 function pd_version: PAnsiChar; cdecl; PDEXT;
@@ -521,6 +529,9 @@ function pd_layout_page_info(layout: Ppd_layout; page: Int32; out info: pd_page_
 function pd_layout_page_items(layout: Ppd_layout; page: Int32; buf: Ppd_draw; cap: Int32; out count: Int32): pd_status; cdecl; PDEXT;
 function pd_layout_hit_test(layout: Ppd_layout; page: Int32; x, y: pd_sp; out pos: pd_pos): pd_status; cdecl; PDEXT;
 function pd_layout_caret(layout: Ppd_layout; pos: pd_pos; out page: Int32; out x, baseline, ascent, descent: pd_sp): pd_status; cdecl; PDEXT;
+
+procedure pd_pdf_options_init(out options: pd_pdf_options); cdecl; PDEXT;
+function pd_layout_write_pdf(layout: Ppd_layout; options: Ppd_pdf_options; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 
 { helpers }
 function PT(v: Double): pd_sp; inline;

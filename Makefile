@@ -11,13 +11,13 @@ MEMLIMIT_KB ?= 2097152
 ORACLE_MAX_MEM ?= 2048
 ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
-SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_doc.c src/pd_doc_io.c \
-           src/pd_doc_layout.c src/pd_layout.c
+SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
+           src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c
 BUILD   ?= build
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)
 LIB     := $(BUILD)/libparade.a
 SO      := $(BUILD)/libparade.so
-TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout
+TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout $(BUILD)/test_pdf
 BENCH   := $(BUILD)/bench_parade
 
 all: $(LIB) $(SO) $(TESTS) $(BENCH)
@@ -106,6 +106,13 @@ pascal-edit: $(BUILD)/pascal/lib/libparade.a $(BUILD)/pd_dump
 pascal-demo: $(BUILD)/pascal/lib/libparade.a
 	$(LAZBUILD) pascal/demo/paradedemo.lpi
 
+# PDF through external readers: Ghostscript parses it, poppler extracts its text and renders it
+pdf-check: $(BUILD)/test_pdf $(BUILD)/pd_dump
+	$(ulimit_cmd) && ./$(BUILD)/test_pdf && ./$(BUILD)/pd_dump --pdf $(BUILD)/sample.pdf > /dev/null
+	gs -q -dNOPAUSE -dBATCH -sDEVICE=nullpage $(BUILD)/test_pdf.pdf && gs -q -dNOPAUSE -dBATCH -sDEVICE=nullpage $(BUILD)/sample.pdf
+	pdftotext $(BUILD)/sample.pdf - | grep -q "Figure 1: a here-or-top float" && echo "text extraction ok"
+	pdftoppm -r 60 -png $(BUILD)/test_pdf.pdf $(BUILD)/test_pdf && echo "rendered $(BUILD)/test_pdf-*.png"
+
 # rasterizer vs fontTools: outline areas and coverage (TrueType and CFF)
 oracle-raster: $(SO)
 	python3 tools/raster_oracle.py --max-mem $(ORACLE_MAX_MEM) \
@@ -144,4 +151,4 @@ pretty:
 	    --break-blocks \
 	    "include/*.h" "src/*.c" "src/*.h" "tests/*.c" "bench/*.c"
 
-.PHONY: all test bench oracle oracle-raster view pages pascal pascal-edit pascal-demo asan clean pretty
+.PHONY: all test bench oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-demo asan clean pretty

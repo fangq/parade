@@ -70,6 +70,19 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   wrapping beside floats, continuous section breaks, optimal (rather than
   greedy-with-lookback) page breaking.
 
+## PDF (`pd_layout_write_pdf`)
+
+PDF 1.7 from the same display list the screen uses. TrueType fonts are
+embedded as subsets (CIDFontType2, Identity-H, glyph numbering kept),
+CFF/CJK fonts as Type 3 fonts drawn from Parade's outlines (a 16 MB Noto
+CJK costs only the glyphs used), ToUnicode maps carry each glyph's code
+point (generated text such as page numbers and list labels included),
+JPEG passes through, PNG (gray/RGB/palette/alpha) is re-encoded with soft
+masks, headings become bookmarks. Output is deterministic (no dates, id
+from content). Streams use Parade's own deflate (`src/pd_zlib.c`,
+cross-checked against zlib). `make pdf-check` runs Ghostscript and
+poppler over the output.
+
 ## Lazarus / Free Pascal (`pascal/`)
 
 - `parade.pas`: the binding for all three headers (static link by default,
@@ -136,6 +149,8 @@ pd_para_break(p, &prm, NULL);
     src/pd_doc_io.c      native JData/BJData save and load
     src/pd_doc_layout.c  document paragraph -> pd_para
     src/pd_layout.c      page builder: columns, floats, headers, fields, display lists
+    src/pd_pdf.c         PDF writer
+    src/pd_zlib.c        deflate/inflate/crc32
     tests/               unit tests
     bench/               quality and speed benchmark
     tools/font_oracle.py fontTools cross-check through the C ABI (ctypes)

@@ -79,6 +79,7 @@ typedef struct {
     pd_block_id block;          /**< source paragraph */
     uint32_t offset;            /**< source byte offset */
     int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float */
+    uint32_t text;              /**< glyphs: the code point shown (also for generated text), 0 if none */
 } pd_draw;
 
 /** the display list of a page; same size-query convention as pd_para_get_glyphs */
@@ -91,6 +92,28 @@ PD_API pd_status pd_layout_hit_test(const pd_layout* layout, int32_t page, pd_sp
 /** where the caret for a position is drawn: page, x, baseline and line ascent/descent */
 PD_API pd_status pd_layout_caret(const pd_layout* layout, pd_pos pos, int32_t* page, pd_sp* x, pd_sp* baseline,
                                  pd_sp* ascent, pd_sp* descent);
+
+/* ------------------------------------------------------------------ */
+/* PDF                                                                */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int32_t compress;           /**< deflate content, fonts and images (default 1) */
+    int32_t outlines;           /**< bookmarks from titles and headings (default 1) */
+    char title[256];            /**< UTF-8; empty = the document's title paragraph */
+    char author[128];
+} pd_pdf_options;
+
+PD_API void pd_pdf_options_init(pd_pdf_options* options);
+
+/**
+ * Write the pages as PDF 1.7: TrueType fonts embedded as subsets, CFF
+ * fonts as Type 3 outlines, ToUnicode maps from the document text, JPEG
+ * and PNG images, bookmarks. Deterministic: the same layout gives the same
+ * bytes. options may be NULL.
+ */
+PD_API pd_status pd_layout_write_pdf(const pd_layout* layout, const pd_pdf_options* options, pd_writer fn,
+                                     void* user);
 
 #ifdef __cplusplus
 }

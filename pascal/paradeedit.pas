@@ -113,6 +113,7 @@ type
     procedure NewDocument;
     procedure LoadFromFile(const FileName: string);
     procedure SaveToFile(const FileName: string);
+    procedure ExportPDF(const FileName: string);
 
     { editing, also usable for automation }
     procedure InsertText(const S: string);
@@ -327,6 +328,20 @@ begin
   end;
   FFileName := FileName;
   FModified := False;
+end;
+
+procedure TParadeEdit.ExportPDF(const FileName: string);
+var
+  Fs: TFileStream;
+  Opt: pd_pdf_options;
+begin
+  pd_pdf_options_init(Opt);
+  Fs := TFileStream.Create(FileName, fmCreate);
+  try
+    ParadeCheck(pd_layout_write_pdf(FLayout, @Opt, @WriteToStream, Fs), 'PDF ' + FileName);
+  finally
+    Fs.Free;
+  end;
 end;
 
 { ---------------- geometry ---------------- }

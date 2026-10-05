@@ -168,6 +168,10 @@ void      pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, 
 typedef int (*pd_field_fn)(void* user, const blk* b, const dinline* q, char* buf, size_t cap);
 pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, pd_para* out, pd_params* prm,
                                pd_field_fn fn, void* user);
+/* the document a layout shows (pd_layout.c) */
+struct pd_layout;
+const pd_doc* pd_layout_doc(const struct pd_layout* L);
+
 /* the paragraph-engine style (font through the resolver) of a format in a paragraph */
 pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, pd_style* st, pd_char_props* cp);
 

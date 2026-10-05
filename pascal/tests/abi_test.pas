@@ -24,6 +24,7 @@ var
   v_pd_layout_info: pd_layout_info;
   v_pd_page_info: pd_page_info;
   v_pd_draw: pd_draw;
+  v_pd_pdf_options: pd_pdf_options;
 begin
   WriteLn('pd_font_metrics ', SizeOf(pd_font_metrics));
   WriteLn('pd_font_metrics.units_per_em ', PtrUInt(@v_pd_font_metrics.units_per_em) - PtrUInt(@v_pd_font_metrics));
@@ -242,4 +243,10 @@ begin
   WriteLn('pd_draw.block ', PtrUInt(@v_pd_draw.block) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.offset ', PtrUInt(@v_pd_draw.offset) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.region ', PtrUInt(@v_pd_draw.region) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.text ', PtrUInt(@v_pd_draw.text) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_pdf_options ', SizeOf(pd_pdf_options));
+  WriteLn('pd_pdf_options.compress ', PtrUInt(@v_pd_pdf_options.compress) - PtrUInt(@v_pd_pdf_options));
+  WriteLn('pd_pdf_options.outlines ', PtrUInt(@v_pd_pdf_options.outlines) - PtrUInt(@v_pd_pdf_options));
+  WriteLn('pd_pdf_options.title ', PtrUInt(@v_pd_pdf_options.title) - PtrUInt(@v_pd_pdf_options));
+  WriteLn('pd_pdf_options.author ', PtrUInt(@v_pd_pdf_options.author) - PtrUInt(@v_pd_pdf_options));
 end.

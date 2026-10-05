@@ -336,10 +336,17 @@ static int to_file(void* user, const void* data, size_t len) {
 }
 
 int main(int argc, char** argv) {
+    const char* pdf = NULL;
     pd_doc* d = NULL;
     pd_layout* L;
     pd_layout_info info;
     int32_t pg, i, k;
+
+    if (argc > 2 && strcmp(argv[1], "--pdf") == 0) {     /* --pdf out.pdf [in.pdoc] */
+        pdf = argv[2];
+        argv += 2;
+        argc -= 2;
+    }
 
     for (i = 0; i < NFONTS; i++) {
         if (pd_font_load_file(font_paths[i], 0, &fonts[i]) != PD_OK) {
@@ -389,6 +396,18 @@ int main(int argc, char** argv) {
 
     fprintf(stderr, "%d pages, %d paragraphs broken, %d float pages, %d overfull columns\n", info.pages,
             info.paragraphs_broken, info.float_pages, info.overfull);
+
+    if (pdf) {
+        FILE* fp = fopen(pdf, "wb");
+
+        if (!fp || pd_layout_write_pdf(L, NULL, to_file, fp) != PD_OK) {
+            fprintf(stderr, "cannot write %s\n", pdf);
+            return 1;
+        }
+
+        fclose(fp);
+        fprintf(stderr, "wrote %s\n", pdf);
+    }
     printf("{\"fonts\": [");
 
     for (i = 0; i < NFONTS; i++) {

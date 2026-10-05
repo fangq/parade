@@ -166,6 +166,8 @@ begin
   for I := 1 to 4 do
     E.ProcessKey(VK_RIGHT, [ssShift]);
   SavePage(E, 0, Dir + 'edit_typed_p1.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+  E.ExportPDF(Dir + 'edit_typed.pdf');
+  Check(FileExists(Dir + 'edit_typed.pdf'), 'PDF export');
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

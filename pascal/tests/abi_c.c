@@ -219,5 +219,11 @@ int main(void) {
     printf("pd_draw.block %zu\n", offsetof(pd_draw, block));
     printf("pd_draw.offset %zu\n", offsetof(pd_draw, offset));
     printf("pd_draw.region %zu\n", offsetof(pd_draw, region));
+    printf("pd_draw.text %zu\n", offsetof(pd_draw, text));
+    printf("pd_pdf_options %zu\n", sizeof(pd_pdf_options));
+    printf("pd_pdf_options.compress %zu\n", offsetof(pd_pdf_options, compress));
+    printf("pd_pdf_options.outlines %zu\n", offsetof(pd_pdf_options, outlines));
+    printf("pd_pdf_options.title %zu\n", offsetof(pd_pdf_options, title));
+    printf("pd_pdf_options.author %zu\n", offsetof(pd_pdf_options, author));
     return 0;
 }

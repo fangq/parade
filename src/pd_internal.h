@@ -155,6 +155,11 @@ static inline int32_t pd_item_penalty(const pd_item* it, const pd_params* prm) {
     return it->penalty;
 }
 
+/* zlib streams (pd_zlib.c): 0 on success, *out malloc'ed */
+int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);
+int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen);
+uint32_t pd_crc32(const void* data, size_t n);
+
 /* line breaking, implemented in pd_break.c */
 pd_status pd_break_lines(pd_para* p, const pd_params* prm, pd_break_info* info);
 

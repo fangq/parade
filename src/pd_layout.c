@@ -1398,6 +1398,10 @@ pd_status pd_layout_update(pd_layout* L, pd_layout_info* info) {
 /* queries                                                            */
 /* ------------------------------------------------------------------ */
 
+const pd_doc* pd_layout_doc(const pd_layout* L) {
+    return L ? L->doc : NULL;
+}
+
 int32_t pd_layout_page_count(const pd_layout* L) {
     return L ? L->npages : 0;
 }
@@ -1465,6 +1469,27 @@ static void emit(dlist_t* D, const pd_draw* x) {
 }
 
 /* shape a short text (label, field value) in a style and emit it at a pen position */
+/* the code point at a byte offset of UTF-8 text (soft hyphens show as hyphens) */
+static uint32_t cp_at(const char* text, size_t len, uint32_t off) {
+    const unsigned char* s = (const unsigned char*)text + off;
+    uint32_t cp;
+    int n, k;
+
+    if (!text || off >= len) {
+        return 0;
+    }
+
+    cp = s[0];
+    n = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+    cp &= n ? 0x3F >> n : 0x7F;
+
+    for (k = 1; k <= n && off + (uint32_t)k < len; k++) {
+        cp = (cp << 6) | (s[k] & 0x3F);
+    }
+
+    return cp == 0xAD ? 0x2D : (cp == 0xFFFC || cp < 32) ? 0 : cp;
+}
+
 static pd_sp emit_text(const pd_layout* L, dlist_t* D, const char* text, const pd_style* st, pd_sp x, pd_sp y,
                        pd_block_id block, uint32_t off, int32_t region) {
     pd_params prm;
@@ -1498,6 +1523,7 @@ static pd_sp emit_text(const pd_layout* L, dlist_t* D, const char* text, const p
         a.y = y;
         a.w = g[i].advance;
         a.glyph = g[i].glyph;
+        a.text = cp_at(text, strlen(text), g[i].cluster);
         a.font = st->font;
         a.size = st->size;
         a.color = st->color;
@@ -1715,6 +1741,7 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
 
         a.kind = PD_DRAW_GLYPH;
         a.glyph = g[i].glyph;
+        a.text = cp_at(b->st.text, b->st.len, g[i].cluster);
         a.font = ps.font;
         a.size = ps.size;
         a.color = ps.color;

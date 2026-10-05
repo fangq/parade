@@ -18,6 +18,7 @@ type
     procedure DoNew(Sender: TObject);
     procedure DoOpen(Sender: TObject);
     procedure DoSave(Sender: TObject);
+    procedure DoPDF(Sender: TObject);
     procedure DoBold(Sender: TObject);
     procedure DoItalic(Sender: TObject);
     procedure DoUnderline(Sender: TObject);
@@ -52,6 +53,7 @@ begin
   AddButton('New', @DoNew);
   AddButton('Open', @DoOpen);
   AddButton('Save', @DoSave);
+  AddButton('PDF', @DoPDF);
   AddButton('B', @DoBold);
   AddButton('I', @DoItalic);
   AddButton('U', @DoUnderline);
@@ -132,6 +134,21 @@ begin
     D.Free;
   end;
   EditChanged(nil);
+end;
+
+procedure TMainForm.DoPDF(Sender: TObject);
+var
+  D: TSaveDialog;
+begin
+  D := TSaveDialog.Create(Self);
+  try
+    D.Filter := 'PDF|*.pdf';
+    D.DefaultExt := 'pdf';
+    if D.Execute then
+      FEdit.ExportPDF(D.FileName);
+  finally
+    D.Free;
+  end;
 end;
 
 procedure TMainForm.DoBold(Sender: TObject);

@@ -34,7 +34,8 @@ STRUCTS = {
     "pd_change": "kind block style revision",
     "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull",
     "pd_page_info": "width height section number label float_page first last",
-    "pd_draw": "kind x y w h glyph font size color resource block offset region",
+    "pd_draw": "kind x y w h glyph font size color resource block offset region text",
+    "pd_pdf_options": "compress outlines title author",
 }
 PASCAL_NAME = {"end": "finish", "label": "label_"}
 
