@@ -1478,6 +1478,91 @@ static void test_docx_endnotes(void) {
     pd_doc_free(d);
 }
 
+/* Word's tab stops: a style's, a paragraph adding to them and clearing one,
+   leaders, the document's default interval; through JData and DOCX. */
+static void test_docx_tabs(void) {
+    pd_doc* d = docx_doc(
+        "word/settings.xml", "<w:settings xmlns:w=\"w\"><w:defaultTabStop w:val=\"360\"/></w:settings>",
+        "word/styles.xml",
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">"
+        "<w:name w:val=\"Normal\"/></w:style>"
+        "<w:style w:type=\"paragraph\" w:styleId=\"TOC\"><w:name w:val=\"TOC\"/><w:basedOn w:val=\"Normal\"/>"
+        "<w:pPr><w:tabs><w:tab w:val=\"left\" w:pos=\"2880\"/><w:tab w:val=\"right\" w:leader=\"dot\" w:pos=\"9000\"/>"
+        "</w:tabs></w:pPr></w:style></w:styles>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:pPr><w:pStyle w:val=\"TOC\"/></w:pPr><w:r><w:t>One</w:t></w:r><w:r><w:tab/></w:r>"
+        "<w:r><w:t>1</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pStyle w:val=\"TOC\"/><w:tabs><w:tab w:val=\"clear\" w:pos=\"2880\"/>"
+        "<w:tab w:val=\"decimal\" w:pos=\"7200\"/></w:tabs></w:pPr><w:r><w:t>Two</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>Plain</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    pd_block_id sec, p[3];
+    pd_para_props pp, np;
+    pd_block_info bi;
+    int pass, i;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    for (pass = 0; pass < 3; pass++) {
+        pd_doc* x = d;
+        buf_t b;
+
+        if (pass > 0) {     /* 1: DOCX out and in, 2: JData */
+            memset(&b, 0, sizeof(b));
+            x = NULL;
+            CHECK((pass == 1 ? pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) : pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b)) ==
+                  PD_OK);
+            CHECK((pass == 1 ? pd_doc_import(b.p, b.n, PD_CONV_DOCX, &x) : pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &x)) ==
+                  PD_OK);
+            free(b.p);
+
+            if (!x) {
+                continue;
+            }
+        }
+
+        sec = pd_doc_child(x, pd_doc_root(x), 0);
+
+        for (i = 0; i < 3; i++) {
+            p[i] = pd_doc_child(x, sec, i);
+        }
+
+        pp = para_resolved(x, p[0]);    /* the style's two stops */
+        pd_doc_para_props(x, p[0], &np);
+
+        if (np.mask & PD_PP_TABS) {
+            pp.ntabs = np.ntabs;
+            memcpy(pp.tabs, np.tabs, sizeof(pp.tabs));
+        }
+
+        CHECK(pp.ntabs == 2 && pp.tabs[0].position == PD_PT(144) && pp.tabs[0].align == PD_TAB_LEFT);
+        CHECK(pp.tabs[1].position == PD_PT(450) && pp.tabs[1].align == PD_TAB_RIGHT &&
+              pp.tabs[1].leader == PD_LEADER_DOT);
+
+        pd_doc_para_props(x, p[1], &np);    /* one cleared, one added */
+        CHECK((np.mask & PD_PP_TABS) && np.ntabs == 2 && np.tabs[0].position == PD_PT(360) &&
+              np.tabs[0].align == PD_TAB_DECIMAL && np.tabs[1].position == PD_PT(450));
+
+        if (pass < 2) {     /* the document's interval, on Normal (DOCX has no other place for it) */
+            pd_doc_block_info(x, p[2], &bi);
+            pd_doc_style_resolve(x, bi.style, &pp, NULL);
+            CHECK(pass == 1 || pp.tab_interval == PD_PT(18));
+        }
+
+        if (x != d) {
+            pd_doc_free(x);
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1503,6 +1588,8 @@ int main(void) {
     test_docx_floats();
     printf("docx endnotes\n");
     test_docx_endnotes();
+    printf("docx tab stops\n");
+    test_docx_tabs();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

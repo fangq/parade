@@ -75,6 +75,12 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
     OVER(PD_PP_HYPHENATE, hyphenate);
     OVER(PD_PP_BREAK_MODE, break_mode);
     OVER(PD_PP_DIRECTION, direction);
+
+    if (s->pp.mask & PD_PP_TABS) {
+        pp->ntabs = s->pp.ntabs;
+        memcpy(pp->tabs, s->pp.tabs, sizeof(pp->tabs));
+        pp->tab_interval = s->pp.tab_interval;
+    }
 #undef OVER
 
     if (label_x) {
@@ -258,6 +264,7 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
     ind[1] = pp.indent_left;
     wid[1] = w;
     pd_para_set_shape(out, 2, ind, wid);
+    pd_para_set_tabs(out, pp.ntabs, pp.tabs, pp.tab_interval, 0);   /* measured from the column's edge */
 
     for (r = 0; r < s->nruns; r++) {
         uint32_t pos = s->runs[r].start, end = s->runs[r].end;

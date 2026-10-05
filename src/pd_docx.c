@@ -675,6 +675,8 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
     pd_doc_block_info(x->d, p, &bi);
     pd_doc_style_resolve(x->d, bi.style, &pp, NULL);
 
+    memset(&dp, 0, sizeof(dp));
+
     if (pd_doc_para_props(x->d, p, &dp) == PD_OK && (dp.mask & PD_PP_ALIGN)) {
         pp.align = dp.align;
     }
@@ -691,6 +693,21 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
 
     if (num) {
         pb_printf(o, "<w:numPr><w:ilvl w:val=\"%d\"/><w:numId w:val=\"%d\"/></w:numPr>", (int)level, num);
+    }
+
+    if ((dp.mask & PD_PP_TABS) && dp.ntabs > 0) {     /* after numPr, before jc, as the schema orders them */
+        static const char* al[] = { "left", "center", "right", "decimal" };
+        static const char* ld[] = { "none", "dot", "hyphen", "underscore" };
+        int32_t k;
+
+        pb_puts(o, "<w:tabs>");
+
+        for (k = 0; k < dp.ntabs && k < PD_MAX_TABS; k++) {
+            pb_printf(o, "<w:tab w:val=\"%s\" w:leader=\"%s\" w:pos=\"%d\"/>", al[dp.tabs[k].align & 3],
+                      ld[dp.tabs[k].leader & 3], TW(dp.tabs[k].position));
+        }
+
+        pb_puts(o, "</w:tabs>");
     }
 
     if (pp.align == PD_ALIGN_CENTER || pp.align == PD_ALIGN_RIGHT || (pp.align == PD_ALIGN_JUSTIFY && !sid && !num)) {
@@ -1558,6 +1575,24 @@ static void ppr_elem(const pd_markup* m, const char* t, dprops* pr) {
     } else if (strcmp(t, "suppressAutoHyphens") == 0) {
         pp->mask |= PD_PP_HYPHENATE;
         pp->hyphenate = !attr_on(m);
+    } else if (strcmp(t, "tab") == 0 && pp->ntabs < PD_MAX_TABS && mu_attr(m, "w:val", v, sizeof(v))) {
+        /* a stop, or the clearing of one the style set (align -1, merged away by pr_over) */
+        pd_tab_stop* ts = &pp->tabs[pp->ntabs];
+        char ld[32] = "none";
+
+        if (strcmp(v, "bar") == 0 || strcmp(v, "num") == 0) {
+            return;     /* a vertical bar, a list's own stop: not stops text goes to */
+        }
+
+        pp->mask |= PD_PP_TABS;
+        ts->position = twips(attr_int(m, "w:pos", 0));
+        ts->align = strcmp(v, "clear") == 0 ? -1 : strcmp(v, "center") == 0 ? PD_TAB_CENTER : strcmp(v, "right") == 0 ||
+                    strcmp(v, "end") == 0 ? PD_TAB_RIGHT : strcmp(v, "decimal") == 0 ? PD_TAB_DECIMAL : PD_TAB_LEFT;
+        mu_attr(m, "w:leader", ld, sizeof(ld));
+        ts->leader = strcmp(ld, "dot") == 0 || strcmp(ld, "middleDot") == 0 ? PD_LEADER_DOT :
+                     strcmp(ld, "hyphen") == 0 ? PD_LEADER_HYPHEN : strcmp(ld, "underscore") == 0 ||
+                     strcmp(ld, "heavy") == 0 ? PD_LEADER_UNDERSCORE : PD_LEADER_NONE;
+        pp->ntabs++;
     }
 }
 
@@ -1582,6 +1617,40 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sp->mask & PD_PP_LINE_SPACING) {
         dp->line_spacing = sp->line_spacing;
         d->line_abs = s->line_abs;
+    }
+
+    if (sp->mask & PD_PP_TABS) {    /* Word's stops add up along the chain, and a clear takes one away */
+        int32_t i, k, j;
+
+        if (!(dp->mask & PD_PP_TABS)) {
+            dp->ntabs = 0;
+        }
+
+        if (sp->tab_interval > 0) {
+            dp->tab_interval = sp->tab_interval;
+        }
+
+        for (i = 0; i < sp->ntabs; i++) {
+            for (k = 0; k < dp->ntabs; k++) {
+                if (abs(dp->tabs[k].position - sp->tabs[i].position) <= 65536 / 20) {
+                    for (j = k; j + 1 < dp->ntabs; j++) {
+                        dp->tabs[j] = dp->tabs[j + 1];
+                    }
+
+                    dp->ntabs--;
+                    break;
+                }
+            }
+
+            if (sp->tabs[i].align >= 0 && dp->ntabs < PD_MAX_TABS) {
+                for (k = dp->ntabs; k > 0 && dp->tabs[k - 1].position > sp->tabs[i].position; k--) {
+                    dp->tabs[k] = dp->tabs[k - 1];
+                }
+
+                dp->tabs[k] = sp->tabs[i];
+                dp->ntabs++;
+            }
+        }
     }
 
     dp->mask |= sp->mask;
@@ -1730,6 +1799,10 @@ static void read_settings(dxi* X, const char* xml, size_t n) {
             X->defaults.pp.hyphenate = attr_on(&m);
         } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "evenAndOddHeaders") == 0) {
             X->even_odd = attr_on(&m);
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "defaultTabStop") == 0 &&
+                   attr_int(&m, "w:val", 0) > 0) {
+            X->defaults.pp.mask |= PD_PP_TABS;
+            X->defaults.pp.tab_interval = twips(attr_int(&m, "w:val", 0));
         }
     }
 }
@@ -2256,6 +2329,14 @@ static void dw_begin_para(dw* w) {
         DW_DIFF(PD_PP_BREAK_BEFORE, page_break_before)
         DW_DIFF(PD_PP_HYPHENATE, hyphenate)
 #undef DW_DIFF
+
+        if ((f->mask & PD_PP_TABS) && (f->ntabs != rp.ntabs || f->tab_interval != rp.tab_interval ||
+                                       memcmp(f->tabs, rp.tabs, (size_t)f->ntabs * sizeof(pd_tab_stop)) != 0)) {
+            b->pp.mask |= PD_PP_TABS;
+            b->pp.ntabs = f->ntabs;
+            memcpy(b->pp.tabs, f->tabs, sizeof(b->pp.tabs));
+            b->pp.tab_interval = f->tab_interval;
+        }
     }
 
     bld_begin_para(b);

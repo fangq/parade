@@ -390,6 +390,19 @@ static int add_space(builder* b, uint32_t cluster, uint32_t cluster_end, int nob
     return 0;
 }
 
+static pd_item* new_tab(builder* b, uint32_t cluster, uint32_t cluster_end) {
+    pd_item* it = new_item(b->p, PD_ITEM_GLUE);
+
+    if (it) {
+        it->flags = PD_FLAG_TAB;
+        it->style = b->style;
+        it->text_start = cluster;
+        it->text_end = cluster_end;
+    }
+
+    return it;
+}
+
 static int add_raw_glue(builder* b, uint32_t at, int32_t stretch, int fil) {
     pd_item* it;
 
@@ -593,8 +606,16 @@ pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_st
 
         if (!rc) {
             switch (cp) {
-                case ' ':
-                case '\t': {
+                case '\t':         /* a fixed space to the next tab stop, sized before breaking */
+                    close_box(&b);
+
+                    if (!new_tab(&b, at, at_end)) {
+                        rc = -1;
+                    }
+
+                    break;
+
+                case ' ': {
                     /* breakable unless UAX #14 forbids a break after this run of spaces */
                     int32_t k = ci + 1;
 
@@ -773,6 +794,151 @@ pd_status pd_para_set_shape(pd_para* p, int32_t n, const pd_sp* indent, const pd
     return PD_OK;
 }
 
+pd_status pd_para_set_tabs(pd_para* p, int32_t n, const pd_tab_stop* stops, pd_sp interval, pd_sp origin) {
+    int32_t i, k;
+
+    if (!p || n < 0 || n > PD_MAX_TABS || (n > 0 && !stops) || interval < 0) {
+        return PD_ERR_ARG;
+    }
+
+    for (i = 0; i < n; i++) {
+        if (stops[i].align < PD_TAB_LEFT || stops[i].align > PD_TAB_DECIMAL || stops[i].leader < PD_LEADER_NONE ||
+                stops[i].leader > PD_LEADER_UNDERSCORE) {
+            return PD_ERR_ARG;
+        }
+    }
+
+    for (i = 0; i < n; i++) {   /* kept in order of position */
+        pd_tab_stop t = stops[i];
+
+        for (k = i; k > 0 && p->tabs[k - 1].position > t.position; k--) {
+            p->tabs[k] = p->tabs[k - 1];
+        }
+
+        p->tabs[k] = t;
+    }
+
+    p->n_tabs = n;
+    p->tab_interval = interval;
+    p->tab_origin = origin;
+    p->have_cache = 0;
+    return PD_OK;
+}
+
+/* width of the text after the tab at item i, up to the next tab or line end;
+   dot: only up to the decimal point */
+static int64_t tab_segment(const pd_para* p, int32_t i, int dot) {
+    int64_t w = 0;
+    int32_t k;
+    uint32_t at = UINT32_MAX;
+
+    if (dot) {
+        uint32_t o;
+
+        for (o = p->items[i].text_end; o < p->n_text && p->text[o] != '\t' && p->text[o] != '\n'; o++) {
+            if (p->text[o] == '.') {
+                at = o;
+                break;
+            }
+        }
+    }
+
+    for (k = i + 1; k < p->n_items; k++) {
+        const pd_item* it = &p->items[k];
+
+        if ((it->type == PD_ITEM_GLUE && (it->flags & (PD_FLAG_TAB | PD_FLAG_FINAL))) ||
+                (it->type == PD_ITEM_PENALTY && it->penalty <= -PD_INF_PENALTY)) {
+            break;
+        }
+
+        if (it->text_start >= at) {
+            break;
+        }
+
+        if (it->type == PD_ITEM_BOX && !(it->flags & PD_FLAG_OBJECT) && it->text_end > at) {
+            uint32_t g;     /* the box holding the point: its glyphs before it */
+
+            for (g = it->glyph_start; g < it->glyph_start + it->glyph_count; g++) {
+                if (p->glyphs[g].cluster < at) {
+                    w += p->glyphs[g].advance;
+                }
+            }
+
+            break;
+        }
+
+        if (it->type != PD_ITEM_PENALTY) {
+            w += it->width;
+        }
+    }
+
+    return w;
+}
+
+/* every tab's width, from where it starts on its line (the first, or the one
+   after a forced break) to its stop */
+static void resolve_tabs(pd_para* p, const pd_params* prm) {
+    pd_sp first = p->n_shape > 0 ? p->shape_indent[0] : prm->indent;
+    pd_sp rest = p->n_shape > 1 ? p->shape_indent[1] : p->n_shape == 1 ? p->shape_indent[0] : 0;
+    pd_sp interval = p->tab_interval > 0 ? p->tab_interval : 36 * 65536;
+    int64_t x = first;
+    int32_t i, k, changed = 0;
+
+    for (i = 0; i < p->n_items; i++) {
+        pd_item* it = &p->items[i];
+
+        if (it->type == PD_ITEM_GLUE && (it->flags & PD_FLAG_TAB)) {
+            int64_t xa = x + p->tab_origin, stop = -1, w;
+            int32_t align = PD_TAB_LEFT, leader = PD_LEADER_NONE;
+
+            for (k = 0; k < p->n_tabs; k++) {
+                if (p->tabs[k].position > xa) {
+                    stop = p->tabs[k].position;
+                    align = p->tabs[k].align;
+                    leader = p->tabs[k].leader;
+                    break;
+                }
+            }
+
+            /* a hanging first line: the other lines' indent is a stop before any set one past it */
+            if (first < rest && x < rest && (stop < 0 || stop > rest + p->tab_origin)) {
+                stop = rest + p->tab_origin;
+                align = PD_TAB_LEFT;
+                leader = PD_LEADER_NONE;
+            }
+
+            if (stop < 0) {
+                stop = (xa / interval + 1) * interval;
+            }
+
+            w = stop - xa;
+
+            if (align != PD_TAB_LEFT) {
+                int64_t seg = tab_segment(p, i, align == PD_TAB_DECIMAL);
+
+                w -= align == PD_TAB_CENTER ? seg / 2 : seg;
+                w = w < 0 ? 0 : w;
+            }
+
+            if (it->width != (int32_t)w || it->user != leader) {
+                it->width = (int32_t)w;
+                it->user = leader;
+                changed = 1;
+            }
+        }
+
+        if (it->type == PD_ITEM_PENALTY && it->penalty <= -PD_INF_PENALTY) {
+            x = rest;   /* a forced break: the next line starts again */
+        } else if (it->type != PD_ITEM_PENALTY) {
+            x += it->width;
+        }
+    }
+
+    if (changed) {
+        p->have_cache = 0;
+    }
+}
+
 pd_status pd_para_break(pd_para* p, const pd_params* prm, pd_break_info* info) {
     pd_params def;
 
@@ -818,6 +984,8 @@ pd_status pd_para_break(pd_para* p, const pd_params* prm, pd_break_info* info) {
         it->flags = PD_FLAG_FINAL;
         p->finalized = 1;
     }
+
+    resolve_tabs(p, prm);
 
     /* bidi levels for the whole paragraph (none kept when it is all left-to-right) */
     if (!pd_bidi_maybe_rtl(p->text ? p->text : "", p->n_text, prm->direction == PD_DIR_LTR ? 0 :

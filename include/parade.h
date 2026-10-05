@@ -281,6 +281,40 @@ PD_API pd_status pd_para_add_glue(pd_para* para, pd_sp width, pd_sp stretch, pd_
 /** append a TeX-style penalty: >= 10000 forbids, <= -10000 forces a break */
 PD_API pd_status pd_para_add_penalty(pd_para* para, int32_t penalty, pd_sp width, int32_t flagged);
 
+typedef enum {
+    PD_TAB_LEFT = 0,            /**< text after the tab starts at the stop */
+    PD_TAB_CENTER = 1,          /**< ... is centred on it */
+    PD_TAB_RIGHT = 2,           /**< ... ends at it */
+    PD_TAB_DECIMAL = 3          /**< ... has its decimal point at it */
+} pd_tab_align;
+
+typedef enum {
+    PD_LEADER_NONE = 0,
+    PD_LEADER_DOT = 1,          /**< . . . . */
+    PD_LEADER_HYPHEN = 2,       /**< - - - - */
+    PD_LEADER_UNDERSCORE = 3    /**< a rule */
+} pd_tab_leader;
+
+#define PD_MAX_TABS 16
+
+typedef struct {
+    pd_sp position;             /**< from the origin (the left margin), see pd_para_set_tabs */
+    int32_t align;              /**< pd_tab_align */
+    int32_t leader;             /**< pd_tab_leader: what fills the space before the stop */
+} pd_tab_stop;
+
+/**
+ * Tab stops for the paragraph's tab characters. A tab is a fixed space to
+ * the next stop right of where it starts; past the last stop, one every
+ * interval (0 = 36pt). Positions are measured from origin sp left of the
+ * paragraph's x = 0 (the line origin pd_para_set_shape indents from), so
+ * that stops can be measured from the margin as in a word processor. When
+ * the first line hangs left of the others, their indent is a stop too. Widths are settled before the breaks are chosen, on
+ * the assumption that a tab is on the paragraph's first line (or the line
+ * after a forced break). n = 0, interval 0, origin 0 is the default.
+ */
+PD_API pd_status pd_para_set_tabs(pd_para* para, int32_t n, const pd_tab_stop* stops, pd_sp interval, pd_sp origin);
+
 /**
  * Per-line geometry (TeX \parshape): line i uses indent[min(i,n-1)] and
  * width[min(i,n-1)]. Use it to wrap text around a figure. n = 0 resets.

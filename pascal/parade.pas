@@ -182,6 +182,17 @@ const
   PD_PAGES_OPTIMAL = 1;
   PD_TABLE_MAX_COLS = 32;
 
+  PD_MAX_TABS = 16;
+  PD_TAB_LEFT = 0;
+  PD_TAB_CENTER = 1;
+  PD_TAB_RIGHT = 2;
+  PD_TAB_DECIMAL = 3;
+  PD_LEADER_NONE = 0;
+  PD_LEADER_DOT = 1;
+  PD_LEADER_HYPHEN = 2;
+  PD_LEADER_UNDERSCORE = 3;
+  PD_PP_TABS = 1 shl 18;
+
   PD_GRAVITY_LEFT = 0;
   PD_GRAVITY_RIGHT = 1;
 
@@ -315,6 +326,12 @@ type
   end;
   Ppd_char_props = ^pd_char_props;
 
+  pd_tab_stop = record
+    position: pd_sp;
+    align, leader: Int32;     { pd_tab_align, pd_tab_leader }
+  end;
+  Ppd_tab_stop = ^pd_tab_stop;
+
   pd_para_props = record
     mask: UInt32;
     align: Int32;
@@ -325,6 +342,9 @@ type
     border_width: pd_sp;
     shading: UInt32;
     direction: Int32;
+    ntabs: Int32;
+    tabs: array[0..PD_MAX_TABS - 1] of pd_tab_stop;
+    tab_interval: pd_sp;
   end;
   Ppd_para_props = ^pd_para_props;
 
@@ -481,6 +501,8 @@ function pd_para_add_object(para: Ppd_para; width, height, depth: pd_sp; user: I
 function pd_para_add_glue(para: Ppd_para; width, stretch, shrink: pd_sp; stretch_fil: Int32): pd_status; cdecl; PDEXT;
 function pd_para_add_penalty(para: Ppd_para; penalty: Int32; width: pd_sp; flagged: Int32): pd_status; cdecl; PDEXT;
 function pd_para_set_shape(para: Ppd_para; n: Int32; indent, width: Ppd_sp): pd_status; cdecl; PDEXT;
+function pd_para_set_tabs(para: Ppd_para; n: Int32; stops: Ppd_tab_stop; interval, origin: pd_sp): pd_status; cdecl;
+  PDEXT;
 function pd_para_break(para: Ppd_para; params: Ppd_params; info: Ppd_break_info): pd_status; cdecl; PDEXT;
 function pd_para_line_count(para: Ppd_para): Int32; cdecl; PDEXT;
 function pd_para_get_line(para: Ppd_para; index: Int32; out line: pd_line): pd_status; cdecl; PDEXT;

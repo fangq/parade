@@ -15,6 +15,7 @@ var
   v_pd_block_info: pd_block_info;
   v_pd_char_props: pd_char_props;
   v_pd_para_props: pd_para_props;
+  v_pd_tab_stop: pd_tab_stop;
   v_pd_list_level: pd_list_level;
   v_pd_run: pd_run;
   v_pd_inline: pd_inline;
@@ -166,6 +167,13 @@ begin
   WriteLn('pd_para_props.border_width ', PtrUInt(@v_pd_para_props.border_width) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.shading ', PtrUInt(@v_pd_para_props.shading) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.direction ', PtrUInt(@v_pd_para_props.direction) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.ntabs ', PtrUInt(@v_pd_para_props.ntabs) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.tabs ', PtrUInt(@v_pd_para_props.tabs) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.tab_interval ', PtrUInt(@v_pd_para_props.tab_interval) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_tab_stop ', SizeOf(pd_tab_stop));
+  WriteLn('pd_tab_stop.position ', PtrUInt(@v_pd_tab_stop.position) - PtrUInt(@v_pd_tab_stop));
+  WriteLn('pd_tab_stop.align ', PtrUInt(@v_pd_tab_stop.align) - PtrUInt(@v_pd_tab_stop));
+  WriteLn('pd_tab_stop.leader ', PtrUInt(@v_pd_tab_stop.leader) - PtrUInt(@v_pd_tab_stop));
   WriteLn('pd_list_level ', SizeOf(pd_list_level));
   WriteLn('pd_list_level.format ', PtrUInt(@v_pd_list_level.format) - PtrUInt(@v_pd_list_level));
   WriteLn('pd_list_level.start ', PtrUInt(@v_pd_list_level.start) - PtrUInt(@v_pd_list_level));

@@ -238,6 +238,7 @@ typedef struct {
 #define PD_PP_BORDER       (1u << 15)
 #define PD_PP_SHADING      (1u << 16)
 #define PD_PP_DIRECTION    (1u << 17)
+#define PD_PP_TABS         (1u << 18) /**< tab stops and the default interval, together */
 
 typedef struct {
     uint32_t mask;              /**< PD_PP_* bits that are set */
@@ -260,6 +261,9 @@ typedef struct {
     pd_sp border_width;
     uint32_t shading;           /**< 0 = none */
     int32_t direction;          /**< pd_direction: auto (first strong character), LTR or RTL */
+    int32_t ntabs;              /**< tab stops set, in order of position, from the left margin */
+    pd_tab_stop tabs[PD_MAX_TABS];
+    pd_sp tab_interval;         /**< default stops past the last set one, 0 = every 36pt */
 } pd_para_props;
 
 /**

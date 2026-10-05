@@ -167,6 +167,24 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
         put_str(w, "Direction", name_of(NAMES(dir_names), p->direction));
     }
 
+    if (m & PD_PP_TABS) {   /* [[position, align, leader], ...] */
+        int32_t i;
+
+        put_int(w, "TabInterval", p->tab_interval);
+        pj_key(w, "Tabs");
+        pj_arr_begin(w);
+
+        for (i = 0; i < p->ntabs && i < PD_MAX_TABS; i++) {
+            pj_arr_begin(w);
+            pj_int(w, p->tabs[i].position);
+            pj_int(w, p->tabs[i].align);
+            pj_int(w, p->tabs[i].leader);
+            pj_arr_end(w);
+        }
+
+        pj_arr_end(w);
+    }
+
     pj_obj_end(w);
 }
 
@@ -767,6 +785,24 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
         p->mask |= PD_PP_DIRECTION;
         p->direction = enum_of(x, NAMES(dir_names));
         REQUIRE(p->direction >= 0);
+    }
+
+    if ((x = pj_get(o, "Tabs"))) {
+        int32_t i;
+
+        REQUIRE(x->type == PJ_ARR);
+        p->mask |= PD_PP_TABS;
+        p->tab_interval = (pd_sp)int_or(pj_get(o, "TabInterval"), 0, 0, SP_MAX, L);
+
+        for (i = 0; i < x->n && i < PD_MAX_TABS; i++) {
+            const pj_node* t = pj_at(x, i);
+
+            REQUIRE(t && t->type == PJ_ARR && t->n == 3);
+            p->tabs[i].position = (pd_sp)int_or(pj_at(t, 0), 0, SP_MIN, SP_MAX, L);
+            p->tabs[i].align = (int32_t)int_or(pj_at(t, 1), 0, PD_TAB_LEFT, PD_TAB_DECIMAL, L);
+            p->tabs[i].leader = (int32_t)int_or(pj_at(t, 2), 0, PD_LEADER_NONE, PD_LEADER_UNDERSCORE, L);
+            p->ntabs = i + 1;
+        }
     }
 
 #undef F

@@ -189,6 +189,9 @@ const pd_doc* pd_layout_doc(const struct pd_layout* L);
 pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, pd_style* st, pd_char_props* cp);
 
 #define PD_CP_ALL ((1u << 14) - 1)
-#define PD_PP_ALL ((1u << 18) - 1)
+#define PD_PP_ALL ((1u << 19) - 1)
+
+/* tab stops of a pd_para_props, when set, within their ranges */
+int pd_doc_tabs_ok(const pd_para_props* pp);
 
 #endif /* PD_DOC_INTERNAL_H */

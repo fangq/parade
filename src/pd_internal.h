@@ -52,6 +52,7 @@ enum {
 #define PD_FLAG_SOFTHYPHEN 8 /* penalty: value is pd_params.hyphen_penalty */
 #define PD_FLAG_EXHYPHEN 16 /* penalty: value is pd_params.ex_hyphen_penalty */
 #define PD_FLAG_FINAL 32    /* paragraph-end items appended by pd_para_break */
+#define PD_FLAG_TAB 64      /* glue: a tab, its width settled by the tab stops; user = its pd_tab_leader */
 
 typedef struct {
     uint8_t type;
@@ -139,6 +140,10 @@ struct pd_para {
     int32_t cap_blev;
     int32_t para_level;
     pd_sp height;
+    /* tab stops (pd_para_set_tabs) */
+    pd_tab_stop tabs[PD_MAX_TABS];
+    int32_t n_tabs;
+    pd_sp tab_interval, tab_origin;
 };
 
 /* growth helper: ensure *cap >= need for an array of elem-sized entries */

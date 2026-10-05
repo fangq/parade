@@ -183,6 +183,17 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
 
     KEEP(PD_PP_SHADING, shading);
     KEEP(PD_PP_DIRECTION, direction);
+
+    if (m & PD_PP_TABS) {
+        int32_t i;
+
+        z.ntabs = pp->ntabs < 0 ? 0 : pp->ntabs > PD_MAX_TABS ? PD_MAX_TABS : pp->ntabs;
+        z.tab_interval = pp->tab_interval;
+
+        for (i = 0; i < z.ntabs; i++) {
+            z.tabs[i] = pp->tabs[i];
+        }
+    }
 #undef KEEP
     *pp = z;
 }
@@ -275,6 +286,12 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
 
     SET(PD_PP_SHADING, shading);
     SET(PD_PP_DIRECTION, direction);
+
+    if (m & PD_PP_TABS) {
+        dst->ntabs = src->ntabs;
+        memcpy(dst->tabs, src->tabs, sizeof(dst->tabs));
+        dst->tab_interval = src->tab_interval;
+    }
 #undef SET
     dst->mask |= m;
 }
@@ -2672,6 +2689,27 @@ pd_status pd_doc_set_para_style(pd_doc* d, pd_block_id para, pd_style_id style) 
     BLOCK_OP("Paragraph style", b && (style == 0 || (s && s->kind == PD_STYLE_PARAGRAPH)), b->st.style = style);
 }
 
+int pd_doc_tabs_ok(const pd_para_props* pp) {
+    int32_t i;
+
+    if (!(pp->mask & PD_PP_TABS)) {
+        return 1;
+    }
+
+    if (pp->ntabs < 0 || pp->ntabs > PD_MAX_TABS || pp->tab_interval < 0) {
+        return 0;
+    }
+
+    for (i = 0; i < pp->ntabs; i++) {
+        if (pp->tabs[i].align < PD_TAB_LEFT || pp->tabs[i].align > PD_TAB_DECIMAL ||
+                pp->tabs[i].leader < PD_LEADER_NONE || pp->tabs[i].leader > PD_LEADER_UNDERSCORE) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 pd_status pd_doc_set_para_props(pd_doc* d, pd_block_id para, const pd_para_props* props) {
     blk* b = d ? para_of(d, para) : NULL;
     pd_para_props pp;
@@ -2684,7 +2722,7 @@ pd_status pd_doc_set_para_props(pd_doc* d, pd_block_id para, const pd_para_props
     }
 
     BLOCK_OP("Paragraph format", b && props && (!(pp.mask & PD_PP_ALIGN) || (pp.align >= PD_ALIGN_JUSTIFY &&
-             pp.align <= PD_ALIGN_CENTER)), b->st.pp = pp);
+             pp.align <= PD_ALIGN_CENTER)) && pd_doc_tabs_ok(&pp), b->st.pp = pp);
 }
 
 pd_status pd_doc_set_role(pd_doc* d, pd_block_id para, pd_role role, int32_t level) {

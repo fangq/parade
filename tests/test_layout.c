@@ -1412,6 +1412,95 @@ static void test_endnotes(void) {
     pd_doc_free(d);
 }
 
+/* x of the glyph at a byte offset of a paragraph on page 0, -1 if none */
+static pd_sp glyph_x(const pd_draw* it, int32_t n, pd_block_id b, uint32_t off, pd_sp* right) {
+    int32_t k;
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].block == b && it[k].offset == off) {
+            if (right) {
+                *right = it[k].x + it[k].w;
+            }
+
+            return it[k].x;
+        }
+    }
+
+    return -1;
+}
+
+/* Tab stops: left, right and decimal stops from the margin, a dot leader,
+   the default interval past the last stop, and the stop a hanging indent
+   makes. */
+static void test_tabs(void) {
+    pd_block_id sec, p1, p2, p3, p4;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_section_props sp;
+    pd_para_props pp;
+    pd_draw* it;
+    int32_t n, k, dots = 0;
+    pd_sp m, x, r, page_end;
+
+    p1 = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p1, 0), "Name\tPage\t12", 12, PD_FORMAT_INHERIT, NULL);
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_TABS;
+    pp.ntabs = 3;
+    pp.tabs[0].position = PD_PT(144);
+    pp.tabs[1].position = PD_PT(360);
+    pp.tabs[1].align = PD_TAB_RIGHT;
+    pp.tabs[1].leader = PD_LEADER_DOT;
+    pp.tabs[2].position = PD_PT(420);      /* out of order: kept sorted */
+    pp.tabs[2].align = PD_TAB_DECIMAL;
+    CHECK(pd_doc_set_para_props(d, p1, &pp) == PD_OK);
+    pp.tabs[0].align = 7;
+    CHECK(pd_doc_set_para_props(d, p1, &pp) != PD_OK);     /* no such alignment */
+
+    p2 = add_para(d, sec, "a\tb\tc");     /* default stops every 36pt */
+    p3 = add_para(d, sec, "x\t3.25");     /* decimal stop at 300pt: the point lands on it */
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_TABS;
+    pp.ntabs = 1;
+    pp.tabs[0].position = PD_PT(300);
+    pp.tabs[0].align = PD_TAB_DECIMAL;
+    pd_doc_set_para_props(d, p3, &pp);
+    p4 = add_para(d, sec, "1.\tHanging text");   /* the left indent is a stop */
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_INDENT_LEFT | PD_PP_INDENT_FIRST;
+    pp.indent_left = PD_PT(36);
+    pp.indent_first = -PD_PT(18);
+    pd_doc_set_para_props(d, p4, &pp);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    pd_doc_section_props(d, sec, &sp);
+    m = sp.margin_left;
+    it = items(L, 0, &n);
+
+    /* "Page" at the left stop; "12" ending at the right one, behind dots */
+    x = glyph_x(it, n, p1, 5, NULL);
+    CHECK(x == m + PD_PT(144));
+    glyph_x(it, n, p1, 8, &page_end);
+    glyph_x(it, n, p1, 11, &r);
+    CHECK(r > m + PD_PT(360) - PD_PT(1) && r <= m + PD_PT(360) + PD_PT(1));
+
+    for (k = 0; k < n; k++) {
+        dots += it[k].kind == PD_DRAW_GLYPH && it[k].block == p1 && it[k].text == '.' && it[k].x > page_end &&
+                it[k].x < m + PD_PT(350);
+    }
+
+    CHECK(dots > 10);
+    CHECK(glyph_x(it, n, p2, 2, NULL) == m + PD_PT(36) && glyph_x(it, n, p2, 4, NULL) == m + PD_PT(72));
+    x = glyph_x(it, n, p3, 3, NULL);       /* the '.' of 3.25 */
+    CHECK(x > m + PD_PT(299) && x < m + PD_PT(301));
+    CHECK(glyph_x(it, n, p4, 3, NULL) == m + PD_PT(36));
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1452,6 +1541,8 @@ int main(void) {
     test_merged_cells();
     printf("endnotes\n");
     test_endnotes();
+    printf("tab stops\n");
+    test_tabs();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

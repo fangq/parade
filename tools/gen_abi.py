@@ -23,7 +23,8 @@ STRUCTS = {
                      "lang small_caps link_target",
     "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
-                     "border_color border_width shading direction",
+                     "border_color border_width shading direction ntabs tabs tab_interval",
+    "pd_tab_stop": "position align leader",
     "pd_list_level": "format start text indent hanging",
     "pd_run": "start end format",
     "pd_inline": "kind resource width height depth field target level name source source_len user",

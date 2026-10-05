@@ -3005,6 +3005,77 @@ static pd_sp rule_reach(const pd_doc* d, const blk* b, const pd_glyph* g, int32_
     return space ? g[i + 1].x - g[i].x : g[i].advance;
 }
 
+/* what fills the space a tab leaves: dots or hyphens on a grid, so that the
+   leaders of lines one above the other line up; or a rule */
+static void emit_leaders(const pd_layout* L, dlist_t* D, const pline* l, const pd_glyph* g, int32_t n,
+                         const pd_line* ln) {
+    const pd_para* pa = l->pc->para;
+    const pd_lineinfo* li;
+    int32_t k, j;
+
+    if (!pa || l->line < 0 || l->line >= pa->n_lines) {
+        return;
+    }
+
+    li = &pa->lines[l->line];
+
+    for (k = li->start; k < li->end && k < pa->n_items; k++) {
+        const pd_item* it = &pa->items[k];
+        pd_style ps;
+        pd_sp x0, x1;
+        int32_t prev = -1, next = -1;
+
+        if (it->type != PD_ITEM_GLUE || !(it->flags & PD_FLAG_TAB) || it->user == PD_LEADER_NONE ||
+                it->width <= 0 || it->style < 0 || pd_para_get_style(pa, it->style, &ps) != PD_OK) {
+            continue;
+        }
+
+        for (j = 0; j < n; j++) {
+            if (g[j].kind != PD_OBJECT && g[j].cluster < it->text_start) {
+                prev = j;
+            } else if (g[j].cluster >= it->text_end && next < 0) {
+                next = j;
+            }
+        }
+
+        x0 = l->ox + (prev >= 0 ? g[prev].x + g[prev].advance : ln->x);
+        x1 = next >= 0 ? l->ox + g[next].x : x0 + it->width;
+
+        if (it->user == PD_LEADER_UNDERSCORE) {
+            pd_draw u;
+
+            memset(&u, 0, sizeof(u));
+            u.kind = PD_DRAW_RULE;
+            u.x = x0;
+            u.y = l->oy + ln->baseline + ps.size / 8;
+            u.w = x1 - x0;
+            u.h = ps.size / 20 > PD_SP_PER_PT / 3 ? ps.size / 20 : PD_SP_PER_PT / 3;
+            u.color = ps.color;
+            u.block = l->pc->block;
+            u.offset = it->text_start;
+            u.region = l->region;
+            emit(D, &u);
+        } else {
+            const char* mark = it->user == PD_LEADER_DOT ? "." : "-";
+            dlist_t M;
+            pd_sp w, pitch, x;
+
+            memset(&M, 0, sizeof(M));
+            w = emit_text(L, &M, mark, &ps, 0, 0, l->pc->block, it->text_start, l->region);
+            free(M.d);
+            pitch = w * 2 > ps.size / 4 ? w * 2 : ps.size / 4;
+
+            if (pitch <= 0) {
+                continue;
+            }
+
+            for (x = l->ox + ((x0 - l->ox + pitch / 2) / pitch + 1) * pitch; x + w <= x1 - pitch / 2; x += pitch) {
+                emit_text(L, D, mark, &ps, x, l->oy + ln->baseline, l->pc->block, it->text_start, l->region);
+            }
+        }
+    }
+}
+
 static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const pline* l) {
     const pd_doc* d = L->doc;
     const blk* b = pd_doc_blk(d, l->pc->block);
@@ -3213,6 +3284,7 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
         }
     }
 
+    emit_leaders(L, D, l, g, n, &ln);
     free(g);
 }
 

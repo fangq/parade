@@ -140,6 +140,13 @@ int main(void) {
     printf("pd_para_props.border_width %zu\n", offsetof(pd_para_props, border_width));
     printf("pd_para_props.shading %zu\n", offsetof(pd_para_props, shading));
     printf("pd_para_props.direction %zu\n", offsetof(pd_para_props, direction));
+    printf("pd_para_props.ntabs %zu\n", offsetof(pd_para_props, ntabs));
+    printf("pd_para_props.tabs %zu\n", offsetof(pd_para_props, tabs));
+    printf("pd_para_props.tab_interval %zu\n", offsetof(pd_para_props, tab_interval));
+    printf("pd_tab_stop %zu\n", sizeof(pd_tab_stop));
+    printf("pd_tab_stop.position %zu\n", offsetof(pd_tab_stop, position));
+    printf("pd_tab_stop.align %zu\n", offsetof(pd_tab_stop, align));
+    printf("pd_tab_stop.leader %zu\n", offsetof(pd_tab_stop, leader));
     printf("pd_list_level %zu\n", sizeof(pd_list_level));
     printf("pd_list_level.format %zu\n", offsetof(pd_list_level, format));
     printf("pd_list_level.start %zu\n", offsetof(pd_list_level, start));
