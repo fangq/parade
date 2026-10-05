@@ -1341,6 +1341,77 @@ static void test_merged_cells(void) {
     pd_doc_free(d);
 }
 
+/* Endnotes: numbered i, ii on their own, their bodies after the last of the
+   text rather than at the foot of the page, footnotes unchanged beside them. */
+static void test_endnotes(void) {
+    pd_block_id sec, p[12], en[2], fn;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_inline o;
+    pd_draw* it;
+    int32_t i, k, n, last, pg0, pg1, pgf, in_foot = 0;
+    pd_sp ylast, y0, y1;
+    char txt[8];
+    int nt = 0;
+
+    for (i = 0; i < 12; i++) {
+        p[i] = add_para(d, sec, frog);
+    }
+
+    en[0] = add_story(d, "First endnote.");
+    en[1] = add_story(d, "Second endnote.");
+    fn = add_story(d, "A footnote.");
+
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_FOOTNOTE;
+    o.level = 1;
+    o.target = en[0];
+    pd_doc_insert_inline(d, at(p[0], 10), &o, NULL);
+    o.target = en[1];
+    pd_doc_insert_inline(d, at(p[5], 10), &o, NULL);
+    add_footnote(d, p[1], 10, fn);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    last = page_of(L, p[11], 0, &ylast);
+    pg0 = page_of(L, pd_doc_child(d, en[0], 0), 0, &y0);
+    pg1 = page_of(L, pd_doc_child(d, en[1], 0), 0, &y1);
+    pgf = page_of(L, pd_doc_child(d, fn, 0), 0, NULL);
+
+    CHECK(pg0 >= last && pg1 >= pg0 && (pg0 > last || y0 > ylast));   /* after all the text */
+    CHECK(pg1 > pg0 || y1 > y0);                                       /* in order */
+    CHECK(pgf == page_of(L, p[1], 10, NULL));                          /* the footnote stays at its foot */
+
+    /* the marks read i and ii; no endnote is drawn in the footnote area */
+    it = items(L, 0, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].block == p[0] && it[k].offset == 10 && nt < 7) {
+            txt[nt++] = (char)it[k].text;
+        }
+    }
+
+    txt[nt] = '\0';
+    CHECK(strcmp(txt, "i") == 0);
+    free(it);
+
+    for (i = 0; i < pd_layout_page_count(L); i++) {
+        it = items(L, i, &n);
+
+        for (k = 0; k < n; k++) {
+            in_foot += it[k].region == 4 && (it[k].block == pd_doc_child(d, en[0], 0) ||
+                                              it[k].block == pd_doc_child(d, en[1], 0));
+        }
+
+        free(it);
+    }
+
+    CHECK(in_foot == 0);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1379,6 +1450,8 @@ int main(void) {
     test_underline_spaces();
     printf("cells merged across rows\n");
     test_merged_cells();
+    printf("endnotes\n");
+    test_endnotes();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

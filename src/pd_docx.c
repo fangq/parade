@@ -299,7 +299,8 @@ typedef struct {
     int in_link, in_note;
     pd_buf rels;                /* document.xml.rels entries beyond the fixed ones */
     pd_buf notes;               /* footnotes.xml body */
-    int nlinks, nnotes;
+    pd_buf endnotes;            /* endnotes.xml body */
+    int nlinks, nnotes, nendnotes;
     dmedia media[256];
     int nmedia, docpr;
     pd_list_id listmap[64];     /* Parade list -> numId order */
@@ -549,18 +550,25 @@ static int dx_span(void* user, const pd_span* sp) {
             case PD_INLINE_FOOTNOTE: {
                 pd_buf* saved = x->o;
                 pd_block_info si;
-                int32_t k, id = ++x->nnotes;
+                int endnote = ob->level == 1;
+                int32_t k, id = endnote ? ++x->nendnotes : ++x->nnotes;
                 pd_block_id spara = x->para;
                 pd_char_props sbase = x->base;
                 int slink = x->in_link;
 
-                pb_printf(o, "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference w:id=\"%d\"/>"
-                          "</w:r>", (int)id);
-                /* the body goes to footnotes.xml */
-                x->o = &x->notes;
-                x->in_note = 1;
+                if (endnote) {
+                    pb_printf(o, "<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:endnoteReference "
+                              "w:id=\"%d\"/></w:r>", (int)id);
+                } else {
+                    pb_printf(o, "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteReference "
+                              "w:id=\"%d\"/></w:r>", (int)id);
+                }
+
+                /* the body goes to footnotes.xml or endnotes.xml */
+                x->o = endnote ? &x->endnotes : &x->notes;
+                x->in_note = endnote ? 2 : 1;
                 x->in_link = 0;
-                pb_printf(x->o, "<w:footnote w:id=\"%d\">", (int)id);
+                pb_printf(x->o, endnote ? "<w:endnote w:id=\"%d\">" : "<w:footnote w:id=\"%d\">", (int)id);
 
                 if (pd_doc_block_info(x->d, ob->target, &si) == PD_OK) {
                     for (k = 0; k < si.child_count; k++) {
@@ -568,7 +576,7 @@ static int dx_span(void* user, const pd_span* sp) {
                     }
                 }
 
-                pb_puts(x->o, "</w:footnote>");
+                pb_puts(x->o, endnote ? "</w:endnote>" : "</w:footnote>");
                 x->in_note = 0;
                 x->o = saved;
                 x->para = spara;
@@ -696,7 +704,10 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
 
     pb_puts(o, "</w:pPr>");
 
-    if (x->in_note && bi.index == 0) {  /* the note's number opens its first paragraph */
+    if (x->in_note == 2 && bi.index == 0) {     /* the note's number opens its first paragraph */
+        pb_puts(o, "<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:endnoteRef/></w:r>"
+                "<w:r><w:t xml:space=\"preserve\"> </w:t></w:r>");
+    } else if (x->in_note && bi.index == 0) {
         pb_puts(o, "<w:r><w:rPr><w:rStyle w:val=\"FootnoteReference\"/></w:rPr><w:footnoteRef/></w:r>"
                 "<w:r><w:t xml:space=\"preserve\"> </w:t></w:r>");
     }
@@ -1143,6 +1154,8 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "wordprocessingml.numbering+xml\"/>"
             "<Override PartName=\"/word/footnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "wordprocessingml.footnotes+xml\"/>"
+            "<Override PartName=\"/word/endnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.endnotes+xml\"/>"
             "<Override PartName=\"/word/settings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "wordprocessingml.settings+xml\"/>");
 
@@ -1176,6 +1189,15 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     pb_put(&part, x->notes.p, x->notes.n);
     pb_puts(&part, "</w:footnotes>");
     zip_add(&z, "word/footnotes.xml", part.p, part.n);
+
+    part.n = 0;
+    pb_puts(&part, XML_DECL);
+    pb_printf(&part, "<w:endnotes %s><w:endnote w:type=\"separator\" w:id=\"-1\"><w:p><w:r><w:separator/></w:r></w:p>"
+              "</w:endnote><w:endnote w:type=\"continuationSeparator\" w:id=\"0\"><w:p><w:r><w:continuationSeparator/>"
+              "</w:r></w:p></w:endnote>", W_NS);
+    pb_put(&part, x->endnotes.p, x->endnotes.n);
+    pb_puts(&part, "</w:endnotes>");
+    zip_add(&z, "word/endnotes.xml", part.p, part.n);
 
     part.n = 0;
     pb_puts(&part, XML_DECL);
@@ -1234,6 +1256,8 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "numbering\" Target=\"numbering.xml\"/>"
             "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
             "footnotes\" Target=\"footnotes.xml\"/>"
+            "<Relationship Id=\"rIdEn\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+            "endnotes\" Target=\"endnotes.xml\"/>"
             "<Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
             "settings\" Target=\"settings.xml\"/>");
 
@@ -1268,11 +1292,12 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     }
 
     zip_finish(&z);
-    i = doc.err || part.err || x->rels.err || x->notes.err;
+    i = doc.err || part.err || x->rels.err || x->notes.err || x->endnotes.err;
     pb_free(&part);
     pb_free(&doc);
     pb_free(&x->rels);
     pb_free(&x->notes);
+    pb_free(&x->endnotes);
     pd_numbers_free(&x->nb);
     free(x);
     return out->err || i ? PD_ERR_NOMEM : PD_OK;
@@ -1336,10 +1361,14 @@ typedef struct {
     int nnums;
     dabs abss[64];
     int nabs;
-    char* notes_xml;
+    char* notes_xml;            /* footnotes.xml */
     size_t notes_len;
     dnote* notes;
     int nnotes;
+    char* en_xml;               /* endnotes.xml */
+    size_t en_len;
+    dnote* en;
+    int nen;
     int depth;                  /* footnote recursion */
     dprops defaults;            /* w:docDefaults and settings.xml */
     int even_odd;               /* settings.xml: even pages have headers of their own */
@@ -1826,32 +1855,33 @@ static void read_numbering(dxi* X, const char* xml, size_t n) {
     }
 }
 
-static void read_notes(dxi* X) {
+/* the notes of footnotes.xml or endnotes.xml: where each one's body is */
+static void read_notes(const char* xml, size_t len, const char* tag, dnote** notes, int* nnotes) {
     pd_markup m;
     int cap = 0, id = 0, depth = 0;
     size_t start = 0;
 
-    mu_init(&m, X->notes_xml, X->notes_len, 0);
+    mu_init(&m, xml, len, 0);
 
     while (mu_next(&m) != MT_END) {
         const char* t = mu_local(m.name);
 
-        if (m.type == MT_OPEN && strcmp(t, "footnote") == 0 && depth == 0) {
+        if (m.type == MT_OPEN && strcmp(t, tag) == 0 && depth == 0) {
             id = attr_int(&m, "w:id", -999);
             start = m.pos;
             depth = 1;
         } else if (m.type == MT_OPEN && depth > 0) {
             depth++;
         } else if (m.type == MT_CLOSE && depth > 0) {
-            if (--depth == 0 && strcmp(t, "footnote") == 0) {
+            if (--depth == 0 && strcmp(t, tag) == 0) {
                 dnote nt;
 
                 nt.id = id;
                 nt.a = start;
                 nt.b = m.pos - strlen(m.name) - 3;
 
-                if (!pd_grow((void**)&X->notes, &cap, (int64_t)X->nnotes + 1, sizeof(dnote))) {
-                    X->notes[X->nnotes++] = nt;
+                if (!pd_grow((void**)notes, &cap, (int64_t)*nnotes + 1, sizeof(dnote))) {
+                    (*notes)[(*nnotes)++] = nt;
                 }
             }
         }
@@ -2264,18 +2294,20 @@ static void dw_link(dw* w, const char* url, size_t n) {
 
 static void dw_parse(dxi* X, const char* xml, size_t n, int note);
 
-static void dw_footnote(dw* w, int id) {
+static void dw_footnote(dw* w, int id, int endnote) {
     dxi* X = w->X;
-    int i;
+    const dnote* notes = endnote ? X->en : X->notes;
+    const char* xml = endnote ? X->en_xml : X->notes_xml;
+    int i, n = endnote ? X->nen : X->nnotes;
 
-    for (i = 0; i < X->nnotes; i++) {
-        if (X->notes[i].id == id && X->depth < 3) {
+    for (i = 0; i < n; i++) {
+        if (notes[i].id == id && X->depth < 3) {
             pd_char_props keep = X->b->cp;
 
             dw_begin_para(w);
-            bld_footnote_begin(X->b);
+            bld_note_begin(X->b, endnote);
             X->depth++;
-            dw_parse(X, X->notes_xml + X->notes[i].a, X->notes[i].b - X->notes[i].a, 1);
+            dw_parse(X, xml + notes[i].a, notes[i].b - notes[i].a, 1);
             X->depth--;
             bld_footnote_end(X->b);
             X->b->cp = keep;
@@ -2641,7 +2673,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (strcmp(t, "softHyphen") == 0) {
                 dw_text(w, "\xC2\xAD", 2);
             } else if (strcmp(t, "footnoteReference") == 0 && !w->note) {
-                dw_footnote(w, attr_int(&m, "w:id", -999));
+                dw_footnote(w, attr_int(&m, "w:id", -999), 0);
+            } else if (strcmp(t, "endnoteReference") == 0 && !w->note) {
+                dw_footnote(w, attr_int(&m, "w:id", -999), 1);
             } else if (strcmp(t, "drawing") == 0) {
                 w->in_drawing = m.type == MT_OPEN;
                 w->blip[0] = '\0';
@@ -2768,7 +2802,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
 
                 dw_text(w, u, un);
-            } else if (strcmp(t, "footnoteRef") == 0) {
+            } else if (strcmp(t, "footnoteRef") == 0 || strcmp(t, "endnoteRef") == 0) {
                 w->after_ref = 1;
             } else if (strcmp(t, "tbl") == 0) {
                 if (w->started) {
@@ -3008,7 +3042,11 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     }
 
     if ((X.notes_xml = (char*)zip_read(&X.z, "word/footnotes.xml", &X.notes_len)) != NULL) {
-        read_notes(&X);
+        read_notes(X.notes_xml, X.notes_len, "footnote", &X.notes, &X.nnotes);
+    }
+
+    if ((X.en_xml = (char*)zip_read(&X.z, "word/endnotes.xml", &X.en_len)) != NULL) {
+        read_notes(X.en_xml, X.en_len, "endnote", &X.en, &X.nen);
     }
 
     if ((xml = (char*)zip_read(&X.z, "word/document.xml", &len)) == NULL) {
@@ -3017,6 +3055,8 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
         free(X.styles);
         free(X.notes_xml);
         free(X.notes);
+        free(X.en_xml);
+        free(X.en);
         return PD_ERR_FORMAT;
     }
 
@@ -3050,5 +3090,7 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     free(X.styles);
     free(X.notes_xml);
     free(X.notes);
+    free(X.en_xml);
+    free(X.en);
     return st;
 }

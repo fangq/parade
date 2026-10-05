@@ -1404,6 +1404,80 @@ static void test_docx_floats(void) {
     pd_doc_free(d);
 }
 
+/* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
+static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
+    pd_inline o;
+
+    if (pd_doc_inline_at(d, at(para, off), &o) != PD_OK || o.kind != PD_INLINE_FOOTNOTE) {
+        return -1;
+    }
+
+    *story = o.target;
+    return o.level;
+}
+
+/* Endnotes come in as endnotes, beside footnotes, and go out as endnotes:
+   through DOCX and through JData. */
+static void test_docx_endnotes(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>One</w:t></w:r>"
+        "<w:r><w:endnoteReference w:id=\"1\"/></w:r><w:r><w:t xml:space=\"preserve\"> two</w:t></w:r>"
+        "<w:r><w:footnoteReference w:id=\"1\"/></w:r></w:p></w:body></w:document>",
+        "word/endnotes.xml",
+        "<w:endnotes xmlns:w=\"w\"><w:endnote w:type=\"separator\" w:id=\"-1\"><w:p/></w:endnote>"
+        "<w:endnote w:id=\"1\"><w:p><w:r><w:endnoteRef/></w:r><w:r><w:t xml:space=\"preserve\"> An endnote.</w:t>"
+        "</w:r></w:p></w:endnote></w:endnotes>",
+        "word/footnotes.xml",
+        "<w:footnotes xmlns:w=\"w\"><w:footnote w:id=\"1\"><w:p><w:r><w:footnoteRef/></w:r>"
+        "<w:r><w:t xml:space=\"preserve\"> A footnote.</w:t></w:r></w:p></w:footnote></w:footnotes>",
+        NULL);
+    pd_doc* back;
+    pd_block_id para, st = 0;
+    const char* t;
+    uint32_t n;
+    buf_t b;
+    int pass;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    for (pass = 0; pass < 3; pass++) {
+        const pd_doc* x = d;
+
+        back = NULL;
+
+        if (pass > 0) {     /* 1: DOCX out and in, 2: JData */
+            memset(&b, 0, sizeof(b));
+            CHECK((pass == 1 ? pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) : pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b)) ==
+                  PD_OK);
+            CHECK((pass == 1 ? pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) : pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &back))
+                  == PD_OK);
+            free(b.p);
+
+            if (!back) {
+                continue;
+            }
+
+            x = back;
+        }
+
+        para = pd_doc_child(x, pd_doc_child(x, pd_doc_root(x), 0), 0);
+        CHECK(note_at(x, para, 3, &st) == 1);
+        pd_doc_para_text(x, pd_doc_child(x, st, 0), &t, &n);
+        CHECK(n == 11 && memcmp(t, "An endnote.", 11) == 0);
+        CHECK(note_at(x, para, 10, &st) == 0);
+        pd_doc_para_text(x, pd_doc_child(x, st, 0), &t, &n);
+        CHECK(n == 11 && memcmp(t, "A footnote.", 11) == 0);
+        pd_doc_free(back);
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1427,6 +1501,8 @@ int main(void) {
     test_docx_tables();
     printf("docx floats\n");
     test_docx_floats();
+    printf("docx endnotes\n");
+    test_docx_endnotes();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

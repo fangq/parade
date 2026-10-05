@@ -761,6 +761,10 @@ void bld_table_end(pd_bld* b) {
 }
 
 pd_block_id bld_footnote_begin(pd_bld* b) {
+    return bld_note_begin(b, 0);
+}
+
+pd_block_id bld_note_begin(pd_bld* b, int endnote) {
     pd_block_id story;
     pd_inline o;
 
@@ -772,6 +776,7 @@ pd_block_id bld_footnote_begin(pd_bld* b) {
     memset(&o, 0, sizeof(o));
     o.kind = PD_INLINE_FOOTNOTE;
     o.target = story;
+    o.level = endnote ? 1 : 0;
     bld_inline(b, &o);
     bld_push(b, story);     /* saves the paragraph the note's mark is in */
     return story;

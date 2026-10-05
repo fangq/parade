@@ -374,7 +374,8 @@ typedef struct {
     pd_sp width, height, depth; /**< box size; images: display size, equations: from the host */
     int32_t field;              /**< pd_field_kind */
     pd_block_id target;         /**< REF fields: the referenced block; FOOTNOTE: the note STORY */
-    int32_t level;              /**< HEADING field level */
+    int32_t level;              /**< HEADING field level; FOOTNOTE: 0 a footnote, 1 an endnote (numbered i, ii, ...
+                                     on its own, laid out after the last section's text) */
     char name[32];              /**< SEQ name or bookmark name */
     const char* source;         /**< equation source or link URL, UTF-8; copied on insert, doc-owned on read */
     int32_t source_len;

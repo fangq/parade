@@ -136,6 +136,8 @@ void bld_cell_end(pd_bld* b);
 void bld_cell_merge_up(pd_bld* b);
 void bld_table_end(pd_bld* b);
 pd_block_id bld_footnote_begin(pd_bld* b);
+/* a footnote, or an endnote when endnote is set: its mark at the current point, its body until bld_footnote_end */
+pd_block_id bld_note_begin(pd_bld* b, int endnote);
 void bld_footnote_end(pd_bld* b);
 /* a header/footer STORY, filled until bld_story_end */
 pd_block_id bld_story_begin(pd_bld* b);
