@@ -1,0 +1,575 @@
+/*
+ * Parade unit tests
+ *
+ * Fonts come from PARADE_TEST_FONT (default: Liberation Serif) and
+ * PARADE_TEST_CJK_FONT (optional). Tests that need a missing font are
+ * skipped, not failed.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "parade.h"
+
+static int failures = 0, checks = 0;
+
+#define CHECK(cond) do { checks++; if (!(cond)) { failures++; \
+            fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); } } while (0)
+
+static const char* text_en =
+    "In olden times when wishing still helped one, there lived a king whose daughters were all "
+    "beautiful, but the youngest was so beautiful that the sun itself, which has seen so much, "
+    "was astonished whenever it shone in her face. Close by the king's castle lay a great dark "
+    "forest, and under an old lime-tree in the forest was a well, and when the day was very warm, "
+    "the king's child went out into the forest and sat down by the side of the cool fountain; and "
+    "when she was bored she took a golden ball, and threw it up on high and caught it; and this "
+    "ball was her favorite plaything.";
+
+static pd_font* load_env_font(const char* env, const char* fallback) {
+    const char* path = getenv(env) ? getenv(env) : fallback;
+    pd_font* f = NULL;
+
+    if (!path || pd_font_load_file(path, 0, &f) != PD_OK) {
+        return NULL;
+    }
+
+    return f;
+}
+
+static pd_para* make_para(const pd_font* font, const char* txt, pd_sp size) {
+    pd_para* p = NULL;
+    pd_style st;
+
+    pd_para_new(&p);
+    pd_style_init(&st, font, size);
+    pd_para_add_text(p, txt, strlen(txt), &st);
+    return p;
+}
+
+/* FNV-1a over every line and glyph: a layout fingerprint */
+static uint64_t layout_hash(const pd_para* p) {
+    uint64_t h = 1469598103934665603ULL;
+    int32_t i, n, k;
+
+    for (i = 0; i < pd_para_line_count(p); i++) {
+        pd_line L;
+        pd_glyph g[1024];
+
+        pd_para_get_line(p, i, &L);
+        pd_para_get_glyphs(p, i, g, 1024, &n);
+
+        for (k = 0; k < n; k++) {
+            int32_t v[4] = { (int32_t)g[k].glyph, (int32_t)g[k].cluster, g[k].x, g[k].y };
+            size_t b;
+
+            for (b = 0; b < sizeof(v); b++) {
+                h = (h ^ ((const unsigned char*)v)[b]) * 1099511628211ULL;
+            }
+        }
+
+        h = (h ^ (uint64_t)L.text_start) * 1099511628211ULL;
+    }
+
+    return h;
+}
+
+static void test_font(const pd_font* f) {
+    pd_font_metrics m;
+    pd_font* bad = NULL;
+    unsigned char junk[4096];
+    int i;
+
+    CHECK(pd_font_get_metrics(f, &m) == PD_OK);
+    CHECK(m.units_per_em > 0);
+    CHECK(m.ascender > 0 && m.descender < 0);
+    CHECK(pd_font_glyph_index(f, 'A') != 0);
+    CHECK(pd_font_glyph_index(f, 0x10FFFD) == 0);
+    CHECK(pd_font_glyph_advance(f, pd_font_glyph_index(f, 'A')) > 0);
+
+    /* malformed input is rejected, never crashes */
+    CHECK(pd_font_load_memory("abc", 3, 0, &bad) == PD_ERR_ARG);
+    srand(1);
+
+    for (i = 0; i < (int)sizeof(junk); i++) {
+        junk[i] = (unsigned char)(rand() & 0xFF);
+    }
+
+    junk[0] = 0;
+    junk[1] = 1;
+    junk[2] = 0;
+    junk[3] = 0;
+    pd_font_load_memory(junk, sizeof(junk), 0, &bad);
+    pd_font_free(bad);
+}
+
+/* Liberation Serif 2.x: known design-unit values (also checked by tools/font_oracle.py) */
+static void test_liberation(const pd_font* f) {
+    pd_font_metrics m;
+
+    pd_font_get_metrics(f, &m);
+
+    if (m.units_per_em != 2048 || pd_font_glyph_advance(f, pd_font_glyph_index(f, 'A')) != 1479) {
+        printf("  (not Liberation Serif, skipping known-value checks)\n");
+        return;
+    }
+
+    CHECK(pd_font_glyph_advance(f, pd_font_glyph_index(f, ' ')) == 512);
+    CHECK(m.has_kerning);
+    CHECK(pd_font_kerning(f, pd_font_glyph_index(f, 'A'), pd_font_glyph_index(f, 'V')) < 0);
+}
+
+static void test_justify(const pd_font* f) {
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    pd_params prm;
+    pd_break_info info;
+    int32_t i, n;
+
+    pd_params_init(&prm);
+    prm.width = PD_PT(200);
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+    CHECK(info.lines > 5);
+    CHECK(info.overfull == 0);
+    CHECK(info.underfull == 0);
+
+    /* every justified line except the last ends exactly at the right margin */
+    for (i = 0; i < info.lines - 1; i++) {
+        pd_line L;
+        pd_glyph g[512];
+
+        pd_para_get_line(p, i, &L);
+        CHECK(pd_para_get_glyphs(p, i, g, 512, &n) == PD_OK);
+        CHECK(n > 0);
+        CHECK(g[n - 1].x + g[n - 1].advance == L.x + prm.width);
+        CHECK(L.width == prm.width);
+    }
+
+    /* lines tile the text */
+    {
+        pd_line a, b;
+
+        for (i = 0; i + 1 < info.lines; i++) {
+            pd_para_get_line(p, i, &a);
+            pd_para_get_line(p, i + 1, &b);
+            CHECK(a.text_end == b.text_start);
+            CHECK(b.baseline > a.baseline);
+        }
+
+        pd_para_get_line(p, info.lines - 1, &a);
+        CHECK(a.text_end == pd_para_text_length(p));
+    }
+
+    /* the size query */
+    CHECK(pd_para_get_glyphs(p, 0, NULL, 0, &n) == PD_OK && n > 0);
+    pd_para_free(p);
+}
+
+static void test_greedy_vs_optimal(const pd_font* f) {
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    pd_params prm;
+    pd_break_info g, o;
+
+    pd_params_init(&prm);
+    prm.width = PD_PT(160);
+    prm.mode = PD_BREAK_GREEDY;
+    pd_para_break(p, &prm, &g);
+    prm.mode = PD_BREAK_OPTIMAL;
+    pd_para_break(p, &prm, &o);
+    CHECK(o.demerits <= g.demerits);
+    printf("  demerits at 160pt: greedy %lld, optimal %lld\n", (long long)g.demerits, (long long)o.demerits);
+    pd_para_free(p);
+}
+
+static void test_determinism(const pd_font* f) {
+    pd_params prm;
+    uint64_t h1, h2;
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    pd_para* q = make_para(f, text_en, PD_PT(10));
+
+    pd_params_init(&prm);
+    prm.width = PD_PT(250);
+    pd_para_break(p, &prm, NULL);
+    pd_para_break(q, &prm, NULL);
+    h1 = layout_hash(p);
+    h2 = layout_hash(q);
+    CHECK(h1 == h2);
+    printf("  layout fingerprint (compare across platforms): %016llx\n", (unsigned long long)h1);
+    pd_para_free(p);
+    pd_para_free(q);
+}
+
+/* an edit followed by an incremental break equals a fresh break of the edited text */
+static void test_incremental(const pd_font* f) {
+    char edited[4096];
+    pd_params prm;
+    pd_break_info info;
+    pd_style st;
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    pd_para* fresh;
+    size_t cut = strlen(text_en) * 2 / 3;
+    int widths[3] = { 140, 220, 345 }, w;
+
+    while (text_en[cut] != ' ') {
+        cut++;
+    }
+
+    snprintf(edited, sizeof(edited), "%.*s extraordinarily%s", (int)cut, text_en, text_en + cut);
+    pd_style_init(&st, f, PD_PT(10));
+
+    for (w = 0; w < 3; w++) {
+        pd_params_init(&prm);
+        prm.width = PD_PT(widths[w]);
+        pd_para_clear(p);
+        pd_para_add_text(p, text_en, strlen(text_en), &st);
+        pd_para_break(p, &prm, NULL);
+
+        pd_para_clear(p);
+        pd_para_add_text(p, edited, strlen(edited), &st);
+        CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+        CHECK(info.reused_breakpoints > 1);
+
+        fresh = make_para(f, edited, PD_PT(10));
+        pd_para_break(fresh, &prm, NULL);
+        CHECK(layout_hash(fresh) == layout_hash(p));
+        pd_para_free(fresh);
+    }
+
+    printf("  reused %d breakpoint states after a 2/3-way edit\n", info.reused_breakpoints);
+    pd_para_free(p);
+}
+
+static void test_freeze(const pd_font* f) {
+    char edited[4096];
+    pd_params prm;
+    pd_break_info info;
+    pd_style st;
+    pd_line before[64], L;
+    int32_t nb, i, same = 0;
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    size_t cut = strlen(text_en) / 2;
+
+    while (text_en[cut] != ' ') {
+        cut++;
+    }
+
+    pd_params_init(&prm);
+    prm.width = PD_PT(200);
+    pd_para_break(p, &prm, NULL);
+    nb = pd_para_line_count(p);
+
+    for (i = 0; i < nb && i < 64; i++) {
+        pd_para_get_line(p, i, &before[i]);
+    }
+
+    snprintf(edited, sizeof(edited), "%.*s extraordinarily%s", (int)cut, text_en, text_en + cut);
+    pd_style_init(&st, f, PD_PT(10));
+    pd_para_clear(p);
+    pd_para_add_text(p, edited, strlen(edited), &st);
+    prm.freeze_offset = (int32_t)cut;
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+    CHECK(info.frozen_lines > 0);
+
+    for (i = 0; i < info.frozen_lines; i++) {
+        pd_para_get_line(p, i, &L);
+        same += (L.text_start == before[i].text_start && L.text_end == before[i].text_end);
+        CHECK(L.text_end <= (uint32_t)cut);
+    }
+
+    CHECK(same == info.frozen_lines);
+
+    /* hysteresis: a break with stability bias still yields a valid layout */
+    prm.freeze_offset = -1;
+    prm.hysteresis = 100000;
+    pd_para_clear(p);
+    pd_para_add_text(p, text_en, strlen(text_en), &st);
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+    CHECK(info.lines > 0 && info.overfull == 0);
+    pd_para_free(p);
+}
+
+static void test_special_chars(const pd_font* f) {
+    pd_params prm;
+    pd_break_info info;
+    pd_line L;
+    pd_glyph g[256];
+    int32_t n, i, saw_hyphen = 0;
+    pd_para* p;
+
+    pd_params_init(&prm);
+
+    /* forced line breaks */
+    p = make_para(f, "first\nsecond\n\nfourth", PD_PT(10));
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+    CHECK(info.lines == 4);
+    pd_para_get_line(p, 2, &L);
+    CHECK(L.ascent > 0);    /* the empty line still has height */
+    pd_para_free(p);
+
+    /* a no-break space never breaks: narrow column, two words glued */
+    p = make_para(f, "aaaa\xC2\xA0" "bbbb cccc", PD_PT(10));
+    prm.width = PD_PT(30);
+    pd_para_break(p, &prm, &info);
+    pd_para_get_line(p, 0, &L);
+    CHECK(L.text_end > 6);  /* "aaaa bbbb" stays on one line */
+    pd_para_free(p);
+
+    /* soft hyphens: breaking there shows a hyphen glyph */
+    p = make_para(f, "su\xC2\xAD" "per\xC2\xAD" "cal\xC2\xAD" "i\xC2\xAD" "fra\xC2\xAD" "gi\xC2\xAD" "lis\xC2\xAD"
+                  "tic ex\xC2\xAD" "pi\xC2\xAD" "ali\xC2\xAD" "do\xC2\xAD" "cious", PD_PT(10));
+    prm.width = PD_PT(40);
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+
+    for (i = 0; i < info.lines; i++) {
+        pd_para_get_line(p, i, &L);
+
+        if (L.hyphenated) {
+            pd_para_get_glyphs(p, i, g, 256, &n);
+            saw_hyphen += (n > 0 && g[n - 1].glyph == pd_font_glyph_index(f, 0x2010)) ||
+                          (n > 0 && g[n - 1].glyph == pd_font_glyph_index(f, '-'));
+        }
+    }
+
+    CHECK(saw_hyphen > 0);
+
+    /* "supercalifra-" alone on a 40pt line has nothing to stretch: underfull */
+    {
+        int32_t under = 0;
+
+        for (i = 0; i < info.lines; i++) {
+            pd_para_get_line(p, i, &L);
+
+            if (L.underfull) {
+                under++;
+                CHECK(L.ratio == 0 && L.width < prm.width && !L.overfull);
+            }
+        }
+
+        CHECK(under > 0 && under == info.underfull);
+    }
+
+    /* ragged lines are never underfull */
+    prm.align = PD_ALIGN_LEFT;
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+    CHECK(info.underfull == 0);
+    prm.align = PD_ALIGN_JUSTIFY;
+    pd_para_free(p);
+
+    /* a word wider than the line: an overfull line, not a failure */
+    p = make_para(f, "a supercalifragilisticexpialidocious b", PD_PT(10));
+    prm.width = PD_PT(50);
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+    CHECK(info.overfull >= 1);
+    pd_para_free(p);
+
+    /* invalid UTF-8 is replaced, not trusted */
+    p = make_para(f, "ok \xFF\xC3 end", PD_PT(10));
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+    pd_para_free(p);
+}
+
+static void test_shape(const pd_font* f) {
+    pd_params prm;
+    pd_break_info info;
+    pd_line L;
+    pd_sp ind[5], wid[5];
+    int32_t i;
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+
+    /* a 120pt figure on the left for the first four lines */
+    for (i = 0; i < 4; i++) {
+        ind[i] = PD_PT(130);
+        wid[i] = PD_PT(170);
+    }
+
+    ind[4] = 0;
+    wid[4] = PD_PT(300);
+    CHECK(pd_para_set_shape(p, 5, ind, wid) == PD_OK);
+    pd_params_init(&prm);
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+
+    for (i = 0; i < info.lines - 1; i++) {
+        pd_para_get_line(p, i, &L);
+        CHECK(L.x == (i < 4 ? PD_PT(130) : 0));
+        CHECK(L.width == (i < 4 ? PD_PT(170) : PD_PT(300)));
+    }
+
+    pd_para_free(p);
+}
+
+static void test_ragged(const pd_font* f) {
+    pd_params prm;
+    pd_break_info info;
+    pd_line L;
+    int32_t i, a;
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    pd_align al[3] = { PD_ALIGN_LEFT, PD_ALIGN_RIGHT, PD_ALIGN_CENTER };
+
+    for (a = 0; a < 3; a++) {
+        pd_params_init(&prm);
+        prm.width = PD_PT(200);
+        prm.align = al[a];
+        CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+
+        for (i = 0; i < info.lines; i++) {
+            pd_para_get_line(p, i, &L);
+            CHECK(L.width <= prm.width);
+            CHECK(L.ratio >= 0);
+
+            if (al[a] == PD_ALIGN_LEFT) {
+                CHECK(L.x == 0);
+            } else if (al[a] == PD_ALIGN_RIGHT) {
+                CHECK(L.x + L.width == prm.width);
+            }
+        }
+    }
+
+    pd_para_free(p);
+}
+
+static void test_caret(const pd_font* f) {
+    pd_params prm;
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    uint32_t off, got, len = (uint32_t)strlen(text_en);
+    int32_t line, hl, bad = 0;
+    pd_sp x, y;
+
+    pd_params_init(&prm);
+    prm.width = PD_PT(180);
+    pd_para_break(p, &prm, NULL);
+
+    /* caret -> point -> offset round trip at every character start */
+    for (off = 0; off <= len; off++) {
+        pd_line L;
+
+        CHECK(pd_para_caret(p, off, &line, &x, &y) == PD_OK);
+        pd_para_get_line(p, line, &L);
+        CHECK(x >= L.x && x <= L.x + L.width);
+        CHECK(pd_para_hit_test(p, x, y, &got, &hl) == PD_OK);
+
+        /* the trailing space of a broken line maps to the line end */
+        if (got != off && !(text_en[off] == ' ' && got == off && hl == line) &&
+                !(off < len && text_en[off] == ' ' && off + 1 == L.text_end)) {
+            bad++;
+        }
+    }
+
+    CHECK(bad == 0);
+
+    if (bad) {
+        printf("  caret round-trip mismatches: %d\n", bad);
+    }
+
+    CHECK(pd_para_caret(p, len + 1, &line, &x, &y) == PD_ERR_RANGE);
+    pd_para_free(p);
+}
+
+static void test_object(const pd_font* f) {
+    pd_params prm;
+    pd_break_info info;
+    pd_style st;
+    pd_glyph g[256];
+    int32_t n, i, found = 0, li;
+    pd_para* p = NULL;
+
+    pd_para_new(&p);
+    pd_style_init(&st, f, PD_PT(10));
+    pd_para_add_text(p, "Equation ", 9, &st);
+    CHECK(pd_para_add_object(p, PD_PT(40), PD_PT(15), PD_PT(5), 42) == PD_OK);
+    pd_para_add_text(p, " follows the text.", 18, &st);
+    pd_params_init(&prm);
+    pd_para_break(p, &prm, &info);
+
+    for (li = 0; li < info.lines; li++) {
+        pd_para_get_glyphs(p, li, g, 256, &n);
+
+        for (i = 0; i < n; i++) {
+            if (g[i].kind == PD_OBJECT) {
+                found = (g[i].user == 42 && g[i].advance == PD_PT(40));
+            }
+        }
+    }
+
+    CHECK(found);
+    {
+        pd_line L;
+        pd_para_get_line(p, 0, &L);
+        CHECK(L.ascent >= PD_PT(15));
+    }
+    pd_para_free(p);
+}
+
+static void test_cjk(const pd_font* f) {
+    /* 天地玄黄，宇宙洪荒。日月盈昃，辰宿列张。 repeated */
+    const char* s = "\xE5\xA4\xA9\xE5\x9C\xB0\xE7\x8E\x84\xE9\xBB\x84\xEF\xBC\x8C\xE5\xAE\x87\xE5\xAE\x99"
+                    "\xE6\xB4\xAA\xE8\x8D\x92\xE3\x80\x82\xE6\x97\xA5\xE6\x9C\x88\xE7\x9B\x88\xE6\x98\x83"
+                    "\xEF\xBC\x8C\xE8\xBE\xB0\xE5\xAE\xBF\xE5\x88\x97\xE5\xBC\xA0\xE3\x80\x82";
+    char buf[1024];
+    pd_params prm;
+    pd_break_info info;
+    pd_line L;
+    int32_t i;
+    pd_para* p;
+
+    snprintf(buf, sizeof(buf), "%s%s%s", s, s, s);
+    p = make_para(f, buf, PD_PT(10));
+    pd_params_init(&prm);
+    prm.width = PD_PT(75);
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+    CHECK(info.lines >= 3);
+
+    /* kinsoku: no line starts with an ideographic comma or full stop */
+    for (i = 1; i < info.lines; i++) {
+        pd_para_get_line(p, i, &L);
+        CHECK(memcmp(buf + L.text_start, "\xEF\xBC\x8C", 3) != 0);
+        CHECK(memcmp(buf + L.text_start, "\xE3\x80\x82", 3) != 0);
+    }
+
+    pd_para_free(p);
+}
+
+int main(void) {
+    pd_font* f = load_env_font("PARADE_TEST_FONT", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf");
+    pd_font* cjk = load_env_font("PARADE_TEST_CJK_FONT", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+
+    printf("parade %s\n", pd_version());
+
+    if (!f) {
+        printf("no test font; set PARADE_TEST_FONT\n");
+        return 77;
+    }
+
+    printf("font\n");
+    test_font(f);
+    test_liberation(f);
+    printf("justify\n");
+    test_justify(f);
+    printf("greedy vs optimal\n");
+    test_greedy_vs_optimal(f);
+    printf("determinism\n");
+    test_determinism(f);
+    printf("incremental\n");
+    test_incremental(f);
+    printf("freeze/hysteresis\n");
+    test_freeze(f);
+    printf("special characters\n");
+    test_special_chars(f);
+    printf("parshape\n");
+    test_shape(f);
+    printf("ragged\n");
+    test_ragged(f);
+    printf("caret/hit test\n");
+    test_caret(f);
+    printf("inline object\n");
+    test_object(f);
+
+    if (cjk) {
+        printf("cjk\n");
+        test_cjk(cjk);
+        pd_font_free(cjk);
+    } else {
+        printf("cjk (skipped, no CJK font)\n");
+    }
+
+    pd_font_free(f);
+    printf("%d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+}
