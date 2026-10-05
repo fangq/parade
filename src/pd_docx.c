@@ -1291,6 +1291,11 @@ typedef struct {
     int nnotes;
     int depth;                  /* footnote recursion */
     dprops defaults;            /* w:docDefaults and settings.xml */
+    int even_odd;               /* settings.xml: even pages have headers of their own */
+    char hf_rid[16][64];        /* header/footer parts already read, and their stories */
+    pd_block_id hf_story[16];
+    int nhf;
+    pd_block_id hf_last[6];     /* the previous section's: header default/first/even, footer the same */
     char def_pstyle[64];        /* the paragraph style of a paragraph that names none */
     char theme_major[64], theme_minor[64];  /* the theme's heading and body fonts */
 } dxi;
@@ -1643,6 +1648,8 @@ static void read_settings(dxi* X, const char* xml, size_t n) {
     while (mu_next(&m) != MT_END) {
         if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "autoHyphenation") == 0) {
             X->defaults.pp.hyphenate = attr_on(&m);
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "evenAndOddHeaders") == 0) {
+            X->even_odd = attr_on(&m);
         }
     }
 }
@@ -1875,6 +1882,8 @@ typedef struct {
     int in_p, started, in_ppr, in_rpr, in_tcpr, in_trpr, in_sect;
     char pstyle[64];
     int num_id, ilvl, outline, sect_here;
+    char hf_ref[6][64];         /* the section's header/footer r:ids: default, first, even; footers after */
+    int fld_kind;               /* a page-number field being read: PD_FIELD_* + 1, 0 none */
     dprops ppr;                 /* the paragraph's own w:pPr */
     pd_char_props pcp;          /* character properties of the paragraph style, defaults included */
     pd_char_props tcp;          /* what the Parade style it was given already says, resolved */
@@ -2201,6 +2210,89 @@ static void dw_image(dw* w) {
     }
 }
 
+/* the field a Word instruction stands for, as PD_FIELD_* + 1; 0 for one Parade
+   does not compute (its result text stays as text) */
+static int page_field(const char* instr) {
+    char word[32];
+    int k = 0;
+
+    while (*instr == ' ') {
+        instr++;
+    }
+
+    while (k + 1 < (int)sizeof(word) && instr[k] && instr[k] != ' ' && instr[k] != '\\') {
+        word[k] = instr[k];
+        k++;
+    }
+
+    word[k] = '\0';
+    return strcmp(word, "PAGE") == 0 ? PD_FIELD_PAGE + 1 : strcmp(word, "NUMPAGES") == 0 ? PD_FIELD_PAGES + 1 :
+           strcmp(word, "SECTIONPAGES") == 0 ? PD_FIELD_SECTION_PAGE + 1 : 0;
+}
+
+static void dw_field(dw* w, int kind) {
+    pd_inline o;
+
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_FIELD;
+    o.field = kind - 1;
+    dw_begin_para(w);
+    dw_apply_run(w);
+    bld_inline(w->X->b, &o);
+}
+
+/* the story of a header or footer part, read once however many sections use it */
+static pd_block_id hf_story(dxi* X, const char* rid) {
+    const char* target = rel_target(X, rid, NULL);
+    char path[300];
+    char* xml;
+    size_t len = 0;
+    pd_block_id story = 0;
+    int i;
+
+    for (i = 0; i < X->nhf; i++) {
+        if (strcmp(X->hf_rid[i], rid) == 0) {
+            return X->hf_story[i];
+        }
+    }
+
+    if (!target || X->nhf >= 16 || X->depth >= 3) {
+        return 0;
+    }
+
+    snprintf(path, sizeof(path), "%s%s", target[0] == '/' ? "" : "word/", target[0] == '/' ? target + 1 : target);
+
+    if ((xml = (char*)zip_read(&X->z, path, &len)) != NULL) {
+        story = bld_story_begin(X->b);
+        X->depth++;
+        dw_parse(X, xml, len, 1);
+        X->depth--;
+        bld_story_end(X->b);
+        free(xml);
+    }
+
+    snprintf(X->hf_rid[X->nhf], sizeof(X->hf_rid[0]), "%s", rid);
+    X->hf_story[X->nhf++] = story;
+    return story;
+}
+
+/* a section's headers and footers into its props: the ones it names, else
+   the previous section's, as Word carries them over */
+static void dw_section_hf(dw* w) {
+    dxi* X = w->X;
+    pd_block_id* f[6] = { &w->sp.header, &w->sp.header_first, &w->sp.header_even,
+                          &w->sp.footer, &w->sp.footer_first, &w->sp.footer_even
+                        };
+    int k;
+
+    for (k = 0; k < 6; k++) {
+        *f[k] = w->hf_ref[k][0] ? hf_story(X, w->hf_ref[k]) : X->hf_last[k];
+        X->hf_last[k] = *f[k];
+    }
+
+    w->sp.facing_pages = X->even_odd && (w->sp.header_even || w->sp.footer_even);
+}
+
 static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
     pd_markup m;
     dw* w = (dw*)calloc(1, sizeof(dw));
@@ -2230,7 +2322,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         }
 
         if (m.type == MT_TEXT) {
-            if (w->in_t && w->fld != 1) {
+            if (w->in_t && w->fld != 1 && !w->fld_kind) {
                 pd_buf txt;
 
                 memset(&txt, 0, sizeof(txt));
@@ -2280,6 +2372,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (strcmp(t, "sectPr") == 0) {
                 w->in_sect = m.type == MT_OPEN;
                 pd_section_props_init(&w->sp);
+                memset(w->hf_ref, 0, sizeof(w->hf_ref));
 
                 if (w->in_ppr) {
                     w->sect_here = 1;
@@ -2293,6 +2386,28 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->sp.margin_bottom = abs(attr_int(&m, "w:bottom", 1440)) * 65536 / 20;
                     w->sp.margin_left = attr_int(&m, "w:left", 1440) * 65536 / 20;
                     w->sp.margin_right = attr_int(&m, "w:right", 1440) * 65536 / 20;
+                    w->sp.header_distance = attr_int(&m, "w:header", 720) * 65536 / 20;
+                    w->sp.footer_distance = attr_int(&m, "w:footer", 720) * 65536 / 20;
+                } else if (strcmp(t, "headerReference") == 0 || strcmp(t, "footerReference") == 0) {
+                    char ty[16] = "default";
+                    int k = (t[0] == 'f' ? 3 : 0);
+
+                    mu_attr(&m, "w:type", ty, sizeof(ty));
+                    k += strcmp(ty, "first") == 0 ? 1 : strcmp(ty, "even") == 0 ? 2 : 0;
+                    mu_attr(&m, "r:id", w->hf_ref[k], sizeof(w->hf_ref[0]));
+                } else if (strcmp(t, "titlePg") == 0) {
+                    w->sp.title_page = attr_on(&m);
+                } else if (strcmp(t, "pgNumType") == 0) {
+                    if (mu_attr(&m, "w:start", v, sizeof(v))) {
+                        w->sp.first_page_number = atoi(v);
+                    }
+
+                    if (mu_attr(&m, "w:fmt", v, sizeof(v))) {
+                        w->sp.page_number_format = strcmp(v, "lowerRoman") == 0 ? PD_NUM_LOWER_ROMAN :
+                                                   strcmp(v, "upperRoman") == 0 ? PD_NUM_UPPER_ROMAN :
+                                                   strcmp(v, "lowerLetter") == 0 ? PD_NUM_LOWER_ALPHA :
+                                                   strcmp(v, "upperLetter") == 0 ? PD_NUM_UPPER_ALPHA : PD_NUM_DECIMAL;
+                    }
                 } else if (strcmp(t, "cols") == 0) {
                     int nc = attr_int(&m, "w:num", 1);
 
@@ -2371,9 +2486,17 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->link_depth[w->nlinks++] = 0;     /* internal anchor: no link */
                 }
             } else if (strcmp(t, "fldSimple") == 0) {
+                int kind;
+
                 w->simple_link = 0;
 
-                if (mu_attr(&m, "w:instr", v, sizeof(v))) {
+                if (mu_attr(&m, "w:instr", v, sizeof(v)) && (kind = page_field(v)) != 0) {
+                    dw_field(w, kind);  /* computed here; Word's last result is not kept */
+
+                    if (m.type == MT_OPEN) {
+                        w->skip = 1;
+                    }
+                } else if (mu_attr(&m, "w:instr", v, sizeof(v))) {
                     const char* h = strstr(v, "HYPERLINK");
                     const char* q = h ? strchr(h, '"') : NULL, *e = q ? strchr(q + 1, '"') : NULL;
 
@@ -2393,11 +2516,21 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
                     w->fld = 2;
 
+                    if ((w->fld_kind = page_field(w->instr)) != 0) {
+                        dw_field(w, w->fld_kind);   /* and its cached result is dropped */
+                    }
+
                     if (q && e && e > q + 1) {
                         dw_link(w, q + 1, (size_t)(e - q - 1));
                         w->fld_link = 1;
                     }
                 } else if (strcmp(v, "end") == 0) {
+                    if (w->fld == 1 && page_field(w->instr)) {     /* no result part at all */
+                        dw_field(w, page_field(w->instr));
+                    }
+
+                    w->fld_kind = 0;
+
                     if (w->fld_link) {
                         dw_link(w, "", 0);
                         w->fld_link = 0;
@@ -2475,6 +2608,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             if (w->sect_here && !w->note) {     /* the section that ends with this paragraph */
                 pd_block_id sec = bld_container(X->b);
 
+                dw_section_hf(w);
                 pd_doc_set_section_props(X->b->d, sec, &w->sp);
                 bld_section(X->b, NULL);
                 w->sect_here = 0;
@@ -2489,6 +2623,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 pd_block_id sec = X->b->st[0].id;
 
                 if (pd_doc_block_info(X->b->d, sec, &bi) == PD_OK && bi.kind == PD_BLOCK_SECTION) {
+                    dw_section_hf(w);
                     pd_doc_set_section_props(X->b->d, sec, &w->sp);
                 }
             }

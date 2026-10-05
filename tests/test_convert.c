@@ -1113,6 +1113,92 @@ static void test_docx_lists(void) {
     pd_doc_free(d);
 }
 
+/* the text of a story's first paragraph */
+static const char* story_text(const pd_doc* d, pd_block_id story, uint32_t* n) {
+    const char* t = "";
+
+    *n = 0;
+
+    if (story) {
+        pd_doc_para_text(d, pd_doc_child(d, story, 0), &t, n);
+    }
+
+    return t;
+}
+
+static int field_at(const pd_doc* d, pd_block_id para, uint32_t off) {
+    pd_inline o;
+
+    return pd_doc_inline_at(d, at(para, off), &o) == PD_OK && o.kind == PD_INLINE_FIELD ? o.field : -1;
+}
+
+/* Headers and footers: the parts a section names, carried over to a
+   section that names none, page-number fields computed rather than frozen,
+   a title page, the page-number format and the header distance. */
+static void test_docx_headers(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\">"
+        "<Relationship Id=\"rId1\" Type=\"t/header\" Target=\"header1.xml\"/>"
+        "<Relationship Id=\"rId2\" Type=\"t/footer\" Target=\"footer1.xml\"/>"
+        "<Relationship Id=\"rId3\" Type=\"t/footer\" Target=\"/word/footer2.xml\"/></Relationships>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:pPr><w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId1\"/>"
+        "<w:footerReference w:type=\"first\" r:id=\"rId2\"/><w:titlePg/>"
+        "<w:pgNumType w:fmt=\"lowerRoman\" w:start=\"3\"/>"
+        "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"500\" w:footer=\"600\"/>"
+        "</w:sectPr></w:pPr><w:r><w:t>One.</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>Two.</w:t></w:r></w:p>"
+        "<w:sectPr><w:footerReference w:type=\"default\" r:id=\"rId3\"/></w:sectPr>"
+        "</w:body></w:document>",
+        "word/header1.xml",
+        "<w:hdr xmlns:w=\"w\"><w:p><w:r><w:t xml:space=\"preserve\">Page </w:t></w:r>"
+        "<w:fldSimple w:instr=\" PAGE \"><w:r><w:t>7</w:t></w:r></w:fldSimple>"
+        "<w:r><w:t xml:space=\"preserve\"> of </w:t></w:r>"
+        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> NUMPAGES \\* MERGEFORMAT </w:instrText></w:r>"
+        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>9</w:t></w:r>"
+        "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p></w:hdr>",
+        "word/footer1.xml",
+        "<w:ftr xmlns:w=\"w\"><w:p><w:r><w:t>First footer</w:t></w:r></w:p></w:ftr>",
+        "word/footer2.xml",
+        "<w:ftr xmlns:w=\"w\"><w:p><w:r><w:t>Second footer</w:t></w:r></w:p></w:ftr>",
+        NULL);
+    pd_block_id s1, s2, hp;
+    pd_section_props a, b;
+    const char* t;
+    uint32_t n;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    s1 = pd_doc_child(d, pd_doc_root(d), 0);
+    s2 = pd_doc_child(d, pd_doc_root(d), 1);
+    CHECK(s2 != 0 && pd_doc_section_props(d, s1, &a) == PD_OK && pd_doc_section_props(d, s2, &b) == PD_OK);
+
+    CHECK(a.header != 0 && a.footer == 0 && a.footer_first != 0 && a.title_page == 1);
+    CHECK(a.page_number_format == PD_NUM_LOWER_ROMAN && a.first_page_number == 3);
+    CHECK(a.header_distance == 500 * 65536 / 20 && a.footer_distance == 600 * 65536 / 20);
+
+    t = story_text(d, a.header, &n);
+    CHECK(n == 15 && memcmp(t, "Page \xEF\xBF\xBC of \xEF\xBF\xBC", 15) == 0);    /* no frozen 7 or 9 */
+    hp = pd_doc_child(d, a.header, 0);
+    CHECK(field_at(d, hp, 5) == PD_FIELD_PAGE && field_at(d, hp, 12) == PD_FIELD_PAGES);
+    t = story_text(d, a.footer_first, &n);
+    CHECK(n == 12 && memcmp(t, "First footer", 12) == 0);
+
+    /* the second section keeps the header, and the part is read once */
+    CHECK(b.header == a.header && b.footer_first == a.footer_first);
+    t = story_text(d, b.footer, &n);
+    CHECK(n == 13 && memcmp(t, "Second footer", 13) == 0);
+    CHECK(pd_doc_story_count(d) == 3);
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1130,6 +1216,8 @@ int main(void) {
     test_docx_styles();
     printf("docx lists\n");
     test_docx_lists();
+    printf("docx headers and footers\n");
+    test_docx_headers();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

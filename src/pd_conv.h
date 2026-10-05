@@ -135,6 +135,9 @@ void bld_cell_end(pd_bld* b);
 void bld_table_end(pd_bld* b);
 pd_block_id bld_footnote_begin(pd_bld* b);
 void bld_footnote_end(pd_bld* b);
+/* a header/footer STORY, filled until bld_story_end */
+pd_block_id bld_story_begin(pd_bld* b);
+void bld_story_end(pd_bld* b);
 pd_block_id bld_float_begin(pd_bld* b);
 void bld_float_end(pd_bld* b);
 void bld_break(pd_bld* b, int32_t kind);

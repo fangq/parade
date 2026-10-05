@@ -759,6 +759,22 @@ void bld_footnote_end(pd_bld* b) {
     bld_pop(b);
 }
 
+pd_block_id bld_story_begin(pd_bld* b) {
+    pd_block_id story;
+
+    if (pd_doc_insert_block(b->d, 0, -1, PD_BLOCK_STORY, &story) != PD_OK) {
+        b->err = PD_ERR_STATE;
+        return 0;
+    }
+
+    bld_push(b, story);
+    return story;
+}
+
+void bld_story_end(pd_bld* b) {
+    bld_pop(b);
+}
+
 pd_block_id bld_float_begin(pd_bld* b) {
     pd_block_id fl;
 
