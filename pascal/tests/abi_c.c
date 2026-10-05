@@ -50,6 +50,8 @@ int main(void) {
     printf("pd_params.freeze_offset %zu\n", offsetof(pd_params, freeze_offset));
     printf("pd_params.direction %zu\n", offsetof(pd_params, direction));
     printf("pd_params.looseness %zu\n", offsetof(pd_params, looseness));
+    printf("pd_params.protrusion %zu\n", offsetof(pd_params, protrusion));
+    printf("pd_params.expansion %zu\n", offsetof(pd_params, expansion));
     printf("pd_break_info %zu\n", sizeof(pd_break_info));
     printf("pd_break_info.lines %zu\n", offsetof(pd_break_info, lines));
     printf("pd_break_info.demerits %zu\n", offsetof(pd_break_info, demerits));
@@ -80,6 +82,7 @@ int main(void) {
     printf("pd_glyph.style %zu\n", offsetof(pd_glyph, style));
     printf("pd_glyph.kind %zu\n", offsetof(pd_glyph, kind));
     printf("pd_glyph.user %zu\n", offsetof(pd_glyph, user));
+    printf("pd_glyph.scale %zu\n", offsetof(pd_glyph, scale));
     printf("pd_pos %zu\n", sizeof(pd_pos));
     printf("pd_pos.block %zu\n", offsetof(pd_pos, block));
     printf("pd_pos.offset %zu\n", offsetof(pd_pos, offset));
@@ -241,6 +244,7 @@ int main(void) {
     printf("pd_draw.offset %zu\n", offsetof(pd_draw, offset));
     printf("pd_draw.region %zu\n", offsetof(pd_draw, region));
     printf("pd_draw.text %zu\n", offsetof(pd_draw, text));
+    printf("pd_draw.scale %zu\n", offsetof(pd_draw, scale));
     printf("pd_pdf_options %zu\n", sizeof(pd_pdf_options));
     printf("pd_pdf_options.compress %zu\n", offsetof(pd_pdf_options, compress));
     printf("pd_pdf_options.outlines %zu\n", offsetof(pd_pdf_options, outlines));

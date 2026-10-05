@@ -79,6 +79,14 @@ PD_API pd_status pd_doc_set_fallback_fonts(pd_doc* doc, const pd_font* const* fo
  * outlive the document; NULL removes the entry.
  */
 PD_API pd_status pd_doc_set_hyphenator(pd_doc* doc, const char* lang, const pd_hyph* hyph);
+/** typeset equation objects (their LaTeX source) with an OpenType math font; NULL: host-sized boxes */
+PD_API void      pd_doc_set_math_font(pd_doc* doc, const pd_font* font);
+/**
+ * Microtypography for every paragraph but code: margin kerning
+ * (protrusion 1) and font expansion up to expansion per-mille of a glyph's
+ * width (pdfTeX's \pdfprotrudechars and \pdfadjustspacing). 0, 0 = off.
+ */
+PD_API pd_status pd_doc_set_microtype(pd_doc* doc, int32_t protrusion, int32_t expansion);
 /** font used when the resolver returns NULL or none is set */
 PD_API void      pd_doc_set_default_font(pd_doc* doc, const pd_font* font);
 

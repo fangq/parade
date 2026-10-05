@@ -237,6 +237,15 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
     prm->line_spacing = pp.line_spacing;
     prm->direction = pp.direction;
 
+    if (s->role == PD_ROLE_EQUATION && !(s->pp.mask & PD_PP_ALIGN)) {
+        prm->align = PD_ALIGN_CENTER;   /* a display equation sits in the middle */
+    }
+
+    if (s->role != PD_ROLE_CODE) {
+        prm->protrusion = d->protrusion;
+        prm->expansion = d->expansion;
+    }
+
     w = column - pp.indent_left - pp.indent_right;
 
     if (w <= 0 || w - pp.indent_first <= 0) {
@@ -288,6 +297,21 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                 pd_sp ow = o->width, oh = o->height, od = o->depth;
 
                 switch (o->kind) {
+                    case PD_INLINE_EQUATION:    /* typeset with the math font: its real size */
+                        if (d->math_font && o->source && o->source_len > 0) {
+                            pd_math_metrics mm;
+                            int32_t cnt;
+
+                            if (pd_math_layout(d->math_font, cp.size, o->source, (size_t)o->source_len,
+                                               s->role == PD_ROLE_EQUATION, NULL, 0, &cnt, &mm) == PD_OK) {
+                                ow = mm.width;
+                                oh = mm.height;
+                                od = mm.depth;
+                            }
+                        }
+
+                        break;
+
                     case PD_INLINE_FIELD:
                     case PD_INLINE_FOOTNOTE: {  /* its value's width, or a placeholder until known */
                         char val[96];

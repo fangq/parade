@@ -205,6 +205,160 @@ static void test_looseness(const pd_font* f) {
     pd_para_free(p);
 }
 
+/* right edge of a line's ink: the end of its last glyph */
+static pd_sp line_right(const pd_para* p, int32_t li, uint32_t* last_cp) {
+    pd_glyph g[1024];
+    int32_t n = 0;
+    const char* t = text_en;
+
+    pd_para_get_glyphs(p, li, g, 1024, &n);
+
+    if (n == 0) {
+        return 0;
+    }
+
+    *last_cp = (unsigned char)t[g[n - 1].cluster];
+    return g[n - 1].x + g[n - 1].advance;
+}
+
+/* microtypography: margin kerning and font expansion */
+static void test_microtype(const pd_font* f) {
+    pd_para* p = make_para(f, text_en, PD_PT(10));
+    pd_params prm;
+    pd_break_info plain, prot, exp;
+    pd_sp W = PD_PT(160);
+    int32_t i, hang = 0, exact = 0, lines, ok_scale = 1, scaled = 0;
+
+    pd_params_init(&prm);
+    prm.width = W;
+    pd_para_break(p, &prm, &plain);
+
+    prm.protrusion = 1;
+    pd_para_break(p, &prm, &prot);
+    lines = pd_para_line_count(p);
+
+    for (i = 0; i + 1 < lines; i++) {
+        uint32_t cp = 0;
+        pd_sp r = line_right(p, i, &cp);
+
+        if (cp == '.' || cp == ',' || cp == ';' || cp == '-') {
+            hang += r > W && r < W + PD_PT(4);   /* punctuation hangs out, a little */
+        } else if (cp >= 'a' && cp <= 'z') {
+            exact += r >= W - 2 && r <= W + 2;    /* letters end at the margin (to rounding) */
+        }
+    }
+
+    CHECK(hang > 0 && exact > 0);
+    printf("  protrusion: %d lines hang punctuation, %d end flush\n", hang, exact);
+
+    prm.protrusion = 0;
+    prm.expansion = 20;
+    pd_para_break(p, &prm, &exp);
+    lines = pd_para_line_count(p);
+
+    for (i = 0; i < lines; i++) {
+        pd_glyph g[1024];
+        int32_t n = 0, k;
+        uint32_t cp;
+
+        pd_para_get_glyphs(p, i, g, 1024, &n);
+
+        for (k = 0; k < n; k++) {
+            ok_scale &= g[k].scale >= 65536 * 98 / 100 && g[k].scale <= 65536 * 102 / 100 + 1;
+            scaled += g[k].scale != 65536;
+        }
+
+        if (i + 1 < lines) {
+            pd_sp r = line_right(p, i, &cp);
+
+            ok_scale &= r >= W - 2 && r <= W + 2;     /* still justified exactly */
+        }
+    }
+
+    CHECK(ok_scale && scaled > 0);
+    CHECK(exp.demerits <= plain.demerits);
+    printf("  expansion: demerits %lld -> %lld, %d glyphs scaled\n", (long long)plain.demerits,
+           (long long)exp.demerits, scaled);
+    pd_para_free(p);
+}
+
+static int math_box(const pd_font* mf, const char* tex, int display, pd_math_metrics* m, int32_t* nrules) {
+    pd_math_item it[2048];
+    int32_t n = 0, k;
+
+    if (pd_math_layout(mf, PD_PT(10), tex, strlen(tex), display, it, 2048, &n, m) != PD_OK) {
+        return -1;
+    }
+
+    if (nrules) {
+        *nrules = 0;
+
+        for (k = 0; k < n; k++) {
+            *nrules += it[k].kind == 1;
+        }
+    }
+
+    return n;
+}
+
+static void test_math(const pd_font* mf) {
+    pd_math_metrics x, x2, fr, sumd, sumt, sq, del, a, b;
+    int32_t rules = 0, n, k;
+    unsigned seed = 99;
+
+    CHECK(pd_font_has_math(mf));
+    CHECK(math_box(mf, "x", 0, &x, NULL) == 1);
+    CHECK(math_box(mf, "x^2", 0, &x2, NULL) == 2 && x2.width > x.width && x2.height > x.height);
+    CHECK(math_box(mf, "\\frac{a}{b}", 0, &fr, &rules) == 3 && rules == 1 && fr.height > x.height && fr.depth > PD_PT(2));
+    CHECK(math_box(mf, "\\sum_{i=1}^n i", 1, &sumd, NULL) > 0 && math_box(mf, "\\sum_{i=1}^n i", 0, &sumt, NULL) > 0);
+    CHECK(sumd.height > sumt.height && sumd.depth > sumt.depth);    /* display: bigger, limits stacked */
+    CHECK(math_box(mf, "\\sqrt{x}", 0, &sq, &rules) >= 2 && rules == 1 && sq.width > x.width);
+    CHECK(math_box(mf, "\\left( \\frac{\\frac{a}{b}}{\\frac{c}{d}} \\right)", 0, &del, NULL) > 0);
+    CHECK(math_box(mf, "\\frac{\\frac{a}{b}}{\\frac{c}{d}}", 0, &a, NULL) > 0);
+    CHECK(del.height >= a.height && del.depth >= a.depth && del.width > a.width);   /* the parentheses enclose it */
+    CHECK(math_box(mf, "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}", 0, &b, NULL) >= 6);
+    CHECK(math_box(mf, "\\mathbb{R} \\alpha \\unknowncommand", 0, &a, NULL) > 3);
+
+    /* the same input, the same layout */
+    {
+        pd_math_item p1[512], p2[512];
+        int32_t n1, n2;
+        const char* t = "\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}";
+
+        pd_math_layout(mf, PD_PT(10), t, strlen(t), 1, p1, 512, &n1, NULL);
+        pd_math_layout(mf, PD_PT(10), t, strlen(t), 1, p2, 512, &n2, NULL);
+        CHECK(n1 == n2 && memcmp(p1, p2, (size_t)n1 * sizeof(pd_math_item)) == 0);
+    }
+
+    /* malformed input: never a crash */
+    for (k = 0; k < 3000; k++) {
+        static const char* bits[] = { "\\frac", "{", "}", "^", "_", "\\left(", "\\right)", "\\sqrt", "[", "]", "x",
+                                      "&", "\\\\", "\\begin{matrix}", "\\end{matrix}", "\\sum", "'", "\\hat", "\\",
+                                      "\\text{", "\\mathbb", "\\big(", "2", " "
+                                    };
+        char buf[256];
+        size_t len = 0;
+        int j, parts = 1 + (int)(seed % 20);
+
+        for (j = 0; j < parts; j++) {
+            const char* piece;
+
+            seed = seed * 1103515245u + 12345u;
+            piece = bits[(seed >> 8) % (sizeof(bits) / sizeof(bits[0]))];
+
+            if (len + strlen(piece) < sizeof(buf)) {
+                memcpy(buf + len, piece, strlen(piece));
+                len += strlen(piece);
+            }
+        }
+
+        pd_math_layout(mf, PD_PT(10), buf, len, (int)(seed & 1), NULL, 0, &n, NULL);
+    }
+
+    printf("  x^2 %.1fpt wide; display sum %.1f+%.1fpt vs text %.1f+%.1fpt; 3000 mangled formulas\n",
+           x2.width / 65536.0, sumd.height / 65536.0, sumd.depth / 65536.0, sumt.height / 65536.0, sumt.depth / 65536.0);
+}
+
 static void test_determinism(const pd_font* f) {
     pd_params prm;
     uint64_t h1, h2;
@@ -802,6 +956,8 @@ int main(void) {
     test_greedy_vs_optimal(f);
     printf("looseness\n");
     test_looseness(f);
+    printf("microtypography\n");
+    test_microtype(f);
     printf("determinism\n");
     test_determinism(f);
     printf("incremental\n");
@@ -818,6 +974,19 @@ int main(void) {
     test_caret(f);
     printf("inline object\n");
     test_object(f);
+
+    {
+        pd_font* mf = load_env_font("PARADE_TEST_MATH_FONT",
+                                    "/usr/share/texmf/fonts/opentype/public/lm-math/latinmodern-math.otf");
+
+        if (mf) {
+            printf("math\n");
+            test_math(mf);
+            pd_font_free(mf);
+        } else {
+            printf("math (skipped, no math font)\n");
+        }
+    }
 
     if (cjk) {
         printf("cjk\n");

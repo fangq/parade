@@ -129,6 +129,37 @@ PD_API size_t pd_text_prev_grapheme(const char* utf8, size_t len, size_t offset)
 PD_API pd_status pd_text_line_breaks(const char* utf8, size_t len, uint8_t* out);
 
 /* ------------------------------------------------------------------ */
+/* Math (TeX-style layout with an OpenType MATH font)                 */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int32_t kind;           /**< 0 glyph, 1 rule (filled rectangle) */
+    uint32_t glyph;
+    pd_sp size;             /**< glyph size */
+    pd_sp x, y;             /**< glyph: pen position on its baseline; rule: top-left corner. y is down from the
+                                 formula's baseline */
+    pd_sp w, h;             /**< rules */
+} pd_math_item;
+
+typedef struct {
+    pd_sp width, height, depth;
+} pd_math_metrics;
+
+/** 1 if the font has an OpenType MATH table (Latin Modern Math, STIX Two Math, TeX Gyre ... Math) */
+PD_API int32_t   pd_font_has_math(const pd_font* font);
+
+/**
+ * Lay out a formula in LaTeX notation the way TeX does (Appendix G with
+ * the font's MATH constants): fractions, scripts, radicals, big operators
+ * with limits, \left..\right delimiters grown from size variants and glyph
+ * assemblies, accents, matrices, \text, \mathbf/\mathbb/\mathcal/\mathrm.
+ * display selects display style. Same size-query convention as
+ * pd_para_get_glyphs; m may be NULL. Unknown commands are shown by name.
+ */
+PD_API pd_status pd_math_layout(const pd_font* font, pd_sp size, const char* tex, size_t len, int32_t display,
+                                pd_math_item* items, int32_t cap, int32_t* count, pd_math_metrics* m);
+
+/* ------------------------------------------------------------------ */
 /* Hyphenation (Liang patterns, libhyphen/hunspell .dic files)        */
 /* ------------------------------------------------------------------ */
 
@@ -202,6 +233,9 @@ typedef struct {
     int32_t freeze_offset;  /**< keep previous lines that end at or before this byte offset (-1 = off) */
     int32_t direction;      /**< pd_direction: paragraph direction (UAX #9); auto = first strong character */
     int32_t looseness;      /**< TeX \looseness: aim for this many lines more (or fewer) than optimal */
+    /* microtypography (pdfTeX/microtype) */
+    int32_t protrusion;     /**< 1: punctuation, hyphens and quotes hang into the margins (margin kerning) */
+    int32_t expansion;      /**< font expansion limit in per-mille of glyph width (20 = 2%), 0 = off */
 } pd_params;
 
 PD_API void pd_params_init(pd_params* params);
@@ -284,6 +318,7 @@ typedef struct {
     int32_t style;          /**< index into the paragraph's style table, -1 for objects */
     int32_t kind;           /**< pd_glyph_kind */
     int32_t user;           /**< style user tag or object user id */
+    int32_t scale;          /**< horizontal glyph scale, 65536 = 1 (font expansion stretches or narrows glyphs) */
 } pd_glyph;
 
 /**

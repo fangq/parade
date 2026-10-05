@@ -2717,6 +2717,7 @@ static pd_sp emit_text(const pd_layout* L, dlist_t* D, const char* text, const p
 
         memset(&a, 0, sizeof(a));
         a.kind = PD_DRAW_GLYPH;
+        a.scale = 65536;
         a.x = x + g[i].x;
         a.y = y;
         a.w = g[i].advance;
@@ -2904,6 +2905,55 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
                 a.kind = PD_DRAW_IMAGE;
                 a.resource = q->obj.resource;
                 emit(D, &a);
+            } else if (q->obj.kind == PD_INLINE_EQUATION && d->math_font && q->obj.source && q->obj.source_len > 0) {
+                /* the formula itself: glyphs of the math font and rules */
+                pd_math_item* mi = NULL;
+                int32_t cnt = 0, k;
+                pd_style es;
+                pd_char_props ecp;
+                pd_format_id ef = b->st.empty_format;
+                int32_t r;
+
+                for (r = 0; r < b->st.nruns; r++) {
+                    if (b->st.runs[r].start <= q->offset && q->offset < b->st.runs[r].end) {
+                        ef = b->st.runs[r].format;
+                    }
+                }
+
+                if (pd_doc_run_style(d, b->id, ef, &es, &ecp) == PD_OK &&
+                        pd_math_layout(d->math_font, ecp.size, q->obj.source, (size_t)q->obj.source_len,
+                                       b->st.role == PD_ROLE_EQUATION, NULL, 0, &cnt, NULL) == PD_OK &&
+                        (mi = (pd_math_item*)malloc(((size_t)cnt + 1) * sizeof(pd_math_item))) != NULL &&
+                        pd_math_layout(d->math_font, ecp.size, q->obj.source, (size_t)q->obj.source_len,
+                                       b->st.role == PD_ROLE_EQUATION, mi, cnt, &cnt, NULL) == PD_OK) {
+                    for (k = 0; k < cnt; k++) {
+                        pd_draw m = a;
+
+                        m.x = a.x + mi[k].x;
+                        m.color = ecp.color;
+                        m.scale = 65536;
+
+                        if (mi[k].kind == 1) {
+                            m.kind = PD_DRAW_RULE;
+                            m.y = l->oy + g[i].y + mi[k].y;
+                            m.w = mi[k].w;
+                            m.h = mi[k].h;
+                        } else {
+                            m.kind = PD_DRAW_GLYPH;
+                            m.y = l->oy + g[i].y + mi[k].y;
+                            m.glyph = mi[k].glyph;
+                            m.font = d->math_font;
+                            m.size = mi[k].size;
+                            m.w = 0;
+                            m.h = 0;
+                            m.text = 0;
+                        }
+
+                        emit(D, &m);
+                    }
+                }
+
+                free(mi);
             } else if (q->obj.kind == PD_INLINE_EQUATION || q->obj.kind == PD_INLINE_USER) {
                 a.kind = PD_DRAW_BOX;
                 emit(D, &a);
@@ -2951,6 +3001,7 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
 
         a.kind = PD_DRAW_GLYPH;
         a.glyph = g[i].glyph;
+        a.scale = g[i].scale ? g[i].scale : 65536;
         a.text = cp_at(b->st.text, b->st.len, g[i].cluster);
         a.font = ps.font;
         a.size = ps.size;

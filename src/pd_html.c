@@ -364,6 +364,12 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
             pb_puts(x->o, "</p>\n");
             return;
 
+        case PD_ROLE_EQUATION:
+            pb_puts(x->o, "<p class=\"equation\">");
+            hx_inline(x, p);
+            pb_puts(x->o, "</p>\n");
+            return;
+
         case PD_ROLE_CODE:
             pb_puts(x->o, x->code_open ? "\n" : "<pre><code>");
             x->code_open = 1;
@@ -917,7 +923,8 @@ static void hi_begin_para(hi* h) {
     for (i = h->depth - 1; i >= 0; i--) {
         const hel* e = &h->stack[i];
 
-        if (!inner && (e->kind == E_H || e->kind == E_PRE || e->kind == E_QUOTE || e->kind == E_LI || e->kind == E_CAP)) {
+        if (!inner && (e->kind == E_H || e->kind == E_PRE || e->kind == E_QUOTE || e->kind == E_LI || e->kind == E_CAP ||
+                       (e->kind == E_P && e->title == 2))) {
             inner = e;
         }
 
@@ -953,6 +960,8 @@ static void hi_begin_para(hi* h) {
         bld_para_style(b, "Quote", PD_ROLE_QUOTE, 0);
     } else if (inner && inner->kind == E_CAP) {
         bld_para_style(b, "Caption", PD_ROLE_CAPTION, 0);
+    } else if (inner && inner->kind == E_P && inner->title == 2) {
+        bld_para_style(b, NULL, PD_ROLE_EQUATION, 0);
     }
 
     if (lists > 0) {
@@ -1370,6 +1379,47 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                 continue;
             }
 
+            if (!strcmp(m.name, "span") && m.type == MT_OPEN && mu_attr(&m, "class", v, sizeof(v)) &&
+                    strstr(v, "math")) {    /* <span class="math">\(..\)</span>: an equation */
+                const char* body = s + m.pos, *end = body;
+                pd_buf src;
+                pd_inline o;
+
+                while (end < s + n && strncmp(end, "</span>", 7) != 0) {
+                    end++;
+                }
+
+                memset(&src, 0, sizeof(src));
+                mu_decode(body, (size_t)(end - body), &src);
+
+                if (src.n >= 4 && src.p[0] == '\\' && (src.p[1] == '(' || src.p[1] == '[')) {
+                    memmove(src.p, src.p + 2, src.n - 2);
+                    src.n -= 4;     /* and the closing \) */
+                }
+
+                memset(&o, 0, sizeof(o));
+                o.kind = PD_INLINE_EQUATION;
+                o.source = src.p ? src.p : "";
+                o.source_len = (int32_t)src.n;
+                o.width = (pd_sp)src.n * PD_PT(5);
+                o.height = PD_PT(8);
+
+                if (!h->b->para) {
+                    hi_begin_para(h);
+                } else if (h->space) {
+                    bld_text(h->b, " ", 1);
+                    h->space = 0;
+                }
+
+                if (src.n) {
+                    bld_inline(h->b, &o);
+                }
+
+                pb_free(&src);
+                m.pos = end < s + n ? (size_t)(end - s) + 7 : n;
+                continue;
+            }
+
             if (kind == 0) {    /* inline formatting */
                 pd_char_props* cp = &h->b->cp;
                 const char* t = m.name;
@@ -1438,6 +1488,10 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
 
             if (kind == E_H && mu_attr(&m, "class", v, sizeof(v)) && strstr(v, "title")) {
                 e.title = 1;
+            }
+
+            if (kind == E_P && mu_attr(&m, "class", v, sizeof(v)) && strstr(v, "equation")) {
+                e.title = 2;    /* a display equation */
             }
 
             switch (kind) {

@@ -488,6 +488,7 @@ static pd_status parse_font(pd_font* f, int32_t face) {
     f->glyf = find_table(f, base, TAG('g', 'l', 'y', 'f'), &f->glyf_len);
     f->loca = find_table(f, base, TAG('l', 'o', 'c', 'a'), &f->loca_len);
     f->cff = find_table(f, base, TAG('C', 'F', 'F', ' '), &f->cff_len);
+    f->math = find_table(f, base, TAG('M', 'A', 'T', 'H'), &f->math_len);
     f->loca_long = head ? S16(f, head + 50) : 0;
     cmap = find_table(f, base, TAG('c', 'm', 'a', 'p'), NULL);
 

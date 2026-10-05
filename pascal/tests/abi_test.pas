@@ -76,6 +76,8 @@ begin
   WriteLn('pd_params.freeze_offset ', PtrUInt(@v_pd_params.freeze_offset) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.direction ', PtrUInt(@v_pd_params.direction) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.looseness ', PtrUInt(@v_pd_params.looseness) - PtrUInt(@v_pd_params));
+  WriteLn('pd_params.protrusion ', PtrUInt(@v_pd_params.protrusion) - PtrUInt(@v_pd_params));
+  WriteLn('pd_params.expansion ', PtrUInt(@v_pd_params.expansion) - PtrUInt(@v_pd_params));
   WriteLn('pd_break_info ', SizeOf(pd_break_info));
   WriteLn('pd_break_info.lines ', PtrUInt(@v_pd_break_info.lines) - PtrUInt(@v_pd_break_info));
   WriteLn('pd_break_info.demerits ', PtrUInt(@v_pd_break_info.demerits) - PtrUInt(@v_pd_break_info));
@@ -106,6 +108,7 @@ begin
   WriteLn('pd_glyph.style ', PtrUInt(@v_pd_glyph.style) - PtrUInt(@v_pd_glyph));
   WriteLn('pd_glyph.kind ', PtrUInt(@v_pd_glyph.kind) - PtrUInt(@v_pd_glyph));
   WriteLn('pd_glyph.user ', PtrUInt(@v_pd_glyph.user) - PtrUInt(@v_pd_glyph));
+  WriteLn('pd_glyph.scale ', PtrUInt(@v_pd_glyph.scale) - PtrUInt(@v_pd_glyph));
   WriteLn('pd_pos ', SizeOf(pd_pos));
   WriteLn('pd_pos.block ', PtrUInt(@v_pd_pos.block) - PtrUInt(@v_pd_pos));
   WriteLn('pd_pos.offset ', PtrUInt(@v_pd_pos.offset) - PtrUInt(@v_pd_pos));
@@ -267,6 +270,7 @@ begin
   WriteLn('pd_draw.offset ', PtrUInt(@v_pd_draw.offset) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.region ', PtrUInt(@v_pd_draw.region) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.text ', PtrUInt(@v_pd_draw.text) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.scale ', PtrUInt(@v_pd_draw.scale) - PtrUInt(@v_pd_draw));
   WriteLn('pd_pdf_options ', SizeOf(pd_pdf_options));
   WriteLn('pd_pdf_options.compress ', PtrUInt(@v_pd_pdf_options.compress) - PtrUInt(@v_pd_pdf_options));
   WriteLn('pd_pdf_options.outlines ', PtrUInt(@v_pd_pdf_options.outlines) - PtrUInt(@v_pd_pdf_options));

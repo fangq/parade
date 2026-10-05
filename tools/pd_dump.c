@@ -24,6 +24,7 @@ static const char* font_paths[] = {
 
 #define NFONTS 5
 static pd_font* fonts[NFONTS];
+static pd_font* mathfont;
 
 static const pd_font* resolve(void* user, const char* family, int32_t weight, int32_t italic) {
     (void)user;
@@ -388,6 +389,26 @@ static pd_doc* sample(void) {
     p = para(&c, "Code", PD_ROLE_CODE, 0, "for (b = 0; b < nbreaks; b++)\n    best[b] = min over a of cost(a, b);");
     para(&c, "Quote", PD_ROLE_QUOTE, 0, "Whatever is worth doing at all is worth doing well.");
 
+    /* mathematics, typeset with the math font */
+    {
+        static const char* inl = "e^{i\\pi} + 1 = 0";
+        static const char* disp = "\\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx = \\sqrt{\\pi}, \\qquad "
+                                  "\\sum_{k=0}^{n} \\binom{n}{k} = 2^n";
+        pd_inline o;
+
+        p = para(&c, NULL, 0, 0, "Formulas are laid out the TeX way, inline like ");
+        memset(&o, 0, sizeof(o));
+        o.kind = PD_INLINE_EQUATION;
+        o.source = inl;
+        o.source_len = (int32_t)strlen(inl);
+        pd_doc_insert_inline(c.d, end_of(c.d, p), &o, NULL);
+        pd_doc_insert_text(c.d, end_of(c.d, p), " or on a line of their own:", 27, PD_FORMAT_INHERIT, NULL);
+        p = para(&c, NULL, PD_ROLE_EQUATION, 0, "");
+        o.source = disp;
+        o.source_len = (int32_t)strlen(disp);
+        pd_doc_insert_inline(c.d, end_of(c.d, p), &o, NULL);
+    }
+
     /* a second section: two columns, roman page numbers */
     pd_doc_insert_block(c.d, pd_doc_root(c.d), -1, PD_BLOCK_SECTION, &sec2);
     pd_doc_section_props(c.d, sec2, &sp);
@@ -486,6 +507,12 @@ int main(int argc, char** argv) {
     }
 
     pd_doc_set_font_resolver(d, resolve, NULL);
+    pd_doc_set_microtype(d, 1, 20);     /* margin kerning and font expansion, as with microtype */
+
+    if (pd_font_load_file("/usr/share/texmf/fonts/opentype/public/lm-math/latinmodern-math.otf", 0, &mathfont) ==
+            PD_OK) {
+        pd_doc_set_math_font(d, mathfont);
+    }
 
     if (pd_layout_new(d, &L) != PD_OK || pd_layout_update(L, &info) != PD_OK) {
         fprintf(stderr, "layout failed\n");

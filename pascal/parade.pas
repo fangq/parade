@@ -244,6 +244,7 @@ type
     freeze_offset: Int32;
     direction: Int32;
     looseness: Int32;
+    protrusion, expansion: Int32;
   end;
   Ppd_params = ^pd_params;
 
@@ -266,6 +267,7 @@ type
     glyph, cluster: UInt32;
     x, y, advance: pd_sp;
     style, kind, user: Int32;
+    scale: Int32;
   end;
   Ppd_glyph = ^pd_glyph;
 
@@ -427,6 +429,7 @@ type
     offset: UInt32;
     region: Int32;
     text: UInt32;
+    scale: Int32;
   end;
   Ppd_draw = ^pd_draw;
 
@@ -488,6 +491,8 @@ procedure pd_doc_set_font_resolver(doc: Ppd_doc; fn: pd_font_resolver; user: Poi
 procedure pd_doc_set_default_font(doc: Ppd_doc; font: Ppd_font); cdecl; PDEXT;
 function pd_doc_set_fallback_fonts(doc: Ppd_doc; fonts: PPointer; n: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_set_hyphenator(doc: Ppd_doc; lang: PAnsiChar; hyph: Pointer): pd_status; cdecl; PDEXT;
+function pd_doc_set_microtype(doc: Ppd_doc; protrusion, expansion: Int32): pd_status; cdecl; PDEXT;
+procedure pd_doc_set_math_font(doc: Ppd_doc; font: Ppd_font); cdecl; PDEXT;
 function pd_doc_revision(doc: Ppd_doc): UInt64; cdecl; PDEXT;
 
 function pd_doc_root(doc: Ppd_doc): pd_block_id; cdecl; PDEXT;

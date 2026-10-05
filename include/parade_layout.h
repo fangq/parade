@@ -84,6 +84,7 @@ typedef struct {
     uint32_t offset;            /**< source byte offset */
     int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float, 4 footnote */
     uint32_t text;              /**< glyphs: the code point shown (also for generated text), 0 if none */
+    int32_t scale;              /**< glyphs: horizontal scale, 65536 = 1 (font expansion) */
 } pd_draw;
 
 /** the display list of a page; same size-query convention as pd_para_get_glyphs */

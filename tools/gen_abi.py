@@ -11,10 +11,10 @@ STRUCTS = {
     "pd_style": "font size space_stretch space_shrink kerning color user hyph",
     "pd_params": "mode align width indent line_penalty adj_demerits double_hyphen_demerits final_hyphen_demerits "
                  "hyphen_penalty ex_hyphen_penalty tex_badness rag_stretch baseline_skip line_spacing hysteresis "
-                 "freeze_offset direction looseness",
+                 "freeze_offset direction looseness protrusion expansion",
     "pd_break_info": "lines demerits overfull underfull reused_breakpoints frozen_lines height",
     "pd_line": "text_start text_end x baseline width ascent descent ratio badness hyphenated overfull underfull",
-    "pd_glyph": "glyph cluster x y advance style kind user",
+    "pd_glyph": "glyph cluster x y advance style kind user scale",
     "pd_pos": "block offset",
     "pd_range": "start end",
     "pd_block_info": "kind id parent child_count index role level list_level style list break_kind text_length "
@@ -37,7 +37,7 @@ STRUCTS = {
     "pd_change": "kind block style revision",
     "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull variants",
     "pd_page_info": "width height section number label float_page first last",
-    "pd_draw": "kind x y w h glyph font size color resource block offset region text",
+    "pd_draw": "kind x y w h glyph font size color resource block offset region text scale",
     "pd_pdf_options": "compress outlines title author",
 }
 PASCAL_NAME = {"end": "finish", "label": "label_"}

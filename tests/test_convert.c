@@ -243,6 +243,14 @@ static pd_doc* rich(void) {
     o.height = PD_PT(8);
     pd_doc_insert_inline(d, end_of(d, p), &o, NULL);
     text(d, p, " inline.");
+    p = para(d, sec, NULL, PD_ROLE_EQUATION, 0, NULL);
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_EQUATION;
+    o.source = "\\sum_{i=1}^n i^2";
+    o.source_len = (int32_t)strlen(o.source);
+    o.width = PD_PT(40);
+    o.height = PD_PT(12);
+    pd_doc_insert_inline(d, at(p, 0), &o, NULL);
     para(d, sec, NULL, 0, 0, "Last paragraph.");
     return d;
 }
@@ -359,7 +367,7 @@ static pd_block_id find_kind(const pd_doc* d, pd_block_id id, int kind) {
 enum {
     F_HEAD = 1, F_BOLD = 2, F_ITAL = 4, F_UNDER = 8, F_STRIKE = 16, F_SHIFT = 32, F_MONO = 64, F_LINK = 128,
     F_LIST = 256, F_QUOTE = 512, F_CODE = 1024, F_TABLE = 2048, F_SPAN = 4096, F_IMAGE = 8192, F_NOTE = 16384,
-    F_COLOR = 32768, F_TITLE = 65536, F_HEADER_ROW = 131072
+    F_COLOR = 32768, F_TITLE = 65536, F_HEADER_ROW = 131072, F_MATH = 262144
 };
 
 static void check_import(const pd_doc* d, uint32_t feat, const char* name) {
@@ -500,6 +508,15 @@ static void check_import(const pd_doc* d, uint32_t feat, const char* name) {
         CHECK(p && find_para(d, " and an equation ") == p);
     }
 
+    if (feat & F_MATH) {
+        p = find_para(d, " and an equation ");
+        CHECK(object_in(d, p, PD_INLINE_EQUATION, &o) && o.source_len == 8 && memcmp(o.source, "E = mc^2", 8) == 0);
+        p = find_para(d, "Last paragraph.");
+        p = pd_doc_prev_paragraph(d, p);
+        CHECK(p && pd_doc_block_info(d, p, &bi) == PD_OK && bi.role == PD_ROLE_EQUATION &&
+              object_in(d, p, PD_INLINE_EQUATION, &o) && o.source_len == 16 && memcmp(o.source, "\\sum_{i=1}^n i^2", 16) == 0);
+    }
+
     printf("  %s: %s\n", name, failures == fails0 ? "all features survive" : "FAILED");
 }
 
@@ -509,7 +526,7 @@ static void test_roundtrip(void) {
         const char* name;
         uint32_t feat;
     } fmts[] = {
-        { PD_CONV_HTML, "HTML", 0x3FFFF },
+        { PD_CONV_HTML, "HTML", 0x7FFFF },
         {
             PD_CONV_MARKDOWN, "Markdown", F_HEAD | F_BOLD | F_ITAL | F_UNDER | F_STRIKE | F_SHIFT | F_MONO | F_LINK | F_LIST |
             F_QUOTE | F_CODE | F_TABLE | F_IMAGE | F_NOTE | F_HEADER_ROW
@@ -519,7 +536,7 @@ static void test_roundtrip(void) {
             F_TABLE | F_IMAGE | F_NOTE | F_TITLE | F_CODE | F_QUOTE | F_SPAN | F_HEADER_ROW
         },
         { PD_CONV_DOCX, "DOCX", 0x3FFFF },
-        { PD_CONV_JDATA, "JData", 0x3FFFF },
+        { PD_CONV_JDATA, "JData", 0x7FFFF },
     };
     pd_doc* d = rich();
     size_t i;

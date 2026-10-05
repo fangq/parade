@@ -135,6 +135,8 @@ struct pd_doc {
         const pd_hyph* hyph;
     }* hyphs;                   /* hyphenation patterns by language tag prefix */
     int32_t nhyphs;
+    int32_t protrusion, expansion;  /* microtypography for the layout bridge */
+    const pd_font* math_font;   /* equations are typeset with it when set */
     void* resolver_user;
     const pd_font* default_font;
     pd_doc_listener listener;

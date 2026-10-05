@@ -39,6 +39,7 @@ type
     FDoc: Ppd_doc;
     FLayout: Ppd_layout;
     FFonts: array of TParadeFontEntry;
+    FMathFont: Ppd_font;        { equations are typeset with it }
     FCaret, FAnchor: pd_marker_id;
     FDesiredX: Double;
     FHasDesiredX: Boolean;
@@ -109,6 +110,8 @@ type
     { fonts: the resolver picks the closest registered face for a family }
     procedure AddFont(const Family, FileName: string; Weight: Integer = 400; Italic: Boolean = False);
     procedure AddDefaultFonts;
+    { an OpenType math font (Latin Modern Math, STIX Two Math) for equations }
+    procedure SetMathFont(const FileName: string);
 
     procedure NewDocument;
     procedure LoadFromFile(const FileName: string);
@@ -333,6 +336,8 @@ begin
   FGlyphs.Free;
   for I := 0 to High(FFonts) do
     pd_font_free(FFonts[I].Font);
+  if FMathFont <> nil then
+    pd_font_free(FMathFont);
   inherited Destroy;
 end;
 
@@ -366,6 +371,23 @@ begin
   end;
   if FileExists(Dir + 'dejavu/DejaVuSansMono.ttf') then
     AddFont('monospace', Dir + 'dejavu/DejaVuSansMono.ttf');
+  SetMathFont('/usr/share/texmf/fonts/opentype/public/lm-math/latinmodern-math.otf');
+end;
+
+procedure TParadeEdit.SetMathFont(const FileName: string);
+var
+  F: Ppd_font;
+begin
+  if not FileExists(FileName) or (pd_font_load_file(PAnsiChar(FileName), 0, F) <> PD_OK) then
+    Exit;
+  if FMathFont <> nil then
+    pd_font_free(FMathFont);
+  FMathFont := F;
+  if FDoc <> nil then
+  begin
+    pd_doc_set_math_font(FDoc, FMathFont);
+    Relayout;
+  end;
 end;
 
 procedure TParadeEdit.NewDocument;
@@ -379,6 +401,7 @@ begin
     pd_doc_free(FDoc);
   FDoc := D;
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
+  pd_doc_set_math_font(FDoc, FMathFont);
   ParadeCheck(pd_layout_new(FDoc, FLayout), 'layout');
   ParadeCheck(pd_doc_marker_new(FDoc, PdPos(FirstPara, 0), PD_GRAVITY_RIGHT, FCaret), 'caret');
   ParadeCheck(pd_doc_marker_new(FDoc, PdPos(FirstPara, 0), PD_GRAVITY_LEFT, FAnchor), 'anchor');
@@ -414,6 +437,7 @@ begin
     pd_doc_free(FDoc);
   FDoc := D;
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
+  pd_doc_set_math_font(FDoc, FMathFont);
   ParadeCheck(pd_layout_new(FDoc, FLayout), 'layout');
   ParadeCheck(pd_doc_marker_new(FDoc, PdPos(FirstPara, 0), PD_GRAVITY_RIGHT, FCaret), 'caret');
   ParadeCheck(pd_doc_marker_new(FDoc, PdPos(FirstPara, 0), PD_GRAVITY_LEFT, FAnchor), 'anchor');

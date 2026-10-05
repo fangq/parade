@@ -1915,6 +1915,56 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
             continue;
         }
 
+        /* $$display math$$ on lines of its own */
+        if (c + 1 < e && s[c] == '$' && s[c + 1] == '$' && !para.n) {
+            pd_buf tex;
+            int32_t j = i;
+            size_t from = c + 2;
+            pd_inline o;
+
+            memset(&tex, 0, sizeof(tex));
+
+            for (;;) {
+                size_t le = lines[j].b, k;
+                int closed = 0;
+
+                for (k = from; k + 1 < le; k++) {
+                    if (s[k] == '$' && s[k + 1] == '$') {
+                        closed = 1;
+                        break;
+                    }
+                }
+
+                pb_put(&tex, s + from, (closed ? k : le) - from);
+
+                if (closed || j + 1 >= nl) {
+                    break;
+                }
+
+                pb_putc(&tex, ' ');
+                from = lines[++j].a;
+            }
+
+            memset(&o, 0, sizeof(o));
+            o.kind = PD_INLINE_EQUATION;
+            o.source = tex.p ? tex.p : "";
+            o.source_len = (int32_t)tex.n;
+            o.width = (pd_sp)tex.n * PD_PT(5);
+            o.height = PD_PT(10);
+            bld_para_style(&b, NULL, PD_ROLE_EQUATION, 0);
+            bld_begin_para(&b);
+
+            if (tex.n) {
+                bld_inline(&b, &o);
+            }
+
+            bld_end_para(&b);
+            pb_free(&tex);
+            i = j;
+            nls = 0;
+            continue;
+        }
+
         /* ATX heading */
         if (c < e && s[c] == '#' && ind < 4) {
             size_t k = c;

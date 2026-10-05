@@ -90,6 +90,7 @@ void pd_para_free(pd_para* p) {
     free(p->sum_st);
     free(p->sum_fil);
     free(p->sum_sh);
+    free(p->sum_bx);
     free(p->lines);
     free(p->old_lines);
     free(p->blev);
@@ -965,6 +966,10 @@ static uint32_t mirror_glyph(const pd_para* p, const pd_glyph* g) {
  */
 static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t cap, int stops, uint8_t* lev_out) {
     const pd_lineinfo* L = &p->lines[li];
+    int32_t expand = p->last_params.expansion < 0 ? 0 : p->last_params.expansion > 100 ? 100 :
+                     p->last_params.expansion;
+    int capped = 0;         /* expansion at its limit, the rest of the slack in the glue */
+    int64_t box_total = 0;
     int64_t slack = L->slack, cum = 0, den = 0, given = 0;
     int32_t i, n = 0, mode = 0, na = 0, capa = 64;     /* mode: 0 none, 1 finite stretch, 2 fil, 3 shrink */
     pd_sp y = L->pub.baseline;
@@ -982,6 +987,7 @@ static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t
             at = q_; capa *= 2; \
         } \
         memset(&at[na], 0, sizeof(pd_glyph)); \
+        at[na].scale = 65536; \
         __VA_ARGS__; \
         na++; \
     } while (0)
@@ -998,6 +1004,47 @@ static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t
         slack = slack < -den ? -den : slack;
     }
 
+    if (expand > 0 && (mode == 1 || mode == 3)) {   /* glyph boxes take their share of the slack too */
+        den = 0;
+
+        for (i = L->start; i < L->end; i++) {
+            const pd_item* it = &p->items[i];
+
+            if (it->type == PD_ITEM_GLUE) {
+                den += mode == 1 ? (it->stretch_order == 0 ? it->stretch : 0) : it->shrink;
+            } else if (it->type == PD_ITEM_BOX && !(it->flags & PD_FLAG_OBJECT)) {
+                den += (int64_t)it->width * expand / 1000;
+            }
+        }
+
+        if (mode == 3) {
+            slack = L->slack < -den ? -den : L->slack;
+        }
+
+        if (den <= 0) {
+            mode = 0;
+        } else if (mode == 1 && slack > den) {
+            /* looser than the stretch allows: glyphs stop at their limit, the glue takes the rest */
+            capped = 1;
+            box_total = 0;
+
+            for (i = L->start; i < L->end; i++) {
+                const pd_item* it = &p->items[i];
+
+                if (it->type == PD_ITEM_BOX && !(it->flags & PD_FLAG_OBJECT)) {
+                    box_total += (int64_t)it->width * expand / 1000;
+                }
+            }
+
+            den -= box_total;
+            slack -= box_total;
+
+            if (den <= 0) {
+                mode = 0;
+            }
+        }
+    }
+
     for (i = L->start; i < L->end; i++) {
         const pd_item* it = &p->items[i];
 
@@ -1007,13 +1054,33 @@ static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t
                      at[na].kind = PD_OBJECT; at[na].user = it->user);
             } else {
                 uint32_t k;
+                int64_t neww = it->width, acc = 0, prev = 0;
+
+                if (expand > 0 && (mode == 1 || mode == 3 || capped) && it->width > 0) {
+                    int64_t part = (int64_t)it->width * expand / 1000;
+
+                    if (capped) {
+                        neww += part;
+                    } else {
+                        int64_t next = share(cum + part, slack, den);
+
+                        neww += next - given;
+                        given = next;
+                        cum += part;
+                    }
+                }
 
                 for (k = 0; k < it->glyph_count; k++) {
                     const pd_gl* gl = &p->glyphs[it->glyph_start + k];
+                    int64_t pos;
 
-                    ATOM(at[na].glyph = gl->glyph; at[na].cluster = gl->cluster; at[na].advance = gl->advance;
+                    acc += gl->advance;     /* scaled advances that add up exactly to the new width */
+                    pos = it->width > 0 ? acc * neww / it->width : acc;
+                    ATOM(at[na].glyph = gl->glyph; at[na].cluster = gl->cluster; at[na].advance = (pd_sp)(pos - prev);
                          at[na].style = it->style; at[na].kind = PD_GLYPH; at[na].x = gl->xoff; at[na].y = gl->yoff;
-                         at[na].user = it->style >= 0 ? p->styles[it->style].user : 0);
+                         at[na].user = it->style >= 0 ? p->styles[it->style].user : 0;
+                         at[na].scale = it->width > 0 ? (int32_t)(neww * 65536 / it->width) : 65536);
+                    prev = pos;
                 }
             }
         } else if (it->type == PD_ITEM_GLUE) {

@@ -15,6 +15,7 @@
 #include "parade_layout.h"
 
 static pd_font* fonts[6];
+static pd_font* mathf;
 
 static const pd_font* resolve(void* user, const char* family, int32_t weight, int32_t italic) {
     (void)user;
@@ -141,6 +142,10 @@ int main(int argc, char** argv) {
 
         pd_doc_set_font_resolver(d, resolve, NULL);
 
+        if (pd_font_load_file("/usr/share/texmf/fonts/opentype/public/lm-math/latinmodern-math.otf", 0, &mathf) == PD_OK) {
+            pd_doc_set_math_font(d, mathf);
+        }
+
         if (fonts[5]) {
             fb[0] = fonts[5];
             pd_doc_set_fallback_fonts(d, fb, 1);
@@ -169,6 +174,8 @@ int main(int argc, char** argv) {
     for (i = 0; i < 6; i++) {
         pd_font_free(fonts[i]);
     }
+
+    pd_font_free(mathf);
 
     if (st != PD_OK) {
         fprintf(stderr, "conversion failed: %s\n", pd_status_string(st));

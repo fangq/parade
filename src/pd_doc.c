@@ -794,6 +794,24 @@ void pd_doc_set_font_resolver(pd_doc* d, pd_font_resolver fn, void* user) {
     }
 }
 
+void pd_doc_set_math_font(pd_doc* d, const pd_font* font) {
+    if (d) {
+        d->math_font = font;
+        d->style_rev++;
+    }
+}
+
+pd_status pd_doc_set_microtype(pd_doc* d, int32_t protrusion, int32_t expansion) {
+    if (!d || protrusion < 0 || protrusion > 1 || expansion < 0 || expansion > 100) {
+        return PD_ERR_ARG;
+    }
+
+    d->protrusion = protrusion;
+    d->expansion = expansion;
+    d->style_rev++;
+    return PD_OK;
+}
+
 pd_status pd_doc_set_hyphenator(pd_doc* d, const char* lang, const pd_hyph* hyph) {
     int32_t i;
 

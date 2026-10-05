@@ -1115,6 +1115,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
         int32_t cur_chunk = -1;
         pd_sp cur_size = 0, run_y = 0, pen = 0;
         uint32_t cur_color = 0xFFFFFFFFu;
+        int32_t cur_scale = 65536;  /* Tz, per page content stream */
         int in_text = 0, in_tj = 0;
 
         memset(&c, 0, sizeof(c));
@@ -1205,7 +1206,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                                     a->font->m.units_per_em);
 
                 if (in_tj && (pf != cur_font || chunk != cur_chunk || a->size != cur_size || a->y != run_y ||
-                              a->color != cur_color)) {
+                              a->color != cur_color || (a->scale ? a->scale : 65536) != cur_scale)) {
                     sb_fmt(&c, "] TJ\n");
                     in_tj = 0;
                 }
@@ -1234,6 +1235,12 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                     cur_size = a->size;
                 }
 
+                if ((a->scale ? a->scale : 65536) != cur_scale) {    /* font expansion: horizontal scaling */
+                    cur_scale = a->scale ? a->scale : 65536;
+                    sb_fmt(&c, "%lld.%03lld Tz\n", (long long)((int64_t)cur_scale * 100 / 65536),
+                           (long long)((int64_t)cur_scale * 100000 / 65536 % 1000));
+                }
+
                 if (!in_tj) {
                     sb_fmt(&c, "1 0 0 1 ");
                     sb_num(&c, a->x);
@@ -1243,18 +1250,18 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                     run_y = a->y;
                     pen = a->x;
                 } else if (a->x != pen) {
-                    /* TJ adjustment in thousandths of an em: positive moves left */
-                    int64_t adj = -((int64_t)(a->x - pen) * 1000) / a->size;
+                    /* TJ adjustment in thousandths of an em (scaled by Tz): positive moves left */
+                    int64_t adj = -((int64_t)(a->x - pen) * 1000 * 65536) / ((int64_t)a->size * cur_scale);
 
                     if (adj) {
                         sb_fmt(&c, "%lld", (long long)adj);
                     }
 
-                    pen += (pd_sp)(-adj * a->size / 1000);
+                    pen += (pd_sp)(-adj * a->size / 1000 * cur_scale / 65536);
                 }
 
                 sb_fmt(&c, pf->truetype ? "<%04X>" : "<%02X>", (unsigned)code);
-                pen += (pd_sp)((int64_t)adv1000 * a->size / 1000);
+                pen += (pd_sp)((int64_t)adv1000 * a->size / 1000 * cur_scale / 65536);
             }
         }
 

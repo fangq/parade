@@ -30,6 +30,7 @@ struct pd_font {
     uint32_t glyf_len, loca_len;
     int32_t loca_long;      /* head.indexToLocFormat */
     uint32_t cff, cff_len;  /* CFF outlines, 0 = absent */
+    uint32_t math, math_len;    /* OpenType MATH table, 0 = absent */
     int32_t face_index;
     void* hb_font;          /* HarfBuzz font when built with PD_WITH_HARFBUZZ */
 };
@@ -125,6 +126,7 @@ struct pd_para {
     int32_t cap_states;
     int32_t line_classes;
     int64_t* sum_w, *sum_st, *sum_fil, *sum_sh; /* prefix sums over items */
+    int64_t* sum_bx;        /* prefix sums of glyph box widths (font expansion) */
     int32_t cap_sums;
     /* result */
     pd_lineinfo* lines;

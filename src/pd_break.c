@@ -33,6 +33,8 @@ typedef struct {
     uint8_t* oldmark;       /* item is a break of the previous layout (hysteresis) */
     pd_sp maxw;
     int ragged;
+    int protrude;
+    int32_t expand;         /* per-mille */
 } ctx_t;
 
 static int64_t sat_add(int64_t a, int64_t b) {
@@ -116,7 +118,111 @@ static int is_flagged(const pd_para* p, int32_t item) {
 /* line measures between breakpoints a and b */
 typedef struct {
     int64_t nat, st, fil, sh;
+    int64_t lp;             /* protrusion into the left margin */
 } measure_t;
+
+/* how far a character may hang into the margin, per-mille of its width (microtype's defaults) */
+static int protrude_factor(uint32_t cp, int right) {
+    if (right) {
+        switch (cp) {
+            case '.':
+            case '-':
+            case 0x2010:
+            case 0x2011:
+            case 0x00AD:
+            case 0x2019:
+            case 0x201D:
+                return 700;
+
+            case ',':
+            case ':':
+            case '"':
+            case '\'':
+                return 500;
+
+            case ';':
+            case 0x2013:
+                return 300;
+
+            case '!':
+            case '?':
+            case 0x2014:
+                return 200;
+
+            case ')':
+            case ']':
+            case 'A':
+            case 'T':
+            case 'V':
+            case 'W':
+            case 'Y':
+            case 'v':
+            case 'w':
+            case 'y':
+                return 50;
+        }
+
+        return 0;
+    }
+
+    switch (cp) {
+        case 0x2018:
+        case 0x201C:
+        case '"':
+        case '\'':
+            return 500;
+
+        case '(':
+        case '[':
+            return 100;
+
+        case 'A':
+        case 'T':
+        case 'V':
+        case 'W':
+        case 'Y':
+        case 'J':
+        case 'v':
+        case 'w':
+        case 'y':
+            return 50;
+    }
+
+    return 0;
+}
+
+static uint32_t cp_at(const pd_para* p, uint32_t off) {
+    const unsigned char* s;
+    uint32_t cp;
+    int n, k;
+
+    if (!p->text || off >= p->n_text) {
+        return 0;
+    }
+
+    s = (const unsigned char*)p->text + off;
+    cp = s[0];
+    n = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+    cp &= n ? 0x3F >> n : 0x7F;
+
+    for (k = 1; k <= n && off + (uint32_t)k < p->n_text; k++) {
+        cp = (cp << 6) | (s[k] & 0x3F);
+    }
+
+    return cp;
+}
+
+/* protrusion of a glyph box at one side, in sp */
+static int64_t box_protrusion(const pd_para* p, const pd_item* it, int right) {
+    const pd_gl* gl;
+
+    if (it->type != PD_ITEM_BOX || (it->flags & PD_FLAG_OBJECT) || it->glyph_count == 0) {
+        return 0;
+    }
+
+    gl = &p->glyphs[it->glyph_start + (right ? it->glyph_count - 1 : 0)];
+    return (int64_t)gl->advance * protrude_factor(cp_at(p, gl->cluster), right) / 1000;
+}
 
 static void measure(const ctx_t* c, int32_t a, int32_t b, measure_t* m) {
     const pd_para* p = c->p;
@@ -133,6 +239,37 @@ static void measure(const ctx_t* c, int32_t a, int32_t b, measure_t* m) {
 
     if (p->items[ib].type == PD_ITEM_PENALTY) {
         m->nat += p->items[ib].width;
+    }
+
+    if (c->expand > 0) {    /* glyphs may widen or narrow a little */
+        int64_t bx = (p->sum_bx[ib] - p->sum_bx[s]) * c->expand / 1000;
+
+        m->st += bx;
+        m->sh += bx;
+    }
+
+    m->lp = 0;
+
+    if (c->protrude) {  /* the line may reach into both margins */
+        int64_t rp = 0;
+        int32_t k;
+
+        if (s < ib) {
+            m->lp = box_protrusion(p, &p->items[s], 0);
+        }
+
+        if (p->items[ib].type == PD_ITEM_PENALTY && p->items[ib].glyph_count == 1) {
+            rp = (int64_t)p->items[ib].width * 700 / 1000;     /* a hyphen added at the break */
+        } else {
+            for (k = ib - 1; k >= s && k >= ib - 4; k--) {
+                if (p->items[k].type == PD_ITEM_BOX) {
+                    rp = box_protrusion(p, &p->items[k], 1);
+                    break;
+                }
+            }
+        }
+
+        m->nat -= m->lp + rp;
     }
 
     if (c->ragged) {    /* spaces keep their natural width; the rag absorbs the slack */
@@ -504,7 +641,7 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
             L->total_stretch[0] = m.st;
             L->total_stretch[1] = m.fil;
             L->total_shrink = m.sh;
-            L->pub.x = line_x(c, lc);
+            L->pub.x = line_x(c, lc) - (pd_sp)m.lp;
 
             if (slack > 0) {
                 L->pub.width = (pd_sp)(m.fil > 0 ? m.nat : m.st > 0 ? w : m.nat);
@@ -519,8 +656,8 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
 
             L->pub.width = (pd_sp)m.nat;
             L->pub.ratio = m.fil > 0 || prm->rag_stretch <= 0 ? 0 : (int32_t)(off * 1000 / prm->rag_stretch);
-            L->pub.x = line_x(c, lc) + (pd_sp)(prm->align == PD_ALIGN_RIGHT ? off :
-                                               prm->align == PD_ALIGN_CENTER ? off / 2 : 0);
+            L->pub.x = line_x(c, lc) - (pd_sp)m.lp + (pd_sp)(prm->align == PD_ALIGN_RIGHT ? off :
+                       prm->align == PD_ALIGN_CENTER ? off / 2 : 0);
         }
 
         /* vertical extents from the boxes on the line */
@@ -591,7 +728,8 @@ static int params_same(const pd_params* a, const pd_params* b) {
            a->final_hyphen_demerits == b->final_hyphen_demerits && a->hyphen_penalty == b->hyphen_penalty &&
            a->ex_hyphen_penalty == b->ex_hyphen_penalty && a->tex_badness == b->tex_badness &&
            a->rag_stretch == b->rag_stretch && a->hysteresis == b->hysteresis &&
-           a->freeze_offset == b->freeze_offset && a->looseness == b->looseness;
+           a->freeze_offset == b->freeze_offset && a->looseness == b->looseness && a->protrusion == b->protrusion &&
+           a->expansion == b->expansion;
 }
 
 static int item_same(const pd_item* x, const pd_item* y) {
@@ -639,18 +777,20 @@ static int mark_old_breaks(pd_para* p, uint8_t* mark) {
 }
 
 static int grow_sums(pd_para* p, int32_t need) {
-    int32_t c1 = p->cap_sums, c2 = p->cap_sums, c3 = p->cap_sums, c4 = p->cap_sums;
+    int32_t c1 = p->cap_sums, c2 = p->cap_sums, c3 = p->cap_sums, c4 = p->cap_sums, c5 = p->cap_sums;
 
     if (pd_grow((void**)&p->sum_w, &c1, need, sizeof(int64_t)) ||
             pd_grow((void**)&p->sum_st, &c2, need, sizeof(int64_t)) ||
             pd_grow((void**)&p->sum_fil, &c3, need, sizeof(int64_t)) ||
-            pd_grow((void**)&p->sum_sh, &c4, need, sizeof(int64_t))) {
+            pd_grow((void**)&p->sum_sh, &c4, need, sizeof(int64_t)) ||
+            pd_grow((void**)&p->sum_bx, &c5, need, sizeof(int64_t))) {
         return -1;
     }
 
     p->cap_sums = c1 < c2 ? c1 : c2;
     p->cap_sums = p->cap_sums < c3 ? p->cap_sums : c3;
     p->cap_sums = p->cap_sums < c4 ? p->cap_sums : c4;
+    p->cap_sums = p->cap_sums < c5 ? p->cap_sums : c5;
     return 0;
 }
 
@@ -688,6 +828,8 @@ pd_status pd_break_lines(pd_para* p, const pd_params* prm, pd_break_info* info) 
     c.prm = prm;
     c.K = p->n_shape > 2 ? p->n_shape : 2;
     c.ragged = prm->align != PD_ALIGN_JUSTIFY;
+    c.protrude = prm->protrusion != 0;
+    c.expand = prm->expansion < 0 ? 0 : prm->expansion > 100 ? 100 : prm->expansion;
 
     for (i = 0; i < c.K; i++) {
         pd_sp w = line_width(&c, i);
@@ -699,7 +841,7 @@ pd_status pd_break_lines(pd_para* p, const pd_params* prm, pd_break_info* info) 
         return PD_ERR_NOMEM;
     }
 
-    p->sum_w[0] = p->sum_st[0] = p->sum_fil[0] = p->sum_sh[0] = 0;
+    p->sum_w[0] = p->sum_st[0] = p->sum_fil[0] = p->sum_sh[0] = p->sum_bx[0] = 0;
 
     for (i = 0; i < n; i++) {
         const pd_item* it = &p->items[i];
@@ -709,6 +851,7 @@ pd_status pd_break_lines(pd_para* p, const pd_params* prm, pd_break_info* info) 
         p->sum_st[i + 1] = p->sum_st[i] + (glue && it->stretch_order == 0 ? it->stretch : 0);
         p->sum_fil[i + 1] = p->sum_fil[i] + (glue && it->stretch_order == 1 ? it->stretch : 0);
         p->sum_sh[i + 1] = p->sum_sh[i] + (glue ? it->shrink : 0);
+        p->sum_bx[i + 1] = p->sum_bx[i] + (it->type == PD_ITEM_BOX && !(it->flags & PD_FLAG_OBJECT) ? it->width : 0);
     }
 
     /* breakpoints; bp 0 is the paragraph start */
