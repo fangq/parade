@@ -158,7 +158,7 @@ PD_API int32_t     pd_doc_story_count(const pd_doc* doc);
 PD_API pd_block_id pd_doc_story_at(const pd_doc* doc, int32_t index);
 PD_API pd_status   pd_doc_block_info(const pd_doc* doc, pd_block_id block, pd_block_info* out);
 PD_API pd_block_id pd_doc_child(const pd_doc* doc, pd_block_id parent, int32_t index);
-/** next/previous paragraph in reading order, descending into floats/cells; 0 at the end */
+/** next/previous paragraph in reading order, descending into floats/cells; 0 at the end. From 0: the first/last */
 PD_API pd_block_id pd_doc_next_paragraph(const pd_doc* doc, pd_block_id block);
 PD_API pd_block_id pd_doc_prev_paragraph(const pd_doc* doc, pd_block_id block);
 
@@ -280,6 +280,12 @@ PD_API pd_format_id pd_doc_format(pd_doc* doc, pd_style_id char_style, const pd_
 /** fully resolved character properties of a run inside a given paragraph */
 PD_API pd_status pd_doc_format_resolve(const pd_doc* doc, pd_block_id paragraph, pd_format_id format,
                                        pd_char_props* out);
+/** what a format was interned from: its character style and direct overrides (either may be NULL) */
+PD_API pd_status pd_doc_format_info(const pd_doc* doc, pd_format_id format, pd_style_id* char_style,
+                                    pd_char_props* overrides);
+/** a style's own definition, before inheritance: kind, parent, and the masked properties it sets */
+PD_API pd_status pd_doc_style_info(const pd_doc* doc, pd_style_id style, int32_t* kind, pd_style_id* parent,
+                                   pd_para_props* para, pd_char_props* chr);
 
 /* ------------------------------------------------------------------ */
 /* Lists                                                              */
@@ -305,6 +311,10 @@ typedef struct {
 
 /** a list definition with up to 9 levels; paragraphs join it through pd_doc_set_list */
 PD_API pd_status pd_doc_list_define(pd_doc* doc, int32_t nlevels, const pd_list_level* levels, pd_list_id* out);
+/** number of list definitions; their ids are 1..count */
+PD_API int32_t   pd_doc_list_count(const pd_doc* doc);
+/** the levels of a list definition; levels holds up to 9 entries (may be NULL) */
+PD_API pd_status pd_doc_list_info(const pd_doc* doc, pd_list_id list, int32_t* nlevels, pd_list_level* levels);
 /** the computed label of a list paragraph ("3.", "b)", "•"), UTF-8, into buf */
 PD_API pd_status pd_doc_list_label(const pd_doc* doc, pd_block_id paragraph, char* buf, int32_t cap);
 
@@ -324,13 +334,16 @@ PD_API pd_status pd_doc_para_text(const pd_doc* doc, pd_block_id paragraph, cons
 PD_API pd_status pd_doc_para_runs(const pd_doc* doc, pd_block_id paragraph, pd_run* buf, int32_t cap,
                                   int32_t* count);
 
+/** a paragraph's direct properties (only the masked fields are set on the paragraph itself) */
+PD_API pd_status pd_doc_para_props(const pd_doc* doc, pd_block_id paragraph, pd_para_props* out);
+
 /* inline objects occupy U+FFFC (3 bytes) in the paragraph text */
 typedef enum {
     PD_INLINE_IMAGE = 0,        /**< resource + display size */
     PD_INLINE_EQUATION = 1,     /**< source text (LaTeX or MathML) + box size from the host/math engine */
     PD_INLINE_FIELD = 2,        /**< computed text: page number, reference, counter */
     PD_INLINE_FOOTNOTE = 3,     /**< reference mark; the note body is a STORY block */
-    PD_INLINE_LINK = 4,         /**< start of an external hyperlink; the URL is in source */
+    PD_INLINE_LINK = 4,         /**< start of an external hyperlink (URL in source); an empty URL ends it */
     PD_INLINE_BOOKMARK = 5,     /**< named anchor for cross-references */
     PD_INLINE_TAB = 6,          /**< tab stop (positions from the paragraph style) */
     PD_INLINE_USER = 7          /**< host-defined object of the given size */
@@ -525,6 +538,8 @@ PD_API int32_t   pd_doc_can_redo(const pd_doc* doc);
 PD_API const char* pd_doc_undo_label(const pd_doc* doc);
 /** maximum remembered steps (default 1000; 0 = unlimited) */
 PD_API void      pd_doc_set_undo_limit(pd_doc* doc, int32_t steps);
+/** forget all undo and redo steps (e.g. after building a document by import); not inside a group */
+PD_API void      pd_doc_clear_undo(pd_doc* doc);
 
 /* ------------------------------------------------------------------ */
 /* Markers: positions that follow edits (caret, selection, bookmarks) */

@@ -130,6 +130,10 @@ type
     procedure CopyToClipboard;
     procedure CutToClipboard;
     procedure PasteFromClipboard;
+    { insert data of a format (PD_CONV_*) at the caret, replacing the selection; one undo step }
+    procedure PasteData(Data: Pointer; Len: Integer; Format: Int32);
+    { the selection in a format (PD_CONV_*) }
+    function ExportSelection(Format: Int32): string;
     function DocumentText: string;
 
     { draw a page into a bitmap at a scale, without the caret (tests, previews, printing) }
@@ -188,6 +192,108 @@ function WriteToStream(user: Pointer; data: Pointer; len: csize_t): cint; cdecl;
 begin
   TStream(user).WriteBuffer(data^, len);
   Result := 0;
+end;
+
+{ converter format of a file name: PD_CONV_*, PD_CONV_JDATA for .pdoc/.bpdoc, -1 unknown }
+function FormatOfFile(const FileName: string): Int32;
+var
+  E: string;
+begin
+  E := LowerCase(ExtractFileExt(FileName));
+  if (E = '.html') or (E = '.htm') then Exit(PD_CONV_HTML);
+  if (E = '.md') or (E = '.markdown') then Exit(PD_CONV_MARKDOWN);
+  if E = '.tex' then Exit(PD_CONV_LATEX);
+  if E = '.rtf' then Exit(PD_CONV_RTF);
+  if E = '.docx' then Exit(PD_CONV_DOCX);
+  if E = '.txt' then Exit(PD_CONV_TEXT);
+  if (E = '.pdoc') or (E = '.bpdoc') then Exit(PD_CONV_JDATA);
+  Result := -1;
+end;
+
+var
+  CF_Parade, CF_Html, CF_Rtf: TClipboardFormat;
+
+procedure RegisterFormats;
+begin
+  if CF_Parade <> 0 then
+    Exit;
+  CF_Parade := RegisterClipboardFormat('application/x-parade');
+  {$IFDEF WINDOWS}
+  CF_Html := RegisterClipboardFormat('HTML Format');
+  CF_Rtf := RegisterClipboardFormat('Rich Text Format');
+  {$ELSE}
+  CF_Html := RegisterClipboardFormat('text/html');
+  CF_Rtf := RegisterClipboardFormat('text/rtf');
+  {$ENDIF}
+end;
+
+{$IFDEF WINDOWS}
+{ Windows wants HTML on the clipboard as a fragment behind a header of byte offsets }
+function WrapCFHtml(const Html: string): string;
+const
+  Head = 'Version:0.9'#13#10'StartHTML:%.10d'#13#10'EndHTML:%.10d'#13#10'StartFragment:%.10d'#13#10 +
+    'EndFragment:%.10d'#13#10;
+  Pre = '<html><body>'#13#10'<!--StartFragment-->';
+  Post = '<!--EndFragment-->'#13#10'</body></html>';
+var
+  Body: string;
+  A, B, H, SF, EF: Integer;
+begin
+  Body := Html;
+  A := Pos('<body>', Body);
+  B := Pos('</body>', Body);
+  if (A > 0) and (B > A) then
+    Body := Copy(Body, A + 6, B - A - 6);
+  H := Length(Format(Head, [0, 0, 0, 0]));
+  SF := H + Length(Pre);
+  EF := SF + Length(Body);
+  Result := Format(Head, [H, EF + Length(Post), SF, EF]) + Pre + Body + Post;
+end;
+{$ENDIF}
+
+{ clipboard text of a format; browsers may give HTML as UTF-16 }
+function ReadClip(Fmt: TClipboardFormat; out S: string): Boolean;
+var
+  Ms: TMemoryStream;
+  W: UnicodeString;
+begin
+  Result := False;
+  S := '';
+  if (Fmt = 0) or not Clipboard.HasFormat(Fmt) then
+    Exit;
+  Ms := TMemoryStream.Create;
+  try
+    if not Clipboard.GetFormat(Fmt, Ms) or (Ms.Size = 0) then
+      Exit;
+    if (Ms.Size >= 2) and (PByte(Ms.Memory)[0] = $FF) and (PByte(Ms.Memory)[1] = $FE) then
+    begin
+      SetLength(W, (Ms.Size - 2) div 2);
+      if Length(W) > 0 then
+        Move(PByte(Ms.Memory)[2], W[1], Length(W) * 2);
+      S := UTF8Encode(W);
+    end
+    else
+      SetString(S, PAnsiChar(Ms.Memory), Ms.Size);
+    while (S <> '') and (S[Length(S)] = #0) do
+      SetLength(S, Length(S) - 1);
+    Result := S <> '';
+  finally
+    Ms.Free;
+  end;
+end;
+
+procedure AddClip(Fmt: TClipboardFormat; const S: string);
+var
+  Ss: TStringStream;
+begin
+  if (Fmt = 0) or (S = '') then
+    Exit;
+  Ss := TStringStream.Create(S);
+  try
+    Clipboard.AddFormat(Fmt, Ss);
+  finally
+    Ss.Free;
+  end;
 end;
 
 { TParadeEdit }
@@ -287,11 +393,18 @@ procedure TParadeEdit.LoadFromFile(const FileName: string);
 var
   Ms: TMemoryStream;
   D: Ppd_doc;
+  Fmt: Int32;
 begin
   Ms := TMemoryStream.Create;
   try
     Ms.LoadFromFile(FileName);
-    ParadeCheck(pd_doc_load(Ms.Memory, Ms.Size, PD_JDATA_AUTO, D), 'load ' + FileName);
+    Fmt := FormatOfFile(FileName);
+    if Fmt < 0 then
+      Fmt := pd_conv_detect(Ms.Memory, Ms.Size);
+    if Fmt = PD_CONV_JDATA then
+      ParadeCheck(pd_doc_load(Ms.Memory, Ms.Size, PD_JDATA_AUTO, D), 'load ' + FileName)
+    else
+      ParadeCheck(pd_doc_import(Ms.Memory, Ms.Size, Fmt, D), 'import ' + FileName);
   finally
     Ms.Free;
   end;
@@ -316,18 +429,33 @@ var
   Fs: TFileStream;
   Fmt: Int32;
 begin
-  if LowerCase(ExtractFileExt(FileName)) = '.bpdoc' then
-    Fmt := PD_JDATA_BINARY
-  else
-    Fmt := PD_JDATA_TEXT;
+  if LowerCase(ExtractFileExt(FileName)) = '.pdf' then
+  begin
+    ExportPDF(FileName);
+    Exit;
+  end;
+  Fmt := FormatOfFile(FileName);
   Fs := TFileStream.Create(FileName, fmCreate);
   try
-    ParadeCheck(pd_doc_save(FDoc, Fmt, @WriteToStream, Fs), 'save ' + FileName);
+    if (Fmt = PD_CONV_JDATA) or (Fmt < 0) then
+    begin
+      if LowerCase(ExtractFileExt(FileName)) = '.bpdoc' then
+        Fmt := PD_JDATA_BINARY
+      else
+        Fmt := PD_JDATA_TEXT;
+      ParadeCheck(pd_doc_save(FDoc, Fmt, @WriteToStream, Fs), 'save ' + FileName);
+    end
+    else
+      ParadeCheck(pd_doc_export(FDoc, Fmt, @WriteToStream, Fs), 'export ' + FileName);
   finally
     Fs.Free;
   end;
-  FFileName := FileName;
-  FModified := False;
+  { only the native format is the document's own file }
+  if (Fmt = PD_JDATA_TEXT) or (Fmt = PD_JDATA_BINARY) then
+  begin
+    FFileName := FileName;
+    FModified := False;
+  end;
 end;
 
 procedure TParadeEdit.ExportPDF(const FileName: string);
@@ -1013,10 +1141,46 @@ begin
   end;
 end;
 
-procedure TParadeEdit.CopyToClipboard;
+function TParadeEdit.ExportSelection(Format: Int32): string;
+var
+  Ss: TStringStream;
 begin
-  if HasSelection then
-    Clipboard.AsText := SelectedText;
+  Result := '';
+  if not HasSelection then
+    Exit;
+  Ss := TStringStream.Create('');
+  try
+    if pd_doc_export_range(FDoc, PdRange(SelStart, SelEnd), Format, @WriteToStream, Ss) = PD_OK then
+      Result := Ss.DataString;
+  finally
+    Ss.Free;
+  end;
+end;
+
+{ the selection as plain text, HTML, RTF and Parade's own format, for any application to take }
+procedure TParadeEdit.CopyToClipboard;
+var
+  Native, Html, Rtf: string;
+begin
+  if not HasSelection then
+    Exit;
+  RegisterFormats;
+  Native := ExportSelection(PD_CONV_JDATA);
+  Html := ExportSelection(PD_CONV_HTML);
+  Rtf := ExportSelection(PD_CONV_RTF);
+  Clipboard.Open;
+  try
+    Clipboard.AsText := SelectedText;   { clears the clipboard: first }
+    AddClip(CF_Parade, Native);
+    {$IFDEF WINDOWS}
+    AddClip(CF_Html, WrapCFHtml(Html));
+    {$ELSE}
+    AddClip(CF_Html, Html);
+    {$ENDIF}
+    AddClip(CF_Rtf, Rtf);
+  finally
+    Clipboard.Close;
+  end;
 end;
 
 procedure TParadeEdit.CutToClipboard;
@@ -1029,9 +1193,37 @@ begin
   end;
 end;
 
-procedure TParadeEdit.PasteFromClipboard;
+procedure TParadeEdit.PasteData(Data: Pointer; Len: Integer; Format: Int32);
+var
+  After: pd_pos;
 begin
-  InsertText(Clipboard.AsText);
+  if Len <= 0 then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Paste');
+  DeleteSelection;
+  if pd_doc_paste(FDoc, CaretPos, Data, Len, Format, @After) = PD_OK then
+  begin
+    pd_doc_marker_set(FDoc, FCaret, After);
+    pd_doc_marker_set(FDoc, FAnchor, After);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+{ the richest format on the clipboard: Parade's own, then HTML, RTF, plain text }
+procedure TParadeEdit.PasteFromClipboard;
+var
+  S: string;
+begin
+  RegisterFormats;
+  if ReadClip(CF_Parade, S) then
+    PasteData(PAnsiChar(S), Length(S), PD_CONV_JDATA)
+  else if ReadClip(CF_Html, S) then
+    PasteData(PAnsiChar(S), Length(S), PD_CONV_HTML)
+  else if ReadClip(CF_Rtf, S) then
+    PasteData(PAnsiChar(S), Length(S), PD_CONV_RTF)
+  else
+    InsertText(Clipboard.AsText);
 end;
 
 procedure TParadeEdit.ProcessKey(Key: Word; Shift: TShiftState);

@@ -141,6 +141,45 @@ begin
   Check(E.DocumentText = 'Bold Worl', 'undo paste: ' + E.DocumentText);
   E.Redo;
 
+  { 5b. rich paste: HTML at the caret, one undo step }
+  Step('rich paste');
+  E.ProcessKey(VK_END, [ssCtrl]);
+  T := '<p>pasted <b>strong</b></p><h2>Head</h2>';
+  E.PasteData(PAnsiChar(T), Length(T), PD_CONV_HTML);
+  Check(Pos('pasted strong'#10'Head', E.DocumentText) > 0, 'html paste: ' + E.DocumentText);
+  E.Undo;
+  Check(E.DocumentText = 'Bold Worl'#10'Line one'#10'Line two'#10'Line three', 'undo html paste: ' + E.DocumentText);
+
+  { 5c. copy and paste through the clipboard keeps formatting (Parade's own format) }
+  Step('clipboard');
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  for I := 1 to 4 do
+    E.ProcessKey(VK_RIGHT, [ssShift]);
+  Check(E.SelectedText = 'Bold', 'select for copy');
+  E.CopyToClipboard;
+  E.ProcessKey(VK_END, [ssCtrl]);
+  E.PasteFromClipboard;
+  Check(Copy(E.DocumentText, Length(E.DocumentText) - 3, 4) = 'Bold', 'clipboard paste: ' + E.DocumentText);
+  N := 0;
+  pd_doc_para_runs(E.Doc, E.CaretPos.block, nil, 0, N);
+  SetLength(Runs, N);
+  if N > 0 then
+    pd_doc_para_runs(E.Doc, E.CaretPos.block, @Runs[0], N, N);
+  if N > 0 then
+    pd_doc_format_resolve(E.Doc, E.CaretPos.block, Runs[N - 1].format, Props);
+  Check((N > 0) and (Props.weight = 700), 'pasted text stays bold');
+  E.Undo;
+
+  { 5d. files in other formats: save as DOCX and Markdown, load them back }
+  Step('formats');
+  E.SaveToFile(Dir + 'edit_test.docx');
+  E.SaveToFile(Dir + 'edit_test.md');
+  T := E.DocumentText;
+  E.LoadFromFile(Dir + 'edit_test.docx');
+  Check(E.DocumentText = T, 'docx round trip: ' + E.DocumentText);
+  E.LoadFromFile(Dir + 'edit_test.md');
+  Check(E.DocumentText = T, 'markdown round trip: ' + E.DocumentText);
+
   { 6. up/down keep the column; clicking places the caret }
   E.ProcessKey(VK_UP, []);
   T := E.DocumentText;

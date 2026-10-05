@@ -970,11 +970,43 @@ static pd_block_id step_para(const pd_doc* d, pd_block_id id, int dir) {
     return 0;
 }
 
+/* the first (dir 1) or last (dir -1) paragraph under a block, depth first */
+static pd_block_id edge_para(const pd_doc* d, pd_block_id id, int dir, int depth) {
+    blk* b = pd_doc_blk(d, id);
+    int32_t i;
+
+    if (!b || depth > 64) {
+        return 0;
+    }
+
+    if (b->kind == PD_BLOCK_PARAGRAPH) {
+        return id;
+    }
+
+    for (i = 0; i < b->nkids; i++) {
+        pd_block_id p = edge_para(d, b->kids[dir > 0 ? i : b->nkids - 1 - i], dir, depth + 1);
+
+        if (p) {
+            return p;
+        }
+    }
+
+    return 0;
+}
+
 pd_block_id pd_doc_next_paragraph(const pd_doc* d, pd_block_id id) {
+    if (d && id == 0) {
+        return edge_para(d, PD_ROOT_ID, 1, 0);
+    }
+
     return para_of(d, id) ? step_para(d, id, 1) : 0;
 }
 
 pd_block_id pd_doc_prev_paragraph(const pd_doc* d, pd_block_id id) {
+    if (d && id == 0) {
+        return edge_para(d, PD_ROOT_ID, -1, 0);
+    }
+
     return para_of(d, id) ? step_para(d, id, -1) : 0;
 }
 
@@ -1116,6 +1148,86 @@ pd_format_id pd_doc_format(pd_doc* d, pd_style_id char_style, const pd_char_prop
 static const dformat* format_of(const pd_doc* d, pd_format_id id) {
     static const dformat none;
     return (id >= 1 && (int32_t)id <= d->nformats) ? &d->formats[id - 1] : (id == 0 ? &none : NULL);
+}
+
+pd_status pd_doc_format_info(const pd_doc* d, pd_format_id fmt, pd_style_id* style, pd_char_props* overrides) {
+    const dformat* f = d ? format_of(d, fmt) : NULL;
+
+    if (!f) {
+        return PD_ERR_ARG;
+    }
+
+    if (style) {
+        *style = f->style;
+    }
+
+    if (overrides) {
+        *overrides = f->cp;
+    }
+
+    return PD_OK;
+}
+
+pd_status pd_doc_style_info(const pd_doc* d, pd_style_id style, int32_t* kind, pd_style_id* parent,
+                            pd_para_props* para, pd_char_props* chr) {
+    dstyle* s = d ? style_of(d, style) : NULL;
+
+    if (!s) {
+        return PD_ERR_ARG;
+    }
+
+    if (kind) {
+        *kind = s->kind;
+    }
+
+    if (parent) {
+        *parent = s->parent;
+    }
+
+    if (para) {
+        *para = s->pp;
+    }
+
+    if (chr) {
+        *chr = s->cp;
+    }
+
+    return PD_OK;
+}
+
+pd_status pd_doc_para_props(const pd_doc* d, pd_block_id para, pd_para_props* out) {
+    blk* b = d ? para_of(d, para) : NULL;
+
+    if (!b || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = b->st.pp;
+    return PD_OK;
+}
+
+int32_t pd_doc_list_count(const pd_doc* d) {
+    return d ? d->nlists : 0;
+}
+
+pd_status pd_doc_list_info(const pd_doc* d, pd_list_id list, int32_t* nlevels, pd_list_level* levels) {
+    const dlist* l;
+
+    if (!d || list < 1 || (int32_t)list > d->nlists) {
+        return PD_ERR_ARG;
+    }
+
+    l = &d->lists[list - 1];
+
+    if (nlevels) {
+        *nlevels = l->n;
+    }
+
+    if (levels) {
+        memcpy(levels, l->lv, (size_t)l->n * sizeof(pd_list_level));
+    }
+
+    return PD_OK;
 }
 
 pd_status pd_doc_format_resolve(const pd_doc* d, pd_block_id para, pd_format_id fmt, pd_char_props* out) {
@@ -3020,6 +3132,22 @@ int32_t pd_doc_can_redo(const pd_doc* d) {
 
 const char* pd_doc_undo_label(const pd_doc* d) {
     return (d && d->nundo > 0) ? d->undo[d->nundo - 1].label : NULL;
+}
+
+void pd_doc_clear_undo(pd_doc* d) {
+    int32_t i;
+
+    if (!d || d->cur) {
+        return;
+    }
+
+    for (i = 0; i < d->nundo; i++) {
+        step_free(d, &d->undo[i], 1);
+    }
+
+    d->nundo = 0;
+    clear_redo(d);
+    d->typing_open = 0;
 }
 
 void pd_doc_set_undo_limit(pd_doc* d, int32_t steps) {

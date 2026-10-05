@@ -116,6 +116,26 @@ poppler over the output.
   `hyphenate` on). Pattern points become TeX discretionaries (flagged,
   penalty 50 by default).
 
+## Import and export (`include/parade_convert.h`)
+
+`pd_doc_import`, `pd_doc_export`, plus `pd_doc_export_range` and
+`pd_doc_paste` for clipboards (one undo step). Built on the public
+document API only.
+
+| format   | in | out | keeps |
+|----------|----|-----|-------|
+| HTML     | yes | yes | headings, alignment, lists, quotes, code, character formats, links, data: images, tables (spans, backgrounds, header rows), figures, footnotes; tolerant reader (web pages, Windows CF_HTML) |
+| Markdown | yes | yes | CommonMark (spec emphasis algorithm), GFM tables/strikethrough/footnotes, `$math$`, `{width=..}` images |
+| LaTeX    | -   | yes | article that compiles with LuaLaTeX/pdfLaTeX: sections, lists, longtable, figures with `\caption`/`\label`/`\ref`, footnotes, equations |
+| RTF      | yes | yes | style sheet, list table, tables (merged cells), footnotes, hyperlink fields, PNG/JPEG |
+| DOCX     | yes | yes | styles (basedOn chains), numbering, tables, footnotes, hyperlinks (also field codes), images, sections, headers/footers; deterministic zip |
+| text     | yes | yes | one paragraph per line |
+
+`tools/pd_conv in.x out.y` converts between any of them and to PDF via
+Parade's own layout. `make conv-check` checks the output with other
+software: lxml, mistune, python-docx, LuaLaTeX, LibreOffice Writer when
+installed, and reads python-docx/LibreOffice-written files back.
+
 ## Lazarus / Free Pascal (`pascal/`)
 
 - `parade.pas`: the binding for all three headers (static link by default,
@@ -127,8 +147,10 @@ poppler over the output.
   and selection are document markers; typing, Enter/Shift+Enter,
   Backspace/Delete across paragraphs, arrows/Home/End/PgUp/PgDn with
   Shift selection, mouse click/drag/double-click, Ctrl+Z/Y/A/B/I/U/C/X/V,
-  zoom (Ctrl+wheel), paragraph styles, multi-line paste as paragraphs,
-  JData/BJData load and save.
+  zoom (Ctrl+wheel), paragraph styles. Copy puts the selection on the
+  clipboard as Parade JData, HTML (CF_HTML on Windows), RTF and text;
+  paste takes the richest. Load/save by extension: .pdoc/.bpdoc, .docx,
+  .rtf, .html, .md, .tex (save), .txt, .pdf (save).
 - `demo/paradedemo`: a small word processor on the control.
 
 ```
@@ -189,6 +211,9 @@ pd_para_break(p, &prm, NULL);
     src/pd_bidi.c        UAX #9 bidi
     src/pd_shape.c       optional HarfBuzz shaping
     src/pd_hyph.c        Liang hyphenation
+    src/pd_conv.c        converters: dispatch, builder, clipboard copy/paste, text
+    src/pd_markup.c      HTML/XML tokenizer
+    src/pd_html.c src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c
     tests/               unit tests
     bench/               quality and speed benchmark
     tools/font_oracle.py fontTools cross-check through the C ABI (ctypes)
@@ -199,5 +224,4 @@ pd_para_break(p, &prm, NULL);
 
 ## Next
 
-Import/export (HTML, Markdown, LaTeX, RTF, DOCX), math, microtypography,
-fuzzing and CI.
+Math layout, microtypography, fuzz drivers, CI, a SIMD breaker loop.

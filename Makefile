@@ -19,22 +19,23 @@ ORACLE_MAX_MEM ?= 2048
 ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
 SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_unidata.c src/pd_text.c src/pd_bidi.c src/pd_shape.c src/pd_hyph.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
-           src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c
+           src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c src/pd_conv.c src/pd_markup.c src/pd_html.c \
+           src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c
 BUILD   ?= build
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)
 LIB     := $(BUILD)/libparade.a
 SO      := $(BUILD)/libparade.so
-TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout $(BUILD)/test_pdf
+TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout $(BUILD)/test_pdf $(BUILD)/test_convert
 BENCH   := $(BUILD)/bench_parade
 
-all: $(LIB) $(SO) $(TESTS) $(BENCH)
+all: $(LIB) $(SO) $(TESTS) $(BENCH) $(BUILD)/pd_dump $(BUILD)/pd_conv
 
-$(BUILD)/%.o: src/%.c include/parade.h include/parade_doc.h include/parade_layout.h src/pd_internal.h src/pd_doc_internal.h \
-           src/pd_json.h | $(BUILD)
+$(BUILD)/%.o: src/%.c include/parade.h include/parade_doc.h include/parade_layout.h include/parade_convert.h \
+           src/pd_internal.h src/pd_doc_internal.h src/pd_json.h src/pd_conv.h | $(BUILD)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) -c $< -o $@
 
 $(LIB): $(OBJ)
-	$(AR) rcs $@ $^
+	rm -f $@ && $(AR) rcs $@ $^
 
 $(SO): $(OBJ)
 	$(CC) -shared -o $@ $^ $(LDLIBS)
@@ -65,6 +66,17 @@ oracle: $(SO)
 
 $(BUILD)/pd_dump: tools/pd_dump.c $(LIB)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) $< $(LIB) -o $@ $(LDLIBS)
+
+$(BUILD)/pd_conv: tools/pd_conv.c $(LIB)
+	$(CC) $(PD_CFLAGS) $(CFLAGS) $< $(LIB) -o $@ $(LDLIBS)
+
+# converters checked by other software: LibreOffice opens our DOCX/RTF/HTML,
+# LuaLaTeX compiles our LaTeX, python-docx/lxml/mistune parse the rest, and
+# LibreOffice's own DOCX/RTF output is read back (MEMLIMIT-capped, timed out)
+conv-check: $(BUILD)/pd_conv $(BUILD)/pd_dump $(BUILD)/test_convert
+	$(ulimit_cmd) && ./$(BUILD)/pd_dump > /dev/null
+	$(ulimit_cmd) && PARADE_CONV_OUT=$(BUILD)/conv ./$(BUILD)/test_convert > /dev/null
+	python3 tools/conv_check.py $(BUILD)
 
 # page check: a sample document laid out and drawn page by page
 pages: $(BUILD)/pd_dump
@@ -179,4 +191,4 @@ pretty:
 	    --break-blocks \
 	    "include/*.h" "src/*.c" "src/*.h" "tests/*.c" "bench/*.c"
 
-.PHONY: all test bench conformance unidata oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-demo asan clean pretty
+.PHONY: all test bench conv-check conformance unidata oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-demo asan clean pretty

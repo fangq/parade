@@ -553,6 +553,13 @@ function pd_doc_can_undo(doc: Ppd_doc): Int32; cdecl; PDEXT;
 function pd_doc_can_redo(doc: Ppd_doc): Int32; cdecl; PDEXT;
 function pd_doc_undo_label(doc: Ppd_doc): PAnsiChar; cdecl; PDEXT;
 procedure pd_doc_set_undo_limit(doc: Ppd_doc; steps: Int32); cdecl; PDEXT;
+procedure pd_doc_clear_undo(doc: Ppd_doc); cdecl; PDEXT;
+function pd_doc_format_info(doc: Ppd_doc; format: pd_format_id; char_style: PUInt32; overrides: Ppd_char_props): pd_status; cdecl; PDEXT;
+function pd_doc_style_info(doc: Ppd_doc; style: pd_style_id; kind: PInt32; parent: PUInt32; para: Ppd_para_props;
+  chr: Ppd_char_props): pd_status; cdecl; PDEXT;
+function pd_doc_para_props(doc: Ppd_doc; paragraph: pd_block_id; out props: pd_para_props): pd_status; cdecl; PDEXT;
+function pd_doc_list_count(doc: Ppd_doc): Int32; cdecl; PDEXT;
+function pd_doc_list_info(doc: Ppd_doc; list: pd_list_id; nlevels: PInt32; levels: Ppd_list_level): pd_status; cdecl; PDEXT;
 
 function pd_doc_marker_new(doc: Ppd_doc; pos: pd_pos; gravity: Int32; out marker: pd_marker_id): pd_status; cdecl; PDEXT;
 procedure pd_doc_marker_free(doc: Ppd_doc; marker: pd_marker_id); cdecl; PDEXT;
@@ -578,6 +585,22 @@ function pd_layout_caret(layout: Ppd_layout; pos: pd_pos; out page: Int32; out x
 
 procedure pd_pdf_options_init(out options: pd_pdf_options); cdecl; PDEXT;
 function pd_layout_write_pdf(layout: Ppd_layout; options: Ppd_pdf_options; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+
+{ ---- parade_convert.h ---- }
+const
+  PD_CONV_TEXT = 0;
+  PD_CONV_HTML = 1;
+  PD_CONV_MARKDOWN = 2;
+  PD_CONV_LATEX = 3;          { export only }
+  PD_CONV_RTF = 4;
+  PD_CONV_DOCX = 5;
+  PD_CONV_JDATA = 6;
+
+function pd_doc_export(doc: Ppd_doc; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+function pd_doc_export_range(doc: Ppd_doc; range: pd_range; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+function pd_doc_import(data: Pointer; len: csize_t; format: Int32; out doc: Ppd_doc): pd_status; cdecl; PDEXT;
+function pd_doc_paste(doc: Ppd_doc; at: pd_pos; data: Pointer; len: csize_t; format: Int32; after: Ppd_pos): pd_status; cdecl; PDEXT;
+function pd_conv_detect(data: Pointer; len: csize_t): Int32; cdecl; PDEXT;
 
 { helpers }
 function PT(v: Double): pd_sp; inline;
