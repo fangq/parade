@@ -262,6 +262,6 @@ pd_para_break(p, &prm, NULL);
 ## Next
 
 Vectorizing the breaker does not pay: a branchless, batched evaluation of
-candidate starts (branch `vectorized-breaker`, bit-identical results) is
-slower with gcc -O2 and only ties with clang -O3 -march=native (AVX-512);
-the time is in the per-candidate state relaxation, not the arithmetic.
+candidate starts (bit-identical results) was slower with gcc -O2 (245 vs
+209 ns/word) and only tied with clang -O3 -march=native (AVX-512, 204 vs
+203); the time is in the per-candidate state relaxation, not the arithmetic.
