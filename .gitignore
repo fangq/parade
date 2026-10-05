@@ -6,3 +6,5 @@ proto/kp
 *.so
 *.dll
 *.dylib
+build-*/
+__pycache__/

@@ -6,8 +6,11 @@
  * layout: a caret or hit-test result needs no translation.
  */
 
+#include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include "pd_doc_internal.h"
+#include "pd_unidata.h"
 
 static const pd_font* resolve_font(const pd_doc* d, const pd_char_props* cp) {
     const pd_font* f = NULL;
@@ -117,6 +120,96 @@ static pd_sp text_width(const pd_style* st, const char* s) {
     return (pd_sp)(units * st->size / m.units_per_em);
 }
 
+/*
+ * Add text in a style, switching to a fallback font for characters the
+ * style's font lacks. Combining marks stay with their base character's
+ * font, spaces with the run's own font.
+ */
+static pd_status add_with_fallback(const pd_doc* d, pd_para* out, const char* text, uint32_t len, const pd_style* ps) {
+    uint32_t* cps, *offs, seg = 0;
+    int32_t n, i, cur = -1;     /* -1: the run's font, else a fallback index */
+    pd_status st = PD_OK;
+
+    if (d->nfallback == 0) {
+        return pd_para_add_text(out, text, len, ps);
+    }
+
+    n = pd_text_decode(text, len, &cps, &offs);
+
+    if (n < 0) {
+        return PD_ERR_NOMEM;
+    }
+
+    for (i = 0; i <= n && st == PD_OK; i++) {
+        int32_t want = cur;
+
+        if (i < n) {
+            uint32_t c = cps[i];
+
+            if (c == ' ' || c == '\t' || c < 32 || c == 0x00A0 || c == 0x200B || c == 0x00AD) {
+                want = -1;
+            } else if (pd_uni_gcb(c) == GCB_EXTEND || pd_uni_gcb(c) == GCB_ZWJ) {
+                want = cur;     /* marks follow their base */
+            } else if (pd_font_glyph_index(ps->font, c)) {
+                want = -1;
+            } else {
+                int32_t k;
+
+                want = -1;
+
+                for (k = 0; k < d->nfallback; k++) {
+                    if (pd_font_glyph_index(d->fallback[k], c)) {
+                        want = k;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (i == n || (want != cur && i > 0)) {
+            pd_style fs = *ps;
+
+            if (cur >= 0) {
+                fs.font = d->fallback[cur];
+            }
+
+            if (offs[i] > seg) {
+                st = pd_para_add_text(out, text + seg, offs[i] - seg, &fs);
+            }
+
+            seg = offs[i < n ? i : n];
+        }
+
+        cur = want;
+    }
+
+    free(cps);
+    free(offs);
+    return st;
+}
+
+/* the registered patterns whose language prefix best matches a tag */
+static const pd_hyph* find_hyph(const pd_doc* d, const char* lang) {
+    const pd_hyph* best = NULL;
+    size_t blen = 0;
+    int32_t i;
+
+    for (i = 0; i < d->nhyphs; i++) {
+        const char* p = d->hyphs[i].lang;
+        size_t n = strlen(p), k;
+
+        for (k = 0; k < n && lang[k] && tolower((unsigned char)lang[k]) == tolower((unsigned char)p[k]); k++) {
+        }
+
+        if (k == n && (lang[n] == 0 || lang[n] == '-' || lang[n] == '_' || n == 0) && (!best || n > blen)) {
+            best = d->hyphs[i].hyph;
+            blen = n;
+        }
+    }
+
+    return best;
+}
+
 pd_status pd_doc_para_build(const pd_doc* d, pd_block_id para, pd_sp column, pd_para* out, pd_params* prm) {
     return pd_doc_para_build_ex(d, para, column, out, prm, NULL, NULL);
 }
@@ -168,6 +261,11 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
             return st;
         }
 
+        if (pp.hyphenate && d->nhyphs) {
+            cp.lang[sizeof(cp.lang) - 1] = 0;
+            ps.hyph = find_hyph(d, cp.lang);
+        }
+
         while (pos < end) {
             uint32_t stop = end;
 
@@ -179,7 +277,7 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                 stop = s->inl[k].offset;
             }
 
-            if (stop > pos && (st = pd_para_add_text(out, s->text + pos, stop - pos, &ps)) != PD_OK) {
+            if (stop > pos && (st = add_with_fallback(d, out, s->text + pos, stop - pos, &ps)) != PD_OK) {
                 return st;
             }
 

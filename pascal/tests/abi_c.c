@@ -30,6 +30,7 @@ int main(void) {
     printf("pd_style.kerning %zu\n", offsetof(pd_style, kerning));
     printf("pd_style.color %zu\n", offsetof(pd_style, color));
     printf("pd_style.user %zu\n", offsetof(pd_style, user));
+    printf("pd_style.hyph %zu\n", offsetof(pd_style, hyph));
     printf("pd_params %zu\n", sizeof(pd_params));
     printf("pd_params.mode %zu\n", offsetof(pd_params, mode));
     printf("pd_params.align %zu\n", offsetof(pd_params, align));

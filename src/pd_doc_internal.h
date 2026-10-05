@@ -124,6 +124,13 @@ struct pd_doc {
     dmarker* markers;
     int32_t nmarkers, capmarkers;
     pd_font_resolver resolver;
+    const pd_font** fallback;   /* fonts tried, in order, for characters the run's font lacks */
+    int32_t nfallback;
+    struct {
+        char lang[16];
+        const pd_hyph* hyph;
+    }* hyphs;                   /* hyphenation patterns by language tag prefix */
+    int32_t nhyphs;
     void* resolver_user;
     const pd_font* default_font;
     pd_doc_listener listener;

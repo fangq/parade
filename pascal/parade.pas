@@ -226,6 +226,7 @@ type
     space_stretch, space_shrink, kerning: Int32;
     color: UInt32;
     user: Int32;
+    hyph: Pointer;           { const pd_hyph* }
   end;
   Ppd_style = ^pd_style;
 
@@ -434,6 +435,11 @@ procedure pd_style_init(out style: pd_style; font: Ppd_font; size: pd_sp); cdecl
 function pd_text_next_grapheme(utf8: PAnsiChar; len, offset: csize_t): csize_t; cdecl; PDEXT;
 function pd_text_prev_grapheme(utf8: PAnsiChar; len, offset: csize_t): csize_t; cdecl; PDEXT;
 function pd_text_line_breaks(utf8: PAnsiChar; len: csize_t; out_: PByte): pd_status; cdecl; PDEXT;
+
+function pd_hyph_load_file(path: PAnsiChar; out hyph: Pointer): pd_status; cdecl; PDEXT;
+function pd_hyph_load_memory(data: Pointer; len: csize_t; out hyph: Pointer): pd_status; cdecl; PDEXT;
+procedure pd_hyph_free(hyph: Pointer); cdecl; PDEXT;
+function pd_hyph_word(hyph: Pointer; utf8: PAnsiChar; len: csize_t; out_: PByte): pd_status; cdecl; PDEXT;
 procedure pd_params_init(out params: pd_params); cdecl; PDEXT;
 
 function pd_para_new(out para: Ppd_para): pd_status; cdecl; PDEXT;
@@ -458,6 +464,8 @@ function pd_doc_new(out doc: Ppd_doc): pd_status; cdecl; PDEXT;
 procedure pd_doc_free(doc: Ppd_doc); cdecl; PDEXT;
 procedure pd_doc_set_font_resolver(doc: Ppd_doc; fn: pd_font_resolver; user: Pointer); cdecl; PDEXT;
 procedure pd_doc_set_default_font(doc: Ppd_doc; font: Ppd_font); cdecl; PDEXT;
+function pd_doc_set_fallback_fonts(doc: Ppd_doc; fonts: PPointer; n: Int32): pd_status; cdecl; PDEXT;
+function pd_doc_set_hyphenator(doc: Ppd_doc; lang: PAnsiChar; hyph: Pointer): pd_status; cdecl; PDEXT;
 function pd_doc_revision(doc: Ppd_doc): UInt64; cdecl; PDEXT;
 
 function pd_doc_root(doc: Ppd_doc): pd_block_id; cdecl; PDEXT;

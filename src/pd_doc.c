@@ -607,6 +607,8 @@ void pd_doc_free(pd_doc* d) {
     free(d->undo);
     free(d->redo);
     free(d->touched);
+    free(d->fallback);
+    free(d->hyphs);
     free(d);
 }
 
@@ -786,6 +788,63 @@ void pd_doc_set_font_resolver(pd_doc* d, pd_font_resolver fn, void* user) {
         d->resolver = fn;
         d->resolver_user = user;
     }
+}
+
+pd_status pd_doc_set_hyphenator(pd_doc* d, const char* lang, const pd_hyph* hyph) {
+    int32_t i;
+
+    if (!d || !lang || strlen(lang) >= sizeof(d->hyphs[0].lang)) {
+        return PD_ERR_ARG;
+    }
+
+    for (i = 0; i < d->nhyphs && strcmp(d->hyphs[i].lang, lang); i++) {
+    }
+
+    if (!hyph) {
+        if (i < d->nhyphs) {
+            d->hyphs[i] = d->hyphs[--d->nhyphs];
+        }
+    } else {
+        if (i == d->nhyphs) {
+            void* p = realloc(d->hyphs, (size_t)(d->nhyphs + 1) * sizeof(d->hyphs[0]));
+
+            if (!p) {
+                return PD_ERR_NOMEM;
+            }
+
+            d->hyphs = p;
+            strcpy(d->hyphs[d->nhyphs++].lang, lang);
+        }
+
+        d->hyphs[i].hyph = hyph;
+    }
+
+    d->style_rev++;
+    return PD_OK;
+}
+
+pd_status pd_doc_set_fallback_fonts(pd_doc* d, const pd_font* const* fonts, int32_t n) {
+    const pd_font** f = NULL;
+
+    if (!d || n < 0 || (n > 0 && !fonts)) {
+        return PD_ERR_ARG;
+    }
+
+    if (n > 0) {
+        f = (const pd_font**)malloc((size_t)n * sizeof(pd_font*));
+
+        if (!f) {
+            return PD_ERR_NOMEM;
+        }
+
+        memcpy(f, fonts, (size_t)n * sizeof(pd_font*));
+    }
+
+    free(d->fallback);
+    d->fallback = f;
+    d->nfallback = n;
+    d->style_rev++;     /* every paragraph may lay out differently now */
+    return PD_OK;
 }
 
 void pd_doc_set_default_font(pd_doc* d, const pd_font* font) {

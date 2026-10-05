@@ -129,6 +129,19 @@ PD_API size_t pd_text_prev_grapheme(const char* utf8, size_t len, size_t offset)
 PD_API pd_status pd_text_line_breaks(const char* utf8, size_t len, uint8_t* out);
 
 /* ------------------------------------------------------------------ */
+/* Hyphenation (Liang patterns, libhyphen/hunspell .dic files)        */
+/* ------------------------------------------------------------------ */
+
+typedef struct pd_hyph pd_hyph;
+
+/** load patterns, e.g. /usr/share/hyphen/hyph_en_US.dic */
+PD_API pd_status pd_hyph_load_file(const char* path, pd_hyph** out);
+PD_API pd_status pd_hyph_load_memory(const void* data, size_t len, pd_hyph** out);
+PD_API void      pd_hyph_free(pd_hyph* hyph);
+/** hyphenation points of one word: out[i] = 1 if a hyphen may go before byte i (len + 1 bytes) */
+PD_API pd_status pd_hyph_word(const pd_hyph* hyph, const char* utf8, size_t len, uint8_t* out);
+
+/* ------------------------------------------------------------------ */
 /* Styles                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -141,6 +154,7 @@ typedef struct {
     int32_t kerning;        /**< 1 to apply pair kerning */
     uint32_t color;         /**< 0xAARRGGBB, opaque to the layout engine */
     int32_t user;           /**< caller tag, returned with every glyph */
+    const pd_hyph* hyph;    /**< hyphenation patterns for this text, NULL = no automatic hyphens */
 } pd_style;
 
 /** fill a style with defaults for the given font and size */

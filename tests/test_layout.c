@@ -568,6 +568,134 @@ static void test_incremental(void) {
     pd_doc_free(d);
 }
 
+static void test_fallback(void) {
+    pd_font* cjk = NULL;
+    pd_block_id sec, p;
+    pd_doc* d;
+    pd_layout* L;
+    pd_draw it[256];
+    int32_t n, k, latin = 0, han = 0, wrong = 0;
+    const char* text = "Mixed \xE4\xB8\xAD\xE6\x96\x87 text";
+    const pd_font* fb[1];
+
+    if (pd_font_load_file("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0, &cjk) != PD_OK) {
+        printf("  (no CJK font, skipped)\n");
+        return;
+    }
+
+    d = new_doc(&sec);
+    p = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p, 0), text, strlen(text), PD_FORMAT_INHERIT, NULL);
+    pd_layout_new(d, &L);
+    pd_layout_update(L, NULL);
+    pd_layout_page_items(L, 0, it, 256, &n);
+    CHECK(n > 0);
+
+    for (k = 0; k < n; k++) {   /* without fallback the Han characters are .notdef in the text font */
+        wrong += it[k].kind == PD_DRAW_GLYPH && it[k].glyph == 0;
+    }
+
+    CHECK(wrong == 2);
+    fb[0] = cjk;
+    CHECK(pd_doc_set_fallback_fonts(d, fb, 1) == PD_OK);
+    pd_layout_update(L, NULL);
+    pd_layout_page_items(L, 0, it, 256, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind != PD_DRAW_GLYPH) {
+            continue;
+        }
+
+        if (it[k].text >= 0x4E00) {
+            han += it[k].font == cjk && it[k].glyph != 0;
+        } else {
+            latin += it[k].font == font;
+        }
+    }
+
+    CHECK(han == 2 && latin == 9);     /* "Mixed" + "text": spaces are glue, not glyphs */
+    pd_layout_free(L);
+    pd_doc_free(d);
+    pd_font_free(cjk);
+}
+
+/* hyphenated lines of a paragraph laid out at a width */
+static int32_t count_hyphens(const pd_doc* d, pd_block_id para, pd_sp col, int32_t* lines) {
+    pd_para* pp;
+    pd_params prm;
+    pd_line ln;
+    int32_t i, h = 0;
+
+    pd_para_new(&pp);
+    pd_doc_para_build(d, para, col, pp, &prm);
+    pd_para_break(pp, &prm, NULL);
+    *lines = pd_para_line_count(pp);
+
+    for (i = 0; i < *lines; i++) {
+        pd_para_get_line(pp, i, &ln);
+        h += ln.hyphenated;
+    }
+
+    pd_para_free(pp);
+    return h;
+}
+
+static void test_hyphenation(void) {
+    pd_hyph* h;
+    uint8_t pts[16];
+    const char* text = "Characteristically, international organizations demonstrate extraordinary "
+                       "responsibilities concerning multidimensional considerations and "
+                       "incomprehensibilities of contemporary administrative representations.";
+    pd_block_id sec, p;
+    pd_doc* d;
+    pd_char_props cp;
+    int32_t lines0, lines1, h0, h1, n, i;
+    pd_range all;
+
+    if (pd_hyph_load_file("/usr/share/hyphen/hyph_en_US.dic", &h) != PD_OK) {
+        printf("  (no hyph_en_US.dic, skipped)\n");
+        return;
+    }
+
+    CHECK(pd_hyph_word(h, "hyphenation", 11, pts) == PD_OK);    /* hy-phen-ation */
+    n = 0;
+
+    for (i = 0; i <= 11; i++) {
+        n += pts[i];
+    }
+
+    CHECK(n == 2 && pts[2] && pts[6]);
+    CHECK(pd_hyph_word(h, "Table", 5, pts) == PD_OK && pts[2] && !pts[1] && !pts[3]);   /* Ta-ble, case-folded */
+    CHECK(pd_hyph_load_memory("UTF-8\n", 6, &(pd_hyph*) {
+        NULL
+    }) == PD_ERR_FORMAT);
+
+    d = new_doc(&sec);
+    p = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p, 0), text, strlen(text), PD_FORMAT_INHERIT, NULL);
+    h0 = count_hyphens(d, p, PD_PT(110), &lines0);
+    CHECK(h0 == 0);                                     /* no patterns registered */
+
+    CHECK(pd_doc_set_hyphenator(d, "de", h) == PD_OK);  /* wrong language: still none */
+    CHECK(count_hyphens(d, p, PD_PT(110), &n) == 0);
+
+    memset(&cp, 0, sizeof(cp));
+    cp.mask = PD_CP_LANG;
+    strcpy(cp.lang, "en-US");
+    all.start = at(p, 0);
+    all.end = at(p, (uint32_t)strlen(text));
+    CHECK(pd_doc_set_char_props(d, all, &cp) == PD_OK);
+    CHECK(pd_doc_set_hyphenator(d, "EN", h) == PD_OK);  /* prefix match, case-insensitive */
+    h1 = count_hyphens(d, p, PD_PT(110), &lines1);
+    CHECK(h1 > 0);
+    printf("  hyphens: %d lines -> %d lines, %d hyphenated\n", lines0, lines1, h1);
+
+    CHECK(pd_doc_set_hyphenator(d, "EN", NULL) == PD_OK);
+    CHECK(count_hyphens(d, p, PD_PT(110), &n) == 0 && n == lines0);
+    pd_doc_free(d);
+    pd_hyph_free(h);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -589,6 +717,9 @@ int main(void) {
     test_hit_caret();
     printf("incremental updates\n");
     test_incremental();
+    printf("font fallback\n");
+    test_fallback();
+    test_hyphenation();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

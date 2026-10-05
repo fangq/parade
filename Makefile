@@ -3,6 +3,13 @@
 CC      ?= cc
 CFLAGS  ?= -O2
 PD_CFLAGS := -std=c99 -Wall -Wextra -Wpedantic -Wshadow -Iinclude -fPIC
+
+# optional complex-script shaping through HarfBuzz: make HARFBUZZ=1 (use its own BUILD dir)
+HARFBUZZ ?= 0
+ifeq ($(HARFBUZZ),1)
+PD_CFLAGS += -DPD_WITH_HARFBUZZ $(shell pkg-config --cflags harfbuzz)
+LDLIBS += $(shell pkg-config --libs harfbuzz)
+endif
 LDLIBS  += -lm
 AR      ?= ar
 
@@ -11,7 +18,7 @@ MEMLIMIT_KB ?= 2097152
 ORACLE_MAX_MEM ?= 2048
 ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
-SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_unidata.c src/pd_text.c src/pd_bidi.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
+SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_unidata.c src/pd_text.c src/pd_bidi.c src/pd_shape.c src/pd_hyph.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
            src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c
 BUILD   ?= build
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)

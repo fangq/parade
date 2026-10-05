@@ -536,6 +536,8 @@ static pd_status parse_font(pd_font* f, int32_t face) {
     }
 
     f->m.has_kerning = (f->gpos_nsub > 0 || f->kern_npairs > 0);
+    f->face_index = face;
+    pd_shape_font_init(f);
     return PD_OK;
 }
 
@@ -616,6 +618,7 @@ pd_status pd_font_load_file(const char* path, int32_t face, pd_font** out) {
 
 void pd_font_free(pd_font* f) {
     if (f) {
+        pd_shape_font_free(f);
         free(f->gpos_sub);
         free(f->gpos_lookup);
         free(f->data);

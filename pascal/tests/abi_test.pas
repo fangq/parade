@@ -54,6 +54,7 @@ begin
   WriteLn('pd_style.kerning ', PtrUInt(@v_pd_style.kerning) - PtrUInt(@v_pd_style));
   WriteLn('pd_style.color ', PtrUInt(@v_pd_style.color) - PtrUInt(@v_pd_style));
   WriteLn('pd_style.user ', PtrUInt(@v_pd_style.user) - PtrUInt(@v_pd_style));
+  WriteLn('pd_style.hyph ', PtrUInt(@v_pd_style.hyph) - PtrUInt(@v_pd_style));
   WriteLn('pd_params ', SizeOf(pd_params));
   WriteLn('pd_params.mode ', PtrUInt(@v_pd_params.mode) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.align ', PtrUInt(@v_pd_params.align) - PtrUInt(@v_pd_params));

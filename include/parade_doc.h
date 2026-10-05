@@ -66,6 +66,19 @@ typedef const pd_font* (*pd_font_resolver)(void* user, const char* family, int32
 PD_API pd_status pd_doc_new(pd_doc** out);
 PD_API void      pd_doc_free(pd_doc* doc);
 PD_API void      pd_doc_set_font_resolver(pd_doc* doc, pd_font_resolver fn, void* user);
+/**
+ * Fonts tried in order for characters the run's font has no glyph for
+ * (e.g. CJK or symbol fonts behind a Latin text font). The fonts must
+ * outlive the document; the list is copied. n = 0 clears it.
+ */
+PD_API pd_status pd_doc_set_fallback_fonts(pd_doc* doc, const pd_font* const* fonts, int32_t n);
+/**
+ * Hyphenation patterns for a language: used for runs whose language tag
+ * starts with lang ("en" matches "en-US"; the longest match wins, "" matches
+ * runs without a language) in paragraphs with hyphenate on. hyph must
+ * outlive the document; NULL removes the entry.
+ */
+PD_API pd_status pd_doc_set_hyphenator(pd_doc* doc, const char* lang, const pd_hyph* hyph);
 /** font used when the resolver returns NULL or none is set */
 PD_API void      pd_doc_set_default_font(pd_doc* doc, const pd_font* font);
 

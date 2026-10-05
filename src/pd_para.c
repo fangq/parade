@@ -260,12 +260,69 @@ static int add_glyph(builder* b, uint32_t cp, uint32_t cluster, uint32_t cluster
     gl = &p->glyphs[p->n_glyphs++];
     gl->glyph = g;
     gl->cluster = cluster;
+    gl->xoff = gl->yoff = 0;
     gl->advance = pd_scale(pd_font_glyph_advance(f, g), b->st->size, b->upem);
     box->width += gl->advance;
     box->glyph_count++;
     box->text_end = cluster_end;
     b->prev_glyph = g;
     return 0;
+}
+
+/* complex-shaped glyphs (logical order) into the open box */
+static int add_shaped(builder* b, const pd_shaped* g, int32_t n, uint32_t text_start, uint32_t text_end) {
+    pd_para* p = b->p;
+    pd_item* box;
+    int32_t k;
+
+    if (b->box_index < 0) {
+        box = new_item(p, PD_ITEM_BOX);
+
+        if (!box) {
+            return -1;
+        }
+
+        box->style = b->style;
+        box->height = b->asc;
+        box->depth = b->desc;
+        box->text_start = text_start;
+        box->glyph_start = (uint32_t)p->n_glyphs;
+        b->box_index = p->n_items - 1;
+    }
+
+    if (pd_grow((void**)&p->glyphs, &p->cap_glyphs, (int64_t)p->n_glyphs + n, sizeof(pd_gl))) {
+        return -1;
+    }
+
+    box = &p->items[b->box_index];
+
+    for (k = 0; k < n; k++) {
+        pd_gl* gl = &p->glyphs[p->n_glyphs++];
+
+        gl->glyph = g[k].glyph;
+        gl->cluster = g[k].cluster;
+        gl->advance = pd_scale(g[k].advance, b->st->size, b->upem);
+        gl->xoff = pd_scale(g[k].xoff, b->st->size, b->upem);
+        gl->yoff = pd_scale(g[k].yoff, b->st->size, b->upem);
+        box->width += gl->advance;
+        box->glyph_count++;
+    }
+
+    box->text_end = text_end;
+    b->prev_glyph = 0;
+    return 0;
+}
+
+/* letters of the scripts hyphenation patterns cover */
+static int is_letter(uint32_t c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= 0xC0 && c <= 0x24F && c != 0xD7 && c != 0xF7) ||
+           (c >= 0x370 && c <= 0x3FF) || (c >= 0x400 && c <= 0x52F);
+}
+
+/* characters with a meaning of their own in the item list (spaces, breaks, hyphens) */
+static int is_special(uint32_t cp) {
+    return cp == ' ' || cp == '\t' || cp == 0x00A0 || cp == 0x202F || cp == 0x200B || cp == 0x00AD || cp == '\r' ||
+           cp == '\n' || cp == 0x0B || cp == 0x0C || cp == 0x85 || cp == 0x2028 || cp == 0x2029;
 }
 
 static int add_space(builder* b, uint32_t cluster, uint32_t cluster_end, int nobreak) {
@@ -349,6 +406,7 @@ static int add_soft_hyphen(builder* b, uint32_t at, uint32_t at_end) {
     it->glyph_count = 1;
     p->glyphs[p->n_glyphs].glyph = g;
     p->glyphs[p->n_glyphs].cluster = at;
+    p->glyphs[p->n_glyphs].xoff = p->glyphs[p->n_glyphs].yoff = 0;
     p->glyphs[p->n_glyphs].advance = pd_scale(pd_font_glyph_advance(f, g), b->st->size, b->upem);
     it->width = p->glyphs[p->n_glyphs].advance;
     p->n_glyphs++;
@@ -359,7 +417,7 @@ pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_st
     builder b;
     pd_font_metrics fm;
     uint32_t base, *cps, *offs;
-    uint8_t* brk;
+    uint8_t* brk, *hyp = NULL;
     int32_t n, first, ci;
 
     if (!p || (!utf8 && len) || !st || !st->font || st->size <= 0) {
@@ -412,6 +470,35 @@ pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_st
     for (first = 0; first < n && offs[first] < base; first++) {
     }
 
+    /* automatic hyphenation points in the words of this run */
+    if (st->hyph && (hyp = (uint8_t*)calloc((size_t)n + 1, 1)) != NULL) {
+        int32_t w0 = first;
+
+        while (w0 < n) {
+            int32_t w1;
+
+            while (w0 < n && !is_letter(cps[w0])) {
+                w0++;
+            }
+
+            for (w1 = w0; w1 < n && is_letter(cps[w1]); w1++) {
+            }
+
+            if (w1 > w0 && w1 - w0 <= 250 && (w0 == 0 || !is_letter(cps[w0 - 1]))) {
+                uint8_t pts[256];
+                int32_t j;
+
+                pd_hyph_points(st->hyph, cps + w0, w1 - w0, pts);
+
+                for (j = 1; j < w1 - w0; j++) {
+                    hyp[w0 + j] = pts[j];
+                }
+            }
+
+            w0 = w1;
+        }
+    }
+
     for (ci = first; ci < n; ci++) {
         uint32_t at = offs[ci], at_end = offs[ci + 1], cp = cps[ci], prev = ci > 0 ? cps[ci - 1] : 0;
         int cls = pd_uni_lb(cp), pcls = ci > 0 ? pd_uni_lb(prev) : -1, rc = 0;
@@ -426,6 +513,39 @@ pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_st
             } else {
                 rc = add_pen(&b, 0, PD_FLAG_EXHYPHEN, at, at);   /* any other opportunity, unflagged */
             }
+        }
+
+        /* a word that needs contextual shaping goes to the complex shaper as a whole */
+        if (!rc && pd_shape_available() && !is_special(cp)) {
+            int32_t k = ci + 1, need = pd_shape_needed(cp), ns;
+            pd_shaped* sh = NULL;
+
+            while (k < n && !is_special(cps[k]) && brk[k] == 0) {
+                need |= pd_shape_needed(cps[k]);
+                k++;
+            }
+
+            if (need && (ns = pd_shape(st->font, p->text, p->n_text, offs[ci], offs[k], &sh)) > 0) {
+                rc = add_shaped(&b, sh, ns, offs[ci], offs[k]);
+                free(sh);
+
+                if (rc) {
+                    free(brk);
+                    free(hyp);
+                    free(cps);
+                    free(offs);
+                    return PD_ERR_NOMEM;
+                }
+
+                ci = k - 1;
+                continue;
+            }
+
+            free(sh);
+        }
+
+        if (!rc && hyp && hyp[ci]) {     /* a discretionary hyphen from the patterns */
+            rc = add_soft_hyphen(&b, at, at);
         }
 
         if (!rc) {
@@ -485,6 +605,7 @@ pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_st
 
         if (rc) {
             free(brk);
+            free(hyp);
             free(cps);
             free(offs);
             return PD_ERR_NOMEM;
@@ -492,6 +613,7 @@ pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_st
     }
 
     free(brk);
+    free(hyp);
     free(cps);
     free(offs);
     return PD_OK;
@@ -848,7 +970,7 @@ static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t
                     const pd_gl* gl = &p->glyphs[it->glyph_start + k];
 
                     ATOM(at[na].glyph = gl->glyph; at[na].cluster = gl->cluster; at[na].advance = gl->advance;
-                         at[na].style = it->style; at[na].kind = PD_GLYPH;
+                         at[na].style = it->style; at[na].kind = PD_GLYPH; at[na].x = gl->xoff; at[na].y = gl->yoff;
                          at[na].user = it->style >= 0 ? p->styles[it->style].user : 0);
                 }
             }
@@ -971,8 +1093,8 @@ static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t
             if (emit) {
                 if (n < cap) {
                     out[n] = at[i];
-                    out[n].x = (pd_sp)x;
-                    out[n].y = y;
+                    out[n].x = (pd_sp)x + at[i].x;     /* plus any shaping offset (y up) */
+                    out[n].y = y - at[i].y;
 
                     if (out[n].kind == PD_STOP_GLUE) {
                         out[n].user = 0;

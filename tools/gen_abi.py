@@ -8,7 +8,7 @@ STRUCTS = {
     "pd_font_metrics": "units_per_em ascender descender line_gap x_height cap_height num_glyphs has_kerning",
     "pd_outline_sink": "move_to line_to quad_to cubic_to close",
     "pd_glyph_image": "width height left top",
-    "pd_style": "font size space_stretch space_shrink kerning color user",
+    "pd_style": "font size space_stretch space_shrink kerning color user hyph",
     "pd_params": "mode align width indent line_penalty adj_demerits double_hyphen_demerits final_hyphen_demerits "
                  "hyphen_penalty ex_hyphen_penalty tex_badness rag_stretch baseline_skip line_spacing hysteresis "
                  "freeze_offset direction",

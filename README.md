@@ -83,11 +83,30 @@ from content). Streams use Parade's own deflate (`src/pd_zlib.c`,
 cross-checked against zlib). `make pdf-check` runs Ghostscript and
 poppler over the output.
 
+## International text
+
+- Unicode 15.1 tables generated from the UCD (`make unidata`,
+  `tools/gen_unidata.py`). UAX #14 line breaking, UAX #29 grapheme
+  clusters (carets move by grapheme) and the full UAX #9 bidi algorithm,
+  each passing 100% of the Unicode conformance files (`make conformance`).
+- Complex scripts: build with `HARFBUZZ=1` and word segments containing
+  Arabic, Indic, Southeast Asian etc. characters are shaped by HarfBuzz
+  (with the whole paragraph as context); Latin/CJK keep the built-in
+  shaper. Without HarfBuzz the interface stays and returns nothing.
+- Font fallback: `pd_doc_set_fallback_fonts` lists fonts tried for
+  characters the run's font lacks (marks follow their base).
+- Hyphenation: Liang patterns from libhyphen `.dic` files
+  (`pd_hyph_load_file("/usr/share/hyphen/hyph_en_US.dic", &h)`), either per
+  style (`pd_style.hyph`) or per language in a document
+  (`pd_doc_set_hyphenator(doc, "en", h)`, used where the paragraph has
+  `hyphenate` on). Pattern points become TeX discretionaries (flagged,
+  penalty 50 by default).
+
 ## Lazarus / Free Pascal (`pascal/`)
 
 - `parade.pas`: the binding for all three headers (static link by default,
   `-dPARADE_DYNAMIC` for the shared library). Record layouts are checked
-  against the C compiler's on every `make pascal` (217 sizes/offsets).
+  against the C compiler's on every `make pascal` (about 220 sizes/offsets).
 - `paradeedit.pas`: `TParadeEdit`, a page-view rich text editor control.
   Glyphs are rasterized by Parade (exact-area coverage, integer only), so
   the screen shows exactly the computed layout on every widgetset. Caret
@@ -151,6 +170,11 @@ pd_para_break(p, &prm, NULL);
     src/pd_layout.c      page builder: columns, floats, headers, fields, display lists
     src/pd_pdf.c         PDF writer
     src/pd_zlib.c        deflate/inflate/crc32
+    src/pd_unidata.c     generated Unicode property tables
+    src/pd_text.c        UTF-8, UAX #14 line breaks, UAX #29 graphemes
+    src/pd_bidi.c        UAX #9 bidi
+    src/pd_shape.c       optional HarfBuzz shaping
+    src/pd_hyph.c        Liang hyphenation
     tests/               unit tests
     bench/               quality and speed benchmark
     tools/font_oracle.py fontTools cross-check through the C ABI (ctypes)
@@ -161,6 +185,6 @@ pd_para_break(p, &prm, NULL);
 
 ## Next
 
-Footnote bodies and table layout in the page builder, Liang hyphenation, UAX #14/#29
-segmentation and grapheme-aware carets, bidi, a pluggable full shaper
-(kb_text_shape or HarfBuzz), and the Free Pascal binding unit.
+Page builder: footnote bodies, tables, wrap beside floats, continuous
+sections, optimal pagination. Then import/export (HTML, Markdown, LaTeX,
+RTF, DOCX), math, microtypography, fuzzing and CI.

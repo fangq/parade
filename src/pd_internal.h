@@ -30,6 +30,8 @@ struct pd_font {
     uint32_t glyf_len, loca_len;
     int32_t loca_long;      /* head.indexToLocFormat */
     uint32_t cff, cff_len;  /* CFF outlines, 0 = absent */
+    int32_t face_index;
+    void* hb_font;          /* HarfBuzz font when built with PD_WITH_HARFBUZZ */
 };
 
 /* ------------------------------------------------------------------ */
@@ -70,6 +72,7 @@ typedef struct {
     uint32_t glyph;
     uint32_t cluster;
     int32_t advance;        /* sp, kerning folded in */
+    int32_t xoff, yoff;     /* sp, from complex shaping (mark positioning); y up */
 } pd_gl;
 
 /* one chosen line */
@@ -157,6 +160,21 @@ static inline int32_t pd_item_penalty(const pd_item* it, const pd_params* prm) {
 
     return it->penalty;
 }
+
+/* hyphenation (pd_hyph.c): points[i] = 1 for a hyphen before letter i */
+int pd_hyph_points(const pd_hyph* h, const uint32_t* word, int32_t n, uint8_t* points);
+
+/* complex shaping (pd_shape.c): available when built with HarfBuzz */
+int  pd_shape_available(void);
+int  pd_shape_needed(uint32_t cp);
+void pd_shape_font_init(pd_font* f);
+void pd_shape_font_free(pd_font* f);
+/* shape text[from, to) of the paragraph text with full context; glyphs in logical order */
+typedef struct {
+    uint32_t glyph, cluster;
+    int32_t advance, xoff, yoff;    /* font units */
+} pd_shaped;
+int32_t pd_shape(const pd_font* f, const char* text, uint32_t len, uint32_t from, uint32_t to, pd_shaped** out);
 
 /* text segmentation (pd_text.c), on code points */
 int32_t pd_text_decode(const char* utf8, size_t len, uint32_t** cps, uint32_t** offs);
