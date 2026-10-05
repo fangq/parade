@@ -1,4 +1,5 @@
 build/
+build-asan/
 proto/kp
 *.o
 *.a

@@ -25,11 +25,33 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
 - **Determinism**: every layout quantity is an integer in scaled points
   (1/65536 pt), and glue is set by exact cumulative integer division.
 
+## Document model (`include/parade_doc.h`)
+
+- **Tree**: root → sections (page geometry, columns, header/footer
+  stories) → paragraphs, floats (figures/tables with placement and
+  wrap), tables, breaks; stories hold headers, footers and footnotes.
+- **Semantics vs appearance**: a paragraph has a role (heading 1–6,
+  caption, quote, code, equation, …) and a style; lists are separate.
+- **Styles**: named paragraph and character styles with inheritance;
+  direct formatting is interned as style + overrides, so runs are ids.
+- **Inline objects** (images, equations, fields, footnote marks, links,
+  bookmarks, tabs) occupy U+FFFC, so document and layout offsets agree.
+- **Editing**: every change is an operation recording its inverse —
+  undo/redo, labelled groups, typing coalescing, markers that follow
+  edits, per-block revisions and a change listener.
+- **Native format**: JData (`.pdoc`, JSON) or BJData (`.bpdoc`), using
+  `_TreeNode_`/`_TreeChildren_`, `_ByteStream_` and optimized N-D arrays;
+  the codec (`src/pd_json.c`) is a C99 port of mimamo's
+  mmm_json/mmm_bjdata/mmm_base64 conventions. Loading untrusted files is
+  fuzzed under ASan.
+- **Layout bridge**: `pd_doc_para_build` turns a document paragraph into a
+  `pd_para` with fonts from a host resolver.
+
 ## Build
 
     make            # build/libparade.a, build/libparade.so, tests, bench
     make test       # unit tests (run under a 2 GB address-space cap)
-    make asan       # tests under AddressSanitizer + UBSan
+    make asan       # tests under AddressSanitizer + UBSan (in build-asan/)
     make bench      # greedy vs optimal quality and speed (GPL-3 text corpus)
     make oracle     # font reader vs fontTools on every installed font
     make view       # render test scenes to build/parade_view.svg/.png
@@ -56,10 +78,15 @@ pd_para_break(p, &prm, NULL);
 
 ## Layout
 
-    include/parade.h     public C API
+    include/parade.h     public C API: fonts, paragraphs, line breaking
+    include/parade_doc.h public C API: document model, editing, JData I/O
     src/pd_font.c        font metrics reader
     src/pd_para.c        content building, simple shaper, output, hit testing
     src/pd_break.c       total-fit / first-fit line breaking
+    src/pd_json.c        JData/BJData codec (port of mimamo conventions)
+    src/pd_doc.c         document tree, styles, lists, operations, undo
+    src/pd_doc_io.c      native JData/BJData save and load
+    src/pd_doc_layout.c  document paragraph -> pd_para
     tests/               unit tests
     bench/               quality and speed benchmark
     tools/font_oracle.py fontTools cross-check through the C ABI (ctypes)
@@ -68,8 +95,7 @@ pd_para_break(p, &prm, NULL);
 
 ## Next
 
-Liang hyphenation patterns, UAX #14/#29 segmentation and grapheme-aware
-carets, bidi, a pluggable full shaper (kb_text_shape or HarfBuzz),
-paragraph variants (looseness ±1), and the page builder (floats,
-headers/footers, incremental repagination), followed by the Free Pascal
-binding unit.
+The page builder (pages from sections, floats, headers/footers, fields,
+incremental repagination), table layout, Liang hyphenation, UAX #14/#29
+segmentation and grapheme-aware carets, bidi, a pluggable full shaper
+(kb_text_shape or HarfBuzz), and the Free Pascal binding unit.

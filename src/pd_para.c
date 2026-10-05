@@ -1104,6 +1104,9 @@ const char* pd_status_string(pd_status s) {
 
         case PD_ERR_STATE:
             return "invalid state";
+
+        case PD_ERR_FORMAT:
+            return "malformed document data";
     }
 
     return "unknown error";

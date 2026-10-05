@@ -11,16 +11,19 @@ MEMLIMIT_KB ?= 2097152
 ORACLE_MAX_MEM ?= 2048
 ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
-SRC     := src/pd_font.c src/pd_para.c src/pd_break.c
-OBJ     := $(SRC:src/%.c=build/%.o)
-LIB     := build/libparade.a
-SO      := build/libparade.so
-TESTS   := build/test_parade
-BENCH   := build/bench_parade
+SRC     := src/pd_font.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_doc.c src/pd_doc_io.c \
+           src/pd_doc_layout.c
+BUILD   ?= build
+OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)
+LIB     := $(BUILD)/libparade.a
+SO      := $(BUILD)/libparade.so
+TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc
+BENCH   := $(BUILD)/bench_parade
 
 all: $(LIB) $(SO) $(TESTS) $(BENCH)
 
-build/%.o: src/%.c include/parade.h src/pd_internal.h | build
+$(BUILD)/%.o: src/%.c include/parade.h include/parade_doc.h src/pd_internal.h src/pd_doc_internal.h \
+           src/pd_json.h | $(BUILD)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) -c $< -o $@
 
 $(LIB): $(OBJ)
@@ -29,17 +32,17 @@ $(LIB): $(OBJ)
 $(SO): $(OBJ)
 	$(CC) -shared -o $@ $^ $(LDLIBS)
 
-$(TESTS): tests/test_parade.c $(LIB)
+$(BUILD)/test_%: tests/test_%.c $(LIB)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) $< $(LIB) -o $@ $(LDLIBS)
 
 $(BENCH): bench/bench_parade.c $(LIB)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) $< $(LIB) -o $@ $(LDLIBS)
 
-build:
-	mkdir -p build
+$(BUILD):
+	mkdir -p $(BUILD)
 
 test: $(TESTS)
-	$(ulimit_cmd) && ./$(TESTS)
+	$(ulimit_cmd) && for t in $(TESTS); do ./$$t || exit 1; done
 
 bench: $(BENCH)
 	$(ulimit_cmd) && ./$(BENCH)
@@ -62,12 +65,13 @@ view: $(SO)
 	    echo "wrote build/parade_view.png"
 
 # address and undefined-behaviour sanitizers
+# sanitizer build in its own directory, so the normal build stays loadable
 asan:
-	$(MAKE) clean
-	$(MAKE) test MEMLIMIT_KB=0 CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" LDLIBS="-lm -fsanitize=address,undefined"
+	ASAN_OPTIONS=hard_rss_limit_mb=2048 UBSAN_OPTIONS=halt_on_error=1 $(MAKE) test BUILD=build-asan MEMLIMIT_KB=0 \
+	    CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" LDLIBS="-lm -fsanitize=address,undefined"
 
 clean:
-	rm -rf build
+	rm -rf build build-asan
 
 pretty:
 	astyle \

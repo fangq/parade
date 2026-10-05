@@ -47,7 +47,8 @@ typedef enum {
     PD_ERR_IO = -3,         /**< file could not be read */
     PD_ERR_FONT = -4,       /**< font data malformed or unsupported */
     PD_ERR_RANGE = -5,      /**< index or offset out of range */
-    PD_ERR_STATE = -6       /**< call not valid in current state (e.g. not broken yet) */
+    PD_ERR_STATE = -6,      /**< call not valid in current state (e.g. not broken yet) */
+    PD_ERR_FORMAT = -7      /**< malformed or inconsistent document data */
 } pd_status;
 
 PD_API const char* pd_version(void);
@@ -119,8 +120,8 @@ typedef enum {
 } pd_align;
 
 typedef struct {
-    pd_break_mode mode;
-    pd_align align;
+    int32_t mode;           /**< pd_break_mode (enum-valued fields are int32_t for a stable ABI) */
+    int32_t align;          /**< pd_align */
     pd_sp width;            /**< line width when no shape is set */
     pd_sp indent;           /**< first-line indent */
     int32_t line_penalty;   /**< TeX \linepenalty (10) */
