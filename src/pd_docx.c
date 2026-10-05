@@ -1257,11 +1257,16 @@ typedef struct {
 
 typedef struct {
     int num_id, abstract_id;
+    int start[9];               /* w:startOverride per level, -1 none */
+    pd_list_id list;            /* its Parade list, once a paragraph uses it */
 } dnum;
 
 typedef struct {
     int id;
-    int kind[9];
+    int kind[9];                /* 1 bullet, 2 numbered */
+    pd_list_level lv[9];
+    int has_ind[9];
+    pd_list_id list;            /* shared by every w:num without overrides, as Word counts them */
 } dabs;
 
 typedef struct {
@@ -1642,14 +1647,57 @@ static void read_settings(dxi* X, const char* xml, size_t n) {
     }
 }
 
+/* a bullet as Word stores it -- often a character of the Symbol or Wingdings
+   font, in the private use area -- as the character it shows */
+static void bullet_text(const char* v, char* out, size_t cap) {
+    const unsigned char* u = (const unsigned char*)v;
+    uint32_t c = 0;
+
+    if (u[0] < 0x80) {
+        c = u[0];
+    } else if ((u[0] & 0xE0) == 0xC0 && u[1]) {
+        c = ((uint32_t)(u[0] & 0x1F) << 6) | (u[1] & 0x3F);
+    } else if ((u[0] & 0xF0) == 0xE0 && u[1] && u[2]) {
+        c = ((uint32_t)(u[0] & 0x0F) << 12) | ((uint32_t)(u[1] & 0x3F) << 6) | (u[2] & 0x3F);
+    }
+
+    if (c == 0xF0B7 || c == 0xF06C || c == 0 || c == 0xF0FC) {
+        snprintf(out, cap, "\xE2\x80\xA2");     /* bullet */
+    } else if (c == 'o' || c == 0xF06F) {
+        snprintf(out, cap, "\xE2\x97\xA6");     /* white bullet: Courier New's "o" */
+    } else if (c == 0xF0A7 || c == 0xF06E) {
+        snprintf(out, cap, "\xE2\x96\xAA");     /* small square */
+    } else if (c == 0xF0D8) {
+        snprintf(out, cap, "\xE2\x9E\xA2");     /* arrowhead */
+    } else if (c >= 0xF000 && c < 0xF100) {
+        snprintf(out, cap, "\xE2\x80\xA2");
+    } else {
+        snprintf(out, cap, "%s", v);
+    }
+}
+
 static void read_numbering(dxi* X, const char* xml, size_t n) {
     pd_markup m;
-    int cur_abs = -1, cur_lvl = -1, cur_num = -1;
+    int cur_abs = -1, cur_lvl = -1, cur_num = -1, ovr_lvl = -1, i;
 
     mu_init(&m, xml, n, 0);
 
     while (mu_next(&m) != MT_END) {
         const char* t = mu_local(m.name);
+        pd_list_level* L = cur_abs >= 0 && cur_lvl >= 0 && cur_lvl < 9 ? &X->abss[cur_abs].lv[cur_lvl] : NULL;
+        char v[64] = "";
+
+        if (m.type == MT_CLOSE) {
+            if (strcmp(t, "lvl") == 0) {
+                cur_lvl = -1;
+            } else if (strcmp(t, "abstractNum") == 0) {
+                cur_abs = -1;
+            } else if (strcmp(t, "num") == 0) {
+                cur_num = -1;
+            }
+
+            continue;
+        }
 
         if (m.type != MT_OPEN && m.type != MT_EMPTY) {
             continue;
@@ -1659,21 +1707,63 @@ static void read_numbering(dxi* X, const char* xml, size_t n) {
             cur_abs = X->nabs++;
             memset(&X->abss[cur_abs], 0, sizeof(dabs));
             X->abss[cur_abs].id = attr_int(&m, "w:abstractNumId", -1);
-            cur_num = -1;
-        } else if (strcmp(t, "lvl") == 0) {
-            cur_lvl = attr_int(&m, "w:ilvl", 0);
-        } else if (strcmp(t, "numFmt") == 0 && cur_abs >= 0 && cur_lvl >= 0 && cur_lvl < 9) {
-            char v[32] = "";
 
+            for (i = 0; i < 9; i++) {   /* what a level says nothing about */
+                X->abss[cur_abs].lv[i].format = PD_NUM_DECIMAL;
+                X->abss[cur_abs].lv[i].start = 1;
+                snprintf(X->abss[cur_abs].lv[i].text, sizeof(X->abss[0].lv[0].text), "%%%d.", i + 1);
+                X->abss[cur_abs].lv[i].indent = PD_PT(36) * (i + 1);
+                X->abss[cur_abs].lv[i].hanging = PD_PT(18);
+            }
+
+            cur_num = -1;
+        } else if (strcmp(t, "lvl") == 0 && cur_abs >= 0 && cur_num < 0) {
+            cur_lvl = attr_int(&m, "w:ilvl", 0);
+        } else if (L && strcmp(t, "start") == 0) {
+            L->start = attr_int(&m, "w:val", 1);
+        } else if (L && strcmp(t, "numFmt") == 0) {
             mu_attr(&m, "w:val", v, sizeof(v));
             X->abss[cur_abs].kind[cur_lvl] = strcmp(v, "bullet") == 0 || strcmp(v, "none") == 0 ? 1 : 2;
+            L->format = strcmp(v, "bullet") == 0 ? PD_NUM_BULLET : strcmp(v, "none") == 0 ? PD_NUM_NONE :
+                        strcmp(v, "lowerLetter") == 0 ? PD_NUM_LOWER_ALPHA : strcmp(v, "upperLetter") == 0 ?
+                        PD_NUM_UPPER_ALPHA : strcmp(v, "lowerRoman") == 0 ? PD_NUM_LOWER_ROMAN :
+                        strcmp(v, "upperRoman") == 0 ? PD_NUM_UPPER_ROMAN : PD_NUM_DECIMAL;
+        } else if (L && strcmp(t, "lvlText") == 0) {
+            if (mu_attr(&m, "w:val", v, sizeof(v)) || m.type == MT_EMPTY) {
+                if (L->format == PD_NUM_BULLET) {
+                    bullet_text(v, L->text, sizeof(L->text));
+                } else {
+                    snprintf(L->text, sizeof(L->text), "%s", v);  /* Word's %1.%2 is Parade's */
+                }
+            }
+        } else if (L && strcmp(t, "ind") == 0) {
+            if (mu_attr(&m, "w:left", v, sizeof(v)) || mu_attr(&m, "w:start", v, sizeof(v))) {
+                L->indent = twips(atoi(v));
+                X->abss[cur_abs].has_ind[cur_lvl] = 1;
+            }
+
+            if (mu_attr(&m, "w:hanging", v, sizeof(v))) {
+                L->hanging = twips(atoi(v));
+            } else if (mu_attr(&m, "w:firstLine", v, sizeof(v))) {
+                L->hanging = 0;
+            }
         } else if (strcmp(t, "num") == 0 && X->nnums < 256) {
             cur_num = X->nnums++;
+            memset(&X->nums[cur_num], 0, sizeof(dnum));
             X->nums[cur_num].num_id = attr_int(&m, "w:numId", -1);
             X->nums[cur_num].abstract_id = -1;
+
+            for (i = 0; i < 9; i++) {
+                X->nums[cur_num].start[i] = -1;
+            }
+
             cur_abs = -1;
         } else if (strcmp(t, "abstractNumId") == 0 && cur_num >= 0) {
             X->nums[cur_num].abstract_id = attr_int(&m, "w:val", -1);
+        } else if (strcmp(t, "lvlOverride") == 0 && cur_num >= 0) {
+            ovr_lvl = attr_int(&m, "w:ilvl", 0);
+        } else if (strcmp(t, "startOverride") == 0 && cur_num >= 0 && ovr_lvl >= 0 && ovr_lvl < 9) {
+            X->nums[cur_num].start[ovr_lvl] = attr_int(&m, "w:val", 1);
         }
     }
 }
@@ -1708,6 +1798,57 @@ static void read_notes(dxi* X) {
             }
         }
     }
+}
+
+/* The Parade list a w:num stands for, made the first time it is used. A
+   num that overrides no start shares its abstract definition's list, so
+   two of them count on from each other the way Word counts them. */
+static pd_list_id list_of(dxi* X, int num_id, const pd_list_level** lv) {
+    int i, k, j, own = 0;
+    dnum* nm = NULL;
+    dabs* ab = NULL;
+
+    *lv = NULL;
+
+    for (i = 0; i < X->nnums && !nm; i++) {
+        if (X->nums[i].num_id == num_id) {
+            nm = &X->nums[i];
+        }
+    }
+
+    for (k = 0; nm && k < X->nabs && !ab; k++) {
+        if (X->abss[k].id == nm->abstract_id) {
+            ab = &X->abss[k];
+        }
+    }
+
+    if (!ab) {
+        return 0;
+    }
+
+    *lv = ab->lv;
+
+    for (j = 0; j < 9; j++) {
+        own |= nm->start[j] >= 0;
+    }
+
+    if (own ? !nm->list : !ab->list) {
+        pd_list_level lv9[9];
+        pd_list_id id = 0;
+
+        memcpy(lv9, ab->lv, sizeof(lv9));
+
+        for (j = 0; j < 9; j++) {
+            if (nm->start[j] >= 0) {
+                lv9[j].start = nm->start[j];
+            }
+        }
+
+        pd_doc_list_define(X->b->d, 9, lv9, &id);
+        *(own ? &nm->list : &ab->list) = id;
+    }
+
+    return own ? nm->list : ab->list;
 }
 
 static int list_kind_of(const dxi* X, int num_id, int ilvl) {
@@ -1861,7 +2002,7 @@ static void dw_begin_para(dw* w) {
     pd_bld* b = w->X->b;
     const char* name = "";
     char low[64];
-    int hop, outline = w->outline, num_id = w->num_id, ilvl = w->ilvl;
+    int hop, outline = w->outline, num_id = w->num_id, ilvl = w->ilvl, list_para = 0;
     size_t k;
     const dstyle_x* st = find_style(w->X, w->pstyle);
 
@@ -1914,7 +2055,20 @@ static void dw_begin_para(dw* w) {
     }
 
     if (num_id > 0) {
-        bld_list(b, list_kind_of(w->X, num_id, ilvl), ilvl < 0 ? 0 : ilvl > 8 ? 8 : ilvl);
+        const pd_list_level* lv = NULL;
+
+        ilvl = ilvl < 0 ? 0 : ilvl > 8 ? 8 : ilvl;
+        bld_list(b, list_kind_of(w->X, num_id, ilvl), ilvl);
+        b->list_id = list_of(w->X, num_id, &lv);
+
+        /* Word measures a level's indent from the margin, and the paragraph's
+           own w:ind replaces it; Parade adds the level's to the paragraph's */
+        if (b->list_id && lv) {
+            b->pp.mask |= PD_PP_INDENT_LEFT | PD_PP_INDENT_FIRST;
+            b->pp.indent_left = (w->ppr.pp.mask & PD_PP_INDENT_LEFT) ? w->ppr.pp.indent_left - lv[ilvl].indent : 0;
+            b->pp.indent_first = 0;
+            list_para = 1;
+        }
     }
 
     /* what the document says about the paragraph -- defaults, the style and
@@ -1935,9 +2089,12 @@ static void dw_begin_para(dw* w) {
 #define DW_DIFF(bit, field) \
         if ((f->mask & (bit)) && f->field != rp.field) { b->pp.mask |= (bit); b->pp.field = f->field; }
         DW_DIFF(PD_PP_ALIGN, align)
-        DW_DIFF(PD_PP_INDENT_LEFT, indent_left)
+        if (!list_para) {   /* a list item's are settled above */
+            DW_DIFF(PD_PP_INDENT_LEFT, indent_left)
+            DW_DIFF(PD_PP_INDENT_FIRST, indent_first)
+        }
+
         DW_DIFF(PD_PP_INDENT_RIGHT, indent_right)
-        DW_DIFF(PD_PP_INDENT_FIRST, indent_first)
         DW_DIFF(PD_PP_SPACE_BEFORE, space_before)
         DW_DIFF(PD_PP_SPACE_AFTER, space_after)
         DW_DIFF(PD_PP_LINE_SPACING, line_spacing)

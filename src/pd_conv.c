@@ -414,6 +414,7 @@ static void bld_reset_next(pd_bld* b) {
     b->level = 0;
     b->list_kind = 0;
     b->list_level = 0;
+    b->list_id = 0;
     memset(&b->pp, 0, sizeof(b->pp));
 }
 
@@ -513,7 +514,9 @@ pd_block_id bld_begin_para(pd_bld* b) {
                         b->level) : 0);
     }
 
-    if (b->list_kind) {
+    if (b->list_id) {
+        pd_doc_set_list(b->d, p, b->list_id, b->list_level);
+    } else if (b->list_kind) {
         pd_doc_set_list(b->d, p, bld_list_id(b, b->list_kind), b->list_level);
     }
 

@@ -4,6 +4,7 @@
  * figure and a footnote; clipboard ranges and paste; malformed input.
  */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1000,6 +1001,118 @@ static void test_docx_styles(void) {
     pd_doc_free(d);
 }
 
+/* a document from the parts of a .docx: name, text, name, text, ..., NULL */
+static pd_doc* docx_doc(const char* first, ...) {
+    const char* names[16];
+    const char* texts[16];
+    int n = 0;
+    va_list ap;
+    const char* nm;
+    buf_t z;
+    pd_doc* d = NULL;
+
+    va_start(ap, first);
+
+    for (nm = first; nm && n < 16; nm = va_arg(ap, const char*)) {
+        names[n] = nm;
+        texts[n++] = va_arg(ap, const char*);
+    }
+
+    va_end(ap);
+    z = stored_zip(names, texts, n);
+
+    if (pd_doc_import(z.p, z.n, PD_CONV_DOCX, &d) != PD_OK) {
+        d = NULL;
+    }
+
+    free(z.p);
+    return d;
+}
+
+static void label_of(const pd_doc* d, pd_block_id p, char* buf) {
+    buf[0] = '\0';
+    pd_doc_list_label(d, p, buf, 32);
+}
+
+/* Word's numbering: formats, label templates, start values, overrides,
+   bullets from the Symbol font, and indents measured from the margin. */
+static void test_docx_lists(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>a</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"1\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>b</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>c</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"3\"/></w:numPr></w:pPr><w:r><w:t>d</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"2\"/></w:numPr></w:pPr><w:r><w:t>e</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"4\"/></w:numPr><w:ind w:left=\"1440\"/></w:pPr>"
+        "<w:r><w:t>f</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        "word/numbering.xml",
+        "<w:numbering xmlns:w=\"w\">"
+        "<w:abstractNum w:abstractNumId=\"0\">"
+        "<w:lvl w:ilvl=\"0\"><w:start w:val=\"3\"/><w:numFmt w:val=\"lowerRoman\"/><w:lvlText w:val=\"(%1)\"/>"
+        "<w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr></w:lvl>"
+        "<w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"upperLetter\"/><w:lvlText w:val=\"%1.%2\"/>"
+        "<w:pPr><w:ind w:left=\"1080\" w:hanging=\"360\"/></w:pPr></w:lvl></w:abstractNum>"
+        "<w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:numFmt w:val=\"bullet\"/>"
+        "<w:lvlText w:val=\"\xEF\x82\xB7\"/><w:pPr><w:ind w:left=\"360\" w:hanging=\"360\"/></w:pPr>"
+        "<w:rPr><w:rFonts w:ascii=\"Symbol\"/></w:rPr></w:lvl></w:abstractNum>"
+        "<w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>"
+        "<w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/></w:num>"
+        "<w:num w:numId=\"3\"><w:abstractNumId w:val=\"0\"/><w:lvlOverride w:ilvl=\"0\">"
+        "<w:startOverride w:val=\"1\"/></w:lvlOverride></w:num>"
+        "<w:num w:numId=\"4\"><w:abstractNumId w:val=\"0\"/></w:num>"
+        "</w:numbering>",
+        NULL);
+    pd_block_id sec, p[6];
+    pd_para_props pp;
+    char lab[32];
+    int i;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+
+    for (i = 0; i < 6; i++) {
+        p[i] = pd_doc_child(d, sec, i);
+    }
+
+    label_of(d, p[0], lab);
+    CHECK(strcmp(lab, "(iii)") == 0);              /* lower roman, from 3 */
+    label_of(d, p[1], lab);
+    CHECK(strcmp(lab, "iii.A") == 0);              /* a template naming two levels */
+    label_of(d, p[2], lab);
+    CHECK(strcmp(lab, "(iv)") == 0);               /* counting on */
+    label_of(d, p[3], lab);
+    CHECK(strcmp(lab, "(i)") == 0);                /* another num restarting at 1 */
+    label_of(d, p[4], lab);
+    CHECK(strcmp(lab, "\xE2\x80\xA2") == 0);       /* Symbol's bullet as the bullet it is */
+    label_of(d, p[5], lab);
+    CHECK(strcmp(lab, "(v)") == 0);                /* a num without overrides shares the count */
+
+    /* text at the level's indent, from the margin; a paragraph's own indent replaces it */
+    pd_doc_para_props(d, p[0], &pp);
+    CHECK((pp.mask & PD_PP_INDENT_LEFT) && pp.indent_left == 0);
+    pd_doc_para_props(d, p[5], &pp);
+    CHECK((pp.mask & PD_PP_INDENT_LEFT) && pp.indent_left == PD_PT(72) - PD_PT(36));
+    {
+        pd_list_level lv[9];
+        int32_t nl = 0;
+        pd_block_info bi;
+
+        pd_doc_block_info(d, p[0], &bi);
+        CHECK(pd_doc_list_info(d, bi.list, &nl, lv) == PD_OK && lv[0].indent == PD_PT(36) &&
+              lv[0].hanging == PD_PT(18) && lv[1].indent == PD_PT(54));
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1015,6 +1128,8 @@ int main(void) {
     test_range();
     printf("docx styles\n");
     test_docx_styles();
+    printf("docx lists\n");
+    test_docx_lists();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

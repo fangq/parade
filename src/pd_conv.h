@@ -108,6 +108,7 @@ typedef struct {
     /* the next paragraph */
     char pstyle[64];
     int32_t role, level, list_kind, list_level;
+    pd_list_id list_id;         /* an importer's own list definition, over list_kind */
     pd_para_props pp;
     /* tables under construction */
     pd_block_id table[8], row[8];
