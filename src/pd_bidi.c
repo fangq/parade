@@ -315,6 +315,60 @@ static void resolve_sequence(const uint32_t* cp, const uint8_t* orig, uint8_t* t
 }
 
 /*
+ * Can the paragraph get any odd (right-to-left) level? Only R, AL and AN
+ * characters, RLE/RLO/RLI (FSI resolves to RLI only around R or AL) and a
+ * right-to-left paragraph direction lead to one: without them every
+ * level is even and the full algorithm can be skipped. ASCII text never
+ * needs it; bytes that are not well-formed UTF-8 answer yes, so the
+ * answer is never wrong, at worst conservative.
+ */
+int pd_bidi_maybe_rtl(const char* utf8, size_t len, int dir) {
+    const unsigned char* s = (const unsigned char*)utf8;
+    size_t i = 0;
+
+    if (dir == 1) {
+        return 1;
+    }
+
+    while (i < len) {
+        unsigned c = s[i];
+        uint32_t cp;
+        int k, extra, t;
+
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+
+        extra = (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : -1;
+
+        if (extra < 0 || i + (size_t)extra >= len) {
+            return 1;
+        }
+
+        cp = c & (0x3F >> extra);
+
+        for (k = 1; k <= extra; k++) {
+            if ((s[i + k] & 0xC0) != 0x80) {
+                return 1;
+            }
+
+            cp = (cp << 6) | (s[i + k] & 0x3F);
+        }
+
+        t = pd_uni_bidi(cp);
+
+        if (t == BC_R || t == BC_AL || t == BC_AN || t == BC_RLE || t == BC_RLO || t == BC_RLI) {
+            return 1;
+        }
+
+        i += (size_t)extra + 1;
+    }
+
+    return 0;
+}
+
+/*
  * Resolve embedding levels for one paragraph. dir: -1 auto, 0 LTR, 1 RTL.
  * levels[i] = REMOVED (0xFF) for characters removed by X9. Returns the
  * paragraph level, or -1 on allocation failure.

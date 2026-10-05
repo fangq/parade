@@ -188,6 +188,8 @@ int     pd_grapheme_boundary(const uint32_t* cp, int32_t n, int32_t i);
 
 /* bidi (pd_bidi.c): levels per code point (0xFF = removed by X9); returns the paragraph level */
 int     pd_bidi_levels(const uint32_t* cp, int32_t n, int dir, uint8_t* levels);
+/* 0 if every level of the paragraph is surely even (no right-to-left text): the levels can be skipped */
+int     pd_bidi_maybe_rtl(const char* utf8, size_t len, int dir);
 int32_t pd_bidi_line(const uint32_t* cp, const uint8_t* levels, int32_t from, int32_t to, int para, uint8_t* lev,
                      int32_t* order);
 

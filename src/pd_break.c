@@ -35,6 +35,7 @@ typedef struct {
     int ragged;
     int protrude;
     int32_t expand;         /* per-mille */
+    int64_t adj[NFIT][NFIT];    /* adjacency demerits from fitness class [to][from] */
 } ctx_t;
 
 static int64_t sat_add(int64_t a, int64_t b) {
@@ -341,6 +342,27 @@ static int line_eval(const ctx_t* c, int32_t a, int32_t b, int32_t lc, const mea
     return fc;
 }
 
+/*
+ * The four fitness-class states of one start breakpoint extended by a line
+ * of demerits d: the smallest total (*best, DEM_INF if none) and the first
+ * class reaching it. Taking the first minimum and updating once is the
+ * same as the sequential strict-less updates of TeX's loop.
+ */
+static int relax4(const pd_state* sa, int64_t d, const int64_t* adj, int64_t* best) {
+    int64_t m = DEM_INF;
+    int fa, bf = 0;
+
+    for (fa = 0; fa < NFIT; fa++) {
+        int64_t t = sa[fa].total >= DEM_INF ? DEM_INF : sat_add(sa[fa].total, d + adj[fa]);
+
+        bf = t < m ? fa : bf;
+        m = t < m ? t : m;
+    }
+
+    *best = m;
+    return bf;
+}
+
 #define SIDX(c, bp, lc, f) ((((int64_t)(bp) * (c)->K + (lc)) * NFIT) + (f))
 
 static void clear_states(ctx_t* c, int32_t bp) {
@@ -375,7 +397,7 @@ static void total_fit(ctx_t* c, int32_t from, int32_t lo) {
             for (lc = 0; lc < c->K; lc++) {
                 const pd_state* sa = &p->states[SIDX(c, a, lc, 0)];
                 int32_t nlc = lc + 1 < c->K ? lc + 1 : c->K - 1;
-                int64_t d;
+                int64_t d, best;
                 int fc;
 
                 if (sa[0].total >= DEM_INF && sa[1].total >= DEM_INF && sa[2].total >= DEM_INF &&
@@ -389,19 +411,13 @@ static void total_fit(ctx_t* c, int32_t from, int32_t lo) {
                     continue;
                 }
 
-                for (fa = 0; fa < NFIT; fa++) {
+                {
                     pd_state* sb = &p->states[SIDX(c, b, nlc, fc)];
-                    int64_t t;
+                    int bf = relax4(sa, d, c->adj[fc], &best);
 
-                    if (sa[fa].total >= DEM_INF) {
-                        continue;
-                    }
-
-                    t = sat_add(sa[fa].total, d + ((fa - fc > 1 || fc - fa > 1) ? c->prm->adj_demerits : 0));
-
-                    if (t < sb->total) {
-                        sb->total = t;
-                        sb->prev = (int32_t)SIDX(c, a, lc, fa);
+                    if (best < sb->total) {
+                        sb->total = best;
+                        sb->prev = (int32_t)SIDX(c, a, lc, bf);
                         any = 1;
                     }
                 }
@@ -830,6 +846,10 @@ pd_status pd_break_lines(pd_para* p, const pd_params* prm, pd_break_info* info) 
     c.ragged = prm->align != PD_ALIGN_JUSTIFY;
     c.protrude = prm->protrusion != 0;
     c.expand = prm->expansion < 0 ? 0 : prm->expansion > 100 ? 100 : prm->expansion;
+
+    for (i = 0; i < NFIT * NFIT; i++) {     /* classes more than one apart are not adjacent */
+        c.adj[i / NFIT][i % NFIT] = (i / NFIT - i % NFIT > 1 || i % NFIT - i / NFIT > 1) ? prm->adj_demerits : 0;
+    }
 
     for (i = 0; i < c.K; i++) {
         pd_sp w = line_width(&c, i);

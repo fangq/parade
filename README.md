@@ -103,6 +103,10 @@ poppler over the output.
   `tools/gen_unidata.py`). UAX #14 line breaking, UAX #29 grapheme
   clusters (carets move by grapheme) and the full UAX #9 bidi algorithm,
   each passing 100% of the Unicode conformance files (`make conformance`).
+  Paragraphs that cannot contain right-to-left text (no R/AL/AN
+  characters or RLE/RLO/RLI, not an RTL paragraph) skip the bidi pass;
+  `make conformance` also checks that this shortcut never misjudges a
+  conformance case or any single code point.
 - Complex scripts: build with `HARFBUZZ=1` and word segments containing
   Arabic, Indic, Southeast Asian etc. characters are shaped by HarfBuzz
   (with the whole paragraph as context); Latin/CJK keep the built-in
@@ -115,6 +119,23 @@ poppler over the output.
   (`pd_doc_set_hyphenator(doc, "en", h)`, used where the paragraph has
   `hyphenate` on). Pattern points become TeX discretionaries (flagged,
   penalty 50 by default).
+
+## Math and microtypography
+
+- Equations (`pd_math_layout`, `src/pd_math.c`): LaTeX notation laid out
+  as TeX's Appendix G with an OpenType MATH font
+  (`pd_doc_set_math_font`, e.g. Latin Modern Math): fractions, scripts,
+  radicals, big operators with limits, `\left..\right` delimiters from
+  size variants and glyph assemblies, accents, matrices, `\text` and
+  math alphabets. Imported from Markdown `$..$`/`$$..$$` and HTML
+  `span.math`; exported to LaTeX. Lengths saturate at 1024pt, so a
+  malformed font cannot overflow the layout.
+- Margin kerning and font expansion as in pdfTeX/microtype
+  (`pd_params.protrusion`, `pd_params.expansion`, or
+  `pd_doc_set_microtype` for a document): punctuation and hyphens hang
+  into the margins, and glyphs may widen or narrow by up to the limit
+  inside the Knuth-Plass search. Scaled glyphs carry `pd_glyph.scale`
+  and are written with `Tz` in PDF.
 
 ## Import and export (`include/parade_convert.h`)
 
@@ -169,10 +190,24 @@ make pascal-demo LAZDIR=/path/to/Lazarus42/
     make view       # render test scenes to build/parade_view.svg/.png
     make pages      # lay out a sample document, draw its pages to build/pages.svg
     make pretty     # astyle formatting
+    make conformance   # Unicode conformance files (fetched once into build/ucd)
+    make fuzz-smoke    # every fuzz target: seeds + deterministic mutations under ASan/UBSan
+    make fuzz FUZZ=doc FUZZ_TIME=600   # coverage-guided libFuzzer run (clang)
 
 Test fonts: `PARADE_TEST_FONT` (default Liberation Serif) and
 `PARADE_TEST_CJK_FONT` (default Noto Sans CJK). Memory caps: `MEMLIMIT_KB`
 for test/bench, `ORACLE_MAX_MEM` (MB) for the fontTools worker.
+
+Fuzz targets (`fuzz/`): `font` (loading, outlines, rasterizing, MATH),
+`doc` (native load, layout, display lists, PDF, export), `import` (every
+importer, paste), `para` (segmentation, bidi, breaking, carets) and `math`
+(the TeX parser). `fuzz/driver.c` replays and mutates without libFuzzer,
+so any compiler can run them; inputs that once crashed are kept in
+`fuzz/seeds/` as regressions, and libFuzzer findings land in
+`build/fuzz/crash/`. CI (`.github/workflows/ci.yml`) runs gcc and clang
+with `-Werror`, the sanitizers, HarfBuzz, fuzzing, conformance, the
+external PDF/converter readers, the Pascal ABI check, formatting and a
+macOS build.
 
 ## Minimal use
 
@@ -211,10 +246,12 @@ pd_para_break(p, &prm, NULL);
     src/pd_bidi.c        UAX #9 bidi
     src/pd_shape.c       optional HarfBuzz shaping
     src/pd_hyph.c        Liang hyphenation
+    src/pd_math.c        OpenType MATH reader and TeX math layout
     src/pd_conv.c        converters: dispatch, builder, clipboard copy/paste, text
     src/pd_markup.c      HTML/XML tokenizer
     src/pd_html.c src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c
-    tests/               unit tests
+    tests/               unit tests, Unicode conformance
+    fuzz/                fuzz targets, stand-in driver, regression seeds
     bench/               quality and speed benchmark
     tools/font_oracle.py fontTools cross-check through the C ABI (ctypes)
     tools/render.py      visual viewer: Parade positions + fontTools outlines -> SVG
@@ -224,4 +261,5 @@ pd_para_break(p, &prm, NULL);
 
 ## Next
 
-Math layout, microtypography, fuzz drivers, CI, a SIMD breaker loop.
+A vectorized breaker loop (candidate starts in branchless batches); the
+4-way fitness relaxation alone gains about 1% on current CPUs.

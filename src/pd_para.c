@@ -820,7 +820,13 @@ pd_status pd_para_break(pd_para* p, const pd_params* prm, pd_break_info* info) {
     }
 
     /* bidi levels for the whole paragraph (none kept when it is all left-to-right) */
-    {
+    if (!pd_bidi_maybe_rtl(p->text ? p->text : "", p->n_text, prm->direction == PD_DIR_LTR ? 0 :
+                           prm->direction == PD_DIR_RTL ? 1 : -1)) {
+        free(p->blev);
+        p->blev = NULL;
+        p->cap_blev = 0;
+        p->para_level = 0;
+    } else {
         uint32_t* cps, *offs;
         int32_t ncp = pd_text_decode(p->text ? p->text : "", p->n_text, &cps, &offs), k;
         uint8_t* lev;
