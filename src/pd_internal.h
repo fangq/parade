@@ -25,6 +25,11 @@ struct pd_font {
     uint32_t* gpos_sub;     /* absolute offsets of PairPos subtables, in lookup order */
     uint16_t* gpos_lookup;  /* lookup index of each subtable */
     int32_t gpos_nsub;
+    uint32_t base;          /* table directory (non-zero inside a collection) */
+    uint32_t glyf, loca;    /* TrueType outlines, 0 = absent */
+    uint32_t glyf_len, loca_len;
+    int32_t loca_long;      /* head.indexToLocFormat */
+    uint32_t cff, cff_len;  /* CFF outlines, 0 = absent */
 };
 
 /* ------------------------------------------------------------------ */

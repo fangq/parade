@@ -11,7 +11,7 @@ MEMLIMIT_KB ?= 2097152
 ORACLE_MAX_MEM ?= 2048
 ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
-SRC     := src/pd_font.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_doc.c src/pd_doc_io.c \
+SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_doc.c src/pd_doc_io.c \
            src/pd_doc_layout.c src/pd_layout.c
 BUILD   ?= build
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)
@@ -72,6 +72,12 @@ view: $(SO)
 	    --export-type=png --export-filename=build/parade_view.png --export-dpi=110 >/dev/null 2>&1) && \
 	    echo "wrote build/parade_view.png"
 
+# rasterizer vs fontTools: outline areas and coverage (TrueType and CFF)
+oracle-raster: $(SO)
+	python3 tools/raster_oracle.py --max-mem $(ORACLE_MAX_MEM) \
+	    /usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf \
+	    /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+
 # address and undefined-behaviour sanitizers
 # sanitizer build in its own directory, so the normal build stays loadable
 asan:
@@ -104,4 +110,4 @@ pretty:
 	    --break-blocks \
 	    "include/*.h" "src/*.c" "src/*.h" "tests/*.c" "bench/*.c"
 
-.PHONY: all test bench oracle view pages asan clean pretty
+.PHONY: all test bench oracle oracle-raster view pages asan clean pretty

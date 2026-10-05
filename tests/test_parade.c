@@ -526,6 +526,100 @@ static void test_cjk(const pd_font* f) {
     pd_para_free(p);
 }
 
+static void test_raster(const pd_font* f) {
+    pd_glyph_image gi, gi2;
+    uint8_t buf[200 * 200];
+    uint32_t A = pd_font_glyph_index(f, 'A'), space = pd_font_glyph_index(f, ' ');
+    uint64_t h1 = 0, h2 = 0;
+    int64_t ink = 0, ink2 = 0;
+    int32_t i, s;
+    pd_font* cjk = NULL;
+
+    CHECK(pd_font_glyph_render(f, A, PD_PT(64), 0, NULL, 0, &gi) == PD_OK);     /* size query */
+    CHECK(gi.width > 30 && gi.width < 70 && gi.height > 35 && gi.height < 50 && gi.top > 35);
+    CHECK(pd_font_glyph_render(f, A, PD_PT(64), 0, buf, 10, &gi) == PD_ERR_RANGE);
+    CHECK(pd_font_glyph_render(f, A, PD_PT(64), 0, buf, sizeof(buf), &gi) == PD_OK);
+
+    for (i = 0; i < gi.width * gi.height; i++) {
+        ink += buf[i];
+        h1 = (h1 ^ buf[i]) * 1099511628211ULL;
+    }
+
+    /* Liberation Serif 'A' covers 0.1187 em^2 per fontTools AreaPen (64 px: 486.0 px^2) */
+    CHECK(ink / 255 > 478 && ink / 255 < 494);
+    CHECK(pd_font_glyph_render(f, A, PD_PT(64), 0, buf, sizeof(buf), &gi2) == PD_OK);
+
+    for (i = 0; i < gi2.width * gi2.height; i++) {
+        h2 = (h2 ^ buf[i]) * 1099511628211ULL;
+    }
+
+    CHECK(h1 == h2);    /* deterministic */
+    printf("  'A' at 64 px: %dx%d, bitmap hash %016llx\n", gi.width, gi.height, (unsigned long long)h1);
+
+    /* subpixel shifts move ink, they do not change it */
+    for (s = 0; s < 256; s += 64) {
+        ink2 = 0;
+        pd_font_glyph_render(f, A, PD_PT(64), s, buf, sizeof(buf), &gi2);
+
+        for (i = 0; i < gi2.width * gi2.height; i++) {
+            ink2 += buf[i];
+        }
+
+        CHECK(ink2 / 255 > 478 && ink2 / 255 < 494);
+    }
+
+    CHECK(pd_font_glyph_render(f, space, PD_PT(64), 0, buf, sizeof(buf), &gi) == PD_OK && gi.width == 0);
+    CHECK(pd_font_glyph_render(f, 0xFFFFFF, PD_PT(64), 0, buf, sizeof(buf), &gi) == PD_ERR_FONT);
+    CHECK(pd_font_glyph_render(f, A, 0, 0, buf, sizeof(buf), &gi) == PD_ERR_ARG);
+
+    if (pd_font_load_file("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 0, &cjk) == PD_OK) {
+        CHECK(pd_font_glyph_render(cjk, pd_font_glyph_index(cjk, 0x5929), PD_PT(32), 0, buf, sizeof(buf), &gi) ==
+              PD_OK && gi.width > 20);   /* CFF outline */
+        pd_font_free(cjk);
+    }
+
+    /* a font with corrupted glyph data renders garbage or fails, never crashes */
+    {
+        FILE* fp = fopen(getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
+                         "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf", "rb");
+        long n;
+        unsigned char* data;
+        int k;
+
+        if (fp && fseek(fp, 0, SEEK_END) == 0 && (n = ftell(fp)) > 0 && fseek(fp, 0, SEEK_SET) == 0) {
+            data = (unsigned char*)malloc((size_t)n);
+
+            if (data && fread(data, 1, (size_t)n, fp) == (size_t)n) {
+                srand(5);
+
+                for (k = 0; k < 200; k++) {
+                    pd_font* bad = NULL;
+                    int j;
+
+                    for (j = 0; j < 50; j++) {
+                        data[rand() % n] ^= (unsigned char)(1 << (rand() % 8));
+                    }
+
+                    if (pd_font_load_memory(data, (size_t)n, 0, &bad) == PD_OK) {
+                        for (j = 0; j < 30; j++) {
+                            pd_font_glyph_render(bad, (uint32_t)(rand() % 3000), PD_PT(20 + rand() % 60), 0, buf, sizeof(buf),
+                                                 &gi);
+                        }
+
+                        pd_font_free(bad);
+                    }
+                }
+            }
+
+            free(data);
+        }
+
+        if (fp) {
+            fclose(fp);
+        }
+    }
+}
+
 int main(void) {
     pd_font* f = load_env_font("PARADE_TEST_FONT", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf");
     pd_font* cjk = load_env_font("PARADE_TEST_CJK_FONT", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
@@ -539,6 +633,8 @@ int main(void) {
 
     printf("font\n");
     test_font(f);
+    printf("rasterizer\n");
+    test_raster(f);
     test_liberation(f);
     printf("justify\n");
     test_justify(f);

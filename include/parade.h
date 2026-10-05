@@ -85,6 +85,35 @@ PD_API int32_t   pd_font_glyph_advance(const pd_font* font, uint32_t glyph);
 /** horizontal pair kerning between two glyphs in design units */
 PD_API int32_t   pd_font_kerning(const pd_font* font, uint32_t left, uint32_t right);
 
+/** receives a glyph outline in font units x 64 (26.6), y up; NULL members are skipped */
+typedef struct {
+    void (*move_to)(void* user, int32_t x, int32_t y);
+    void (*line_to)(void* user, int32_t x, int32_t y);
+    void (*quad_to)(void* user, int32_t cx, int32_t cy, int32_t x, int32_t y);
+    void (*cubic_to)(void* user, int32_t c1x, int32_t c1y, int32_t c2x, int32_t c2y, int32_t x, int32_t y);
+    void (*close)(void* user);
+} pd_outline_sink;
+
+/** the outline of a glyph (TrueType glyf or CFF), contours closed */
+PD_API pd_status pd_font_glyph_outline(const pd_font* font, uint32_t glyph, const pd_outline_sink* sink, void* user);
+
+/** placement of a rendered glyph bitmap relative to the pen position on the baseline */
+typedef struct {
+    int32_t width, height;      /**< pixels; 0 x 0 for an empty glyph */
+    int32_t left;               /**< bitmap column 0 is this many pixels right of the pen */
+    int32_t top;                /**< bitmap row 0 is this many pixels above the baseline */
+} pd_glyph_image;
+
+/**
+ * Render a glyph to an 8-bit coverage bitmap (width x height, row-major,
+ * 255 = inside). px_per_em is the em size in pixels (16.16, e.g. 10pt at
+ * 96 dpi = 13.33 px), subpixel shifts it right by 0..255 / 256 of a pixel.
+ * Integer arithmetic only: identical pixels on every platform. With buf
+ * NULL only *info is filled (size query).
+ */
+PD_API pd_status pd_font_glyph_render(const pd_font* font, uint32_t glyph, pd_sp px_per_em, int32_t subpixel,
+                                      uint8_t* buf, int32_t cap, pd_glyph_image* info);
+
 /* ------------------------------------------------------------------ */
 /* Styles                                                             */
 /* ------------------------------------------------------------------ */
