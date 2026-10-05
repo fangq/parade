@@ -2825,6 +2825,57 @@ static void field_text(const pd_layout* L, const ppage* p, const blk* b, const d
     }
 }
 
+/* How far an underline or a strike through glyph i reaches: its own
+   advance, or on to the next glyph when what lies between them is spaces
+   carrying the same decoration -- the inter-word glue is no glyph of its
+   own, and Word draws the rule through an underlined space. which: 0
+   underline, 1 strike. */
+static pd_sp rule_reach(const pd_doc* d, const blk* b, const pd_glyph* g, int32_t n, int32_t i, int which) {
+    uint32_t from, to, k;
+    int32_t r;
+    int space = 0;
+
+    if (i + 1 >= n || g[i + 1].kind == PD_OBJECT || g[i + 1].y != g[i].y || g[i + 1].x <= g[i].x + g[i].advance) {
+        return g[i].advance;
+    }
+
+    from = g[i].cluster;
+    to = g[i + 1].cluster;
+
+    if (to <= from || to > b->st.len) {
+        return g[i].advance;
+    }
+
+    for (k = from; k < to; k++) {   /* the glyph's own characters, then only spaces */
+        char c = b->st.text[k];
+
+        if (c == ' ' || c == '\t') {
+            space = 1;
+        } else if (space) {
+            return g[i].advance;
+        }
+    }
+
+    for (k = from; k < to; k++) {
+        if (b->st.text[k] == ' ' || b->st.text[k] == '\t') {
+            pd_format_id f = b->st.empty_format;
+            pd_char_props cp;
+
+            for (r = 0; r < b->st.nruns; r++) {
+                if (b->st.runs[r].start <= k && k < b->st.runs[r].end) {
+                    f = b->st.runs[r].format;
+                }
+            }
+
+            if (pd_doc_format_resolve(d, b->id, f, &cp) != PD_OK || !(which ? cp.strike : cp.underline)) {
+                return g[i].advance;
+            }
+        }
+    }
+
+    return space ? g[i + 1].x - g[i].x : g[i].advance;
+}
+
 static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const pline* l) {
     const pd_doc* d = L->doc;
     const blk* b = pd_doc_blk(d, l->pc->block);
@@ -3021,11 +3072,13 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
 
             if (cp.underline) {
                 u.y = a.y + ps.size / 8;
+                u.w = rule_reach(d, b, g, n, i, 0);
                 emit(D, &u);
             }
 
             if (cp.strike) {
                 u.y = a.y - ps.size / 4;
+                u.w = rule_reach(d, b, g, n, i, 1);
                 emit(D, &u);
             }
         }

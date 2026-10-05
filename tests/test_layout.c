@@ -1211,6 +1211,64 @@ static void test_optimal_pages(void) {
     pd_doc_free(d);
 }
 
+/* An underline runs through the spaces that are underlined themselves and
+   stops at those that are not: the space between words is glue, not a glyph. */
+static void test_underline_spaces(void) {
+    pd_block_id sec, p;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_char_props cp;
+    pd_range r;
+    pd_draw* it;
+    int32_t n, k;
+    pd_sp gx[32];
+    int bridged = 0, gap_ruled = 0;
+
+    p = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p, 0), "one two three four", 18, PD_FORMAT_INHERIT, NULL);
+    memset(&cp, 0, sizeof(cp));
+    cp.mask = PD_CP_UNDERLINE;
+    cp.underline = 1;
+    r.start = at(p, 0);
+    r.end = at(p, 7);              /* "one two": the space between them too */
+    pd_doc_set_char_props(d, r, &cp);
+    r.start = at(p, 8);
+    r.end = at(p, 13);             /* "three", not the space before it */
+    pd_doc_set_char_props(d, r, &cp);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    it = items(L, 0, &n);
+
+    for (k = 0; k < 32; k++) {
+        gx[k] = -1;
+    }
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].offset < 32) {
+            gx[it[k].offset] = it[k].x;
+        }
+    }
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_RULE) {
+            /* through the space after "one", up to the "t" of "two" */
+            bridged |= it[k].x <= gx[2] && it[k].x + it[k].w >= gx[4];
+            /* anything through the middle of the gap between "two" and "three" */
+            gap_ruled |= it[k].x < (gx[6] + gx[8]) / 2 + PD_PT(1) && it[k].x + it[k].w > gx[8] - PD_PT(1) &&
+                         it[k].x + it[k].w < gx[8] + PD_PT(30) && it[k].x <= gx[6];
+        }
+    }
+
+    CHECK(gx[0] >= 0 && gx[4] > gx[2] && gx[8] > gx[6]);
+    CHECK(bridged);
+    CHECK(!gap_ruled);
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1245,6 +1303,8 @@ int main(void) {
     test_continuous();
     printf("optimal page breaking\n");
     test_optimal_pages();
+    printf("underlines through spaces\n");
+    test_underline_spaces();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
