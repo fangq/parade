@@ -11,7 +11,7 @@ MEMLIMIT_KB ?= 2097152
 ORACLE_MAX_MEM ?= 2048
 ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
-SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
+SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_unidata.c src/pd_text.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
            src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c
 BUILD   ?= build
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)
@@ -106,6 +106,27 @@ pascal-edit: $(BUILD)/pascal/lib/libparade.a $(BUILD)/pd_dump
 pascal-demo: $(BUILD)/pascal/lib/libparade.a
 	$(LAZBUILD) pascal/demo/paradedemo.lpi
 
+# Unicode conformance: official test files (fetched once into build/ucd)
+UCD_URL ?= https://www.unicode.org/Public/15.1.0/ucd
+UCD_FILES = auxiliary/LineBreakTest.txt auxiliary/GraphemeBreakTest.txt BidiCharacterTest.txt LineBreak.txt \
+            auxiliary/GraphemeBreakProperty.txt emoji/emoji-data.txt BidiMirroring.txt UnicodeData.txt \
+            EastAsianWidth.txt DerivedCoreProperties.txt BidiBrackets.txt
+
+$(BUILD)/ucd/.fetched:
+	mkdir -p $(BUILD)/ucd
+	cd $(BUILD)/ucd && for f in $(UCD_FILES); do curl -sSf -O "$(UCD_URL)/$$f" || exit 1; done
+	touch $@
+
+$(BUILD)/conformance: tests/conformance.c $(LIB)
+	$(CC) $(PD_CFLAGS) $(CFLAGS) -Isrc $< $(LIB) -o $@ $(LDLIBS)
+
+conformance: $(BUILD)/conformance $(BUILD)/ucd/.fetched
+	$(ulimit_cmd) && ./$(BUILD)/conformance $(BUILD)/ucd
+
+# regenerate src/pd_unidata.c from the UCD
+unidata: $(BUILD)/ucd/.fetched
+	python3 tools/gen_unidata.py $(BUILD)/ucd
+
 # PDF through external readers: Ghostscript parses it, poppler extracts its text and renders it
 pdf-check: $(BUILD)/test_pdf $(BUILD)/pd_dump
 	$(ulimit_cmd) && ./$(BUILD)/test_pdf && ./$(BUILD)/pd_dump --pdf $(BUILD)/sample.pdf > /dev/null
@@ -151,4 +172,4 @@ pretty:
 	    --break-blocks \
 	    "include/*.h" "src/*.c" "src/*.h" "tests/*.c" "bench/*.c"
 
-.PHONY: all test bench oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-demo asan clean pretty
+.PHONY: all test bench conformance unidata oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-demo asan clean pretty

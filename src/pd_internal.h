@@ -155,6 +155,11 @@ static inline int32_t pd_item_penalty(const pd_item* it, const pd_params* prm) {
     return it->penalty;
 }
 
+/* text segmentation (pd_text.c), on code points */
+int32_t pd_text_decode(const char* utf8, size_t len, uint32_t** cps, uint32_t** offs);
+int     pd_linebreaks(const uint32_t* cp, int32_t n, uint8_t* brk);    /* brk[0..n]: 0 no, 1 allow, 2 must */
+int     pd_grapheme_boundary(const uint32_t* cp, int32_t n, int32_t i);
+
 /* zlib streams (pd_zlib.c): 0 on success, *out malloc'ed */
 int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);
 int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen);

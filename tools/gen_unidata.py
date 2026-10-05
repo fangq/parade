@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Generate src/pd_unidata.c from the Unicode Character Database.
+
+usage: gen_unidata.py UCD_DIR      (Unicode 15.1: LineBreak.txt, EastAsianWidth.txt,
+                                    UnicodeData.txt, GraphemeBreakProperty.txt,
+                                    emoji-data.txt, DerivedCoreProperties.txt,
+                                    BidiBrackets.txt, BidiMirroring.txt)
+
+Three byte-per-code-point properties, stored as two-stage tables (256-entry
+blocks, identical blocks shared):
+  lb:   line break class (LB1 already resolved) | 0x40 East Asian F/W/H
+  gcb:  grapheme cluster break | InCB << 4 | 0x40 Pi | 0x80 Pf
+  bidi: bidi class | 0x20 Extended_Pictographic | 0x40 unassigned (Cn)
+plus sorted tables of bidi bracket pairs and mirrored glyphs.
+"""
+import os, re, sys
+
+LB = "BK CR LF CM NL SG WJ ZW GL SP ZWJ B2 BA BB HY CB CL CP EX IN NS OP QU IS NU PO PR SY AI AK AL AP AS CJ EB EM " \
+     "H2 H3 HL ID JL JV JT RI SA VF VI XX".split()
+GCB = "Other CR LF Control Extend ZWJ RI Prepend SpacingMark L V T LV LVT".split()
+GCB_FILE = {"Regional_Indicator": "RI"}
+BIDI = "L R AL EN ES ET AN CS NSM BN B S WS ON LRE LRO RLE RLO PDF LRI RLI FSI PDI".split()
+N = 0x110000
+
+
+def ranges(path):
+    """(lo, hi, value, missing) for every data or @missing line"""
+    for line in open(path, encoding="utf-8"):
+        missing = line.startswith("# @missing:")
+        if missing:
+            line = line[len("# @missing:"):]
+        elif line.startswith("#"):
+            continue
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        f = [x.strip() for x in line.split(";")]
+        a = f[0].split("..")
+        lo = int(a[0], 16)
+        hi = int(a[1], 16) if len(a) > 1 else lo
+        yield lo, hi, f[1:], missing
+
+
+def main(ucd):
+    p = lambda name: os.path.join(ucd, name)
+    gc = ["Cn"] * N
+    bidi_raw = [None] * N
+    first = None
+    for line in open(p("UnicodeData.txt"), encoding="utf-8"):
+        f = line.split(";")
+        cp = int(f[0], 16)
+        if f[1].endswith(", First>"):
+            first = cp
+            continue
+        lo = first if f[1].endswith(", Last>") else cp
+        first = None
+        for c in range(lo, cp + 1):
+            gc[c] = f[2]
+            bidi_raw[c] = f[4]
+
+    # default bidi classes of unassigned code points (DerivedBidiClass @missing)
+    bidi = ["L"] * N
+    for lo, hi, v in [(0x0590, 0x05FF, "R"), (0x07C0, 0x085F, "R"), (0xFB1D, 0xFB4F, "R"), (0x10800, 0x10CFF, "R"),
+                      (0x10D40, 0x10EBF, "R"), (0x10F00, 0x10F2F, "R"), (0x10F70, 0x10FFF, "R"),
+                      (0x1E800, 0x1EC6F, "R"), (0x1ED50, 0x1EDFF, "R"), (0x1EF00, 0x1EFFF, "R"),
+                      (0x0600, 0x07BF, "AL"), (0x0860, 0x08FF, "AL"), (0xFB50, 0xFDCF, "AL"), (0xFDF0, 0xFDFF, "AL"),
+                      (0xFE70, 0xFEFF, "AL"), (0x10D00, 0x10D3F, "AL"), (0x10EC0, 0x10EFF, "AL"),
+                      (0x10F30, 0x10F6F, "AL"), (0x1EC70, 0x1ECBF, "AL"), (0x1ED00, 0x1ED4F, "AL"),
+                      (0x1EE00, 0x1EEFF, "AL"), (0x20A0, 0x20CF, "ET")]:
+        for c in range(lo, hi + 1):
+            bidi[c] = v
+    for c in range(N):
+        if bidi_raw[c]:
+            bidi[c] = bidi_raw[c]
+        elif (0xFDD0 <= c <= 0xFDEF) or (c & 0xFFFE) == 0xFFFE or (0xE0000 <= c <= 0xE0FFF):
+            bidi[c] = "BN"
+
+    lb = ["XX"] * N
+    for lo, hi, v, missing in ranges(p("LineBreak.txt")):
+        for c in range(lo, hi + 1):
+            lb[c] = v[0]
+    ea = ["N"] * N
+    for lo, hi, v, missing in ranges(p("EastAsianWidth.txt")):
+        for c in range(lo, hi + 1):
+            ea[c] = v[0]
+    ext = [False] * N
+    for lo, hi, v, missing in ranges(p("emoji-data.txt")):
+        if not missing and v[0] == "Extended_Pictographic":
+            for c in range(lo, hi + 1):
+                ext[c] = True
+    gcb = ["Other"] * N
+    for lo, hi, v, missing in ranges(p("GraphemeBreakProperty.txt")):
+        if not missing:
+            for c in range(lo, hi + 1):
+                gcb[c] = GCB_FILE.get(v[0], v[0])
+    incb = [0] * N
+    for lo, hi, v, missing in ranges(p("DerivedCoreProperties.txt")):
+        if not missing and v[0] == "InCB":
+            k = {"Linker": 1, "Consonant": 2, "Extend": 3}[v[1]]
+            for c in range(lo, hi + 1):
+                incb[c] = k
+
+    # LB1 resolution
+    for c in range(N):
+        v = lb[c]
+        if v in ("AI", "SG", "XX"):
+            v = "AL"
+        elif v == "SA":
+            v = "CM" if gc[c] in ("Mn", "Mc") else "AL"
+        elif v == "CJ":
+            v = "NS"
+        lb[c] = v
+
+    tables = {
+        "lb": [LB.index(lb[c]) | (0x40 if ea[c] in ("F", "W", "H") else 0) for c in range(N)],
+        "gcb": [GCB.index(gcb[c]) | (incb[c] << 4) | (0x40 if gc[c] == "Pi" else 0) | (0x80 if gc[c] == "Pf" else 0)
+                for c in range(N)],
+        "bidi": [BIDI.index(bidi[c]) | (0x20 if ext[c] else 0) | (0x40 if gc[c] == "Cn" else 0) for c in range(N)],
+    }
+
+    out = ['/* Generated by tools/gen_unidata.py from the Unicode 15.1 Character Database. Do not edit. */',
+           '', '#include "pd_unidata.h"', '']
+    for name, vals in tables.items():
+        blocks, index, stage1 = [], {}, []
+        for b in range(N // 256):
+            blk = tuple(vals[b * 256:(b + 1) * 256])
+            if blk not in index:
+                index[blk] = len(blocks)
+                blocks.append(blk)
+            stage1.append(index[blk])
+        out.append(f'const uint16_t pd_uni_{name}_1[{len(stage1)}] = {{')
+        for i in range(0, len(stage1), 16):
+            out.append('    ' + ', '.join(str(x) for x in stage1[i:i + 16]) + ',')
+        out.append('};')
+        out.append(f'const uint8_t pd_uni_{name}_2[{len(blocks) * 256}] = {{')
+        for blk in blocks:
+            for i in range(0, 256, 32):
+                out.append('    ' + ','.join(str(x) for x in blk[i:i + 32]) + ',')
+        out.append('};')
+        out.append('')
+        print(f"{name}: {len(blocks)} distinct blocks, {len(stage1) * 2 + len(blocks) * 256} bytes", file=sys.stderr)
+
+    br = []
+    for lo, hi, v, missing in ranges(p("BidiBrackets.txt")):
+        if not missing:
+            br.append((lo, int(v[0], 16), 1 if v[1] == "o" else 2))
+    br.sort()
+    out.append(f'const uint32_t pd_uni_brackets[{len(br)}][3] = {{')
+    out += [f'    {{0x{a:04X}, 0x{b:04X}, {t}}},' for a, b, t in br]
+    out += ['};', f'const int32_t pd_uni_nbrackets = {len(br)};', '']
+    mi = []
+    for lo, hi, v, missing in ranges(p("BidiMirroring.txt")):
+        if not missing:
+            mi.append((lo, int(v[0], 16)))
+    mi.sort()
+    out.append(f'const uint32_t pd_uni_mirrors[{len(mi)}][2] = {{')
+    out += [f'    {{0x{a:04X}, 0x{b:04X}}},' for a, b in mi]
+    out += ['};', f'const int32_t pd_uni_nmirrors = {len(mi)};', '']
+    here = os.path.dirname(os.path.abspath(__file__))
+    open(os.path.join(here, "..", "src", "pd_unidata.c"), "w").write("\n".join(out) + "\n")
+    print("wrote src/pd_unidata.c", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])

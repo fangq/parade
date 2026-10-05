@@ -620,6 +620,56 @@ static void test_raster(const pd_font* f) {
     }
 }
 
+static void test_unicode(const pd_font* f) {
+    /* family emoji (ZWJ sequence), flag pair, e + combining acute */
+    const char* fam = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7x";
+    const char* flags = "\xF0\x9F\x87\xAF\xF0\x9F\x87\xB5\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8";
+    const char* comb = "cafe\xCC\x81 ok";
+    uint8_t lb[64];
+    pd_params prm;
+    pd_break_info info;
+    pd_line L;
+    int32_t i;
+    uint32_t off;
+    pd_para* p;
+
+    CHECK(pd_text_next_grapheme(fam, strlen(fam), 0) == 18);    /* the whole family is one cluster */
+    CHECK(pd_text_prev_grapheme(fam, strlen(fam), 18) == 0);
+    CHECK(pd_text_next_grapheme(flags, strlen(flags), 0) == 8);   /* JP */
+    CHECK(pd_text_next_grapheme(flags, strlen(flags), 8) == 16);  /* US */
+    CHECK(pd_text_next_grapheme(comb, strlen(comb), 3) == 6);     /* e + U+0301 */
+    CHECK(pd_text_line_breaks("ab cd-ef $(12.35)", 17, lb) == PD_OK);
+    CHECK(lb[3] == 1 && lb[1] == 0 && lb[6] == 1 && lb[10] == 0 && lb[14] == 0 && lb[17] == 2);
+
+    pd_params_init(&prm);
+
+    /* numbers and closing brackets stay attached even in a narrow column */
+    p = make_para(f, "price $(12.35) and x ) y", PD_PT(10));
+    prm.width = PD_PT(25);
+    CHECK(pd_para_break(p, &prm, &info) == PD_OK);
+
+    for (i = 0; i < info.lines; i++) {
+        const char* text = "price $(12.35) and x ) y";
+
+        pd_para_get_line(p, i, &L);
+        CHECK(text[L.text_start] != ')');
+        CHECK(!(L.text_start > 6 && L.text_start < 14));    /* "$(12.35)" is never split */
+    }
+
+    pd_para_free(p);
+
+    /* hit testing never lands between e and its combining accent */
+    p = make_para(f, comb, PD_PT(20));
+    prm.width = PD_PT(300);
+    pd_para_break(p, &prm, &info);
+
+    for (i = 0; i < 4000; i += 50) {
+        CHECK(pd_para_hit_test(p, PD_PT(i / 50), PD_PT(10), &off, NULL) == PD_OK && off != 4);
+    }
+
+    pd_para_free(p);
+}
+
 int main(void) {
     pd_font* f = load_env_font("PARADE_TEST_FONT", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf");
     pd_font* cjk = load_env_font("PARADE_TEST_CJK_FONT", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
@@ -635,6 +685,8 @@ int main(void) {
     test_font(f);
     printf("rasterizer\n");
     test_raster(f);
+    printf("unicode segmentation\n");
+    test_unicode(f);
     test_liberation(f);
     printf("justify\n");
     test_justify(f);

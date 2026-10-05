@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pd_internal.h"
+#include "pd_unidata.h"
 
 /* ------------------------------------------------------------------ */
 /* small utilities                                                    */
@@ -49,100 +50,12 @@ int pd_grow(void** ptr, int32_t* cap, int64_t need, size_t elem) {
     return 0;
 }
 
-/* decode one UTF-8 code point; invalid input yields U+FFFD and consumes one byte */
-static uint32_t utf8_next(const unsigned char* s, size_t len, size_t* i) {
-    unsigned c = s[*i];
-    uint32_t cp, min;
-    int n, k;
-
-    if (c < 0x80) {
-        (*i)++;
-        return c;
-    } else if ((c & 0xE0) == 0xC0) {
-        n = 1;
-        cp = c & 0x1F;
-        min = 0x80;
-    } else if ((c & 0xF0) == 0xE0) {
-        n = 2;
-        cp = c & 0x0F;
-        min = 0x800;
-    } else if ((c & 0xF8) == 0xF0) {
-        n = 3;
-        cp = c & 0x07;
-        min = 0x10000;
-    } else {
-        (*i)++;
-        return 0xFFFD;
-    }
-
-    if (*i + (size_t)n >= len) {
-        (*i)++;
-        return 0xFFFD;
-    }
-
-    for (k = 1; k <= n; k++) {
-        unsigned d = s[*i + k];
-
-        if ((d & 0xC0) != 0x80) {
-            (*i)++;
-            return 0xFFFD;
-        }
-
-        cp = (cp << 6) | (d & 0x3F);
-    }
-
-    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
-        (*i)++;
-        return 0xFFFD;
-    }
-
-    *i += n + 1;
-    return cp;
-}
-
 /* ideographic scripts that break between characters */
 static int is_cjk(uint32_t c) {
     return (c >= 0x2E80 && c <= 0x2FDF) || (c >= 0x3040 && c <= 0x30FF) || (c >= 0x3100 && c <= 0x312F) ||
            (c >= 0x31A0 && c <= 0x31FF) || (c >= 0x3400 && c <= 0x4DBF) || (c >= 0x4E00 && c <= 0x9FFF) ||
            (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFF00 && c <= 0xFFEF) || (c >= 0x3000 && c <= 0x303F) ||
            (c >= 0x20000 && c <= 0x3FFFF);
-}
-
-/* kinsoku: characters that must not start a line (closing punctuation, small kana) */
-static int no_break_before(uint32_t c) {
-    static const uint32_t t[] = {
-        0x3001, 0x3002, 0xFF0C, 0xFF0E, 0xFF1A, 0xFF1B, 0xFF01, 0xFF1F, 0x300D, 0x300F, 0x3009, 0x300B,
-        0x3011, 0xFF09, 0xFF3D, 0xFF5D, 0x3015, 0x3017, 0x3019, 0x301B, 0x30FC, 0x3005, 0x309D, 0x309E,
-        0x30FD, 0x30FE, 0x3041, 0x3043, 0x3045, 0x3047, 0x3049, 0x3063, 0x3083, 0x3085, 0x3087, 0x308E,
-        0x30A1, 0x30A3, 0x30A5, 0x30A7, 0x30A9, 0x30C3, 0x30E3, 0x30E5, 0x30E7, 0x30EE, 0x30F5, 0x30F6,
-        0x2019, 0x201D, 0x00BB, 0x2026, 0x2025, 0x30FB, 0xFF65, ',', '.', ':', ';', '!', '?', ')', ']', '}'
-    };
-    size_t i;
-
-    for (i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
-        if (t[i] == c) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-/* kinsoku: characters that must not end a line (opening brackets) */
-static int no_break_after(uint32_t c) {
-    static const uint32_t t[] = {
-        0x300C, 0x300E, 0x3008, 0x300A, 0x3010, 0xFF08, 0xFF3B, 0xFF5B, 0x3014, 0x3016, 0x3018, 0x301A,
-        0x2018, 0x201C, 0x00AB, '(', '[', '{'
-    };
-    size_t i;
-
-    for (i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
-        if (t[i] == c) {
-            return 1;
-        }
-    }
-
-    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -444,9 +357,9 @@ static int add_soft_hyphen(builder* b, uint32_t at, uint32_t at_end) {
 pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_style* st) {
     builder b;
     pd_font_metrics fm;
-    const unsigned char* s = (const unsigned char*)utf8;
-    uint32_t base, prev = 0;
-    size_t i = 0;
+    uint32_t base, *cps, *offs;
+    uint8_t* brk;
+    int32_t n, first, ci;
 
     if (!p || (!utf8 && len) || !st || !st->font || st->size <= 0) {
         return PD_ERR_ARG;
@@ -478,93 +391,108 @@ pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_st
     b.desc = pd_scale(-fm.descender, st->size, b.upem);
     b.box_index = -1;
 
-    /* a style change inside a word must not create a breakpoint, but CJK
-       may break at a run boundary: look at the last code point added */
-    if (p->n_items > 0 && base > 0) {
-        size_t j = base - 1;
+    /* UAX #14 over the paragraph text so far: a boundary at the start of this
+       run sees the text before it, so a style change inside a word is no break */
+    n = pd_text_decode(p->text, p->n_text, &cps, &offs);
 
-        while (j > 0 && (p->text[j] & 0xC0) == 0x80) {
-            j--;
-        }
-
-        {
-            size_t k = j;
-            prev = utf8_next((const unsigned char*)p->text, base, &k);
-        }
+    if (n < 0) {
+        return PD_ERR_NOMEM;
     }
 
-    while (i < len) {
-        uint32_t at = base + (uint32_t)i, at_end, cp;
-        int rc = 0;
+    brk = (uint8_t*)malloc((size_t)n + 1);
 
-        cp = utf8_next(s, len, &i);
-        at_end = base + (uint32_t)i;
+    if (!brk || pd_linebreaks(cps, n, brk)) {
+        free(brk);
+        free(cps);
+        free(offs);
+        return PD_ERR_NOMEM;
+    }
 
-        /* CJK: a break opportunity between ideographs, governed by kinsoku */
-        if (prev && (is_cjk(cp) || is_cjk(prev)) && prev != ' ' && cp != ' ' && !no_break_before(cp) &&
-                !no_break_after(prev) && prev != 0x00A0 && cp != 0x00A0 && prev != '\n' && cp != '\n') {
-            if (add_raw_glue(&b, at, st->size / 4, 0)) {
-                return PD_ERR_NOMEM;
+    for (first = 0; first < n && offs[first] < base; first++) {
+    }
+
+    for (ci = first; ci < n; ci++) {
+        uint32_t at = offs[ci], at_end = offs[ci + 1], cp = cps[ci], prev = ci > 0 ? cps[ci - 1] : 0;
+        int cls = pd_uni_lb(cp), pcls = ci > 0 ? pd_uni_lb(prev) : -1, rc = 0;
+
+        /* a break opportunity before this character (spaces carry their own: their glue) */
+        if (ci > 0 && brk[ci] == 1 && pcls != LB_SP && cls != LB_SP && pcls != LB_ZW && prev != 0x00AD &&
+                pcls != LB_BK && pcls != LB_CR && pcls != LB_LF && pcls != LB_NL) {
+            if (pcls == LB_HY || (pcls == LB_BA && prev >= 0x2010 && prev <= 0x2015)) {
+                rc = add_pen(&b, 0, PD_FLAG_FLAGGED | PD_FLAG_EXHYPHEN, at, at);    /* after a hyphen or dash */
+            } else if (is_cjk(cp) || is_cjk(prev) || cls == LB_ID || pcls == LB_ID) {
+                rc = add_raw_glue(&b, at, st->size / 4, 0);  /* inter-character space that may stretch */
+            } else {
+                rc = add_pen(&b, 0, PD_FLAG_EXHYPHEN, at, at);   /* any other opportunity, unflagged */
             }
         }
 
-        switch (cp) {
-            case ' ':
-            case '\t':
-                rc = add_space(&b, at, at_end, 0);
-                break;
+        if (!rc) {
+            switch (cp) {
+                case ' ':
+                case '\t': {
+                    /* breakable unless UAX #14 forbids a break after this run of spaces */
+                    int32_t k = ci + 1;
 
-            case 0x00A0:
-            case 0x202F:
-                rc = add_space(&b, at, at_end, 1);
-                break;
+                    while (k < n && pd_uni_lb(cps[k]) == LB_SP) {
+                        k++;
+                    }
 
-            case 0x200B:        /* zero-width space */
-                rc = add_raw_glue(&b, at, 0, 0);
-                p->items[p->n_items - 1].text_end = at_end;
-                break;
-
-            case 0x00AD:        /* soft hyphen */
-                rc = add_soft_hyphen(&b, at, at_end);
-                break;
-
-            case '\r':
-                break;
-
-            case '\n':
-            case 0x2028:        /* forced line break */
-                rc = add_raw_glue(&b, at, 0, 1);
-
-                if (!rc) {
-                    rc = add_pen(&b, -PD_INF_PENALTY, 0, at, at_end);
+                    rc = add_space(&b, at, at_end, k < n && brk[k] == 0);
+                    break;
                 }
 
-                break;
+                case 0x00A0:
+                case 0x202F:
+                    rc = add_space(&b, at, at_end, 1);
+                    break;
 
-            case '-':
-            case 0x2010:
-            case 0x2013:
-            case 0x2014:        /* explicit hyphen or dash: breakable after it */
-                rc = add_glyph(&b, cp, at, at_end);
+                case 0x200B:        /* zero-width space */
+                    rc = add_raw_glue(&b, at, 0, 0);
+                    p->items[p->n_items - 1].text_end = at_end;
+                    break;
 
-                if (!rc) {
-                    rc = add_pen(&b, 0, PD_FLAG_FLAGGED | PD_FLAG_EXHYPHEN, at_end, at_end);
-                }
+                case 0x00AD:        /* soft hyphen */
+                    rc = add_soft_hyphen(&b, at, at_end);
+                    break;
 
-                break;
+                case '\r':
+                    if (ci + 1 < n && cps[ci + 1] == '\n') {
+                        break;      /* CR LF is one line end */
+                    }
 
-            default:
-                rc = add_glyph(&b, cp, at, at_end);
-                break;
+                /* fall through */
+                case '\n':
+                case 0x0B:
+                case 0x0C:
+                case 0x85:
+                case 0x2028:
+                case 0x2029:        /* mandatory line break (BK, LF, NL classes) */
+                    rc = add_raw_glue(&b, at, 0, 1);
+
+                    if (!rc) {
+                        rc = add_pen(&b, -PD_INF_PENALTY, 0, at, at_end);
+                    }
+
+                    break;
+
+                default:
+                    rc = add_glyph(&b, cp, at, at_end);
+                    break;
+            }
         }
 
         if (rc) {
+            free(brk);
+            free(cps);
+            free(offs);
             return PD_ERR_NOMEM;
         }
-
-        prev = cp;
     }
 
+    free(brk);
+    free(cps);
+    free(offs);
     return PD_OK;
 }
 
@@ -937,16 +865,47 @@ pd_status pd_para_get_glyphs(const pd_para* p, int32_t li, pd_glyph* buf, int32_
     return n <= cap ? PD_OK : PD_ERR_RANGE;
 }
 
-/* caret stops of a line: glyph and space left edges plus the line end */
+/* caret stops of a line: glyph and space left edges plus the line end, only at
+   grapheme cluster boundaries (never between a letter and its combining mark) */
 static pd_glyph* line_stops(const pd_para* p, int32_t li, int32_t* n) {
-    int32_t cnt = walk_line(p, li, NULL, 0, 1);
+    int32_t cnt = walk_line(p, li, NULL, 0, 1), k, o = 0, ncp;
     pd_glyph* buf = (pd_glyph*)malloc(((size_t)cnt + 1) * sizeof(pd_glyph));
+    uint32_t* cps, *offs;
 
     if (!buf) {
         return NULL;
     }
 
     *n = walk_line(p, li, buf, cnt, 1);
+    ncp = pd_text_decode(p->text ? p->text : "", p->n_text, &cps, &offs);
+
+    if (ncp < 0) {
+        return buf;
+    }
+
+    for (k = 0; k < *n; k++) {
+        int32_t lo = 0, hi = ncp;
+
+        while (lo < hi) {   /* the code point starting at the stop's cluster */
+            int32_t mid = (lo + hi) / 2;
+
+            if (offs[mid] < buf[k].cluster) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        if (lo >= ncp || offs[lo] != buf[k].cluster || pd_grapheme_boundary(cps, ncp, lo)) {
+            buf[o++] = buf[k];
+        } else if (o > 0) {
+            buf[o - 1].advance += buf[k].advance;   /* the mark widens the cluster before it */
+        }
+    }
+
+    *n = o;
+    free(cps);
+    free(offs);
     return buf;
 }
 

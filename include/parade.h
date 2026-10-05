@@ -115,6 +115,20 @@ PD_API pd_status pd_font_glyph_render(const pd_font* font, uint32_t glyph, pd_sp
                                       uint8_t* buf, int32_t cap, pd_glyph_image* info);
 
 /* ------------------------------------------------------------------ */
+/* Text segmentation (Unicode 15.1)                                   */
+/* ------------------------------------------------------------------ */
+
+/** byte offset of the next / previous grapheme cluster boundary (UAX #29) */
+PD_API size_t pd_text_next_grapheme(const char* utf8, size_t len, size_t offset);
+PD_API size_t pd_text_prev_grapheme(const char* utf8, size_t len, size_t offset);
+/**
+ * Line break opportunities (UAX #14): out[i] (len + 1 bytes) is 0 when no
+ * break may come before byte i, 1 when a break is allowed, 2 when it is
+ * mandatory; out[len] = 2.
+ */
+PD_API pd_status pd_text_line_breaks(const char* utf8, size_t len, uint8_t* out);
+
+/* ------------------------------------------------------------------ */
 /* Styles                                                             */
 /* ------------------------------------------------------------------ */
 
