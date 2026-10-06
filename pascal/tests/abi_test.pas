@@ -178,6 +178,8 @@ begin
   WriteLn('pd_para_props.tabs ', PtrUInt(@v_pd_para_props.tabs) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.tab_interval ', PtrUInt(@v_pd_para_props.tab_interval) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.contextual ', PtrUInt(@v_pd_para_props.contextual) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.border_sides ', PtrUInt(@v_pd_para_props.border_sides) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.border_space ', PtrUInt(@v_pd_para_props.border_space) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_tab_stop ', SizeOf(pd_tab_stop));
   WriteLn('pd_tab_stop.position ', PtrUInt(@v_pd_tab_stop.position) - PtrUInt(@v_pd_tab_stop));
   WriteLn('pd_tab_stop.align ', PtrUInt(@v_pd_tab_stop.align) - PtrUInt(@v_pd_tab_stop));

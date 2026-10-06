@@ -287,7 +287,17 @@ typedef struct {
     pd_tab_stop tabs[PD_MAX_TABS];
     pd_sp tab_interval;         /**< default stops past the last set one, 0 = every 36pt */
     int32_t contextual;         /**< its space before and after left out next to a paragraph of the same style */
+    int32_t border_sides;       /**< PD_BORDER_* edges the border has (with PD_PP_BORDER); 0 = all four */
+    pd_sp border_space;         /**< between the text and the border */
 } pd_para_props;
+
+/* the edges of a paragraph border; paragraphs one after another with the
+   same border share one box, and BETWEEN rules them off from each other */
+#define PD_BORDER_TOP     (1 << 0)
+#define PD_BORDER_RIGHT   (1 << 1)
+#define PD_BORDER_BOTTOM  (1 << 2)
+#define PD_BORDER_LEFT    (1 << 3)
+#define PD_BORDER_BETWEEN (1 << 4)
 
 /**
  * Define a named style. parent is inherited for every unmasked field

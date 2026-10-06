@@ -157,6 +157,14 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
     if (m & PD_PP_BORDER) {
         put_int(w, "BorderColor", p->border_color);
         put_int(w, "BorderWidth", p->border_width);
+
+        if (p->border_sides) {
+            put_int(w, "BorderSides", p->border_sides);
+        }
+
+        if (p->border_space) {
+            put_int(w, "BorderSpace", p->border_space);
+        }
     }
 
     if (m & PD_PP_SHADING) {
@@ -841,6 +849,8 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
         p->mask |= PD_PP_BORDER;
         p->border_color = (uint32_t)int_or(x, 0, 0, 0xFFFFFFFFLL, L);
         p->border_width = (pd_sp)int_or(pj_get(o, "BorderWidth"), 0, 0, SP_MAX, L);
+        p->border_sides = (int32_t)int_or(pj_get(o, "BorderSides"), 0, 0, 31, L);
+        p->border_space = (pd_sp)int_or(pj_get(o, "BorderSpace"), 0, 0, SP_MAX, L);
     }
 
     if ((x = pj_get(o, "Shading"))) {

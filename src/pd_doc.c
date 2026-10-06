@@ -191,6 +191,8 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
     if (m & PD_PP_BORDER) {
         z.border_color = pp->border_color;
         z.border_width = pp->border_width;
+        z.border_sides = pp->border_sides & 31;
+        z.border_space = pp->border_space;
     }
 
     KEEP(PD_PP_SHADING, shading);
@@ -307,6 +309,8 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
     if (m & PD_PP_BORDER) {
         dst->border_color = src->border_color;
         dst->border_width = src->border_width;
+        dst->border_sides = src->border_sides;
+        dst->border_space = src->border_space;
     }
 
     SET(PD_PP_SHADING, shading);

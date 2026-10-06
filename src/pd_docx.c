@@ -1309,21 +1309,32 @@ static void dx_ppr_head(pd_buf* o, const pd_para_props* pp, uint32_t m) {
 static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto, const pd_para_props* base) {
     if ((m & PD_PP_BORDER) && pp->border_color && pp->border_width > 0) {
         int sz = (int)SCALE(pp->border_width, 8, 65536), side;
-        static const char* sides[] = { "top", "left", "bottom", "right" };
+        int has = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM | PD_BORDER_LEFT;
+        static const char* names[] = { "top", "left", "bottom", "right", "between" };
+        static const int bits[] = { PD_BORDER_TOP, PD_BORDER_LEFT, PD_BORDER_BOTTOM, PD_BORDER_RIGHT, PD_BORDER_BETWEEN };
 
         sz = sz < 2 ? 2 : sz;
         pb_puts(o, "<w:pBdr>");
 
-        for (side = 0; side < 4; side++) {
-            pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"1\" w:color=\"%06X\"/>", sides[side], sz,
-                      (unsigned)(pp->border_color & 0xFFFFFF));
+        for (side = 0; side < 5; side++) {
+            if (has & bits[side]) {
+                pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"%d\" w:color=\"%06X\"/>", names[side], sz,
+                          side == 4 ? 0 : (int)SCALE(pp->border_space, 1, 65536), (unsigned)(pp->border_color & 0xFFFFFF));
+            } else if (base && base->border_color && base->border_width > 0) {
+                pb_printf(o, "<w:%s w:val=\"nil\"/>", names[side]);   /* the style's edge taken away */
+            }
         }
 
         pb_puts(o, "</w:pBdr>");
+    } else if ((m & PD_PP_BORDER) && base && base->border_color && base->border_width > 0) {
+        pb_puts(o, "<w:pBdr><w:top w:val=\"nil\"/><w:left w:val=\"nil\"/><w:bottom w:val=\"nil\"/>"
+                "<w:right w:val=\"nil\"/><w:between w:val=\"nil\"/></w:pBdr>");
     }
 
     if ((m & PD_PP_SHADING) && pp->shading) {
         pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(pp->shading & 0xFFFFFF));
+    } else if ((m & PD_PP_SHADING) && base && base->shading) {
+        pb_puts(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>");
     }
 
     if ((m & PD_PP_TABS) && (pp->ntabs > 0 || (base && base->ntabs > 0))) {
@@ -2159,6 +2170,42 @@ static void ppr_elem(const pd_markup* m, const char* t, dprops* pr) {
     } else if (strcmp(t, "pageBreakBefore") == 0) {
         pp->mask |= PD_PP_BREAK_BEFORE;
         pp->page_break_before = attr_on(m);
+    } else if (strcmp(t, "pBdr") == 0 && m->type == MT_OPEN) {
+        pp->mask |= PD_PP_BORDER;   /* the edges that follow say what it has */
+        pp->border_color = 0;
+        pp->border_width = 0;
+        pp->border_sides = 0;
+        pp->border_space = 0;
+    } else if (strcmp(t, "top") == 0 || strcmp(t, "bottom") == 0 || strcmp(t, "left") == 0 ||
+               strcmp(t, "right") == 0 || strcmp(t, "start") == 0 || strcmp(t, "end") == 0 ||
+               strcmp(t, "between") == 0) {
+        /* an edge of w:pBdr (no other w:pPr child has these names) */
+        int side = t[0] == 't' ? PD_BORDER_TOP : t[0] == 'b' && t[1] == 'o' ? PD_BORDER_BOTTOM : t[0] == 'b' ?
+                   PD_BORDER_BETWEEN : t[0] == 'r' || t[0] == 'e' ? PD_BORDER_RIGHT : PD_BORDER_LEFT;
+
+        if (mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "none") != 0 && strcmp(v, "nil") != 0) {
+            pd_sp bw = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
+
+            pp->mask |= PD_PP_BORDER;
+            pp->border_sides |= side;
+            pp->border_width = bw > pp->border_width ? bw : pp->border_width;
+            pp->border_width = pp->border_width > 0 ? pp->border_width : PD_PT(0.25);
+
+            if (!pp->border_color || side != PD_BORDER_BETWEEN) {
+                pp->border_color = mu_attr(m, "w:color", v, sizeof(v)) && strcmp(v, "auto") != 0 ?
+                                   0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0xFF000000u;
+            }
+
+            if (side != PD_BORDER_BETWEEN && attr_int(m, "w:space", 0) > 0) {   /* in points */
+                pd_sp sp = PD_PT(attr_int(m, "w:space", 0));
+
+                pp->border_space = sp > pp->border_space ? sp : pp->border_space;
+            }
+        }
+    } else if (strcmp(t, "shd") == 0) {
+        pp->mask |= PD_PP_SHADING;
+        pp->shading = mu_attr(m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0 ?
+                      0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0;
     } else if (strcmp(t, "suppressAutoHyphens") == 0) {
         pp->mask |= PD_PP_HYPHENATE;
         pp->hyphenate = !attr_on(m);
@@ -2201,6 +2248,14 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sp->mask & PD_PP_BREAK_BEFORE) dp->page_break_before = sp->page_break_before;
     if (sp->mask & PD_PP_HYPHENATE) dp->hyphenate = sp->hyphenate;
     if (sp->mask & PD_PP_CONTEXTUAL) dp->contextual = sp->contextual;
+    if (sp->mask & PD_PP_SHADING) dp->shading = sp->shading;
+
+    if (sp->mask & PD_PP_BORDER) {
+        dp->border_color = sp->border_color;
+        dp->border_width = sp->border_width;
+        dp->border_sides = sp->border_sides;
+        dp->border_space = sp->border_space;
+    }
 
     if (sp->mask & PD_PP_LINE_SPACING) {
         dp->line_spacing = sp->line_spacing;
@@ -2886,7 +2941,8 @@ static void dw_custom_style(dw* w, pd_bld* b) {
         }
 
         if ((sty.pp.mask & PD_PP_BORDER) && sty.pp.border_color == rp.border_color &&
-                sty.pp.border_width == rp.border_width) {
+                sty.pp.border_width == rp.border_width && sty.pp.border_sides == rp.border_sides &&
+                sty.pp.border_space == rp.border_space) {
             sty.pp.mask &= ~PD_PP_BORDER;
         }
 
@@ -3004,7 +3060,18 @@ static void dw_begin_para(dw* w) {
         DW_DIFF(PD_PP_KEEP_LINES, keep_lines)
         DW_DIFF(PD_PP_BREAK_BEFORE, page_break_before)
         DW_DIFF(PD_PP_HYPHENATE, hyphenate)
+        DW_DIFF(PD_PP_CONTEXTUAL, contextual)
+        DW_DIFF(PD_PP_SHADING, shading)
 #undef DW_DIFF
+
+        if ((f->mask & PD_PP_BORDER) && (f->border_color != rp.border_color || f->border_width != rp.border_width ||
+                                         f->border_sides != rp.border_sides || f->border_space != rp.border_space)) {
+            b->pp.mask |= PD_PP_BORDER;
+            b->pp.border_color = f->border_color;
+            b->pp.border_width = f->border_width;
+            b->pp.border_sides = f->border_sides;
+            b->pp.border_space = f->border_space;
+        }
 
         if ((f->mask & PD_PP_TABS) && (f->ntabs != rp.ntabs || f->tab_interval != rp.tab_interval ||
                                        memcmp(f->tabs, rp.tabs, (size_t)f->ntabs * sizeof(pd_tab_stop)) != 0)) {

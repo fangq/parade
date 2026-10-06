@@ -209,6 +209,11 @@ const
   PD_LEADER_UNDERSCORE = 3;
   PD_PP_TABS = 1 shl 18;
   PD_PP_CONTEXTUAL = 1 shl 19;
+  PD_BORDER_TOP = 1;
+  PD_BORDER_RIGHT = 2;
+  PD_BORDER_BOTTOM = 4;
+  PD_BORDER_LEFT = 8;
+  PD_BORDER_BETWEEN = 16;
 
   PD_GRAVITY_LEFT = 0;
   PD_GRAVITY_RIGHT = 1;
@@ -368,6 +373,8 @@ type
     tabs: array[0..PD_MAX_TABS - 1] of pd_tab_stop;
     tab_interval: pd_sp;
     contextual: Int32;
+    border_sides: Int32;
+    border_space: pd_sp;
   end;
   Ppd_para_props = ^pd_para_props;
 

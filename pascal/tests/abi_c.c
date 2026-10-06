@@ -150,6 +150,8 @@ int main(void) {
     printf("pd_para_props.tabs %zu\n", offsetof(pd_para_props, tabs));
     printf("pd_para_props.tab_interval %zu\n", offsetof(pd_para_props, tab_interval));
     printf("pd_para_props.contextual %zu\n", offsetof(pd_para_props, contextual));
+    printf("pd_para_props.border_sides %zu\n", offsetof(pd_para_props, border_sides));
+    printf("pd_para_props.border_space %zu\n", offsetof(pd_para_props, border_space));
     printf("pd_tab_stop %zu\n", sizeof(pd_tab_stop));
     printf("pd_tab_stop.position %zu\n", offsetof(pd_tab_stop, position));
     printf("pd_tab_stop.align %zu\n", offsetof(pd_tab_stop, align));

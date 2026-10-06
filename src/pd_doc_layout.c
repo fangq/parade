@@ -79,6 +79,14 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
     OVER(PD_PP_BREAK_MODE, break_mode);
     OVER(PD_PP_DIRECTION, direction);
     OVER(PD_PP_CONTEXTUAL, contextual);
+    OVER(PD_PP_SHADING, shading);
+
+    if (s->pp.mask & PD_PP_BORDER) {
+        pp->border_color = s->pp.border_color;
+        pp->border_width = s->pp.border_width;
+        pp->border_sides = s->pp.border_sides;
+        pp->border_space = s->pp.border_space;
+    }
 
     if (s->pp.mask & PD_PP_TABS) {
         pp->ntabs = s->pp.ntabs;

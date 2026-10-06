@@ -608,6 +608,9 @@ static void collect_ids(const pd_doc* d, pd_block_id id, pd_block_id* out, int32
     collect_paras(d, id, out, n, cap);
 }
 
+static int has_box(const pd_para_props* pp);
+static int same_box(const pd_para_props* a, const pd_para_props* b);
+
 /* the section a block is in; a story's (headers, notes): the first section */
 static const pd_section_props* section_of(const pd_doc* d, pd_block_id id) {
     const blk* b = pd_doc_blk(d, id);
@@ -633,28 +636,36 @@ static const pd_section_props* section_of(const pd_doc* d, pd_block_id id) {
 static pd_sp para_gap(const pd_doc* d, pd_block_id prev, pd_sp prev_after, pd_block_id cur, const pd_para_props* pp) {
     const blk* a = prev ? pd_doc_blk(d, prev) : NULL, *b = pd_doc_blk(d, cur);
     const pd_section_props* sp = section_of(d, cur);
-    pd_sp before = pp->space_before;
+    pd_sp before = pp->space_before, room = 0;
+    pd_para_props ap;
+    int top = pp->border_color && pp->border_width > 0 &&
+              (!pp->border_sides || (pp->border_sides & PD_BORDER_TOP));
 
     if (a && b && a->kind == PD_BLOCK_PARAGRAPH) {
         pd_style_id normal = pd_doc_style_find(d, "Normal");
         pd_style_id sa = a->st.style ? a->st.style : normal, sb = b->st.style ? b->st.style : normal;
 
-        if (sa == sb) {
-            pd_para_props ap;
+        pd_doc_effective_pp(d, a, &ap, NULL);
 
-            if (pp->contextual) {
-                before = 0;
-            }
+        if (sa == sb && pp->contextual) {
+            before = 0;
+        }
 
-            pd_doc_effective_pp(d, a, &ap, NULL);
+        if (sa == sb && ap.contextual) {
+            prev_after = 0;
+        }
 
-            if (ap.contextual) {
-                prev_after = 0;
-            }
+        /* borders take room: a box's top and bottom edges and their space, a rule between */
+        if (has_box(&ap) && same_box(&ap, pp)) {
+            top = 0;
+            room = (pp->border_sides & PD_BORDER_BETWEEN) && pp->border_color ? pp->border_width : 0;
+        } else if (ap.border_color && ap.border_width > 0 && (!ap.border_sides || (ap.border_sides & PD_BORDER_BOTTOM))) {
+            room = ap.border_width + ap.border_space;
         }
     }
 
-    return sp && sp->add_spacing ? before + prev_after : before > prev_after ? before : prev_after;
+    room += top ? pp->border_width + pp->border_space : 0;
+    return room + (sp && sp->add_spacing ? before + prev_after : before > prev_after ? before : prev_after);
 }
 
 /* lay out the paragraphs of a block stack at a width; returns total height */
@@ -3202,6 +3213,114 @@ static void emit_leaders(const pd_layout* L, dlist_t* D, const pline* l, const p
     }
 }
 
+/* a paragraph border or shading */
+static int has_box(const pd_para_props* pp) {
+    return (pp->border_color && pp->border_width > 0) || pp->shading;
+}
+
+/* paragraphs one after another that share one box */
+static int same_box(const pd_para_props* a, const pd_para_props* b) {
+    return a->border_color == b->border_color && a->border_width == b->border_width &&
+           a->border_sides == b->border_sides && a->border_space == b->border_space && a->shading == b->shading &&
+           a->indent_left == b->indent_left && a->indent_right == b->indent_right;
+}
+
+static void emit_rect(dlist_t* D, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color, pd_block_id block, int32_t region) {
+    pd_draw a;
+
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    memset(&a, 0, sizeof(a));
+    a.kind = PD_DRAW_RULE;
+    a.x = x;
+    a.y = y;
+    a.w = w;
+    a.h = h;
+    a.color = color;
+    a.block = block;
+    a.region = region;
+    emit(D, &a);
+}
+
+/* Paragraph shading and borders, under the text: one box round the lines of
+   paragraphs that share it, its top edge only where the first of them
+   starts and its bottom where the last ends (a box broken by the page stays
+   open), rules between them if the border asks for those. */
+static void emit_para_boxes(dlist_t* D, const ppage* p) {
+    int32_t i = 0, j, k;
+
+    while (i < p->n) {
+        const pline* l = &p->lines[i];
+        const pd_para_props* pp;
+        const pline* e;
+        pd_sp x0, x1, y0, y1, bw;
+        int sides;
+        uint32_t bc;
+
+        if (!l->pc || l->line < 0 || !has_box(&l->pc->pp)) {
+            i++;
+            continue;
+        }
+
+        pp = &l->pc->pp;
+
+        for (j = i + 1; j < p->n; j++) {
+            const pline* m = &p->lines[j], *q = &p->lines[j - 1];
+
+            if (!m->pc || m->line < 0 || m->region != l->region || m->ox != l->ox || m->top < q->top ||
+                    (m->pc->block != q->pc->block && !(m->line == 0 && q->line == q->pc->nlines - 1 &&
+                            same_box(&m->pc->pp, pp)))) {
+                break;
+            }
+        }
+
+        e = &p->lines[j - 1];
+        sides = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM | PD_BORDER_LEFT;
+        bw = pp->border_color ? pp->border_width : 0;
+        bc = pp->border_color;
+        x0 = l->ox + pp->indent_left - ((sides & PD_BORDER_LEFT) && bw ? pp->border_space : 0);
+        x1 = l->ox + l->pc->width - pp->indent_right + ((sides & PD_BORDER_RIGHT) && bw ? pp->border_space : 0);
+        y0 = l->top - (l->line == 0 && (sides & PD_BORDER_TOP) && bw ? pp->border_space : 0);
+        y1 = e->bottom + (e->line == e->pc->nlines - 1 && (sides & PD_BORDER_BOTTOM) && bw ? pp->border_space : 0);
+
+        if (pp->shading) {
+            emit_rect(D, x0, y0, x1 - x0, y1 - y0, pp->shading, l->pc->block, l->region);
+        }
+
+        if (bw > 0) {
+            pd_sp lx = x0 - ((sides & PD_BORDER_LEFT) ? bw : 0), rx = x1 + ((sides & PD_BORDER_RIGHT) ? bw : 0);
+
+            if ((sides & PD_BORDER_TOP) && l->line == 0) {
+                emit_rect(D, lx, y0 - bw, rx - lx, bw, bc, l->pc->block, l->region);
+            }
+
+            if ((sides & PD_BORDER_BOTTOM) && e->line == e->pc->nlines - 1) {
+                emit_rect(D, lx, y1, rx - lx, bw, bc, l->pc->block, l->region);
+            }
+
+            if (sides & PD_BORDER_LEFT) {
+                emit_rect(D, x0 - bw, y0, bw, y1 - y0, bc, l->pc->block, l->region);
+            }
+
+            if (sides & PD_BORDER_RIGHT) {
+                emit_rect(D, x1, y0, bw, y1 - y0, bc, l->pc->block, l->region);
+            }
+
+            for (k = i + 1; (sides & PD_BORDER_BETWEEN) && k < j; k++) {
+                const pline* a = &p->lines[k - 1], *b = &p->lines[k];
+
+                if (a->pc->block != b->pc->block) {     /* half way between the two */
+                    emit_rect(D, x0, (a->bottom + b->top - bw) / 2, x1 - x0, bw, bc, b->pc->block, b->region);
+                }
+            }
+        }
+
+        i = j;
+    }
+}
+
 static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const pline* l) {
     const pd_doc* d = L->doc;
     const blk* b = pd_doc_blk(d, l->pc->block);
@@ -3493,6 +3612,8 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
         a.block = r->block;
         emit(&D, &a);
     }
+
+    emit_para_boxes(&D, &L->pages[page]);
 
     for (i = 0; i < L->pages[page].n; i++) {
         emit_line(L, &D, &L->pages[page], &L->pages[page].lines[i]);

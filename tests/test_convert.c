@@ -869,6 +869,13 @@ static pd_para_props para_resolved(const pd_doc* d, pd_block_id p) {
     if (o.mask & PD_PP_SPACE_BEFORE) r.space_before = o.space_before;
     if (o.mask & PD_PP_SPACE_AFTER) r.space_after = o.space_after;
     if (o.mask & PD_PP_LINE_SPACING) r.line_spacing = o.line_spacing;
+    if (o.mask & PD_PP_SHADING) r.shading = o.shading;
+    if (o.mask & PD_PP_BORDER) {
+        r.border_color = o.border_color;
+        r.border_width = o.border_width;
+        r.border_sides = o.border_sides;
+        r.border_space = o.border_space;
+    }
     if (o.mask & PD_PP_KEEP_NEXT) r.keep_with_next = o.keep_with_next;
     if (o.mask & PD_PP_KEEP_LINES) r.keep_lines = o.keep_lines;
     if (o.mask & PD_PP_HYPHENATE) r.hyphenate = o.hyphenate;
@@ -1712,6 +1719,58 @@ static void test_docx_contextual(void) {
     pd_doc_free(d);
 }
 
+/* Word's paragraph borders and shading: edges by side, their space and
+   colour, rules between, a style's border taken away by the paragraph --
+   read and kept through DOCX */
+static void test_docx_borders(void) {
+    pd_doc* d = docx_doc(
+        "word/styles.xml",
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">"
+        "<w:name w:val=\"Normal\"/></w:style>"
+        "<w:style w:type=\"paragraph\" w:styleId=\"Boxed\"><w:name w:val=\"Boxed\"/><w:basedOn w:val=\"Normal\"/>"
+        "<w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"8\" w:space=\"4\" w:color=\"FF0000\"/>"
+        "<w:left w:val=\"single\" w:sz=\"8\" w:space=\"4\" w:color=\"FF0000\"/>"
+        "<w:bottom w:val=\"single\" w:sz=\"8\" w:space=\"4\" w:color=\"FF0000\"/>"
+        "<w:right w:val=\"single\" w:sz=\"8\" w:space=\"4\" w:color=\"FF0000\"/>"
+        "<w:between w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"FF0000\"/></w:pBdr>"
+        "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"DDEEFF\"/></w:pPr></w:style></w:styles>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:pPr><w:pStyle w:val=\"Boxed\"/></w:pPr><w:r><w:t>boxed</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"12\" w:space=\"1\" w:color=\"auto\"/></w:pBdr></w:pPr>"
+        "<w:r><w:t>ruled</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pStyle w:val=\"Boxed\"/><w:pBdr><w:top w:val=\"nil\"/><w:left w:val=\"nil\"/>"
+        "<w:bottom w:val=\"nil\"/><w:right w:val=\"nil\"/><w:between w:val=\"nil\"/></w:pBdr>"
+        "<w:shd w:val=\"clear\" w:fill=\"auto\"/></w:pPr><w:r><w:t>bare</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec;
+        pd_para_props pp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        pp = para_resolved(d, pd_doc_child(d, sec, 0));
+        CHECK(pp.border_color == 0xFFFF0000u && pp.border_width == PD_PT(1) && pp.border_space == PD_PT(4));
+        CHECK(pp.border_sides == (PD_BORDER_TOP | PD_BORDER_LEFT | PD_BORDER_BOTTOM | PD_BORDER_RIGHT |
+                                  PD_BORDER_BETWEEN) && pp.shading == 0xFFDDEEFFu);
+        pp = para_resolved(d, pd_doc_child(d, sec, 1));
+        CHECK(pp.border_color == 0xFF000000u && pp.border_width == PD_PT(1.5) && pp.border_sides == PD_BORDER_BOTTOM);
+        CHECK(pp.border_space == PD_PT(1) && pp.shading == 0);
+        pp = para_resolved(d, pd_doc_child(d, sec, 2));
+        CHECK(pp.border_color == 0 && pp.shading == 0);
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2338,6 +2397,8 @@ int main(void) {
     test_docx_effects();
     printf("docx contextual spacing\n");
     test_docx_contextual();
+    printf("docx paragraph borders\n");
+    test_docx_borders();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

@@ -1675,6 +1675,79 @@ static void test_contextual(void) {
     pd_doc_free(d);
 }
 
+/* Paragraph borders and shading: two paragraphs with the same border share
+   one box -- its top over the first, its bottom under the second, a rule
+   between them -- the shading fills it under the text, and a paragraph
+   with only a bottom edge gets a rule under it and nothing else. */
+static void test_para_borders(void) {
+    pd_block_id sec, p[4];
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_para_props pp;
+    pd_draw* it;
+    int32_t n, k, first_glyph = -1, shade = -1, wide = 0, under3 = 0, other3 = 0;
+    pd_sp top0 = 0, base0, base1, base2;
+
+    p[0] = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p[0], 0), "boxed one", 9, PD_FORMAT_INHERIT, NULL);
+    p[1] = add_para(d, sec, "boxed two");
+    p[2] = add_para(d, sec, "plain");
+    p[3] = add_para(d, sec, "ruled under");
+
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_BORDER | PD_PP_SHADING;
+    pp.border_color = 0xFF000000u;
+    pp.border_width = PD_PT(1);
+    pp.border_space = PD_PT(2);
+    pp.border_sides = PD_BORDER_TOP | PD_BORDER_BOTTOM | PD_BORDER_LEFT | PD_BORDER_RIGHT | PD_BORDER_BETWEEN;
+    pp.shading = 0xFFEEEEEEu;
+    pd_doc_set_para_props(d, p[0], &pp);
+    pd_doc_set_para_props(d, p[1], &pp);
+    pp.mask = PD_PP_BORDER;
+    pp.border_sides = PD_BORDER_BOTTOM;
+    pd_doc_set_para_props(d, p[3], &pp);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    it = items(L, 0, &n);
+    page_of(L, p[0], 0, &base0);
+    page_of(L, p[1], 0, &base1);
+    page_of(L, p[2], 0, &base2);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && first_glyph < 0) {
+            first_glyph = k;
+        }
+
+        if (it[k].kind == PD_DRAW_RULE && it[k].color == 0xFFEEEEEEu) {
+            shade = k;
+            top0 = it[k].y;
+            CHECK(it[k].y + it[k].h > base1 && it[k].y < base0);    /* round both paragraphs */
+        }
+
+        if (it[k].kind == PD_DRAW_RULE && it[k].color == 0xFF000000u && it[k].block == p[3]) {
+            under3 += it[k].h == PD_PT(1) && it[k].y > base2;
+            other3 += it[k].h != PD_PT(1);
+        }
+
+        if (it[k].kind == PD_DRAW_RULE && it[k].color == 0xFF000000u && it[k].h == PD_PT(1) && it[k].block != p[3]) {
+            wide++;     /* top, between, bottom */
+        }
+    }
+
+    CHECK(shade >= 0 && first_glyph > shade);   /* under the text */
+    CHECK(wide == 3);
+    CHECK(under3 == 1 && other3 == 0);
+
+    /* the box takes room: the rule between the boxed two, and the bottom edge and its space before the plain one */
+    CHECK(base1 - base0 > base2 - base1 - PD_PT(3) && base2 - base1 >= base1 - base0 + PD_PT(2));
+    (void)top0;
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1721,6 +1794,8 @@ int main(void) {
     test_char_effects();
     printf("contextual spacing\n");
     test_contextual();
+    printf("paragraph borders and shading\n");
+    test_para_borders();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
