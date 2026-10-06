@@ -199,9 +199,10 @@ static const char* const words[] = { "alpha ", "beta ", "gamma ", "\xC3\xA9t\xC3
                                       "x", "Hello world. ", "\xF0\x9F\x98\x80"
                                     };
 
-static int random_edit(pd_doc* d, pd_res_id res) {
+static int random_edit(int rep, pd_res_id res) {
+    pd_doc* d = R[rep].d;
     pd_block_id P[512];
-    int n = paras(d, P, 512), k = (int)rnd(24);
+    int n = paras(d, P, 512), k = (int)rnd(30);
     pd_block_id p = n ? P[rnd((uint32_t)n)] : 0;
     uint32_t len = p ? text_len(d, p) : 0, a, b;
     pd_range r;
@@ -386,6 +387,64 @@ static int random_edit(pd_doc* d, pd_res_id res) {
             break;
         }
 
+        case 24: case 25:   /* this replica's own last edit undone, or redone */
+            if (k == 24) {
+                pd_sync_undo(R[rep].s);
+            } else {
+                pd_sync_redo(R[rep].s);
+            }
+
+            break;
+
+        case 26: {  /* a comment, or a reply to one */
+            pd_comment c;
+            pd_comment_id id;
+            int32_t nc = pd_doc_comment_count(d);
+
+            memset(&c, 0, sizeof(c));
+            snprintf(c.author, sizeof(c.author), "Reviewer %d", rep);
+            c.text = rnd(2) ? "Please check." : "Agreed \xE2\x9C\x93";
+            c.text_len = (uint32_t)strlen(c.text);
+            c.range = r;
+            c.parent = nc > 0 && rnd(2) ? (pd_comment_id)(1 + rnd((uint32_t)nc)) : 0;
+
+            if (pd_doc_comment_add(d, &c, &id) != PD_OK && c.parent) {
+                c.parent = 0;
+                pd_doc_comment_add(d, &c, &id);
+            }
+
+            break;
+        }
+
+        case 27: {  /* a comment resolved, reopened or edited */
+            int32_t nc = pd_doc_comment_count(d);
+            pd_comment c;
+            pd_comment_id id = nc > 0 ? (pd_comment_id)(1 + rnd((uint32_t)nc)) : 0;
+
+            if (id && pd_doc_comment_get(d, id, &c) == PD_OK) {
+                if (rnd(2)) {
+                    c.resolved = !c.resolved;
+                } else {
+                    c.text = "Edited.";
+                    c.text_len = 7;
+                }
+
+                pd_doc_comment_set(d, id, &c);
+            }
+
+            break;
+        }
+
+        case 28: {  /* a comment removed (its replies with it) */
+            int32_t nc = pd_doc_comment_count(d);
+
+            if (nc > 0) {
+                pd_doc_comment_remove(d, (pd_comment_id)(1 + rnd((uint32_t)nc)));
+            }
+
+            break;
+        }
+
         default: {  /* direct paragraph properties */
             pd_para_props pp;
 
@@ -529,6 +588,61 @@ static void test_join_and_merge(void) {
     }
 }
 
+static const char* first_text(pd_doc* d, uint32_t* n) {
+    const char* t = "";
+
+    *n = 0;
+    pd_doc_para_text(d, pd_doc_next_paragraph(d, 0), &t, n);
+    return t;
+}
+
+static void test_own_undo(void) {
+    uint32_t n;
+    const char* t;
+    pd_comment c;
+    pd_comment_id id;
+    int k;
+
+    /* Ann types, Bob types; Ann's undo takes away Ann's words only, on everyone's screen */
+    pd_doc_insert_text(R[0].d, at(pd_doc_next_paragraph(R[0].d, 0), 0), "Ann ", 4, PD_FORMAT_INHERIT, NULL);
+    deliver_all();
+    pd_doc_insert_text(R[1].d, at(pd_doc_next_paragraph(R[1].d, 0), 0), "Bob ", 4, PD_FORMAT_INHERIT, NULL);
+    deliver_all();
+    t = first_text(R[2].d, &n);
+    CHECK(n >= 8 && !memcmp(t, "Bob Ann ", 8));
+    CHECK(pd_sync_can_undo(R[0].s) > 0);
+    CHECK(pd_sync_undo(R[0].s) == PD_OK);
+    deliver_all();
+
+    for (k = 0; k < NREP; k++) {
+        t = first_text(R[k].d, &n);
+        CHECK(n >= 4 && !memcmp(t, "Bob ", 4) && (n < 8 || memcmp(t + 4, "Ann ", 4) != 0));
+    }
+
+    CHECK(pd_sync_redo(R[0].s) == PD_OK);
+    deliver_all();
+    t = first_text(R[1].d, &n);
+    CHECK(n >= 8 && !memcmp(t, "Bob Ann ", 8));
+    CHECK(same_everywhere("own undo", 1));
+
+    /* a comment made on one replica shows on the others, on the same words, and goes when undone */
+    memset(&c, 0, sizeof(c));
+    strcpy(c.author, "Cy");
+    c.text = "Who?";
+    c.text_len = 4;
+    c.range.start = at(pd_doc_next_paragraph(R[2].d, 0), 0);
+    c.range.end = at(pd_doc_next_paragraph(R[2].d, 0), 3);
+    CHECK(pd_doc_comment_add(R[2].d, &c, &id) == PD_OK);
+    deliver_all();
+    CHECK(pd_doc_comment_count(R[0].d) >= 1 && pd_doc_comment_get(R[0].d, (pd_comment_id)pd_doc_comment_count(R[0].d), &c) == PD_OK &&
+          c.text_len == 4 && c.range.end.offset - c.range.start.offset == 3);
+    CHECK(same_everywhere("shared comment", 1));
+    CHECK(pd_sync_undo(R[2].s) == PD_OK);
+    deliver_all();
+    CHECK(pd_doc_comment_get(R[0].d, (pd_comment_id)pd_doc_comment_count(R[0].d), &c) != PD_OK);
+    CHECK(same_everywhere("comment undone", 1));
+}
+
 static void test_random(void) {
     int i, k, diverged = 0;
 
@@ -539,7 +653,7 @@ static void test_random(void) {
         int op;
 
         k = (int)rnd(NREP);
-        op = random_edit(R[k].d, 1);
+        op = random_edit(k, 1);
 
         {
             char what[64];
@@ -677,6 +791,8 @@ int main(void) {
     printf("join, concurrent edits\n");
     setup();
     test_join_and_merge();
+    printf("undo of one's own edits, comments\n");
+    test_own_undo();
     printf("random edits on three replicas\n");
     test_random();
     printf("catching up\n");

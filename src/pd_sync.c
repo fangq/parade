@@ -7,11 +7,13 @@
  *   "styles": map  style name -> definition (JSON text)
  *   "lists":  map  key -> list levels (JSON text)
  *   "res":    map  hash -> picture bytes, "m:" hash -> its media type
+ *   "comments": map key -> {"j": description (JSON text), "s"/"e": sticky anchors of the range's ends
+ *                           in their paragraphs' text, "sb"/"eb": those paragraphs' keys}
  * A block's key is made by the replica that made the block ("<client>.<n>"),
  * so keys never clash; each replica maps them to its own block ids. The
  * main tree is "root" and the stories (headers, footnotes) "stories".
  *
- * Text keeps Parade's byte offsets (the shared text counts UTF-8 bytes).
+ * The shared text counts UTF-16 units, Parade UTF-8 bytes: offsets are converted where they cross.
  * Character formatting is one attribute per property, so concurrent
  * changes to different properties of the same text both stay; an inline
  * object is its U+FFFC character with an "obj" attribute describing it.
@@ -83,7 +85,7 @@ typedef struct {
 struct pd_sync {
     pd_doc* d;
     YDoc* y;
-    Branch* blocks, *styles, *lists, *res;
+    Branch* blocks, *styles, *lists, *res, *comments;
     uint64_t client;
     uint32_t counter;
     skey* key_of;               /* by block id */
@@ -115,11 +117,22 @@ struct pd_sync {
     uint32_t nchg, capchg;
     int styles_changed;
     int applying, remote;
+    int collect;                /* an undo under way: its changes are brought into the document too */
+    /* comments: comment id -> key and its description as last shared */
+    skey* ckey;
+    char** cjson;
+    uint32_t nckey, ncjson;
+    uint64_t comment_rev_seen;
+    int comments_changed;
+    /* undo of this replica's own edits */
+    YUndoManager* um;
+    int prev_typing;
     pd_sync_send_fn send;
     void* send_user;
 };
 
 static void shadows_check(pd_sync* s, const char* where);
+static void range_fix(const pd_doc* d, pd_pos* a, pd_pos* e);
 static int list_has(const skey* v, int32_t n, const char* k);
 
 /* ------------------------------------------------------------------ */
@@ -1060,8 +1073,8 @@ static int ps_crdt(pd_sync* s, const Branch* txt, const YTransaction* t, pstate*
             const char* name = ch[c].fmt[k].key;
             char* sv;
 
-            if (!x || !name) {
-                continue;
+            if (!x || !name || !strncmp(name, "c:", 2)) {
+                continue;   /* comment marks (c:<key>) are not formatting */
             }
 
             if (x->tag == Y_JSON_STR && (sv = youtput_read_string(x)) != NULL) {
@@ -1136,17 +1149,32 @@ static void ps_diff(const pd_sync* s, const pstate* a, const pstate* b, uint32_t
     *suf = q;
 }
 
-/* the shared text's index for a byte offset: an object is one there, three bytes here */
-static uint32_t yidx(const pd_sync* s, const pstate* p, uint32_t off) {
-    uint32_t i, n = 0;
+/* bytes of the character at i, and the shared text's units for it: UTF-16, an object one */
+static uint32_t ch_len(const pd_sync* s, const pstate* p, uint32_t i, uint32_t* units) {
+    unsigned char c = (unsigned char)p->t[i];
+    uint32_t n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
 
-    for (i = 0; i < off && i < p->n; i++) {
-        if ((unsigned char)p->t[i] == 0xEF && s->sigobj[p->sig[i]]) {
-            n++;
-        }
+    *units = n == 4 ? 2 : 1;
+
+    if (c == 0xEF && s->sigobj[p->sig[i]]) {
+        n = 3;
+        *units = 1;
     }
 
-    return off - 2 * n;
+    return n;
+}
+
+/* The shared text's index for a byte offset. The shared text counts UTF-16 units (yrs's own; its
+   byte-offset mode misplaces sticky indexes next to multi-byte characters), an object one. */
+static uint32_t yidx(const pd_sync* s, const pstate* p, uint32_t off) {
+    uint32_t i = 0, n = 0, u;
+
+    while (i < off && i < p->n) {
+        i += ch_len(s, p, i, &u);
+        n += u;
+    }
+
+    return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1936,7 +1964,7 @@ static void text_share(pd_sync* s, YTransaction* t, blk* b) {
             ytext_insert(tb, t, ypos, piece, &in);
             ymapin_free(&m);
             free(piece);
-            ypos += j - i;
+            ypos = yidx(s, &cur, j);
         }
     }
 
@@ -1988,9 +2016,44 @@ static void text_share(pd_sync* s, YTransaction* t, blk* b) {
 }
 
 /* the touched blocks of the operation just finished, into the shared state */
+static void comments_share(pd_sync* s, YTransaction* t);
+static int comments_anchor(pd_sync* s, YTransaction* t, int fix);
+static void comments_pull(pd_sync* s, const YTransaction* t);
+
 static void share(pd_sync* s) {
-    YTransaction* t = ydoc_write_transaction(s->y, 0, NULL);
-    int guard = 0;
+    YTransaction* t;
+    int guard = 0, typing = s->d->typing_open;
+
+    /* an undo step per operation, typing on in one place gathered into one as Parade does */
+    if (s->um && !(s->prev_typing && typing)) {
+        yundo_manager_stop(s->um);
+    }
+
+    s->prev_typing = typing;
+    t = ydoc_write_transaction(s->y, 5, "local");
+
+    if (s->d->comment_rev != s->comment_rev_seen) {    /* a comment on a paragraph not shared yet (a
+                                                          placeholder): the paragraph is shared first */
+        int32_t ci;
+
+        for (ci = 1; ci <= s->d->ncomments; ci++) {
+            pd_comment c;
+            int e;
+
+            if (pd_doc_comment_get(s->d, (pd_comment_id)ci, &c) != PD_OK || c.parent) {
+                continue;
+            }
+
+            for (e = 0; e < 2; e++) {
+                pd_block_id at = e ? c.range.end.block : c.range.start.block;
+                blk* b = pd_doc_blk(s->d, at);
+
+                if (b && !key_of(s, at) && b->parent) {
+                    push(&s->dp, &s->ndp, &s->capdp, at);
+                }
+            }
+        }
+    }
 
     while ((s->ndk || s->ndp || s->ndt || s->nds) && guard++ < 1000000) {
         blk* b;
@@ -2032,6 +2095,14 @@ static void share(pd_sync* s) {
         }
     }
 
+    if (s->d->comment_rev != s->comment_rev_seen) {
+        comments_share(s, t);
+    }
+
+    if (s->d->ncomments) {  /* the ranges as the shared anchors have them, everywhere the same */
+        comments_anchor(s, t, 1);
+    }
+
     ytransaction_commit(t);
     shadows_check(s, "share");
 }
@@ -2062,8 +2133,13 @@ static void on_doc_change(void* user) {
         }
     }
 
-    if (s->ndk || s->ndp || s->nds) {
+    if (s->ndk || s->ndp || s->nds || s->d->comment_rev != s->comment_rev_seen) {
         share(s);
+    }
+
+    /* the document's own undo would bring back what the others never saw again: pd_sync_undo it is */
+    if (s->d->nundo && !s->d->group_depth) {
+        pd_doc_clear_undo(s->d);
     }
 }
 
@@ -2171,6 +2247,12 @@ static void reconcile_props(pd_sync* s, const YTransaction* t, pd_block_id id, c
     blk* b = pd_doc_blk(s->d, id);
     shadow* h = sh_of(s, id);
     char* js = bm ? map_str(bm, t, "p") : NULL;
+
+    if (bm && b && h && !js) {  /* lost (yrs's undo does not bring back a value a block was made with):
+                                   written again from the document after this */
+        push(&s->dp, &s->ndp, &s->capdp, id);
+        return;
+    }
 
     if (!js || !b || !h) {
         free(js);
@@ -2380,7 +2462,7 @@ static void reconcile(pd_sync* s) {
     YTransaction* t = ydoc_read_transaction(s->y);
     char track[sizeof(d->track)];
     uint32_t i;
-    int pass;
+    int pass, fix = 0;
 
     memcpy(track, d->track, sizeof(track));
     memset(d->track, 0, sizeof(d->track));     /* remote edits are not this author's tracked changes */
@@ -2421,11 +2503,636 @@ static void reconcile(pd_sync* s) {
         }
     }
 
+    if (s->comments_changed || ymap_len(s->comments, t) > 0) {   /* also when blocks came that comments wanted */
+        comments_pull(s, t);
+        s->comments_changed = 0;
+    }
+
+    if (d->ncomments) {
+        fix = comments_anchor(s, (YTransaction*)t, 0);
+    }
+
+    s->comment_rev_seen = d->comment_rev;
     pd_doc_end_group(d);
     s->applying = 0;
     memcpy(d->track, track, sizeof(track));
     ytransaction_commit(t);
     s->nchg = 0;
+
+    if (d->nundo && !d->group_depth) {
+        pd_doc_clear_undo(d);
+    }
+
+    if (fix || s->ndp) {    /* comments left without a paragraph, properties lost: put right, and told
+                               (not an edit to undo) */
+        YTransaction* w = ydoc_write_transaction(s->y, 3, "fix");
+
+        while (s->ndp) {
+            pd_block_id id = s->dp[--s->ndp];
+            blk* b = pd_doc_blk(d, id);
+            shadow* h = sh_of(s, id);
+
+            if (b && h) {
+                free(h->props);
+                h->props = NULL;
+                props_share(s, w, b);
+            }
+        }
+
+        if (fix) {
+            comments_anchor(s, w, 1);
+        }
+
+        ytransaction_commit(w);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* comments                                                           */
+/* ------------------------------------------------------------------ */
+
+static const char* ckey_of(const pd_sync* s, pd_comment_id id) {
+    return id < s->nckey && s->ckey[id].k[0] ? s->ckey[id].k : NULL;
+}
+
+static pd_comment_id cid_of(const pd_sync* s, const char* k) {
+    uint32_t i;
+
+    for (i = 1; i < s->nckey; i++) {
+        if (!strcmp(s->ckey[i].k, k)) {
+            return i;
+        }
+    }
+
+    return 0;
+}
+
+static int cmap_set(pd_sync* s, pd_comment_id id, const char* key, char* json) {
+    uint32_t c1 = s->ncjson;
+    char k0[KEYLEN], *k = key ? k0 : NULL;
+
+    if (key) {  /* copied first: it may be the slot it goes into, which may move */
+        snprintf(k0, sizeof(k0), "%s", key);
+    }
+
+    if (zgrow((void**)&s->ckey, &s->nckey, id + 1, sizeof(skey)) || zgrow((void**)&s->cjson, &c1, s->nckey,
+            sizeof(char*))) {
+        free(json);
+        return -1;
+    }
+
+    s->ncjson = c1;
+    snprintf(s->ckey[id].k, KEYLEN, "%s", k ? k : "");
+    free(s->cjson[id]);
+    s->cjson[id] = json;
+    return 0;
+}
+
+static int comment_parse(const char* js, pd_comment* c, char* parent, size_t cap, pj_doc** keep);
+
+/* a comment's description as shared: its reply parent by key, as it was first shared -- a thread does
+   not change, however this replica came to hold it (its own undo may have taken away a thread's first
+   comment and not a later reply) */
+static char* comment_json(pd_sync* s, pd_comment_id id, const pd_comment* c) {
+    pd_buf b;
+    pj_writer w;
+    const char* pk = c->parent ? ckey_of(s, c->parent) : NULL;
+    char old[KEYLEN];
+
+    if (id < s->ncjson && s->cjson[id]) {   /* a thread is decided when a reply is first shared */
+        pd_comment oc;
+        pj_doc* j = NULL;
+
+        if (comment_parse(s->cjson[id], &oc, old, sizeof(old), &j)) {
+            pk = old[0] ? old : NULL;
+        }
+
+        pj_free(j);
+    }
+
+    memset(&b, 0, sizeof(b));
+    pj_init(&w, 0, to_pb, &b);
+    w.compact = 1;
+    pj_obj_begin(&w);
+    pj_key(&w, "Author");
+    pj_cstr(&w, c->author);
+    pj_key(&w, "Date");
+    pj_cstr(&w, c->date);
+    pj_key(&w, "Text");
+    pj_str(&w, c->text ? c->text : "", c->text_len);
+    pj_key(&w, "Parent");
+    pj_cstr(&w, pk ? pk : "");
+    pj_key(&w, "Resolved");
+    pj_int(&w, c->resolved ? 1 : 0);
+    pj_obj_end(&w);
+    pj_finish(&w);
+    return pb_take(&b);
+}
+
+/* a byte offset of the document's paragraph from the shared text's index */
+static uint32_t ybyte(const pd_sync* s, const pstate* p, uint32_t yi) {
+    uint32_t i = 0, n = 0, u;
+
+    while (i < p->n && n < yi) {
+        i += ch_len(s, p, i, &u);
+        n += u;
+    }
+
+    i = i < p->n ? i : p->n;
+
+    while (i > 0 && i < p->n && ((unsigned char)p->t[i] & 0xC0) == 0x80) {    /* on a character */
+        i--;
+    }
+
+    return i;
+}
+
+/* a position before or at another in reading order */
+static int pos_le(const pd_doc* d, pd_pos a, pd_pos b) {
+    pd_block_id p;
+    int n = 0;
+
+    if (a.block == b.block) {
+        return a.offset <= b.offset;
+    }
+
+    for (p = pd_doc_next_paragraph(d, a.block); p && n < 1000000; p = pd_doc_next_paragraph(d, p), n++) {
+        if (p == b.block) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* a range's ends that edits may have crossed over: empty at the start, as the document has it */
+static void range_fix(const pd_doc* d, pd_pos* a, pd_pos* e) {
+    if (!pos_le(d, *a, *e)) {
+        *e = *a;
+    }
+}
+
+/* the UTF-16 units of a UTF-8 string */
+static uint32_t u16len(const char* v) {
+    uint32_t n = 0;
+
+    for (; *v; v++) {
+        unsigned char c = (unsigned char)*v;
+
+        n += (c & 0xC0) == 0x80 ? 0 : c >= 0xF0 ? 2 : 1;
+    }
+
+    return n;
+}
+
+/* Where a comment's mark (the attribute c:<key>) is in a paragraph's shared text: the first marked
+   unit and the end of the last; 0 when there is none */
+static int marks_find(const Branch* tb, const YTransaction* t, const char* name, uint32_t* first, uint32_t* end) {
+    uint32_t nc = 0, c, u = 0, k;
+    YChunk* ch = tb ? ytext_chunks(tb, t, &nc) : NULL;
+    int found = 0;
+
+    for (c = 0; c < nc; c++) {
+        char* v = youtput_read_string(&ch[c].data);
+        uint32_t len = v ? u16len(v) : 1;
+
+        for (k = 0; k < ch[c].fmt_len; k++) {
+            const YOutput* x = ch[c].fmt[k].value;
+
+            if (ch[c].fmt[k].key && !strcmp(ch[c].fmt[k].key, name) && x && x->tag != Y_JSON_NULL &&
+                    x->tag != Y_JSON_UNDEF) {
+                if (!found) {
+                    *first = u;
+                }
+
+                *end = u + len;
+                found = 1;
+            }
+        }
+
+        u += len;
+    }
+
+    if (ch) {
+        ychunks_destroy(ch, nc);
+    }
+
+    return found;
+}
+
+static Branch* para_text(pd_sync* s, const YTransaction* t, const char* key) {
+    Branch* bm = key ? block_map(s, t, key) : NULL;
+
+    return bm ? map_branch(bm, t, "t", Y_TEXT) : NULL;
+}
+
+/* mark (or with on 0, unmark) a stretch of a paragraph's shared text, given in document bytes */
+static void marks_set(pd_sync* s, YTransaction* t, pd_block_id id, uint32_t from, uint32_t to, const char* name, int on) {
+    const char* k = key_of(s, id);
+    Branch* tb = para_text(s, t, k);
+    blk* b = pd_doc_blk(s->d, id);
+    pstate p;
+
+    if (!tb || !b || ps_doc(s, b, &p, NULL)) {
+        return;
+    }
+
+    {
+        uint32_t a = yidx(s, &p, from), e = yidx(s, &p, to);
+        char* key = (char*)name;
+        YInput v = on ? yinput_long(1) : yinput_null(), m = yinput_json_map(&key, &v, 1);
+
+        if (e > a) {
+            ytext_format(tb, t, a, e - a, &m);
+        }
+    }
+
+    ps_free(&p);
+}
+
+/* a comment's marks taken off a paragraph's shared text */
+static void marks_clear(pd_sync* s, YTransaction* t, const char* para, const char* name) {
+    Branch* tb = para_text(s, t, para);
+    uint32_t f, e;
+
+    if (tb && marks_find(tb, t, name, &f, &e)) {
+        char key[KEYLEN + 2], *kp = key;
+        YInput v = yinput_null(), m;
+
+        snprintf(key, sizeof(key), "%s", name);
+        m = yinput_json_map(&kp, &v, 1);
+        ytext_format(tb, t, f, e - f, &m);
+    }
+}
+
+/* a comment's marks taken off the paragraphs it names, and off extra ones (where it goes next) */
+static void range_clear(pd_sync* s, YTransaction* t, Branch* cm, const char* ck, const char* k1, const char* k2) {
+    char name[KEYLEN + 2], *bk[2];
+    int i;
+
+    snprintf(name, sizeof(name), "c:%s", ck);
+    bk[0] = map_str(cm, t, "sb");
+    bk[1] = map_str(cm, t, "eb");
+
+    for (i = 0; i < 2; i++) {
+        marks_clear(s, t, bk[i], name);
+        free(bk[i]);
+    }
+
+    marks_clear(s, t, k1, name);
+    marks_clear(s, t, k2, name);
+}
+
+/* A comment's range into the shared state: the characters it covers carry the mark c:<key>, so it
+   moves with them and every replica reads it the same (yrs's sticky indexes do not resolve the same
+   everywhere). "sb"/"eb" name the paragraphs of its ends; "pt" says what an empty range is next to
+   (1 before the marked character, 2 after, 3 an empty paragraph), "sx"/"ex" an end at a paragraph's
+   edge with nothing to mark. */
+static void range_put(pd_sync* s, YTransaction* t, Branch* cm, const char* ck, pd_pos a, pd_pos e) {
+    const char* ka = key_of(s, a.block), *ke = key_of(s, e.block);
+    char name[KEYLEN + 2];
+    blk* ba = pd_doc_blk(s->d, a.block), *be = pd_doc_blk(s->d, e.block);
+    int64_t pt = 0, sx = 0, ex = 0;
+    YInput v;
+
+    if (!ka || !ke || !ba || !be) {
+        return;
+    }
+
+    range_fix(s->d, &a, &e);
+    snprintf(name, sizeof(name), "c:%s", ck);
+    range_clear(s, t, cm, ck, ka, ke);
+
+    if (a.block == e.block && a.offset == e.offset) {   /* a point: marks a character next to it */
+        pstate p;
+        uint32_t u;
+
+        if (ps_doc(s, ba, &p, NULL) == 0) {
+            if (a.offset < p.n) {
+                marks_set(s, t, a.block, a.offset, a.offset + ch_len(s, &p, a.offset, &u), name, 1);
+                pt = 1;
+            } else if (a.offset > 0) {
+                uint32_t q = a.offset - 1;
+
+                while (q > 0 && (((unsigned char)p.t[q] & 0xC0) == 0x80 || ((unsigned char)p.t[q] == 0xBC && q >= 2 &&
+                                 s->sigobj[p.sig[q]]))) {
+                    q--;
+                }
+
+                marks_set(s, t, a.block, q, a.offset, name, 1);
+                pt = 2;
+            } else {
+                pt = 3;
+            }
+
+            ps_free(&p);
+        }
+    } else if (a.block == e.block) {
+        marks_set(s, t, a.block, a.offset, e.offset, name, 1);
+    } else {
+        if (a.offset < ba->st.len) {
+            marks_set(s, t, a.block, a.offset, ba->st.len, name, 1);
+        } else {
+            sx = 1;
+        }
+
+        if (e.offset > 0) {
+            marks_set(s, t, e.block, 0, e.offset, name, 1);
+        } else {
+            ex = 1;
+        }
+    }
+
+
+    v = yinput_string(ka);
+    ymap_insert(cm, t, "sb", &v);
+    v = yinput_string(ke);
+    ymap_insert(cm, t, "eb", &v);
+    v = yinput_long(pt);
+    ymap_insert(cm, t, "pt", &v);
+    v = yinput_long(sx);
+    ymap_insert(cm, t, "sx", &v);
+    v = yinput_long(ex);
+    ymap_insert(cm, t, "ex", &v);
+}
+
+/* where a comment's range is now, in the document; 0 when its marks are gone (the text went) */
+static int range_get(pd_sync* s, const YTransaction* t, const Branch* cm, const char* ck, pd_pos* a, pd_pos* e) {
+    char* ka = map_str(cm, t, "sb"), *ke = map_str(cm, t, "eb"), name[KEYLEN + 2];
+    pd_block_id ia = ka ? id_of(s, ka) : 0, ie = ke ? id_of(s, ke) : 0;
+    blk* ba = ia ? pd_doc_blk(s->d, ia) : NULL, *be = ie ? pd_doc_blk(s->d, ie) : NULL;
+    int64_t pt = map_int(cm, t, "pt", 0), sx = map_int(cm, t, "sx", 0), ex = map_int(cm, t, "ex", 0);
+    uint32_t f0 = 0, e0 = 0, f1 = 0, e1 = 0;
+    int ok = 0;
+    pstate pa, pe;
+
+    snprintf(name, sizeof(name), "c:%s", ck);
+
+    if (ba && be && ps_doc(s, ba, &pa, NULL) == 0) {
+        if (ps_doc(s, be, &pe, NULL) == 0) {
+            Branch* ta = para_text(s, t, ka), *te = para_text(s, t, ke);
+            int fa = marks_find(ta, t, name, &f0, &e0), fe = ia == ie ? fa : marks_find(te, t, name, &f1, &e1);
+
+            if (ia == ie) {
+                f1 = f0;
+                e1 = e0;
+            }
+
+            a->block = ia;
+            e->block = ie;
+
+            if (pt == 3) {
+                a->offset = e->offset = 0;
+                ok = 1;
+            } else if (pt == 1 || pt == 2) {
+                if (fa) {
+                    a->offset = e->offset = ybyte(s, &pa, pt == 1 ? f0 : e0);
+                    ok = 1;
+                }
+            } else if ((sx || fa) && (ex || fe)) {
+                a->offset = sx ? pa.n : ybyte(s, &pa, f0);
+                e->offset = ex ? 0 : ybyte(s, &pe, e1);
+                ok = 1;
+            }
+
+            ps_free(&pe);
+        }
+
+        ps_free(&pa);
+    }
+
+    free(ka);
+    free(ke);
+    return ok;
+}
+
+/* the document's comments made, changed or removed since last time, into the shared state */
+static void comments_share(pd_sync* s, YTransaction* t) {
+    int32_t i, n = pd_doc_comment_count(s->d);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {   /* threads' first comments before their replies */
+        for (i = 1; i <= n; i++) {
+            pd_comment c;
+            int alive = pd_doc_comment_get(s->d, (pd_comment_id)i, &c) == PD_OK;
+            const char* k = ckey_of(s, (pd_comment_id)i);
+
+            if (alive && (c.parent != 0) != (pass == 1)) {
+                continue;
+            }
+
+            if (alive && (!k || !s->cjson[i])) {    /* new, or back (undo of its removal): under its own key */
+                char key[KEYLEN], *js = comment_json(s, (pd_comment_id)i, &c);
+                char* keys[1] = { "j" };
+                YInput vals[1], m;
+                Branch* cm;
+
+                if (!js) {
+                    continue;
+                }
+
+                if (k) {
+                    snprintf(key, sizeof(key), "%s", k);
+                } else {
+                    key_new(s, key);
+                }
+
+                vals[0] = yinput_string(js);
+                m = yinput_ymap(keys, vals, 1);
+                ymap_insert(s->comments, t, key, &m);
+
+                if (!c.parent && (cm = map_branch(s->comments, t, key, Y_MAP)) != NULL) {
+                    range_put(s, t, cm, key, c.range.start, c.range.end);
+                }
+
+                cmap_set(s, (pd_comment_id)i, key, js);
+            } else if (alive) {
+                char* js = comment_json(s, (pd_comment_id)i, &c);
+                Branch* cm = map_branch(s->comments, t, k, Y_MAP);
+
+                if (js && cm && (!s->cjson[i] || strcmp(js, s->cjson[i]) != 0)) {
+                    YInput v = yinput_string(js);
+
+                    ymap_insert(cm, t, "j", &v);
+                    cmap_set(s, (pd_comment_id)i, k, js);
+                } else {
+                    free(js);
+                }
+            } else if (!alive && k && s->cjson[i] && pass == 0) {   /* removed: the key stays, for undo */
+                Branch* cm = map_branch(s->comments, t, k, Y_MAP);
+
+                if (cm) {
+                    range_clear(s, t, cm, k, NULL, NULL);
+                }
+
+                ymap_remove(s->comments, t, k);
+                free(s->cjson[i]);
+                s->cjson[i] = NULL;
+            }
+        }
+    }
+
+    s->comment_rev_seen = s->d->comment_rev;
+}
+
+/* Every shared comment's range, where its anchors are now. An anchor whose paragraph is gone (joined
+   to another) cannot say: with fix, the comment is anchored again where this replica's range went, and
+   that is shared -- several replicas doing it at once agree on the last one written. Without fix,
+   returns whether one needs it. */
+static int comments_anchor(pd_sync* s, YTransaction* t, int fix) {
+    uint32_t i;
+    int need = 0;
+
+    for (i = 1; i < s->nckey; i++) {
+        Branch* cm = s->ckey[i].k[0] ? map_branch(s->comments, t, s->ckey[i].k, Y_MAP) : NULL;
+        pd_pos a, e;
+        pd_comment c;
+
+        if (!cm || (int32_t)i > s->d->ncomments || !s->d->comments[i - 1].alive || s->d->comments[i - 1].parent) {
+            continue;
+        }
+
+        if (range_get(s, t, cm, s->ckey[i].k, &a, &e)) {
+            range_fix(s->d, &a, &e);
+            pd_doc_marker_set(s->d, s->d->comments[i - 1].start, a);
+            pd_doc_marker_set(s->d, s->d->comments[i - 1].end, e);
+        } else if (!fix) {
+            need = 1;
+        } else if (pd_doc_comment_get(s->d, i, &c) == PD_OK) {
+            range_put(s, t, cm, s->ckey[i].k, c.range.start, c.range.end);
+        }
+    }
+
+    return need;
+}
+
+static int comment_parse(const char* js, pd_comment* c, char* parent, size_t cap, pj_doc** keep) {
+    pj_doc* j = pj_parse(js, strlen(js), 0, NULL);
+    const pj_node* r = j ? pj_root(j) : NULL, *x;
+
+    memset(c, 0, sizeof(*c));
+    parent[0] = '\0';
+
+    if (!r || r->type != PJ_OBJ) {
+        pj_free(j);
+        return 0;
+    }
+
+    if ((x = pj_get(r, "Author")) && x->type == PJ_STR) {
+        snprintf(c->author, sizeof(c->author), "%s", x->s);
+    }
+
+    if ((x = pj_get(r, "Date")) && x->type == PJ_STR) {
+        snprintf(c->date, sizeof(c->date), "%s", x->s);
+    }
+
+    if ((x = pj_get(r, "Text")) && x->type == PJ_STR) {
+        c->text = x->s;
+        c->text_len = (uint32_t)x->len;
+    }
+
+    if ((x = pj_get(r, "Parent")) && x->type == PJ_STR) {
+        snprintf(parent, cap, "%s", x->s);
+    }
+
+    c->resolved = (int32_t)pj_int_or(pj_get(r, "Resolved"), 0);
+    *keep = j;
+    return 1;
+}
+
+/* the shared comments into the document: new ones made, changed ones changed, gone ones removed */
+static void comments_pull(pd_sync* s, const YTransaction* t) {
+    pd_doc* d = s->d;
+    YMapIter* it;
+    YMapEntry* e;
+    int pass;
+    uint32_t i;
+    skey* seen = NULL;
+    uint32_t nseen = 0, capseen = 0;
+
+    for (pass = 0; pass < 2; pass++) {
+        if ((it = ymap_iter(s->comments, t)) == NULL) {
+            break;
+        }
+
+        while ((e = ymap_iter_next(it)) != NULL) {
+            Branch* cm = e->value && e->value->tag == Y_MAP ? youtput_read_ymap(e->value) : NULL;
+            char* js = cm ? map_str(cm, t, "j") : NULL, parent[KEYLEN];
+            pd_comment c, c0;
+            pj_doc* jd = NULL;
+            pd_comment_id id = cid_of(s, e->key);
+
+            if (js && comment_parse(js, &c, parent, sizeof(parent), &jd) && (parent[0] != 0) == (pass == 1)) {
+                if (pass == 0 && !zgrow((void**)&seen, &capseen, nseen + 1, sizeof(skey))) {
+                    snprintf(seen[nseen++].k, KEYLEN, "%s", e->key);
+                } else if (pass == 1 && !zgrow((void**)&seen, &capseen, nseen + 1, sizeof(skey))) {
+                    snprintf(seen[nseen++].k, KEYLEN, "%s", e->key);
+                }
+
+                if (id && pd_doc_comment_get(d, id, &c0) != PD_OK) {
+                    id = 0;     /* removed here, shared again: made again */
+                }
+
+                if (!id) {
+                    pd_comment_id nid;
+
+                    c.parent = parent[0] ? cid_of(s, parent) : 0;
+
+                    int placed = c.parent || range_get(s, t, cm, e->key, &c.range.start, &c.range.end);
+
+                    if (placed && !c.parent) {
+                        range_fix(d, &c.range.start, &c.range.end);
+                    }
+
+                    if ((!parent[0] || c.parent) && placed && pd_doc_comment_add(d, &c, &nid) == PD_OK) {
+                        pd_comment_id old = cid_of(s, e->key);
+
+                        if (old && old != nid) {    /* the key belongs to the new one now */
+                            cmap_set(s, old, NULL, NULL);
+                        }
+
+                        cmap_set(s, nid, e->key, js);
+                        js = NULL;
+                    }
+                } else if (!s->cjson[id] || strcmp(js, s->cjson[id]) != 0) {
+                    pd_comment cur;
+
+                    if (pd_doc_comment_get(d, id, &cur) == PD_OK) {
+                        memcpy(cur.author, c.author, sizeof(cur.author));
+                        memcpy(cur.date, c.date, sizeof(cur.date));
+                        cur.text = c.text;
+                        cur.text_len = c.text_len;
+                        cur.resolved = c.resolved;
+                        pd_doc_comment_set(d, id, &cur);
+                    }
+
+                    cmap_set(s, id, e->key, js);
+                    js = NULL;
+                }
+            }
+
+            pj_free(jd);
+            free(js);
+            ymap_entry_destroy(e);
+        }
+
+        ymap_iter_destroy(it);
+    }
+
+    for (i = 1; i < s->nckey; i++) {    /* gone from the shared state: removed here too, the key kept */
+        if (s->ckey[i].k[0] && s->cjson[i] && !list_has(seen, (int32_t)nseen, s->ckey[i].k)) {
+            pd_comment c;
+
+            if (pd_doc_comment_get(d, i, &c) == PD_OK) {
+                pd_doc_comment_remove(d, i);
+            }
+
+            free(s->cjson[i]);
+            s->cjson[i] = NULL;
+        }
+    }
+
+    free(seen);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2450,7 +3157,7 @@ static void on_blocks(void* user, uint32_t n, const YEvent* ev) {
     pd_sync* s = (pd_sync*)user;
     uint32_t i;
 
-    if (!s->remote) {
+    if (!s->remote && !s->collect) {
         return;
     }
 
@@ -2493,8 +3200,19 @@ static void on_styles(void* user, uint32_t n, const YEvent* ev) {
     (void)n;
     (void)ev;
 
-    if (s->remote) {
+    if (s->remote || s->collect) {
         s->styles_changed = 1;
+    }
+}
+
+static void on_comments(void* user, uint32_t n, const YEvent* ev) {
+    pd_sync* s = (pd_sync*)user;
+
+    (void)n;
+    (void)ev;
+
+    if (s->remote || s->collect) {
+        s->comments_changed = 1;
     }
 }
 
@@ -2581,7 +3299,7 @@ pd_status pd_sync_new(pd_doc* d, uint64_t client, pd_sync** out) {
 
     o = yoptions();
     o.id = client & ((1ull << 53) - 1);
-    o.flags = Y_OFFSET_BYTES;
+    o.flags = Y_OFFSET_UTF16 | Y_SKIP_GC;    /* undo may bring back what was deleted: kept */
     s->y = ydoc_new_with_options(o);
     s->d = d;
     s->client = o.id;
@@ -2595,8 +3313,29 @@ pd_status pd_sync_new(pd_doc* d, uint64_t client, pd_sync** out) {
     s->styles = ymap(s->y, "styles");
     s->lists = ymap(s->y, "lists");
     s->res = ymap(s->y, "res");
+    s->comments = ymap(s->y, "comments");
     yobserve_deep(s->blocks, 1, "b", s, on_blocks);
     yobserve_deep(s->styles, 1, "s", s, on_styles);
+    yobserve_deep(s->comments, 1, "c", s, on_comments);
+    {   /* undo of this replica's own edits: what it writes is marked "local" */
+        YUndoManagerOptions uo;
+        Branch* scope[3];
+        int k;
+
+        uo.capture_timeout_millis = 1 << 30;    /* steps are cut where operations end, not by time */
+        s->um = yundo_manager(&uo);
+        scope[0] = s->blocks;   /* not lists and pictures: definitions others may be using by now */
+        scope[1] = s->styles;
+        scope[2] = s->comments;
+
+        for (k = 0; s->um && k < 3; k++) {
+            yundo_manager_add_scope(s->um, s->y, scope[k]);
+        }
+
+        if (s->um) {
+            yundo_manager_add_origin(s->um, 5, "local");
+        }
+    }
     t = ydoc_write_transaction(s->y, 0, NULL);     /* subscribing needs one that writes */
     ytransaction_observe_updates_v1(t, 1, "u", s, on_update);
     ytransaction_commit(t);
@@ -2624,11 +3363,23 @@ void pd_sync_free(pd_sync* s) {
         s->d->sync_user = NULL;
     }
 
+    if (s->um) {
+        yundo_manager_destroy(s->um);
+    }
+
     if (s->y) {
         yunobserve_deep(s->blocks, 1, "b");
         yunobserve_deep(s->styles, 1, "s");
+        yunobserve_deep(s->comments, 1, "c");
         ydoc_destroy(s->y);
     }
+
+    for (i = 0; i < s->ncjson; i++) {
+        free(s->cjson[i]);
+    }
+
+    free(s->ckey);
+    free(s->cjson);
 
     for (i = 0; i < s->nsh; i++) {
         sh_clear(&s->sh[i]);
@@ -2692,7 +3443,9 @@ pd_status pd_sync_publish(pd_sync* s) {
 
     push(&s->dk, &s->ndk, &s->capdk, PD_STORYROOT_ID);
     push(&s->dk, &s->ndk, &s->capdk, PD_ROOT_ID);
+    s->comment_rev_seen = s->d->comment_rev - 1;    /* the comments already there are shared too */
     share(s);
+    yundo_manager_clear(s->um);     /* publishing is not an edit to undo */
     return PD_OK;
 }
 
@@ -2722,7 +3475,7 @@ pd_status pd_sync_receive(pd_sync* s, const void* data, size_t len) {
         return PD_ERR_FORMAT;
     }
 
-    if (s->nchg || s->styles_changed) {
+    if (s->nchg || s->styles_changed || s->comments_changed) {
         reconcile(s);
     }
 
@@ -2777,6 +3530,75 @@ pd_status pd_sync_diff(pd_sync* s, const void* sv, size_t sv_len, void** out, si
 
 void pd_sync_free_data(void* data) {
     free(data);
+}
+
+/* an undo or redo of this replica's own edits: the shared state changes, the others are told, and the
+   document follows as for a remote update */
+static pd_status undo_redo(pd_sync* s, int redo) {
+    uint8_t ok;
+
+    if (!s || !s->um || s->d->in_op || s->d->group_depth > 0) {
+        return PD_ERR_ARG;
+    }
+
+    yundo_manager_stop(s->um);
+    s->collect = 1;
+    ok = redo ? yundo_manager_redo(s->um) : yundo_manager_undo(s->um);
+    s->collect = 0;
+
+    if (s->nchg || s->styles_changed || s->comments_changed) {
+        reconcile(s);
+    }
+
+    s->prev_typing = 0;
+    shadows_check(s, redo ? "redo" : "undo");
+    return ok ? PD_OK : PD_ERR_STATE;
+}
+
+pd_status pd_sync_undo(pd_sync* s) {
+    return undo_redo(s, 0);
+}
+
+pd_status pd_sync_redo(pd_sync* s) {
+    return undo_redo(s, 1);
+}
+
+int32_t pd_sync_can_undo(pd_sync* s) {
+    return s && s->um ? (int32_t)yundo_manager_undo_stack_len(s->um) : 0;
+}
+
+int32_t pd_sync_can_redo(pd_sync* s) {
+    return s && s->um ? (int32_t)yundo_manager_redo_stack_len(s->um) : 0;
+}
+
+pd_status pd_sync_pos_share(const pd_sync* s, pd_pos pos, char* key, size_t cap, uint32_t* offset) {
+    const char* k = s ? key_of(s, pos.block) : NULL;
+
+    if (!k || !key || !offset || strlen(k) >= cap) {
+        return PD_ERR_ARG;
+    }
+
+    strcpy(key, k);
+    *offset = pos.offset;
+    return PD_OK;
+}
+
+pd_status pd_sync_pos_local(const pd_sync* s, const char* key, uint32_t offset, pd_pos* out) {
+    pd_block_id id = s && key ? id_of(s, key) : 0;
+    blk* b = id ? pd_doc_blk(s->d, id) : NULL;
+
+    if (!b || b->kind != PD_BLOCK_PARAGRAPH || !out) {
+        return PD_ERR_RANGE;
+    }
+
+    out->block = id;
+    out->offset = offset > b->st.len ? b->st.len : offset;
+
+    while (out->offset > 0 && out->offset < b->st.len && ((unsigned char)b->st.text[out->offset] & 0xC0) == 0x80) {
+        out->offset--;
+    }
+
+    return PD_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2884,25 +3706,124 @@ static void dump_crdt(pd_sync* s, const YTransaction* t, pd_buf* o, const char* 
     }
 }
 
+static int line_cmp(const void* a, const void* b) {
+    return strcmp(*(char* const*)a, *(char* const*)b);
+}
+
+/* the comments, a line each in key order: description, then where the range is (paragraph key:offset) */
+static void dump_comments(pd_sync* s, const YTransaction* t, pd_buf* o, int from_shared) {
+    char** lines = NULL;
+    uint32_t n = 0, cap = 0, i;
+    pd_buf b;
+
+    for (i = 1; i < s->nckey; i++) {
+        pd_comment c;
+        char* js;
+
+        if (!s->ckey[i].k[0] || zgrow((void**)&lines, &cap, n + 1, sizeof(char*))) {
+            continue;
+        }
+
+        memset(&b, 0, sizeof(b));
+
+        if (from_shared) {
+            continue;   /* read from the shared map below */
+        } else if (pd_doc_comment_get(s->d, i, &c) == PD_OK && (js = comment_json(s, (pd_comment_id)i, &c)) != NULL) {
+            pb_printf(&b, "comment %s %s", s->ckey[i].k, js);
+
+            if (!c.parent && key_of(s, c.range.start.block) && key_of(s, c.range.end.block)) {
+                pb_printf(&b, " %s:%u-%s:%u", key_of(s, c.range.start.block), c.range.start.offset,
+                          key_of(s, c.range.end.block), c.range.end.offset);
+            }
+
+            free(js);
+        } else {
+            continue;
+        }
+
+        if ((lines[n] = pb_take(&b)) != NULL) {
+            n++;
+        }
+    }
+
+    if (from_shared) {  /* the shared comments, but a reply whose thread is gone, which nobody shows */
+        YMapIter* it = ymap_iter(s->comments, t);
+        YMapEntry* e;
+
+        while (it && (e = ymap_iter_next(it)) != NULL) {
+            Branch* cm = e->value && e->value->tag == Y_MAP ? youtput_read_ymap(e->value) : NULL;
+            char* js = cm ? map_str(cm, t, "j") : NULL, parent[KEYLEN];
+            pd_comment c;
+            pj_doc* jd = NULL;
+            pd_pos a, en;
+            Branch* pm;
+
+            /* a thread shows where its first comment's anchors are; one whose paragraph went before
+               it was anchored again shows nowhere until it is */
+            Branch* root = NULL;
+
+            if (js && comment_parse(js, &c, parent, sizeof(parent), &jd)) {
+                root = parent[0] ? map_branch(s->comments, t, parent, Y_MAP) : cm;
+            }
+
+            if (root && range_get(s, t, root, parent[0] ? parent : e->key, &a, &en) &&
+                    !zgrow((void**)&lines, &cap, n + 1, sizeof(char*))) {
+                (void)pm;
+                memset(&b, 0, sizeof(b));
+                pb_printf(&b, "comment %s %s", e->key, js);
+
+                if (!parent[0]) {
+                    range_fix(s->d, &a, &en);
+                    pb_printf(&b, " %s:%u-%s:%u", key_of(s, a.block), a.offset, key_of(s, en.block), en.offset);
+                }
+
+                if ((lines[n] = pb_take(&b)) != NULL) {
+                    n++;
+                }
+            }
+
+            pj_free(jd);
+            free(js);
+            ymap_entry_destroy(e);
+        }
+
+        if (it) {
+            ymap_iter_destroy(it);
+        }
+    }
+
+    if (n > 1) {
+        qsort(lines, n, sizeof(char*), line_cmp);
+    }
+
+    for (i = 0; i < n; i++) {
+        pb_printf(o, "%s\n", lines[i]);
+        free(lines[i]);
+    }
+
+    free(lines);
+}
+
 char* pd_sync_dump(pd_sync* s, int from_shared) {
     pd_buf o;
+    YTransaction* t;
 
     if (!s) {
         return NULL;
     }
 
     memset(&o, 0, sizeof(o));
+    t = ydoc_read_transaction(s->y);
 
     if (from_shared) {
-        YTransaction* t = ydoc_read_transaction(s->y);
-
         dump_crdt(s, t, &o, "stories", 0);
         dump_crdt(s, t, &o, "root", 0);
-        ytransaction_commit(t);
     } else {
         dump_doc(s, &o, PD_STORYROOT_ID, 0);
         dump_doc(s, &o, PD_ROOT_ID, 0);
     }
 
+    dump_comments(s, t, &o, from_shared);
+    ytransaction_commit(t);
     return pb_take(&o);
 }

@@ -5,16 +5,20 @@
  * API). Each editor's document gets a pd_sync. Local edits become updates
  * for the others; updates received are merged and the document changes to
  * match, so every replica that has seen the same updates shows the same
- * document whatever order they arrived in. Updates may be lost, repeated or
- * reordered on the way: re-sending is always safe, and a replica that was
- * away catches up by sending its state vector and applying the diff it is
- * answered with.
+ * document. Updates may be lost or repeated on the way: re-sending is
+ * always safe, and a replica that was away catches up by sending its state
+ * vector and applying the diff it is answered with.
  *
  * Shared: the block tree, paragraph text with its character formatting
  * (each property merged on its own), inline objects and the pictures they
- * show, paragraph and block properties, styles, lists, tracked changes.
- * Not yet: comments, metadata, per-user undo (undo reverts remote edits
- * too).
+ * show, paragraph and block properties, styles, lists, tracked changes,
+ * comments with replies (their ranges anchored to the text). Not yet:
+ * metadata.
+ *
+ * Updates must reach each replica in an order that keeps every update
+ * after the ones it depends on -- as a server or relay forwarding them in
+ * the order received does (yrs 0.28 loses an update that comes before one
+ * it depends on).
  */
 
 #ifndef PARADE_SYNC_H
@@ -51,6 +55,24 @@ PD_API pd_status pd_sync_receive(pd_sync* sync, const void* update, size_t len);
 PD_API pd_status pd_sync_state_vector(pd_sync* sync, void** out, size_t* len);
 /** what this replica has that the owner of a state vector lacks; sv NULL: everything */
 PD_API pd_status pd_sync_diff(pd_sync* sync, const void* sv, size_t sv_len, void** out, size_t* len);
+/**
+ * Undo and redo this replica's own edits only, leaving everyone else's;
+ * the others are sent the change like any edit. With a pd_sync, a host
+ * calls these in place of pd_doc_undo and pd_doc_redo.
+ */
+PD_API pd_status pd_sync_undo(pd_sync* sync);
+PD_API pd_status pd_sync_redo(pd_sync* sync);
+PD_API int32_t   pd_sync_can_undo(pd_sync* sync);
+PD_API int32_t   pd_sync_can_redo(pd_sync* sync);
+
+/**
+ * A position as every replica can read it -- the paragraph's shared key
+ * and the byte offset -- for showing where the others' carets are; and
+ * back into this document (PD_ERR_RANGE when that paragraph is not here).
+ */
+PD_API pd_status pd_sync_pos_share(const pd_sync* sync, pd_pos pos, char* key, size_t cap, uint32_t* offset);
+PD_API pd_status pd_sync_pos_local(const pd_sync* sync, const char* key, uint32_t offset, pd_pos* out);
+
 /** release what pd_sync_state_vector, pd_sync_diff or pd_sync_dump returned */
 PD_API void      pd_sync_free_data(void* data);
 /**
