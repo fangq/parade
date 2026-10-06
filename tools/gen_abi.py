@@ -20,7 +20,9 @@ STRUCTS = {
     "pd_block_info": "kind id parent child_count index role level list_level style list break_kind text_length "
                      "revision",
     "pd_char_props": "mask family size weight italic color background underline strike shift letter_space kerning "
-                     "lang small_caps link_target caps hidden position",
+                     "lang small_caps link_target caps hidden position revision",
+    "pd_revision": "kind author date",
+    "pd_comment": "author date text text_len parent resolved range",
     "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
                      "border_color border_width shading direction ntabs tabs tab_interval contextual border_sides border_space",
@@ -45,6 +47,7 @@ STRUCTS = {
     "pd_page_info": "width height section number label float_page first last",
     "pd_draw": "kind x y w h glyph font size color resource block offset region text scale points npoints path_flags "
                "line_width fill",
+    "pd_markup_item": "kind id range x y top bottom color",
     "pd_pdf_options": "compress outlines title author",
 }
 PASCAL_NAME = {"end": "finish", "label": "label_"}

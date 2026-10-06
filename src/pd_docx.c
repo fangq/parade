@@ -291,7 +291,9 @@ static const char* W_NS =
     "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" "
     "xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" "
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" "
+    "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" "
     "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"";
+static const char* XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
 
 typedef struct {
     pd_res_id res;
@@ -328,6 +330,13 @@ typedef struct {
     int mirror;                 /* some section mirrors its margins */
     int nbookmarks;
     pd_buf* hf_rels[8];
+    struct {
+        uint32_t off;
+        int end;                /* 0: the range starts, 1: it ends */
+        pd_comment_id id;
+    } cb[64];                   /* comment range ends in the paragraph being written, in order */
+    int ncb, cbi;
+    int nrev;                   /* w:ins / w:del ids given out */
 } dxo;
 
 static void xesc(pd_buf* o, const char* s, size_t n) {
@@ -449,15 +458,15 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
 }
 
 /* run text: tabs and line breaks are their own elements */
-static void dx_text(pd_buf* o, const char* s, size_t n) {
+static void dx_text_as(pd_buf* o, const char* s, size_t n, const char* tag) {
     size_t i, j = 0;
 
     for (i = 0; i <= n; i++) {
         if (i == n || s[i] == '\t' || s[i] == '\n') {
             if (i > j) {
-                pb_puts(o, "<w:t xml:space=\"preserve\">");
+                pb_printf(o, "<%s xml:space=\"preserve\">", tag);
                 xesc(o, s + j, i - j);
-                pb_puts(o, "</w:t>");
+                pb_printf(o, "</%s>", tag);
             }
 
             if (i < n) {
@@ -467,6 +476,10 @@ static void dx_text(pd_buf* o, const char* s, size_t n) {
             j = i + 1;
         }
     }
+}
+
+static void dx_text(pd_buf* o, const char* s, size_t n) {
+    dx_text_as(o, s, n, "w:t");
 }
 
 static int dx_media(dxo* x, pd_res_id res, const char** rid_name) {
@@ -990,9 +1003,170 @@ static void dx_flush_anchors(dxo* x) {
     }
 }
 
+/* the comment range ends up to an offset of the paragraph being written */
+static void dx_marks(dxo* x, uint32_t upto) {
+    while (x->cbi < x->ncb && x->cb[x->cbi].off <= upto) {
+        int id = (int)x->cb[x->cbi].id;
+
+        if (x->cb[x->cbi].end) {
+            pb_printf(x->o, "<w:commentRangeEnd w:id=\"%d\"/><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr>"
+                      "<w:commentReference w:id=\"%d\"/></w:r>", id, id);
+        } else {
+            pb_printf(x->o, "<w:commentRangeStart w:id=\"%d\"/>", id);
+        }
+
+        x->cbi++;
+    }
+}
+
+/* where the comments' ranges start and end in a paragraph */
+static void dx_comment_bounds(dxo* x, pd_block_id p) {
+    int32_t i, j;
+
+    x->ncb = x->cbi = 0;
+
+    for (i = 1; i <= pd_doc_comment_count(x->d); i++) {
+        pd_comment c;
+        int e;
+
+        if (pd_doc_comment_get(x->d, (pd_comment_id)i, &c) != PD_OK) {
+            continue;
+        }
+
+        for (e = 0; e < 2; e++) {
+            const pd_pos* q = e ? &c.range.end : &c.range.start;
+
+            if (q->block == p && x->ncb < 64) {
+                for (j = x->ncb; j > 0 && (x->cb[j - 1].off > q->offset || (x->cb[j - 1].off == q->offset &&
+                                           x->cb[j - 1].end > e)); j--) {
+                    x->cb[j] = x->cb[j - 1];
+                }
+
+                x->cb[j].off = q->offset;
+                x->cb[j].end = e;
+                x->cb[j].id = (pd_comment_id)i;
+                x->ncb++;
+            }
+        }
+    }
+}
+
+/* one run of text, inside w:ins or w:del when it is a tracked change */
+static void dx_run(dxo* x, const pd_span* sp, const char* t, size_t n) {
+    pd_buf* o = x->o;
+    pd_revision rv;
+    int kind = 0;
+
+    if (sp->cp.revision && pd_doc_revision_get(x->d, sp->cp.revision, &rv) == PD_OK) {
+        kind = rv.kind;
+        pb_printf(o, "<w:%s w:id=\"%d\" w:author=\"", kind == PD_REV_DELETE ? "del" : "ins", ++x->nrev);
+        xesc(o, rv.author, strlen(rv.author));
+
+        if (rv.date[0]) {
+            pb_puts(o, "\" w:date=\"");
+            xesc(o, rv.date, strlen(rv.date));
+        }
+
+        pb_puts(o, "\">");
+    }
+
+    pb_puts(o, "<w:r>");
+    dx_rpr(x, &sp->cp, &x->base, x->in_link ? "Hyperlink" : NULL);
+    dx_text_as(o, t, n, kind == PD_REV_DELETE ? "w:delText" : "w:t");
+    pb_puts(o, "</w:r>");
+
+    if (kind) {
+        pb_puts(o, kind == PD_REV_DELETE ? "</w:del>" : "</w:ins>");
+    }
+}
+
+/* comments.xml (and commentsExtended.xml, for replies and resolved ones); 0 when there are none */
+static int dx_comments(const pd_doc* d, pd_buf* o, pd_buf* ex) {
+    int32_t i, n = 0;
+
+    pb_puts(o, XML_DECL);
+    pb_printf(o, "<w:comments %s>", W_NS);
+    pb_puts(ex, XML_DECL);
+    pb_puts(ex, "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\">");
+
+    for (i = 1; i <= pd_doc_comment_count(d); i++) {
+        pd_comment c;
+        uint32_t k, j = 0;
+        char ini[8];
+        int ni = 0, word = 1;
+
+        if (pd_doc_comment_get(d, (pd_comment_id)i, &c) != PD_OK) {
+            continue;
+        }
+
+        for (k = 0; c.author[k] && ni < 4; k++) {    /* initials: the first letters of the words */
+            if (c.author[k] == ' ') {
+                word = 1;
+            } else if (word && (unsigned char)c.author[k] < 128) {
+                ini[ni++] = c.author[k];
+                word = 0;
+            } else {
+                word = 0;
+            }
+        }
+
+        ini[ni] = '\0';
+        n++;
+        pb_printf(o, "<w:comment w:id=\"%d\" w:author=\"", (int)i);
+        xesc(o, c.author, strlen(c.author));
+
+        if (c.date[0]) {
+            pb_puts(o, "\" w:date=\"");
+            xesc(o, c.date, strlen(c.date));
+        }
+
+        pb_printf(o, "\" w:initials=\"%s\">", ini);
+
+        for (k = 0; k <= c.text_len; k++) {
+            if (k == c.text_len || c.text[k] == '\n') {
+                if (k == c.text_len) {
+                    pb_printf(o, "<w:p w14:paraId=\"%08X\">", 0x10000000u + (unsigned)i);
+                } else {
+                    pb_puts(o, "<w:p>");
+                }
+
+                pb_puts(o, "<w:pPr><w:pStyle w:val=\"CommentText\"/></w:pPr>");
+
+                if (j == 0) {
+                    pb_puts(o, "<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r>");
+                }
+
+                if (k > j) {
+                    pb_puts(o, "<w:r>");
+                    dx_text(o, c.text + j, k - j);
+                    pb_puts(o, "</w:r>");
+                }
+
+                pb_puts(o, "</w:p>");
+                j = k + 1;
+            }
+        }
+
+        pb_puts(o, "</w:comment>");
+        pb_printf(ex, "<w15:commentEx w15:paraId=\"%08X\"", 0x10000000u + (unsigned)i);
+
+        if (c.parent) {
+            pb_printf(ex, " w15:paraIdParent=\"%08X\"", 0x10000000u + (unsigned)c.parent);
+        }
+
+        pb_printf(ex, " w15:done=\"%d\"/>", c.resolved ? 1 : 0);
+    }
+
+    pb_puts(o, "</w:comments>");
+    pb_puts(ex, "</w15:commentsEx>");
+    return n;
+}
+
 static int dx_span(void* user, const pd_span* sp) {
     dxo* x = (dxo*)user;
     pd_buf* o = x->o;
+
+    dx_marks(x, sp->offset);
 
     if (sp->is_object) {
         const pd_inline* ob = &sp->obj;
@@ -1093,7 +1267,12 @@ static int dx_span(void* user, const pd_span* sp) {
                 int32_t k, id = endnote ? ++x->nendnotes : ++x->nnotes;
                 pd_block_id spara = x->para;
                 pd_char_props sbase = x->base;
-                int slink = x->in_link;
+                int slink = x->in_link, sncb = x->ncb, scbi = x->cbi;
+                void* scb = malloc(sizeof(x->cb));
+
+                if (scb) {
+                    memcpy(scb, x->cb, sizeof(x->cb));
+                }
 
                 if (endnote) {
                     pb_printf(o, "<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:endnoteReference "
@@ -1121,6 +1300,14 @@ static int dx_span(void* user, const pd_span* sp) {
                 x->para = spara;
                 x->base = sbase;
                 x->in_link = slink;
+
+                if (scb) {
+                    memcpy(x->cb, scb, sizeof(x->cb));
+                    free(scb);
+                }
+
+                x->ncb = sncb;
+                x->cbi = scbi;
                 break;
             }
 
@@ -1166,10 +1353,23 @@ static int dx_span(void* user, const pd_span* sp) {
         return o->err;
     }
 
-    pb_puts(o, "<w:r>");
-    dx_rpr(x, &sp->cp, &x->base, x->in_link ? "Hyperlink" : NULL);
-    dx_text(o, sp->text, sp->len);
-    pb_puts(o, "</w:r>");
+    {   /* split where comment ranges start or end */
+        uint32_t cur = sp->offset, end = sp->offset + sp->len;
+
+        while (cur < end) {
+            uint32_t stop = end;
+
+            dx_marks(x, cur);
+
+            if (x->cbi < x->ncb && x->cb[x->cbi].off < end) {
+                stop = x->cb[x->cbi].off;
+            }
+
+            dx_run(x, sp, sp->text + (cur - sp->offset), stop - cur);
+            cur = stop;
+        }
+    }
+
     return o->err;
 }
 
@@ -1364,12 +1564,16 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
     x->para = p;
     x->in_link = 0;
     pd_conv_base_props(x->d, p, &x->base);
-    pd_conv_spans(x->d, p, dx_span, x);
+    dx_comment_bounds(x, p);
+    pd_conv_spans_all(x->d, p, dx_span, x);
 
     if (x->in_link) {
         pb_puts(x->o, "</w:hyperlink>");
         x->in_link = 0;
     }
+
+    dx_marks(x, UINT32_MAX);
+    x->ncb = x->cbi = 0;
 
     pb_puts(x->o, "</w:p>");
 }
@@ -1777,7 +1981,6 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
     pb_puts(o, "</w:sectPr>");
 }
 
-static const char* XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
 
 static int same_ci(const char* a, const char* b) {
     while (*a && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
@@ -2300,10 +2503,10 @@ static void dx_core(const pd_doc* d, pd_buf* o) {
 
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     dxo* x = (dxo*)calloc(1, sizeof(dxo));
-    pd_buf doc, part;
+    pd_buf doc, part, cxml, cext;
     zipw z;
     pd_block_info ri;
-    int32_t s, i;
+    int32_t s, i, ncomments;
 
     if (!x) {
         return PD_ERR_NOMEM;
@@ -2311,6 +2514,8 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
 
     memset(&doc, 0, sizeof(doc));
     memset(&part, 0, sizeof(part));
+    memset(&cxml, 0, sizeof(cxml));
+    memset(&cext, 0, sizeof(cext));
     memset(&z, 0, sizeof(z));
     x->d = d;
     pd_numbers_init(&x->nb, d);
@@ -2401,6 +2606,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     }
 
     pb_puts(&doc, "</w:body></w:document>");
+    ncomments = dx_comments(d, &cxml, &cext);
 
     /* the package */
     z.o = out;
@@ -2433,6 +2639,13 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
 
     pb_puts(&part, "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package."
             "core-properties+xml\"/>");
+
+    if (ncomments) {
+        pb_puts(&part, "<Override PartName=\"/word/comments.xml\" ContentType=\"application/vnd.openxmlformats-"
+                "officedocument.wordprocessingml.comments+xml\"/><Override PartName=\"/word/commentsExtended.xml\" "
+                "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml\"/>");
+    }
+
     pb_puts(&part, "</Types>");
     zip_add(&z, "[Content_Types].xml", part.p, part.n);
     part.n = 0;
@@ -2472,6 +2685,11 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     pb_put(&part, x->endnotes.p, x->endnotes.n);
     pb_puts(&part, "</w:endnotes>");
     zip_add(&z, "word/endnotes.xml", part.p, part.n);
+
+    if (ncomments) {
+        zip_add(&z, "word/comments.xml", cxml.p, cxml.n);
+        zip_add(&z, "word/commentsExtended.xml", cext.p, cext.n);
+    }
 
     part.n = 0;
     pb_puts(&part, XML_DECL);
@@ -2557,6 +2775,12 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "<Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
             "settings\" Target=\"settings.xml\"/>");
 
+    if (ncomments) {
+        pb_puts(&part, "<Relationship Id=\"rIdCm\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                "relationships/comments\" Target=\"comments.xml\"/><Relationship Id=\"rIdCx\" Type=\"http://schemas."
+                "microsoft.com/office/2011/relationships/commentsExtended\" Target=\"commentsExtended.xml\"/>");
+    }
+
     for (i = 0; i < x->nhf; i++) {
         pb_printf(&part, "<Relationship Id=\"rIdh%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
                   "relationships/%s\" Target=\"hf%d.xml\"/>", (int)i + 1, x->hf_footer[i] ? "footer" : "header",
@@ -2580,7 +2804,9 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     }
 
     zip_finish(&z);
-    i = doc.err || part.err || x->rels.err || x->notes.err || x->endnotes.err;
+    i = doc.err || part.err || x->rels.err || x->notes.err || x->endnotes.err || cxml.err || cext.err;
+    pb_free(&cxml);
+    pb_free(&cext);
     pb_free(&part);
     pb_free(&doc);
     pb_free(&x->rels);
@@ -2714,6 +2940,12 @@ typedef struct {
         int field;
     } refs[2048];
     int nrefs;
+    struct dcmt {               /* comments' ranges in the text, by w:id */
+        int wid;
+        pd_marker_id m0, m1;
+        int pending;            /* started between paragraphs: at the next one's start */
+    }* cm;
+    int ncm, capcm;
 } dxi;
 
 static const char* rel_target(const dxi* X, const char* id, int* external) {
@@ -3729,6 +3961,7 @@ typedef struct {
     int skip;                   /* depth inside an ignored element */
     int note;                   /* parsing a footnote body */
     int after_ref;              /* just after the note's own number: drop the space that follows it */
+    pd_rev_id rev;              /* inside w:ins or w:del: the tracked change the text is */
 } dw;
 
 /* the run's format: what the document says about its characters, less what
@@ -3781,6 +4014,11 @@ static void dw_apply_run(dw* w) {
     DW_DIFF(PD_CP_POSITION, position)
     DW_DIFF(PD_CP_KERNING, kerning)
 #undef DW_DIFF
+
+    if (w->rev) {
+        cp.mask |= PD_CP_REVISION;
+        cp.revision = w->rev;
+    }
 
     bld_set_format(w->X->b, &cp);
 }
@@ -4204,6 +4442,71 @@ static void dw_begin_para(dw* w) {
 
     bld_begin_para(b);
     w->started = 1;
+
+    {   /* comment ranges that started between paragraphs start here */
+        int ci;
+
+        for (ci = 0; ci < w->X->ncm; ci++) {
+            if (w->X->cm[ci].pending && b->para) {
+                pd_pos at;
+
+                at.block = b->para;
+                at.offset = 0;
+                pd_doc_marker_new(b->d, at, PD_GRAVITY_LEFT, &w->X->cm[ci].m0);
+                w->X->cm[ci].pending = 0;
+            }
+        }
+    }
+}
+
+/* where a comment's range starts (0), ends (1) or its reference mark is (2) */
+static void dw_comment_mark(dw* w, int wid, int what) {
+    dxi* X = w->X;
+    struct dcmt* c = NULL;
+    pd_pos at;
+    int k;
+
+    for (k = 0; k < X->ncm; k++) {
+        if (X->cm[k].wid == wid) {
+            c = &X->cm[k];
+        }
+    }
+
+    if (!c) {
+        if (X->ncm >= 4096 || pd_grow((void**)&X->cm, &X->capcm, (int64_t)X->ncm + 1, sizeof(*X->cm))) {
+            return;
+        }
+
+        c = &X->cm[X->ncm++];
+        memset(c, 0, sizeof(*c));
+        c->wid = wid;
+    }
+
+    if (!w->in_p) {
+        c->pending = what == 0 && !c->m0;
+        return;
+    }
+
+    dw_begin_para(w);
+    at = bld_pos(X->b);
+
+    if (!at.block) {
+        return;
+    }
+
+    if (what == 0 && !c->m0) {
+        pd_doc_marker_new(X->b->d, at, PD_GRAVITY_LEFT, &c->m0);
+    } else if (what == 1 || (what == 2 && !c->m1)) {
+        if (c->m1) {
+            pd_doc_marker_free(X->b->d, c->m1);
+        }
+
+        pd_doc_marker_new(X->b->d, at, PD_GRAVITY_LEFT, &c->m1);
+
+        if (!c->m0) {   /* only a reference: a point */
+            pd_doc_marker_new(X->b->d, at, PD_GRAVITY_LEFT, &c->m0);
+        }
+    }
 }
 
 static void dw_text(dw* w, const char* s, size_t n) {
@@ -5328,14 +5631,35 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
         if (open) {
             /* elements whose content is ignored */
-            if (strcmp(t, "del") == 0 || strcmp(t, "txbxContent") == 0 || strcmp(t, "Fallback") == 0 ||
-                    strcmp(t, "moveFrom") == 0 ||
+            if (strcmp(t, "txbxContent") == 0 || strcmp(t, "Fallback") == 0 ||
                     (w->in_ppr && strcmp(t, "rPr") == 0) || strcmp(t, "rPrChange") == 0 ||
                     strcmp(t, "pPrChange") == 0) {
                 if (m.type == MT_OPEN) {
                     w->skip = 1;
                 }
 
+                continue;
+            }
+
+            if ((!strcmp(t, "ins") || !strcmp(t, "del") || !strcmp(t, "moveTo") || !strcmp(t, "moveFrom")) &&
+                    m.type == MT_OPEN && !w->in_rpr) {
+                pd_revision rv;     /* a tracked change: the runs inside are an insertion or a deletion */
+
+                memset(&rv, 0, sizeof(rv));
+                rv.kind = t[0] == 'd' || !strcmp(t, "moveFrom") ? PD_REV_DELETE : PD_REV_INSERT;
+                mu_attr(&m, "w:author", rv.author, sizeof(rv.author));
+                mu_attr(&m, "w:date", rv.date, sizeof(rv.date));
+
+                if (pd_doc_revision_add(X->b->d, &rv, &w->rev) != PD_OK) {
+                    w->rev = 0;
+                }
+
+                continue;
+            }
+
+            if ((!strcmp(t, "commentRangeStart") || !strcmp(t, "commentRangeEnd") || !strcmp(t, "commentReference")) &&
+                    mu_attr(&m, "w:id", v, sizeof(v))) {
+                dw_comment_mark(w, atoi(v), !strcmp(t, "commentRangeStart") ? 0 : !strcmp(t, "commentRangeEnd") ? 1 : 2);
                 continue;
             }
 
@@ -5443,9 +5767,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->in_rpr = m.type == MT_OPEN;
             } else if (w->in_rpr) {
                 rpr_elem(X, &m, t, &w->rcp, w->rstyle, sizeof(w->rstyle));
-            } else if (strcmp(t, "t") == 0) {
+            } else if (strcmp(t, "t") == 0 || strcmp(t, "delText") == 0) {
                 w->in_t = m.type == MT_OPEN;
-            } else if (strcmp(t, "instrText") == 0) {
+            } else if (strcmp(t, "instrText") == 0 || strcmp(t, "delInstrText") == 0) {
                 w->in_instr = m.type == MT_OPEN;
             } else if (strcmp(t, "tab") == 0 && w->in_p && !w->in_ppr) {
                 dw_text(w, "\t", 1);
@@ -5808,10 +6132,13 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             }
         } else if (strcmp(t, "rPr") == 0) {
             w->in_rpr = 0;
-        } else if (strcmp(t, "t") == 0) {
+        } else if (strcmp(t, "t") == 0 || strcmp(t, "delText") == 0) {
             w->in_t = 0;
-        } else if (strcmp(t, "instrText") == 0) {
+        } else if (strcmp(t, "instrText") == 0 || strcmp(t, "delInstrText") == 0) {
             w->in_instr = 0;
+        } else if ((!strcmp(t, "ins") || !strcmp(t, "del") || !strcmp(t, "moveTo") || !strcmp(t, "moveFrom")) &&
+                   !w->in_rpr) {
+            w->rev = 0;
         } else if (strcmp(t, "positionH") == 0) {
             w->in_posh = 0;
         } else if (strcmp(t, "align") == 0) {
@@ -5898,6 +6225,145 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
     }
 
     free(w);
+}
+
+/* comments.xml: each comment's text, on the range its w:id marked in the text; commentsExtended.xml
+   makes replies and resolved ones of them */
+static void read_comments(dxi* X, pd_doc* d) {
+    struct {
+        unsigned para, parent;
+        int done;
+    }* ex = NULL;
+    struct {
+        unsigned para;
+        pd_comment_id id;
+    }* made = NULL;
+    int nex = 0, capex = 0, nmade = 0, capmade = 0, k;
+    size_t len = 0;
+    char* xml;
+    pd_markup m;
+    char v[64];
+
+    if (!X->ncm) {
+        return;
+    }
+
+    if ((xml = (char*)zip_read(&X->z, "word/comments.xml", &len)) == NULL) {
+        xml = (char*)calloc(1, 1);  /* none: the ranges' markers still go */
+    }
+
+    {
+        char* xe;
+        size_t elen = 0;
+
+        if ((xe = (char*)zip_read(&X->z, "word/commentsExtended.xml", &elen)) != NULL) {
+            mu_init(&m, xe, elen, 0);
+
+            while (mu_next(&m) != MT_END) {
+                if ((m.type == MT_OPEN || m.type == MT_EMPTY) && !strcmp(mu_local(m.name), "commentEx") &&
+                        mu_attr(&m, "w15:paraId", v, sizeof(v)) && nex < 65536 &&
+                        !pd_grow((void**)&ex, &capex, (int64_t)nex + 1, sizeof(*ex))) {
+                    ex[nex].para = (unsigned)strtoul(v, NULL, 16);
+                    ex[nex].parent = mu_attr(&m, "w15:paraIdParent", v, sizeof(v)) ? (unsigned)strtoul(v, NULL, 16) : 0;
+                    ex[nex].done = mu_attr(&m, "w15:done", v, sizeof(v)) && atoi(v) != 0;
+                    nex++;
+                }
+            }
+
+            free(xe);
+        }
+    }
+
+    mu_init(&m, xml, len, 0);
+
+    while (mu_next(&m) != MT_END) {
+        pd_comment c;
+        pd_buf text;
+        int depth = 1, in_t = 0, paras = 0, wid;
+        unsigned last_para = 0;
+        struct dcmt* at = NULL;
+
+        if (m.type != MT_OPEN || strcmp(mu_local(m.name), "comment") != 0 || !mu_attr(&m, "w:id", v, sizeof(v))) {
+            continue;
+        }
+
+        wid = atoi(v);
+        memset(&c, 0, sizeof(c));
+        memset(&text, 0, sizeof(text));
+        mu_attr(&m, "w:author", c.author, sizeof(c.author));
+        mu_attr(&m, "w:date", c.date, sizeof(c.date));
+
+        while (depth > 0 && mu_next(&m) != MT_END) {
+            const char* t = mu_local(m.name);
+
+            if (m.type == MT_OPEN) {
+                depth++;
+            } else if (m.type == MT_CLOSE) {
+                depth--;
+            }
+
+            if (m.type == MT_OPEN && !strcmp(t, "p")) {
+                if (paras++) {
+                    pb_putc(&text, '\n');
+                }
+
+                last_para = mu_attr(&m, "w14:paraId", v, sizeof(v)) ? (unsigned)strtoul(v, NULL, 16) : 0;
+            } else if ((m.type == MT_OPEN || m.type == MT_CLOSE) && !strcmp(t, "t")) {
+                in_t = m.type == MT_OPEN;
+            } else if (m.type == MT_TEXT && in_t) {
+                mu_decode(m.text, m.tlen, &text);
+            } else if ((m.type == MT_EMPTY || m.type == MT_OPEN) && !strcmp(t, "tab")) {
+                pb_putc(&text, '\t');
+            }
+        }
+
+        for (k = 0; k < X->ncm; k++) {
+            if (X->cm[k].wid == wid && X->cm[k].m0 && X->cm[k].m1) {
+                at = &X->cm[k];
+            }
+        }
+
+        for (k = 0; k < nex && last_para; k++) {
+            if (ex[k].para == last_para) {
+                int j;
+
+                c.resolved = ex[k].done;
+
+                for (j = 0; j < nmade && ex[k].parent; j++) {
+                    if (made[j].para == ex[k].parent) {
+                        c.parent = made[j].id;
+                    }
+                }
+            }
+        }
+
+        c.text = text.p;
+        c.text_len = (uint32_t)text.n;
+
+        if (at && pd_doc_marker_get(d, at->m0, &c.range.start) == PD_OK &&
+                pd_doc_marker_get(d, at->m1, &c.range.end) == PD_OK) {
+            pd_comment_id id;
+
+            if (pd_doc_comment_add(d, &c, &id) == PD_OK && last_para &&
+                    !pd_grow((void**)&made, &capmade, (int64_t)nmade + 1, sizeof(*made))) {
+                made[nmade].para = last_para;
+                made[nmade].id = id;
+                nmade++;
+            }
+        }
+
+        pb_free(&text);
+    }
+
+    for (k = 0; k < X->ncm; k++) {
+        pd_doc_marker_free(d, X->cm[k].m0);
+        pd_doc_marker_free(d, X->cm[k].m1);
+    }
+
+    pd_doc_clear_undo(d);
+    free(ex);
+    free(made);
+    free(xml);
 }
 
 pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
@@ -6094,6 +6560,9 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
         pd_doc_clear_undo(d);
     }
+
+    read_comments(&X, d);
+    free(X.cm);
 
     /* a trailing empty section (from a sectPr in the last paragraph) goes */
     {

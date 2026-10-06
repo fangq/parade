@@ -39,6 +39,8 @@ typedef uint32_t pd_format_id;  /* interned character style + direct formatting;
 typedef uint32_t pd_list_id;    /* 0 = not in a list */
 typedef uint32_t pd_res_id;     /* embedded resource (image bytes, ...); 0 = none */
 typedef uint32_t pd_marker_id;  /* 0 = none */
+typedef uint32_t pd_rev_id;     /* tracked change (author, date, kind); 0 = none */
+typedef uint32_t pd_comment_id; /* 0 = none */
 
 /** a position: byte offset into a paragraph's text */
 typedef struct {
@@ -201,6 +203,7 @@ typedef enum {
 #define PD_CP_CAPS        (1u << 14)
 #define PD_CP_HIDDEN      (1u << 15)
 #define PD_CP_POSITION    (1u << 16)
+#define PD_CP_REVISION    (1u << 17)
 
 typedef enum {
     PD_UNDERLINE_NONE = 0,
@@ -238,6 +241,7 @@ typedef struct {
     int32_t caps;               /**< shown in capitals; the text keeps its case */
     int32_t hidden;             /**< kept in the text, not shown and taking no room */
     pd_sp position;             /**< baseline raised (positive) or lowered, at full size (not a super/subscript) */
+    pd_rev_id revision;         /**< tracked insertion or deletion the text belongs to (0: none) */
 } pd_char_props;
 
 /* paragraph property mask bits */
@@ -683,6 +687,92 @@ PD_API pd_status pd_doc_marker_new(pd_doc* doc, pd_pos pos, pd_gravity gravity, 
 PD_API void      pd_doc_marker_free(pd_doc* doc, pd_marker_id marker);
 PD_API pd_status pd_doc_marker_get(const pd_doc* doc, pd_marker_id marker, pd_pos* out);
 PD_API pd_status pd_doc_marker_set(pd_doc* doc, pd_marker_id marker, pd_pos pos);
+
+/* ------------------------------------------------------------------ */
+/* Tracked changes                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A tracked change is text whose character format names a revision: an
+ * insertion still shown as such, or a deletion kept in the text until it
+ * is accepted. Revisions are a table of (kind, author, date); the same
+ * three give the same id. The table is not part of the undo history.
+ */
+typedef enum {
+    PD_REV_INSERT = 1,
+    PD_REV_DELETE = 2
+} pd_rev_kind;
+
+typedef struct {
+    int32_t kind;               /**< pd_rev_kind */
+    char author[64];            /**< UTF-8 */
+    char date[32];              /**< ISO 8601 ("2026-10-06T03:40:00Z"), may be empty */
+} pd_revision;
+
+PD_API pd_status pd_doc_revision_add(pd_doc* doc, const pd_revision* rev, pd_rev_id* out);
+PD_API pd_status pd_doc_revision_get(const pd_doc* doc, pd_rev_id rev, pd_revision* out);
+/** revisions are numbered 1..count */
+PD_API int32_t   pd_doc_revision_count(const pd_doc* doc);
+/** authors in order of first appearance among revisions and comments (0-based), -1 if unknown */
+PD_API int32_t   pd_doc_author_index(const pd_doc* doc, const char* author);
+/** a colour told apart from other authors' (0xFFRRGGBB) */
+PD_API uint32_t  pd_doc_author_color(const pd_doc* doc, const char* author);
+
+/**
+ * Record edits as tracked changes by author (NULL or "" stops): text
+ * typed or pasted becomes an insertion; deleted text is kept and marked
+ * deleted, except the author's own pending insertions, which simply go.
+ * Paragraph breaks are not tracked: deleting across paragraphs marks
+ * their text and keeps the paragraphs.
+ */
+PD_API pd_status pd_doc_set_tracking(pd_doc* doc, const char* author);
+/** the tracking author, NULL when not tracking */
+PD_API const char* pd_doc_tracking(const pd_doc* doc);
+
+typedef enum {
+    PD_MARKUP_BALLOONS = 0,     /**< insertions in the author's colour, deletions out of the text (balloons) */
+    PD_MARKUP_INLINE = 1,       /**< insertions underlined, deletions struck through, in the author's colour */
+    PD_MARKUP_FINAL = 2,        /**< as if every change were accepted */
+    PD_MARKUP_ORIGINAL = 3      /**< as if every change were rejected */
+} pd_markup_mode;
+
+/** how layouts show tracked changes (default PD_MARKUP_BALLOONS) */
+PD_API void      pd_doc_set_markup(pd_doc* doc, int32_t mode);
+PD_API int32_t   pd_doc_markup(const pd_doc* doc);
+/** accept (1) or reject (0) every change in a range, as one undo step */
+PD_API pd_status pd_doc_revision_resolve(pd_doc* doc, pd_range range, int32_t accept);
+/**
+ * The next change from a position (dir > 0) or the previous one (dir < 0):
+ * the stretch of one paragraph's text in one revision. PD_ERR_RANGE when
+ * there is none.
+ */
+PD_API pd_status pd_doc_revision_find(const pd_doc* doc, pd_pos from, int32_t dir, pd_range* out,
+                                      pd_rev_id* rev);
+
+/* ------------------------------------------------------------------ */
+/* Comments                                                           */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char author[64];
+    char date[32];
+    const char* text;           /**< UTF-8, paragraphs separated by '\n'; get: doc-owned until the comment changes */
+    uint32_t text_len;
+    pd_comment_id parent;       /**< the comment this replies to (0: none); a reply shares its range */
+    int32_t resolved;
+    pd_range range;             /**< get: where the commented text is now (markers follow edits) */
+} pd_comment;
+
+/** add a comment on a range (ignored for a reply), as an undo step */
+PD_API pd_status pd_doc_comment_add(pd_doc* doc, const pd_comment* comment, pd_comment_id* out);
+/** PD_ERR_ARG for an id never given out or removed */
+PD_API pd_status pd_doc_comment_get(const pd_doc* doc, pd_comment_id id, pd_comment* out);
+/** change text, author, date and resolved (the range and parent stay) */
+PD_API pd_status pd_doc_comment_set(pd_doc* doc, pd_comment_id id, const pd_comment* comment);
+/** remove a comment and its replies */
+PD_API pd_status pd_doc_comment_remove(pd_doc* doc, pd_comment_id id);
+/** ids are 1..count, removed ones included */
+PD_API int32_t   pd_doc_comment_count(const pd_doc* doc);
 
 /* ------------------------------------------------------------------ */
 /* Change notification                                                */

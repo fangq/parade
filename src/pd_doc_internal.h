@@ -97,10 +97,22 @@ typedef struct {
     int alive;
 } dmarker;
 
+typedef struct {
+    char author[64];
+    char date[32];
+    char* text;
+    uint32_t len;
+    pd_comment_id parent;
+    int32_t resolved;
+    pd_marker_id start, end;    /* the commented range; a reply keeps its parent's */
+    int alive;
+} dcomment;
+
 enum {
     UR_STATE = 0,               /* swap a block's state */
     UR_ATTACH = 1,              /* attach <-> detach a subtree */
-    UR_STYLE = 2                /* swap a style definition */
+    UR_STYLE = 2,               /* swap a style definition */
+    UR_COMMENT = 3              /* swap a comment */
 };
 
 typedef struct {
@@ -112,6 +124,8 @@ typedef struct {
     int32_t index;
     pd_style_id style;          /* UR_STYLE */
     dstyle sdef;
+    pd_comment_id comment;      /* UR_COMMENT */
+    dcomment csave;
 } urec;
 
 typedef struct {
@@ -174,6 +188,15 @@ struct pd_doc {
     dtouch* touched;
     int32_t ntouched, captouched;
     int in_op;
+    /* tracked changes and comments */
+    pd_revision* revs;
+    int32_t nrevs, caprevs;
+    char track[64];             /* tracking author, "" = not tracking */
+    pd_rev_id track_ins, track_del;
+    int32_t markup;             /* pd_markup_mode */
+    dcomment* comments;
+    int32_t ncomments, capcomments;
+    uint64_t comment_rev;       /* bumped by every comment change */
 };
 
 /* shared by pd_doc.c and pd_doc_io.c */
@@ -206,10 +229,14 @@ pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
 pd_status pd_doc_label_style(const pd_doc* d, pd_block_id para, pd_style* st);
 /* a style for characters described outright */
 pd_status pd_doc_cp_style(const pd_doc* d, const pd_char_props* cp, pd_style* st);
+/* pd_doc_comment_add outside the undo history (loading) */
+pd_status pd_doc_comment_add_raw(pd_doc* d, const pd_comment* in, pd_comment_id* out);
+/* a resolved run's look under the document's markup mode: author colours, deletions hidden or struck */
+void pd_doc_markup_props(const pd_doc* d, pd_char_props* cp);
 /* the style of the document's Normal text */
 pd_status pd_doc_default_style(const pd_doc* d, pd_style* st);
 
-#define PD_CP_ALL ((1u << 17) - 1)
+#define PD_CP_ALL ((1u << 18) - 1)
 #define PD_PP_ALL ((1u << 20) - 1)
 
 /* a picture's MIME type and pixel size from its first bytes (PNG, JPEG, GIF), NULL if none of those */

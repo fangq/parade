@@ -14,6 +14,8 @@ var
   v_pd_range: pd_range;
   v_pd_block_info: pd_block_info;
   v_pd_char_props: pd_char_props;
+  v_pd_revision: pd_revision;
+  v_pd_comment: pd_comment;
   v_pd_para_props: pd_para_props;
   v_pd_tab_stop: pd_tab_stop;
   v_pd_list_level: pd_list_level;
@@ -28,6 +30,7 @@ var
   v_pd_layout_info: pd_layout_info;
   v_pd_page_info: pd_page_info;
   v_pd_draw: pd_draw;
+  v_pd_markup_item: pd_markup_item;
   v_pd_pdf_options: pd_pdf_options;
 begin
   WriteLn('pd_font_metrics ', SizeOf(pd_font_metrics));
@@ -154,6 +157,19 @@ begin
   WriteLn('pd_char_props.caps ', PtrUInt(@v_pd_char_props.caps) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_char_props.hidden ', PtrUInt(@v_pd_char_props.hidden) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_char_props.position ', PtrUInt(@v_pd_char_props.position) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.revision ', PtrUInt(@v_pd_char_props.revision) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_revision ', SizeOf(pd_revision));
+  WriteLn('pd_revision.kind ', PtrUInt(@v_pd_revision.kind) - PtrUInt(@v_pd_revision));
+  WriteLn('pd_revision.author ', PtrUInt(@v_pd_revision.author) - PtrUInt(@v_pd_revision));
+  WriteLn('pd_revision.date ', PtrUInt(@v_pd_revision.date) - PtrUInt(@v_pd_revision));
+  WriteLn('pd_comment ', SizeOf(pd_comment));
+  WriteLn('pd_comment.author ', PtrUInt(@v_pd_comment.author) - PtrUInt(@v_pd_comment));
+  WriteLn('pd_comment.date ', PtrUInt(@v_pd_comment.date) - PtrUInt(@v_pd_comment));
+  WriteLn('pd_comment.text ', PtrUInt(@v_pd_comment.text) - PtrUInt(@v_pd_comment));
+  WriteLn('pd_comment.text_len ', PtrUInt(@v_pd_comment.text_len) - PtrUInt(@v_pd_comment));
+  WriteLn('pd_comment.parent ', PtrUInt(@v_pd_comment.parent) - PtrUInt(@v_pd_comment));
+  WriteLn('pd_comment.resolved ', PtrUInt(@v_pd_comment.resolved) - PtrUInt(@v_pd_comment));
+  WriteLn('pd_comment.range ', PtrUInt(@v_pd_comment.range) - PtrUInt(@v_pd_comment));
   WriteLn('pd_para_props ', SizeOf(pd_para_props));
   WriteLn('pd_para_props.mask ', PtrUInt(@v_pd_para_props.mask) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.align ', PtrUInt(@v_pd_para_props.align) - PtrUInt(@v_pd_para_props));
@@ -331,6 +347,15 @@ begin
   WriteLn('pd_draw.path_flags ', PtrUInt(@v_pd_draw.path_flags) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.line_width ', PtrUInt(@v_pd_draw.line_width) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.fill ', PtrUInt(@v_pd_draw.fill) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_markup_item ', SizeOf(pd_markup_item));
+  WriteLn('pd_markup_item.kind ', PtrUInt(@v_pd_markup_item.kind) - PtrUInt(@v_pd_markup_item));
+  WriteLn('pd_markup_item.id ', PtrUInt(@v_pd_markup_item.id) - PtrUInt(@v_pd_markup_item));
+  WriteLn('pd_markup_item.range ', PtrUInt(@v_pd_markup_item.range) - PtrUInt(@v_pd_markup_item));
+  WriteLn('pd_markup_item.x ', PtrUInt(@v_pd_markup_item.x) - PtrUInt(@v_pd_markup_item));
+  WriteLn('pd_markup_item.y ', PtrUInt(@v_pd_markup_item.y) - PtrUInt(@v_pd_markup_item));
+  WriteLn('pd_markup_item.top ', PtrUInt(@v_pd_markup_item.top) - PtrUInt(@v_pd_markup_item));
+  WriteLn('pd_markup_item.bottom ', PtrUInt(@v_pd_markup_item.bottom) - PtrUInt(@v_pd_markup_item));
+  WriteLn('pd_markup_item.color ', PtrUInt(@v_pd_markup_item.color) - PtrUInt(@v_pd_markup_item));
   WriteLn('pd_pdf_options ', SizeOf(pd_pdf_options));
   WriteLn('pd_pdf_options.compress ', PtrUInt(@v_pd_pdf_options.compress) - PtrUInt(@v_pd_pdf_options));
   WriteLn('pd_pdf_options.outlines ', PtrUInt(@v_pd_pdf_options.outlines) - PtrUInt(@v_pd_pdf_options));

@@ -3424,7 +3424,11 @@ static pd_sp rule_reach(const pd_doc* d, const blk* b, const pd_glyph* g, int32_
                 }
             }
 
-            if (pd_doc_format_resolve(d, b->id, f, &cp) != PD_OK || !(which ? cp.strike : cp.underline)) {
+            if (pd_doc_format_resolve(d, b->id, f, &cp) == PD_OK) {
+                pd_doc_markup_props(d, &cp);
+            }
+
+            if (cp.hidden || !(which ? cp.strike : cp.underline)) {
                 return g[i].advance;
             }
         }
@@ -4105,6 +4109,7 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
         if (g[i].style >= 0 && g[i].style != cached_style) {
             pd_para_get_style(l->pc->para, g[i].style, &ps);
             pd_doc_format_resolve(d, b->id, (pd_format_id)ps.user, &cp);
+            pd_doc_markup_props(d, &cp);
             cached_style = g[i].style;
         }
 
@@ -4498,4 +4503,162 @@ pd_status pd_layout_caret(const pd_layout* L, pd_pos pos, int32_t* page, pd_sp* 
     }
 
     return c ? PD_ERR_STATE : PD_ERR_ARG;
+}
+
+/* ------------------------------------------------------------------ */
+/* markup: tracked changes and comments on a page                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    pd_markup_item* m;
+    int32_t n, cap;
+    int err;
+} mlist_t;
+
+/* add the item when its range starts on the page; returns the page it starts on */
+static int32_t mark_add(const pd_layout* L, mlist_t* M, int32_t page, int32_t kind, uint32_t id, pd_range r,
+                        const char* author) {
+    pd_markup_item it;
+    int32_t pg = -1, pe = -1;
+    pd_sp x, base, asc, desc, ex, eb, ea, ed;
+
+    if (pd_layout_caret(L, r.start, &pg, &x, &base, &asc, &desc) != PD_OK || pg != page) {
+        return pg;
+    }
+
+    memset(&it, 0, sizeof(it));
+    it.kind = kind;
+    it.id = id;
+    it.range = r;
+    it.x = x;
+    it.y = base;
+    it.top = base - asc;
+    it.bottom = base + desc;
+    it.color = pd_doc_author_color(L->doc, author);
+
+    if (pd_layout_caret(L, r.end, &pe, &ex, &eb, &ea, &ed) == PD_OK && pe == page && eb + ed > it.bottom) {
+        it.bottom = eb + ed;
+    }
+
+    if (M->n >= M->cap) {
+        int32_t nc = M->cap ? M->cap * 2 : 16;
+        pd_markup_item* t = (pd_markup_item*)realloc(M->m, (size_t)nc * sizeof(*t));
+
+        if (!t) {
+            M->err = 1;
+            return pg;
+        }
+
+        M->m = t;
+        M->cap = nc;
+    }
+
+    M->m[M->n++] = it;
+    return pg;
+}
+
+static int mark_cmp(const void* a, const void* b) {
+    const pd_markup_item* p = (const pd_markup_item*)a, *q = (const pd_markup_item*)b;
+
+    if (p->y != q->y) {
+        return p->y < q->y ? -1 : 1;
+    }
+
+    if (p->x != q->x) {
+        return p->x < q->x ? -1 : 1;
+    }
+
+    return p->kind - q->kind;
+}
+
+pd_status pd_layout_page_markup(const pd_layout* L, int32_t page, pd_markup_item* buf, int32_t cap, int32_t* count) {
+    const pd_doc* d;
+    pd_page_info pi;
+    mlist_t M;
+    int32_t i;
+
+    if (!L || !count || cap < 0) {
+        return PD_ERR_ARG;
+    }
+
+    if (page < 0 || page >= L->npages || pd_layout_page_info(L, page, &pi) != PD_OK) {
+        return PD_ERR_RANGE;
+    }
+
+    d = L->doc;
+    memset(&M, 0, sizeof(M));
+
+    if (pi.first.block && pd_doc_markup(d) <= PD_MARKUP_INLINE && pd_doc_revision_count(d) > 0) {
+        pd_block_id cur;
+
+        int past = 0;
+
+        for (cur = pi.first.block; cur && !M.err && !past; cur = cur == pi.last.block ? 0 : pd_doc_next_paragraph(d, cur)) {
+            const blk* b = pd_doc_blk(d, cur);
+            int32_t k = 0;
+
+            while (b && k < b->st.nruns) {
+                pd_style_id cs;
+                pd_char_props ov;
+                pd_revision rv;
+                pd_range r;
+                int32_t j = k;
+
+                if (pd_doc_format_info(d, b->st.runs[k].format, &cs, &ov) != PD_OK || !(ov.mask & PD_CP_REVISION) ||
+                        pd_doc_revision_get(d, ov.revision, &rv) != PD_OK) {
+                    k++;
+                    continue;
+                }
+
+                for (; j + 1 < b->st.nruns && b->st.runs[j + 1].start == b->st.runs[j].end; j++) {
+                    pd_char_props o2;
+
+                    if (pd_doc_format_info(d, b->st.runs[j + 1].format, &cs, &o2) != PD_OK ||
+                            !(o2.mask & PD_CP_REVISION) || o2.revision != ov.revision) {
+                        break;
+                    }
+                }
+
+                r.start.block = r.end.block = cur;
+                r.start.offset = b->st.runs[k].start;
+                r.end.offset = b->st.runs[j].end;
+                past = mark_add(L, &M, page, rv.kind == PD_REV_DELETE ? PD_MARK_DELETION : PD_MARK_INSERTION, ov.revision,
+                                r, rv.author) > page;
+                k = j + 1;
+            }
+        }
+    }
+
+    for (i = 1; i <= pd_doc_comment_count(d) && !M.err; i++) {
+        pd_comment c;
+
+        if (pd_doc_comment_get(d, (pd_comment_id)i, &c) == PD_OK && !c.parent) {
+            mark_add(L, &M, page, PD_MARK_COMMENT, (uint32_t)i, c.range, c.author);
+        }
+    }
+
+    if (M.err) {
+        free(M.m);
+        return PD_ERR_NOMEM;
+    }
+
+    if (M.n > 1) {
+        qsort(M.m, (size_t)M.n, sizeof(*M.m), mark_cmp);
+    }
+
+    *count = M.n;
+
+    if (buf) {
+        if (cap < M.n) {
+            free(M.m);
+            return PD_ERR_RANGE;
+        }
+
+        if (M.n) {
+            memcpy(buf, M.m, (size_t)M.n * sizeof(*M.m));
+        }
+    }
+
+    free(M.m);
+    return PD_OK;
 }

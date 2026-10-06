@@ -152,7 +152,7 @@ size_t pd_base64_decode(const char* s, size_t n, unsigned char* out) {
 /* reading                                                            */
 /* ------------------------------------------------------------------ */
 
-int pd_conv_spans(const pd_doc* d, pd_block_id para, pd_span_fn fn, void* user) {
+static int spans(const pd_doc* d, pd_block_id para, pd_span_fn fn, void* user, int deleted) {
     const char* t;
     uint32_t len;
     pd_run* runs = NULL;
@@ -178,6 +178,14 @@ int pd_conv_spans(const pd_doc* d, pd_block_id para, pd_span_fn fn, void* user) 
         memset(&sp, 0, sizeof(sp));
         sp.format = runs[r].format;
         pd_doc_format_resolve(d, para, runs[r].format, &sp.cp);
+
+        if (!deleted && sp.cp.revision) {     /* exported as if accepted: tracked deletions are left out */
+            pd_revision rv;
+
+            if (pd_doc_revision_get(d, sp.cp.revision, &rv) == PD_OK && rv.kind == PD_REV_DELETE) {
+                continue;
+            }
+        }
 
         while (pos < end && !stop) {
             uint32_t k = pos;
@@ -218,6 +226,14 @@ int pd_conv_spans(const pd_doc* d, pd_block_id para, pd_span_fn fn, void* user) 
 
     free(runs);
     return stop;
+}
+
+int pd_conv_spans(const pd_doc* d, pd_block_id para, pd_span_fn fn, void* user) {
+    return spans(d, para, fn, user, 0);
+}
+
+int pd_conv_spans_all(const pd_doc* d, pd_block_id para, pd_span_fn fn, void* user) {
+    return spans(d, para, fn, user, 1);
 }
 
 static void numbers_walk(pd_numbers* nb, pd_block_id id, int32_t seq_val[16], char seq_name[16][32], int32_t* nseq,
@@ -545,6 +561,17 @@ static pd_list_id bld_list_id(pd_bld* b, int32_t kind) {
     }
 
     return b->lists[kind];
+}
+
+pd_pos bld_pos(pd_bld* b) {
+    pd_pos at;
+    const char* t;
+    uint32_t n = 0;
+
+    bld_flush(b);
+    at.block = b->para;
+    at.offset = b->para && pd_doc_para_text(b->d, b->para, &t, &n) == PD_OK ? n : 0;
+    return at;
 }
 
 pd_block_id bld_begin_para(pd_bld* b) {
@@ -981,6 +1008,15 @@ static pd_format_id map_format(copier* C, pd_format_id f) {
     }
 
     ov.mask &= ~PD_CP_LINK;
+
+    if (ov.mask & PD_CP_REVISION) {     /* a tracked change keeps its author and date */
+        pd_revision rv;
+
+        if (pd_doc_revision_get(C->s, ov.revision, &rv) != PD_OK || pd_doc_revision_add(C->d, &rv, &ov.revision) != PD_OK) {
+            ov.mask &= ~PD_CP_REVISION;
+        }
+    }
+
     return pd_doc_format(C->d, map_style(C, cs, 0), &ov);
 }
 
@@ -1098,7 +1134,7 @@ static pd_status copy_content(copier* C, pd_block_id sp, uint32_t from, uint32_t
     x.from = from;
     x.to = to;
     x.st = PD_OK;
-    pd_conv_spans(C->s, sp, copy_span, &x);
+    pd_conv_spans_all(C->s, sp, copy_span, &x);
     *at = x.at;
     return x.st;
 }

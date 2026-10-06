@@ -7,6 +7,7 @@
  *   UR_STATE  swaps a block's content state with a saved copy
  *   UR_ATTACH attaches or detaches a whole subtree (insert, remove, move)
  *   UR_STYLE  swaps a style definition
+ *   UR_COMMENT swaps a comment
  * Before an operation first changes a block in a step, the block's state
  * is saved once; later changes in the same step (typing) need nothing.
  */
@@ -14,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "pd_doc_internal.h"
 
 /* ------------------------------------------------------------------ */
@@ -162,6 +164,10 @@ void pd_doc_cp_normalize(pd_char_props* cp) {
         z.position = cp->position;
     }
 
+    if (m & PD_CP_REVISION) {
+        z.revision = cp->revision;
+    }
+
     *cp = z;
 }
 
@@ -282,6 +288,10 @@ static void cp_apply(pd_char_props* dst, const pd_char_props* src) {
 
     if (m & PD_CP_POSITION) {
         dst->position = src->position;
+    }
+
+    if (m & PD_CP_REVISION) {
+        dst->revision = src->revision;
     }
 
     dst->mask |= m;
@@ -613,6 +623,8 @@ static void step_free(pd_doc* d, ustep* s, int dropping) {
 
         if (r->type == UR_STATE) {
             bstate_free(&r->saved);
+        } else if (r->type == UR_COMMENT) {
+            free(r->csave.text);
         } else if (r->type == UR_ATTACH && !r->attached && dropping) {
             /* the only owner of a detached subtree is the record that detached it */
             blk* b = r->id < d->captab ? d->tab[r->id] : NULL;
@@ -651,6 +663,12 @@ void pd_doc_free(pd_doc* d) {
         free(d->res[i].data);
     }
 
+    for (i = 0; i < d->ncomments; i++) {
+        free(d->comments[i].text);
+    }
+
+    free(d->comments);
+    free(d->revs);
     free(d->meta);
     free(d->tab);
     free(d->styles);
@@ -1955,6 +1973,12 @@ static void toggle(pd_doc* d, urec* r) {
         r->sdef = t;
         d->style_rev++;
         touch(d, PD_CHANGE_STYLE, 0, r->style);
+    } else if (r->type == UR_COMMENT) {
+        dcomment t = d->comments[r->comment - 1];
+
+        d->comments[r->comment - 1] = r->csave;
+        r->csave = t;
+        d->comment_rev++;
     }
 }
 
@@ -2353,6 +2377,10 @@ static int is_within(const pd_doc* d, pd_block_id id, pd_block_id anc) {
 /* public operations                                                  */
 /* ------------------------------------------------------------------ */
 
+static pd_format_id with_revision(pd_doc* d, pd_format_id fmt, pd_rev_id rev);
+static pd_rev_id track_rev(pd_doc* d, int32_t kind);
+static pd_status track_delete(pd_doc* d, pd_range r, pd_pos* after);
+
 pd_status pd_doc_insert_text(pd_doc* d, pd_pos at, const char* utf8, size_t len, pd_format_id fmt, pd_pos* after) {
     blk* b;
     pd_status st = PD_OK;
@@ -2371,10 +2399,12 @@ pd_status pd_doc_insert_text(pd_doc* d, pd_pos at, const char* utf8, size_t len,
         return PD_ERR_ARG;
     }
 
-    if (fmt == PD_FORMAT_INHERIT) {
-        fmt = format_at(&b->st, at.offset, 1);
+    if (fmt == PD_FORMAT_INHERIT) {     /* typing continues the format, not a neighbour's tracked change */
+        fmt = with_revision(d, format_at(&b->st, at.offset, 1), track_rev(d, PD_REV_INSERT));
     } else if (!format_of(d, fmt)) {
         return PD_ERR_ARG;
+    } else if (d->track[0]) {
+        fmt = with_revision(d, fmt, track_rev(d, PD_REV_INSERT));
     }
 
     if (after) {
@@ -2460,7 +2490,8 @@ pd_status pd_doc_insert_inline(pd_doc* d, pd_pos at, const pd_inline* obj, pd_po
     pd_inl_point(&x);
 
     if (op_begin(d, "Insert object", 0, at.block, at.offset) || snap(d, b) ||
-            content_insert(&b->st, at.offset, "\xEF\xBF\xBC", 3, format_at(&b->st, at.offset, 1)) ||
+            content_insert(&b->st, at.offset, "\xEF\xBF\xBC", 3,
+                           with_revision(d, format_at(&b->st, at.offset, 1), track_rev(d, PD_REV_INSERT))) ||
             grow((void**)&b->st.inl, &b->st.capinl, (int64_t)b->st.ninl + 1, sizeof(dinline))) {
         free(x.source);
         st = PD_ERR_NOMEM;
@@ -2570,6 +2601,10 @@ pd_status pd_doc_delete(pd_doc* d, pd_range r, pd_pos* after) {
 
     if (!a || !e || !is_boundary(&a->st, r.start.offset) || !is_boundary(&e->st, r.end.offset)) {
         return PD_ERR_RANGE;
+    }
+
+    if (d->track[0]) {
+        return track_delete(d, r, after);
     }
 
     if (a == e) {
@@ -3537,4 +3572,611 @@ int32_t pd_doc_load_images(pd_doc* d, pd_image_fetch fetch, void* user) {
             user);
     notify(d);
     return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* tracked changes                                                    */
+/* ------------------------------------------------------------------ */
+
+static const pd_revision* rev_of(const pd_doc* d, pd_rev_id id) {
+    return id >= 1 && (int32_t)id <= d->nrevs ? &d->revs[id - 1] : NULL;
+}
+
+static pd_rev_id format_rev(const pd_doc* d, pd_format_id fmt) {
+    const dformat* f = format_of(d, fmt);
+    return f && (f->cp.mask & PD_CP_REVISION) ? f->cp.revision : 0;
+}
+
+/* fmt with its revision replaced (0: none) */
+static pd_format_id with_revision(pd_doc* d, pd_format_id fmt, pd_rev_id rev) {
+    const dformat* f = format_of(d, fmt);
+    dformat nf;
+
+    if (!f || format_rev(d, fmt) == rev) {
+        return fmt;
+    }
+
+    nf = *f;
+    nf.cp.revision = rev;
+    nf.cp.mask = rev ? nf.cp.mask | PD_CP_REVISION : nf.cp.mask & ~PD_CP_REVISION;
+    return intern(d, nf.style, &nf.cp);
+}
+
+pd_status pd_doc_revision_add(pd_doc* d, const pd_revision* rev, pd_rev_id* out) {
+    pd_revision r;
+    int32_t i;
+
+    if (!d || !rev || !out || (rev->kind != PD_REV_INSERT && rev->kind != PD_REV_DELETE)) {
+        return PD_ERR_ARG;
+    }
+
+    memset(&r, 0, sizeof(r));
+    r.kind = rev->kind;
+    memcpy(r.author, rev->author, sizeof(r.author) - 1);
+    memcpy(r.date, rev->date, sizeof(r.date) - 1);
+    r.author[strlen(r.author)] = '\0';     /* bytes after the end are cleared, so equal revisions compare equal */
+    memset(r.author + strlen(r.author), 0, sizeof(r.author) - strlen(r.author));
+    memset(r.date + strlen(r.date), 0, sizeof(r.date) - strlen(r.date));
+
+    if (!pd_doc_utf8_valid(r.author, strlen(r.author), 0) || !pd_doc_utf8_valid(r.date, strlen(r.date), 0)) {
+        return PD_ERR_ARG;
+    }
+
+    for (i = 0; i < d->nrevs; i++) {
+        if (d->revs[i].kind == r.kind && !strcmp(d->revs[i].author, r.author) && !strcmp(d->revs[i].date, r.date)) {
+            *out = (pd_rev_id)(i + 1);
+            return PD_OK;
+        }
+    }
+
+    if (d->nrevs >= 0xFFFFFF || grow((void**)&d->revs, &d->caprevs, (int64_t)d->nrevs + 1, sizeof(pd_revision))) {
+        return PD_ERR_NOMEM;
+    }
+
+    d->revs[d->nrevs++] = r;
+    *out = (pd_rev_id)d->nrevs;
+    return PD_OK;
+}
+
+pd_status pd_doc_revision_get(const pd_doc* d, pd_rev_id rev, pd_revision* out) {
+    const pd_revision* r = d ? rev_of(d, rev) : NULL;
+
+    if (!r || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = *r;
+    return PD_OK;
+}
+
+int32_t pd_doc_revision_count(const pd_doc* d) {
+    return d ? d->nrevs : 0;
+}
+
+int32_t pd_doc_author_index(const pd_doc* d, const char* author) {
+    int32_t i, j, n = 0;
+
+    if (!d || !author) {
+        return -1;
+    }
+
+    for (i = 0; i < d->nrevs + d->ncomments; i++) {
+        const char* a = i < d->nrevs ? d->revs[i].author : d->comments[i - d->nrevs].author;
+        int seen = 0;
+
+        for (j = 0; j < i && !seen; j++) {
+            seen = !strcmp(a, j < d->nrevs ? d->revs[j].author : d->comments[j - d->nrevs].author);
+        }
+
+        if (!seen) {
+            if (!strcmp(a, author)) {
+                return n;
+            }
+
+            n++;
+        }
+    }
+
+    return -1;
+}
+
+uint32_t pd_doc_author_color(const pd_doc* d, const char* author) {
+    static const uint32_t pal[8] = {0xFF1565C0u, 0xFFC2185Bu, 0xFF2E7D32u, 0xFFE65100u,
+                                    0xFF6A1B9Au, 0xFF00838Fu, 0xFF8D6E00u, 0xFF5D4037u
+                                   };
+    int32_t i = pd_doc_author_index(d, author);
+
+    return pal[(i < 0 ? 0 : i) % 8];
+}
+
+/* this tracking session's revision of a kind, made on first use; 0 when not tracking */
+static pd_rev_id track_rev(pd_doc* d, int32_t kind) {
+    pd_rev_id* id = kind == PD_REV_INSERT ? &d->track_ins : &d->track_del;
+
+    if (!d->track[0]) {
+        return 0;
+    }
+
+    if (!*id) {
+        pd_revision r;
+        time_t now = time(NULL);
+        struct tm* t = gmtime(&now);
+
+        memset(&r, 0, sizeof(r));
+        r.kind = kind;
+        memcpy(r.author, d->track, sizeof(r.author));
+
+        if (t) {
+            strftime(r.date, sizeof(r.date), "%Y-%m-%dT%H:%M:%SZ", t);
+        }
+
+        if (pd_doc_revision_add(d, &r, id) != PD_OK) {
+            *id = 0;
+        }
+    }
+
+    return *id;
+}
+
+pd_status pd_doc_set_tracking(pd_doc* d, const char* author) {
+    if (!d || (author && (strlen(author) >= sizeof(d->track) || !pd_doc_utf8_valid(author, strlen(author), 0)))) {
+        return PD_ERR_ARG;
+    }
+
+    memset(d->track, 0, sizeof(d->track));
+
+    if (author) {
+        strcpy(d->track, author);
+    }
+
+    d->track_ins = d->track_del = 0;
+    return PD_OK;
+}
+
+const char* pd_doc_tracking(const pd_doc* d) {
+    return d && d->track[0] ? d->track : NULL;
+}
+
+void pd_doc_set_markup(pd_doc* d, int32_t mode) {
+    if (d && mode >= PD_MARKUP_BALLOONS && mode <= PD_MARKUP_ORIGINAL && mode != d->markup) {
+        d->markup = mode;
+        d->style_rev++;     /* every paragraph may look different */
+    }
+}
+
+int32_t pd_doc_markup(const pd_doc* d) {
+    return d ? d->markup : 0;
+}
+
+void pd_doc_markup_props(const pd_doc* d, pd_char_props* cp) {
+    const pd_revision* r = cp->revision ? rev_of(d, cp->revision) : NULL;
+    int ins;
+
+    if (!r) {
+        return;
+    }
+
+    ins = r->kind == PD_REV_INSERT;
+
+    if (d->markup == PD_MARKUP_FINAL || d->markup == PD_MARKUP_ORIGINAL) {
+        if (ins == (d->markup == PD_MARKUP_ORIGINAL)) {
+            cp->hidden = 1;
+        }
+
+        return;
+    }
+
+    cp->color = pd_doc_author_color(d, r->author);
+
+    if (ins) {
+        cp->underline = PD_UNDERLINE_SINGLE;
+    } else if (d->markup == PD_MARKUP_BALLOONS) {
+        cp->hidden = 1;
+    } else {
+        cp->strike = 1;
+    }
+}
+
+/* a paragraph range in reading order: start before end */
+static int range_ok(const pd_doc* d, pd_range r) {
+    blk* a = para_of(d, r.start.block), *e = para_of(d, r.end.block);
+    pd_block_id cur;
+
+    if (!a || !e || !is_boundary(&a->st, r.start.offset) || !is_boundary(&e->st, r.end.offset)) {
+        return 0;
+    }
+
+    if (a == e) {
+        return r.start.offset <= r.end.offset;
+    }
+
+    for (cur = a->id; cur && cur != e->id; cur = step_para(d, cur, 1)) {
+    }
+
+    return cur != 0;
+}
+
+/* the runs of [a, e) of a paragraph, split at a and e, copied out */
+static pd_run* runs_in(bstate* s, uint32_t a, uint32_t e, int32_t* n) {
+    pd_run* out;
+    int32_t i;
+
+    *n = 0;
+
+    if (runs_split(s, a) || runs_split(s, e) || (out = (pd_run*)malloc(((size_t)s->nruns + 1) * sizeof(pd_run))) == NULL) {
+        return NULL;
+    }
+
+    for (i = 0; i < s->nruns; i++) {
+        if (s->runs[i].start >= a && s->runs[i].end <= e) {
+            out[(*n)++] = s->runs[i];
+        }
+    }
+
+    return out;
+}
+
+/* what happens to one run: 0 keep, 1 remove the text, 2 set the format to rev */
+typedef int (*run_action)(pd_doc* d, const pd_revision* r, void* user);
+
+static int act_track(pd_doc* d, const pd_revision* r, void* user) {
+    (void)user;
+
+    if (r && r->kind == PD_REV_INSERT && !strcmp(r->author, d->track)) {
+        return 1;   /* one's own pending insertion just goes */
+    }
+
+    return r && r->kind == PD_REV_DELETE ? 0 : 2;
+}
+
+static int act_resolve(pd_doc* d, const pd_revision* r, void* user) {
+    int accept = *(const int*)user;
+
+    (void)d;
+
+    if (!r) {
+        return 0;
+    }
+
+    return (r->kind == PD_REV_DELETE) == (accept != 0) ? 1 : 3;     /* 3: back to plain text */
+}
+
+/* apply an action to every run of a range; whole paragraphs emptied by removal go when drop is set */
+static pd_status for_revisions(pd_doc* d, pd_range r, const char* label, run_action fn, void* user, pd_rev_id rev,
+                               int drop) {
+    pd_block_id cur, next;
+    pd_status st = PD_OK;
+
+    if (op_begin(d, label, 0, 0, 0)) {
+        op_end(d, 0, 0, 0);
+        return PD_ERR_NOMEM;
+    }
+
+    for (cur = r.start.block; cur && st == PD_OK; cur = next) {
+        blk* b = d->tab[cur];
+        uint32_t s0 = cur == r.start.block ? r.start.offset : 0, e0 = cur == r.end.block ? r.end.offset : b->st.len;
+        uint32_t had = b->st.len;
+        int32_t n, i, removed = 0;
+        pd_run* rs;
+
+        next = cur == r.end.block ? 0 : step_para(d, cur, 1);
+
+        if (s0 >= e0) {
+            continue;
+        }
+
+        if (snap(d, b) || (rs = runs_in(&b->st, s0, e0, &n)) == NULL) {
+            st = PD_ERR_NOMEM;
+            break;
+        }
+
+        for (i = n - 1; i >= 0; i--) {     /* backwards: offsets before a removal stay put */
+            int a = fn(d, rev_of(d, format_rev(d, rs[i].format)), user);
+
+            if (a == 1) {
+                content_delete(&b->st, rs[i].start, rs[i].end);
+                markers_delete(d, cur, rs[i].start, rs[i].end);
+                removed = 1;
+            } else if (a >= 2) {
+                pd_char_props cp;
+
+                memset(&cp, 0, sizeof(cp));
+                cp.mask = PD_CP_REVISION;
+                cp.revision = a == 2 ? rev : 0;
+
+                if (range_map_formats(d, &b->st, rs[i].start, rs[i].end, a == 2 ? 0 : 1, &cp, PD_CP_REVISION, 0)) {
+                    st = PD_ERR_NOMEM;
+                }
+            }
+        }
+
+        free(rs);
+        touch(d, PD_CHANGE_TEXT, cur, 0);
+
+        /* a paragraph whose whole text was a deletion goes with it, as its mark would in Word */
+        if (drop && removed && had > 0 && b->st.len == 0 && s0 == 0 && e0 == had && b->kind == PD_BLOCK_PARAGRAPH) {
+            blk* p = d->tab[b->parent];
+            pd_pos fb;
+
+            if (p && p->nkids > 1 && (next || step_para(d, cur, -1))) {
+                fb.block = next ? next : step_para(d, cur, -1);
+                fb.offset = 0;
+
+                if (do_detach(d, cur)) {
+                    st = PD_ERR_NOMEM;
+                }
+
+                clamp_markers(d, fb);
+            }
+        }
+    }
+
+    op_end(d, 0, 0, 0);
+    return st;
+}
+
+static pd_status track_delete(pd_doc* d, pd_range r, pd_pos* after) {
+    pd_rev_id del;
+
+    if (!range_ok(d, r)) {
+        return PD_ERR_ARG;
+    }
+
+    if (after) {
+        *after = r.start;
+    }
+
+    if (r.start.block == r.end.block && r.start.offset == r.end.offset) {
+        return PD_OK;
+    }
+
+    if ((del = track_rev(d, PD_REV_DELETE)) == 0) {
+        return PD_ERR_NOMEM;
+    }
+
+    return for_revisions(d, r, "Delete", act_track, NULL, del, 0);
+}
+
+pd_status pd_doc_revision_resolve(pd_doc* d, pd_range r, int32_t accept) {
+    int a = accept != 0;
+
+    if (!d || !range_ok(d, r)) {
+        return PD_ERR_ARG;
+    }
+
+    return for_revisions(d, r, a ? "Accept changes" : "Reject changes", act_resolve, &a, 0, 1);
+}
+
+pd_status pd_doc_revision_find(const pd_doc* d, pd_pos from, int32_t dir, pd_range* out, pd_rev_id* rev) {
+    pd_block_id cur;
+    int first = 1;
+
+    if (!d || !out || !para_of(d, from.block) || dir == 0) {
+        return PD_ERR_ARG;
+    }
+
+    dir = dir > 0 ? 1 : -1;
+
+    for (cur = from.block; cur; cur = step_para(d, cur, dir), first = 0) {
+        const bstate* s = &d->tab[cur]->st;
+        int32_t i, k;
+
+        for (k = 0; k < s->nruns; k++) {
+            int32_t j;
+            pd_rev_id v;
+
+            i = dir > 0 ? k : s->nruns - 1 - k;
+            v = format_rev(d, s->runs[i].format);
+
+            if (!v || (first && (dir > 0 ? s->runs[i].start < from.offset : s->runs[i].end > from.offset))) {
+                continue;
+            }
+
+            /* the stretch: neighbouring runs of the same revision */
+            for (j = i; j + 1 < s->nruns && s->runs[j + 1].start == s->runs[j].end &&
+                    format_rev(d, s->runs[j + 1].format) == v && !(first && dir < 0 && s->runs[j + 1].end > from.offset); j++) {
+            }
+
+            for (; i > 0 && s->runs[i - 1].end == s->runs[i].start && format_rev(d, s->runs[i - 1].format) == v &&
+                    !(first && dir > 0 && s->runs[i - 1].start < from.offset); i--) {
+            }
+
+            out->start.offset = s->runs[i].start;
+            out->end.offset = s->runs[j].end;
+            out->start.block = out->end.block = cur;
+
+            if (rev) {
+                *rev = v;
+            }
+
+            return PD_OK;
+        }
+    }
+
+    return PD_ERR_RANGE;
+}
+
+/* ------------------------------------------------------------------ */
+/* comments                                                           */
+/* ------------------------------------------------------------------ */
+
+static dcomment* comment_of(const pd_doc* d, pd_comment_id id) {
+    return id >= 1 && (int32_t)id <= d->ncomments && d->comments[id - 1].alive ? &d->comments[id - 1] : NULL;
+}
+
+/* fill a comment record from the public form (text copied); -1 bad input, -2 no memory */
+static int comment_fill(dcomment* c, const pd_comment* in) {
+    if (!memchr(in->author, 0, sizeof(in->author)) || !memchr(in->date, 0, sizeof(in->date)) ||
+            !pd_doc_utf8_valid(in->author, strlen(in->author), 0) || !pd_doc_utf8_valid(in->date, strlen(in->date), 0) ||
+            (in->text_len && !in->text) || in->text_len > INT32_MAX / 2 ||
+            !pd_doc_utf8_valid(in->text ? in->text : "", in->text_len, 0)) {
+        return -1;
+    }
+
+    memcpy(c->author, in->author, sizeof(c->author));
+    memcpy(c->date, in->date, sizeof(c->date));
+    c->resolved = in->resolved != 0;
+    c->len = in->text_len;
+
+    if ((c->text = (char*)malloc((size_t)in->text_len + 1)) == NULL) {
+        return -2;
+    }
+
+    if (in->text_len) {
+        memcpy(c->text, in->text, in->text_len);
+    }
+
+    c->text[in->text_len] = '\0';
+    return 0;
+}
+
+/* swap a comment for a new version under undo */
+static pd_status comment_swap(pd_doc* d, pd_comment_id id, const dcomment* nv, const char* label) {
+    urec* r;
+
+    if (op_begin(d, label, 0, 0, 0) || (r = add_rec(d, UR_COMMENT)) == NULL) {
+        op_end(d, 0, 0, 0);
+        free(nv->text);
+        return PD_ERR_NOMEM;
+    }
+
+    r->comment = id;
+    r->csave = d->comments[id - 1];
+    d->comments[id - 1] = *nv;
+    d->comment_rev++;
+    touch(d, PD_CHANGE_FORMAT, 0, 0);
+    op_end(d, 0, 0, 0);
+    return PD_OK;
+}
+
+static pd_status comment_add(pd_doc* d, const pd_comment* in, pd_comment_id* out, int undo) {
+    dcomment c;
+    const dcomment* p;
+    int e;
+
+    if (!d || !in || !out) {
+        return PD_ERR_ARG;
+    }
+
+    p = in->parent ? comment_of(d, in->parent) : NULL;
+
+    if ((in->parent && !p) || (!p && !range_ok(d, in->range))) {
+        return PD_ERR_ARG;
+    }
+
+    memset(&c, 0, sizeof(c));
+
+    if ((e = comment_fill(&c, in)) != 0) {
+        return e == -1 ? PD_ERR_ARG : PD_ERR_NOMEM;
+    }
+
+    c.alive = 1;
+    c.parent = in->parent;
+
+    if (p) {
+        c.start = p->start;
+        c.end = p->end;
+    } else if (pd_doc_marker_new(d, in->range.start, PD_GRAVITY_RIGHT, &c.start) != PD_OK ||
+               pd_doc_marker_new(d, in->range.end, PD_GRAVITY_LEFT, &c.end) != PD_OK) {
+        free(c.text);
+        return PD_ERR_NOMEM;
+    }
+
+    if (grow((void**)&d->comments, &d->capcomments, (int64_t)d->ncomments + 1, sizeof(dcomment))) {
+        free(c.text);
+        return PD_ERR_NOMEM;
+    }
+
+    memset(&d->comments[d->ncomments], 0, sizeof(dcomment));     /* the record of "not there yet" */
+    d->comments[d->ncomments].start = c.start;
+    d->comments[d->ncomments].end = c.end;
+    d->ncomments++;
+    *out = (pd_comment_id)d->ncomments;
+
+    if (!undo) {
+        d->comments[d->ncomments - 1] = c;
+        d->comment_rev++;
+        return PD_OK;
+    }
+
+    return comment_swap(d, *out, &c, "Comment");
+}
+
+pd_status pd_doc_comment_add(pd_doc* d, const pd_comment* in, pd_comment_id* out) {
+    return comment_add(d, in, out, 1);
+}
+
+pd_status pd_doc_comment_add_raw(pd_doc* d, const pd_comment* in, pd_comment_id* out) {
+    return comment_add(d, in, out, 0);
+}
+
+pd_status pd_doc_comment_get(const pd_doc* d, pd_comment_id id, pd_comment* out) {
+    const dcomment* c = d ? comment_of(d, id) : NULL;
+
+    if (!c || !out) {
+        return PD_ERR_ARG;
+    }
+
+    memset(out, 0, sizeof(*out));
+    memcpy(out->author, c->author, sizeof(out->author));
+    memcpy(out->date, c->date, sizeof(out->date));
+    out->text = c->text;
+    out->text_len = c->len;
+    out->parent = c->parent;
+    out->resolved = c->resolved;
+    pd_doc_marker_get(d, c->start, &out->range.start);
+    pd_doc_marker_get(d, c->end, &out->range.end);
+
+    if (!range_ok(d, out->range)) {     /* edits crossed the ends over */
+        out->range.end = out->range.start;
+    }
+
+    return PD_OK;
+}
+
+pd_status pd_doc_comment_set(pd_doc* d, pd_comment_id id, const pd_comment* in) {
+    const dcomment* c = d ? comment_of(d, id) : NULL;
+    dcomment nv;
+    int e;
+
+    if (!c || !in) {
+        return PD_ERR_ARG;
+    }
+
+    nv = *c;
+
+    if ((e = comment_fill(&nv, in)) != 0) {
+        return e == -1 ? PD_ERR_ARG : PD_ERR_NOMEM;
+    }
+
+    return comment_swap(d, id, &nv, "Edit comment");
+}
+
+pd_status pd_doc_comment_remove(pd_doc* d, pd_comment_id id) {
+    int32_t i;
+    pd_status st = PD_OK;
+
+    if (!d || !comment_of(d, id)) {
+        return PD_ERR_ARG;
+    }
+
+    pd_doc_begin_group(d, "Delete comment");
+
+    for (i = 0; i < d->ncomments && st == PD_OK; i++) {
+        if (d->comments[i].alive && ((pd_comment_id)(i + 1) == id || d->comments[i].parent == id)) {
+            dcomment dead = d->comments[i];
+
+            dead.alive = 0;
+            dead.text = NULL;
+            dead.len = 0;
+            st = comment_swap(d, (pd_comment_id)(i + 1), &dead, "Delete comment");
+        }
+    }
+
+    pd_doc_end_group(d);
+    return st;
+}
+
+int32_t pd_doc_comment_count(const pd_doc* d) {
+    return d ? d->ncomments : 0;
 }

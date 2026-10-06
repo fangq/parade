@@ -954,6 +954,155 @@ static void test_layout_bridge(void) {
     pd_font_free(font);
 }
 
+/* the revision of the text at an offset (0: none) */
+static pd_rev_id rev_at(const pd_doc* d, pd_block_id b, uint32_t off) {
+    pd_run runs[64];
+    int32_t n = 0, i;
+    pd_style_id cs;
+    pd_char_props cp;
+
+    pd_doc_para_runs(d, b, runs, 64, &n);
+
+    for (i = 0; i < n; i++) {
+        if (runs[i].start <= off && off < runs[i].end && pd_doc_format_info(d, runs[i].format, &cs, &cp) == PD_OK) {
+            return cp.mask & PD_CP_REVISION ? cp.revision : 0;
+        }
+    }
+
+    return 0;
+}
+
+static int rev_kind(const pd_doc* d, pd_rev_id id, const char* author) {
+    pd_revision r;
+    return pd_doc_revision_get(d, id, &r) == PD_OK && !strcmp(r.author, author) ? r.kind : 0;
+}
+
+static void test_track_changes(void) {
+    pd_doc* d = NULL, *t = NULL;
+    pd_block_id p, q;
+    pd_pos a;
+    pd_range r;
+    pd_rev_id v;
+    pd_comment c, g;
+    pd_comment_id c1 = 0, c2 = 0;
+    buf_t txt, txt2;
+
+    pd_doc_new(&d);
+    p = first_para(d);
+    pd_doc_insert_text(d, at(p, 0), "The quick fox", 13, PD_FORMAT_INHERIT, NULL);
+    pd_doc_split(d, at(p, 13), &a);
+    q = a.block;
+    pd_doc_insert_text(d, a, "jumps over", 10, PD_FORMAT_INHERIT, NULL);
+    pd_doc_clear_undo(d);
+
+    /* typing while tracking makes an insertion by the author */
+    CHECK(pd_doc_set_tracking(d, "Ann") == PD_OK && !strcmp(pd_doc_tracking(d), "Ann"));
+    CHECK(pd_doc_insert_text(d, at(p, 10), "brown ", 6, PD_FORMAT_INHERIT, NULL) == PD_OK);
+    CHECK(text_is(d, p, "The quick brown fox"));
+    v = rev_at(d, p, 10);
+    CHECK(v && rev_kind(d, v, "Ann") == PD_REV_INSERT && rev_at(d, p, 9) == 0 && rev_at(d, p, 16) == 0);
+
+    /* deleting others' text marks it; deleting one's own insertion removes it */
+    r.start = at(p, 4);
+    r.end = at(p, 12);    /* "quick br" */
+    CHECK(pd_doc_delete(d, r, &a) == PD_OK && a.offset == 4);
+    CHECK(text_is(d, p, "The quick own fox"));
+    CHECK(rev_kind(d, rev_at(d, p, 4), "Ann") == PD_REV_DELETE && rev_at(d, p, 10) == v);
+    CHECK(pd_doc_undo(d) == PD_OK && text_is(d, p, "The quick brown fox") && rev_at(d, p, 4) == 0);
+    CHECK(pd_doc_redo(d) == PD_OK && text_is(d, p, "The quick own fox"));
+
+    /* across paragraphs: text is marked, the paragraphs stay */
+    r.start = at(p, 14);
+    r.end = at(q, 5);
+    CHECK(pd_doc_delete(d, r, NULL) == PD_OK && pd_doc_next_paragraph(d, p) == q);
+    CHECK(rev_kind(d, rev_at(d, q, 0), "Ann") == PD_REV_DELETE && rev_at(d, q, 5) == 0);
+
+    /* finding changes, forwards and backwards */
+    CHECK(pd_doc_revision_find(d, at(p, 0), 1, &r, &v) == PD_OK && r.start.offset == 4 && r.end.offset == 10 &&
+          rev_kind(d, v, "Ann") == PD_REV_DELETE);
+    CHECK(pd_doc_revision_find(d, r.end, 1, &r, &v) == PD_OK && r.start.offset == 10 && r.end.offset == 14);
+    CHECK(pd_doc_revision_find(d, r.end, 1, &r, &v) == PD_OK && r.start.offset == 14 && r.end.offset == 17);
+    CHECK(pd_doc_revision_find(d, r.end, 1, &r, &v) == PD_OK && r.start.block == q && r.end.offset == 5);
+    CHECK(pd_doc_revision_find(d, r.end, 1, &r, &v) == PD_ERR_RANGE);
+    CHECK(pd_doc_revision_find(d, at(q, 0), -1, &r, &v) == PD_OK && r.start.block == p && r.start.offset == 14);
+
+    /* typing is not tracked once tracking stops, even next to a change */
+    CHECK(pd_doc_set_tracking(d, NULL) == PD_OK && pd_doc_tracking(d) == NULL);
+    CHECK(pd_doc_insert_text(d, at(p, 13), "!", 1, PD_FORMAT_INHERIT, NULL) == PD_OK && rev_at(d, p, 13) == 0);
+    CHECK(pd_doc_undo(d) == PD_OK);
+
+    /* comments follow edits and undo */
+    memset(&c, 0, sizeof(c));
+    strcpy(c.author, "Bob");
+    c.text = "Which fox?";
+    c.text_len = 10;
+    c.range.start = at(p, 14);
+    c.range.end = at(p, 17);
+    CHECK(pd_doc_comment_add(d, &c, &c1) == PD_OK && c1 == 1);
+    c.parent = c1;
+    c.text = "The red one.";
+    c.text_len = 12;
+    strcpy(c.author, "Ann");
+    CHECK(pd_doc_comment_add(d, &c, &c2) == PD_OK && c2 == 2);
+    CHECK(pd_doc_comment_get(d, c2, &g) == PD_OK && g.parent == c1 && g.range.start.offset == 14);
+    CHECK(pd_doc_author_index(d, "Ann") == 0 && pd_doc_author_index(d, "Bob") == 1 &&
+          pd_doc_author_color(d, "Ann") != pd_doc_author_color(d, "Bob"));
+    pd_doc_insert_text(d, at(p, 0), "So: ", 4, PD_FORMAT_INHERIT, NULL);
+    CHECK(pd_doc_comment_get(d, c1, &g) == PD_OK && g.range.start.offset == 18 && g.range.end.offset == 21 &&
+          g.text_len == 10 && !memcmp(g.text, "Which fox?", 10));
+    CHECK(pd_doc_undo(d) == PD_OK);
+    g.resolved = 1;
+    CHECK(pd_doc_comment_set(d, c1, &g) == PD_OK && pd_doc_comment_get(d, c1, &g) == PD_OK && g.resolved);
+    CHECK(pd_doc_undo(d) == PD_OK && pd_doc_comment_get(d, c1, &g) == PD_OK && !g.resolved);
+
+    /* the native format keeps revisions and comments */
+    txt = save(d, PD_JDATA_TEXT);
+    CHECK(contains(txt, "\"Revisions\"", 11) && contains(txt, "\"Comments\"", 10));
+    CHECK(pd_doc_load(txt.p, txt.n, PD_JDATA_TEXT, &t) == PD_OK);
+
+    if (t) {
+        txt2 = save(t, PD_JDATA_TEXT);
+        CHECK(same(txt, txt2));
+        CHECK(rev_kind(t, rev_at(t, p, 4), "Ann") == PD_REV_DELETE);
+        CHECK(pd_doc_comment_get(t, 2, &g) == PD_OK && g.parent == 1 && !strcmp(g.author, "Ann"));
+        free(txt2.p);
+        pd_doc_free(t);
+    }
+
+    free(txt.p);
+    CHECK(pd_doc_comment_remove(d, c1) == PD_OK && pd_doc_comment_get(d, c2, &g) == PD_ERR_ARG);
+    CHECK(pd_doc_undo(d) == PD_OK && pd_doc_comment_get(d, c2, &g) == PD_OK);
+
+    /* accept: deletions go, insertions stay as plain text */
+    r.start = at(p, 0);
+    r.end = at(q, 10);
+    CHECK(pd_doc_revision_resolve(d, r, 1) == PD_OK);
+    CHECK(text_is(d, p, "The own ") && text_is(d, q, " over") && rev_at(d, p, 4) == 0);
+    CHECK(pd_doc_revision_find(d, at(p, 0), 1, &r, &v) == PD_ERR_RANGE);
+    CHECK(pd_doc_undo(d) == PD_OK && text_is(d, p, "The quick own fox"));
+
+    /* reject: insertions go, deletions come back */
+    r.start = at(p, 0);
+    r.end = at(q, 10);
+    CHECK(pd_doc_revision_resolve(d, r, 0) == PD_OK);
+    CHECK(text_is(d, p, "The quick fox") && text_is(d, q, "jumps over"));
+    CHECK(pd_doc_undo(d) == PD_OK);
+
+    /* a paragraph wholly deleted goes on accept */
+    pd_doc_set_tracking(d, "Ann");
+    r.start = at(q, 0);
+    r.end = at(q, 10);
+    CHECK(pd_doc_delete(d, r, NULL) == PD_OK && text_is(d, q, "jumps over"));
+    r.start = at(p, 0);
+    CHECK(pd_doc_revision_resolve(d, r, 1) == PD_OK && pd_doc_next_paragraph(d, p) == 0);
+    CHECK(invariants(d));
+
+    /* markup modes */
+    pd_doc_set_markup(d, PD_MARKUP_INLINE);
+    CHECK(pd_doc_markup(d) == PD_MARKUP_INLINE);
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);   /* progress stays in order with sanitizer reports */
     printf("basics\n");
@@ -972,6 +1121,8 @@ int main(void) {
     test_jdata();
     printf("layout bridge\n");
     test_layout_bridge();
+    printf("tracked changes, comments\n");
+    test_track_changes();
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

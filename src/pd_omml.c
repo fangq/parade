@@ -770,28 +770,20 @@ static void tex_list(tp* p, int stop_brace) {
 
                 p->o = keep;
 
-                if (both) {     /* rename the element: sSub or sSup becomes sSubSup */
+                if (both) {     /* rename the element, which opens at atom: sSub or sSup becomes sSubSup */
                     const char* tag = c == '^' ? "<m:sSup><m:e>" : "<m:sSub><m:e>";
-                    size_t tl = strlen(tag), q;
+                    size_t tl = strlen(tag);
 
-                    for (q = o->n >= tl ? o->n - tl : 0; ; q--) {
-                        if (q + tl <= o->n && !memcmp(o->p + q, tag, tl)) {
-                            size_t rest = o->n - (q + tl);
-                            char* tail = (char*)malloc(rest + 1);
+                    if (atom + tl <= o->n && !memcmp(o->p + atom, tag, tl)) {
+                        size_t rest = o->n - (atom + tl);
+                        char* tail = (char*)malloc(rest + 1);
 
-                            if (tail) {
-                                memcpy(tail, o->p + q + tl, rest);
-                                o->n = q;
-                                pb_puts(o, "<m:sSubSup><m:e>");
-                                pb_put(o, tail, rest);
-                                free(tail);
-                            }
-
-                            break;
-                        }
-
-                        if (q == 0) {
-                            break;
+                        if (tail) {
+                            memcpy(tail, o->p + atom + tl, rest);
+                            o->n = atom;
+                            pb_puts(o, "<m:sSubSup><m:e>");
+                            pb_put(o, tail, rest);
+                            free(tail);
                         }
                     }
 

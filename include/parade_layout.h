@@ -102,6 +102,30 @@ typedef struct {
 PD_API pd_status pd_layout_page_items(const pd_layout* layout, int32_t page, pd_draw* buf, int32_t cap,
                                       int32_t* count);
 
+typedef enum {
+    PD_MARK_DELETION = 1,       /**< deleted text: a balloon in PD_MARKUP_BALLOONS, else struck through in place */
+    PD_MARK_INSERTION = 2,      /**< inserted text (in the text, in the author's colour) */
+    PD_MARK_COMMENT = 3         /**< a comment (not its replies, which share its range) */
+} pd_mark_kind;
+
+typedef struct {
+    int32_t kind;               /**< pd_mark_kind */
+    uint32_t id;                /**< pd_rev_id or pd_comment_id */
+    pd_range range;             /**< the text concerned: a change's stretch of one paragraph, a comment's range */
+    pd_sp x, y;                 /**< anchor on the page: where the range starts, on its baseline */
+    pd_sp top, bottom;          /**< the lines it covers on this page, for a change bar */
+    uint32_t color;             /**< the author's colour */
+} pd_markup_item;
+
+/**
+ * The tracked changes and comments starting on a page, top to bottom, for
+ * a host's margin balloons and change bars; same size-query convention as
+ * pd_layout_page_items. Changes are not listed in PD_MARKUP_FINAL and
+ * PD_MARKUP_ORIGINAL.
+ */
+PD_API pd_status pd_layout_page_markup(const pd_layout* layout, int32_t page, pd_markup_item* buf, int32_t cap,
+                                       int32_t* count);
+
 /** the document position nearest to a point on a page */
 PD_API pd_status pd_layout_hit_test(const pd_layout* layout, int32_t page, pd_sp x, pd_sp y, pd_pos* out);
 

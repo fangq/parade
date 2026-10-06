@@ -37,6 +37,8 @@ type
   pd_list_id = UInt32;
   pd_res_id = UInt32;
   pd_marker_id = UInt32;
+  pd_rev_id = UInt32;
+  pd_comment_id = UInt32;
 
   Ppd_sp = ^pd_sp;
   Ppd_font = Pointer;
@@ -122,6 +124,16 @@ const
   PD_CP_CAPS = 1 shl 14;
   PD_CP_HIDDEN = 1 shl 15;
   PD_CP_POSITION = 1 shl 16;
+  PD_CP_REVISION = 1 shl 17;
+  PD_REV_INSERT = 1;
+  PD_REV_DELETE = 2;
+  PD_MARKUP_BALLOONS = 0;
+  PD_MARKUP_INLINE = 1;
+  PD_MARKUP_FINAL = 2;
+  PD_MARKUP_ORIGINAL = 3;
+  PD_MARK_DELETION = 1;
+  PD_MARK_INSERTION = 2;
+  PD_MARK_COMMENT = 3;
   PD_UNDERLINE_NONE = 0;
   PD_UNDERLINE_SINGLE = 1;
   PD_UNDERLINE_DOUBLE = 2;
@@ -364,8 +376,27 @@ type
     link_target: pd_block_id;
     caps, hidden: Int32;
     position: pd_sp;
+    revision: pd_rev_id;
   end;
   Ppd_char_props = ^pd_char_props;
+
+  pd_revision = record
+    kind: Int32;
+    author: array[0..63] of AnsiChar;
+    date: array[0..31] of AnsiChar;
+  end;
+  Ppd_revision = ^pd_revision;
+
+  pd_comment = record
+    author: array[0..63] of AnsiChar;
+    date: array[0..31] of AnsiChar;
+    text: PAnsiChar;
+    text_len: UInt32;
+    parent: pd_comment_id;
+    resolved: Int32;
+    range: pd_range;
+  end;
+  Ppd_comment = ^pd_comment;
 
   pd_tab_stop = record
     position: pd_sp;
@@ -540,6 +571,15 @@ type
   end;
   Ppd_draw = ^pd_draw;
 
+  pd_markup_item = record
+    kind: Int32;
+    id: UInt32;
+    range: pd_range;
+    x, y, top, bottom: pd_sp;
+    color: UInt32;
+  end;
+  Ppd_markup_item = ^pd_markup_item;
+
   pd_pdf_options = record
     compress, outlines: Int32;
     title: array[0..255] of AnsiChar;
@@ -687,6 +727,24 @@ procedure pd_doc_marker_free(doc: Ppd_doc; marker: pd_marker_id); cdecl; PDEXT;
 function pd_doc_marker_get(doc: Ppd_doc; marker: pd_marker_id; out pos: pd_pos): pd_status; cdecl; PDEXT;
 function pd_doc_marker_set(doc: Ppd_doc; marker: pd_marker_id; pos: pd_pos): pd_status; cdecl; PDEXT;
 
+function pd_doc_revision_add(doc: Ppd_doc; const rev: pd_revision; out id: pd_rev_id): pd_status; cdecl; PDEXT;
+function pd_doc_revision_get(doc: Ppd_doc; rev: pd_rev_id; out info: pd_revision): pd_status; cdecl; PDEXT;
+function pd_doc_revision_count(doc: Ppd_doc): Int32; cdecl; PDEXT;
+function pd_doc_author_index(doc: Ppd_doc; author: PAnsiChar): Int32; cdecl; PDEXT;
+function pd_doc_author_color(doc: Ppd_doc; author: PAnsiChar): UInt32; cdecl; PDEXT;
+function pd_doc_set_tracking(doc: Ppd_doc; author: PAnsiChar): pd_status; cdecl; PDEXT;
+function pd_doc_tracking(doc: Ppd_doc): PAnsiChar; cdecl; PDEXT;
+procedure pd_doc_set_markup(doc: Ppd_doc; mode: Int32); cdecl; PDEXT;
+function pd_doc_markup(doc: Ppd_doc): Int32; cdecl; PDEXT;
+function pd_doc_revision_resolve(doc: Ppd_doc; range: pd_range; accept: Int32): pd_status; cdecl; PDEXT;
+function pd_doc_revision_find(doc: Ppd_doc; from: pd_pos; dir: Int32; out range: pd_range; rev: PUInt32): pd_status;
+  cdecl; PDEXT;
+function pd_doc_comment_add(doc: Ppd_doc; const comment: pd_comment; out id: pd_comment_id): pd_status; cdecl; PDEXT;
+function pd_doc_comment_get(doc: Ppd_doc; id: pd_comment_id; out comment: pd_comment): pd_status; cdecl; PDEXT;
+function pd_doc_comment_set(doc: Ppd_doc; id: pd_comment_id; const comment: pd_comment): pd_status; cdecl; PDEXT;
+function pd_doc_comment_remove(doc: Ppd_doc; id: pd_comment_id): pd_status; cdecl; PDEXT;
+function pd_doc_comment_count(doc: Ppd_doc): Int32; cdecl; PDEXT;
+
 procedure pd_doc_set_listener(doc: Ppd_doc; fn: pd_doc_listener; user: Pointer); cdecl; PDEXT;
 function pd_doc_save(doc: Ppd_doc; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 function pd_doc_load_images(doc: Ppd_doc; fetch: pd_image_fetch; user: Pointer): Int32; cdecl; PDEXT;
@@ -702,6 +760,8 @@ procedure pd_layout_invalidate(layout: Ppd_layout); cdecl; PDEXT;
 function pd_layout_page_count(layout: Ppd_layout): Int32; cdecl; PDEXT;
 function pd_layout_page_info(layout: Ppd_layout; page: Int32; out info: pd_page_info): pd_status; cdecl; PDEXT;
 function pd_layout_page_items(layout: Ppd_layout; page: Int32; buf: Ppd_draw; cap: Int32; out count: Int32): pd_status; cdecl; PDEXT;
+function pd_layout_page_markup(layout: Ppd_layout; page: Int32; buf: Ppd_markup_item; cap: Int32;
+  out count: Int32): pd_status; cdecl; PDEXT;
 function pd_layout_hit_test(layout: Ppd_layout; page: Int32; x, y: pd_sp; out pos: pd_pos): pd_status; cdecl; PDEXT;
 function pd_layout_caret(layout: Ppd_layout; pos: pd_pos; out page: Int32; out x, baseline, ascent, descent: pd_sp): pd_status; cdecl; PDEXT;
 

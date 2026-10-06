@@ -48,6 +48,8 @@ typedef int (*pd_span_fn)(void* user, const pd_span* s);
 
 /* spans of a paragraph in order; stops early when fn returns nonzero */
 int pd_conv_spans(const pd_doc* d, pd_block_id para, pd_span_fn fn, void* user);
+/* the same with tracked deletions included (pd_conv_spans leaves them out) */
+int pd_conv_spans_all(const pd_doc* d, pd_block_id para, pd_span_fn fn, void* user);
 
 /* numbers the exporters print: SEQ counters, footnotes, cross-references */
 typedef struct {
@@ -128,6 +130,8 @@ void bld_list(pd_bld* b, int32_t kind, int32_t level);
 pd_list_id bld_list_new(pd_bld* b, int32_t kind, int32_t level, int32_t start);
 /* start a paragraph now (ends the current one) */
 pd_block_id bld_begin_para(pd_bld* b);
+/* where the next text goes (block 0 outside a paragraph); pending text is put in first */
+pd_pos bld_pos(pd_bld* b);
 void bld_end_para(pd_bld* b);
 void bld_text(pd_bld* b, const char* s, size_t n);
 void bld_inline(pd_bld* b, const pd_inline* o);
