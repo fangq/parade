@@ -1,0 +1,337 @@
+{
+ "_DataInfo_": {
+  "GeneratedBy": "Parade 0.1.0",
+  "FormatName": "ParadeDocument",
+  "FormatVersion": 1,
+  "LengthUnit": "sp (1/65536 pt)"
+ },
+ "NextID": 5,
+ "Styles": [
+  {
+   "Name": "Normal",
+   "Kind": "paragraph",
+   "Parent": 0,
+   "Para": {
+    "SpaceBefore": 0,
+    "SpaceAfter": 0,
+    "LineSpacing": 1000,
+    "Hyphenate": true,
+    "TabInterval": 2359296,
+    "Tabs": []
+   },
+   "Char": {
+    "Family": "Times New Roman",
+    "Size": 655360,
+    "Kerning": true
+   }
+  },
+  {
+   "Name": "Heading 1",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "left",
+    "IndentFirst": 0,
+    "SpaceBefore": 1310720,
+    "SpaceAfter": 655360,
+    "KeepWithNext": true,
+    "Hyphenate": false,
+    "NextStyle": 1
+   },
+   "Char": {
+    "Size": 1310720,
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Heading 2",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "left",
+    "IndentFirst": 0,
+    "SpaceBefore": 1048576,
+    "SpaceAfter": 524288,
+    "KeepWithNext": true,
+    "Hyphenate": false,
+    "NextStyle": 1
+   },
+   "Char": {
+    "Size": 1048576,
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Heading 3",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "left",
+    "IndentFirst": 0,
+    "SpaceBefore": 917504,
+    "SpaceAfter": 458752,
+    "KeepWithNext": true,
+    "Hyphenate": false,
+    "NextStyle": 1
+   },
+   "Char": {
+    "Size": 917504,
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Heading 4",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "left",
+    "IndentFirst": 0,
+    "SpaceBefore": 786432,
+    "SpaceAfter": 393216,
+    "KeepWithNext": true,
+    "Hyphenate": false,
+    "NextStyle": 1
+   },
+   "Char": {
+    "Size": 786432,
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Heading 5",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "left",
+    "IndentFirst": 0,
+    "SpaceBefore": 720896,
+    "SpaceAfter": 327680,
+    "KeepWithNext": true,
+    "Hyphenate": false,
+    "NextStyle": 1
+   },
+   "Char": {
+    "Size": 720896,
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Heading 6",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "left",
+    "IndentFirst": 0,
+    "SpaceBefore": 655360,
+    "SpaceAfter": 327680,
+    "KeepWithNext": true,
+    "Hyphenate": false,
+    "NextStyle": 1
+   },
+   "Char": {
+    "Size": 655360,
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Title",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "center",
+    "IndentFirst": 0,
+    "SpaceAfter": 1179648,
+    "Hyphenate": false,
+    "NextStyle": 1
+   },
+   "Char": {
+    "Size": 1572864,
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Caption",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "center",
+    "IndentFirst": 0,
+    "SpaceBefore": 393216,
+    "SpaceAfter": 655360
+   },
+   "Char": {
+    "Size": 589824,
+    "Italic": true
+   }
+  },
+  {
+   "Name": "Quote",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "IndentLeft": 1572864,
+    "IndentRight": 1572864
+   },
+   "Char": {
+    "Italic": true
+   }
+  },
+  {
+   "Name": "Code",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "Align": "left",
+    "IndentFirst": 0,
+    "Hyphenate": false,
+    "BreakMode": "greedy"
+   },
+   "Char": {
+    "Family": "monospace",
+    "Size": 589824,
+    "Kerning": false
+   }
+  },
+  {
+   "Name": "Emphasis",
+   "Kind": "character",
+   "Parent": 0,
+   "Char": {
+    "Italic": true
+   }
+  },
+  {
+   "Name": "Strong",
+   "Kind": "character",
+   "Parent": 0,
+   "Char": {
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Term",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "SpaceAfter": 0,
+    "KeepWithNext": true
+   },
+   "Char": {
+    "Weight": 700
+   }
+  },
+  {
+   "Name": "Definition",
+   "Kind": "paragraph",
+   "Parent": 1,
+   "Para": {
+    "IndentLeft": 2359296
+   },
+   "Char": {}
+  }
+ ],
+ "Revisions": [
+  {
+   "Kind": "delete",
+   "Author": "Ann",
+   "Date": "2026-10-06T07:59:42Z"
+  },
+  {
+   "Kind": "insert",
+   "Author": "Ann",
+   "Date": "2026-10-06T07:59:42Z"
+  }
+ ],
+ "Formats": [
+  {
+   "Style": 0,
+   "Char": {
+    "Revision": 1
+   }
+  },
+  {
+   "Style": 0,
+   "Char": {
+    "Revision": 2
+   }
+  }
+ ],
+ "Lists": [],
+ "Resources": [],
+ "Document": {
+  "_TreeNode_(root)": {
+   "ID": 1
+  },
+  "_TreeChildren_": [
+   {
+    "_TreeNode_(section)": {
+     "ID": 3,
+     "Page": {
+      "Width": 39013580,
+      "Height": 55174758,
+      "MarginTop": 4718592,
+      "MarginBottom": 4718592,
+      "MarginLeft": 4718592,
+      "MarginRight": 4718592,
+      "HeaderDistance": 2359296,
+      "FooterDistance": 2359296,
+      "Columns": 1,
+      "ColumnGap": 1179648,
+      "FirstPageNumber": 1,
+      "PageNumberFormat": "decimal",
+      "TitlePage": false,
+      "FacingPages": false,
+      "Header": 0,
+      "HeaderFirst": 0,
+      "HeaderEven": 0,
+      "Footer": 0,
+      "FooterFirst": 0,
+      "FooterEven": 0,
+      "FootnoteSkip": 786432,
+      "AddSpacing": true,
+      "MirrorMargins": -1
+     }
+    },
+    "_TreeChildren_": [
+     {
+      "_TreeNode_(paragraph)": {
+       "ID": 4,
+       "Style": 1,
+       "Role": "body",
+       "Level": 0,
+       "Text": "The quick brown fox",
+       "Runs": [
+        [0,4,1],
+        [4,10,0],
+        [10,16,2],
+        [16,19,0]
+       ]
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "Stories": [],
+ "Comments": [
+  {
+   "Author": "Ann",
+   "Date": "2026-10-06T03:59:42",
+   "Text": "Which fox?",
+   "Start": [
+    4,
+    16
+   ],
+   "End": [
+    4,
+    19
+   ]
+  },
+  {
+   "Author": "Ann",
+   "Date": "2026-10-06T03:59:42",
+   "Text": "The red one.",
+   "Parent": 1
+  }
+ ]
+}

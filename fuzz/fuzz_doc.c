@@ -18,6 +18,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     pd_layout* L = NULL;
     pd_draw* items;
     pd_pos pos;
+    pd_block_info bi;
     int32_t pg, n, page;
     pd_sp x, base, asc, desc;
     size_t bytes = 0;
@@ -56,6 +57,8 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 }
 
                 pd_layout_hit_test(L, pg, PD_PT(100), PD_PT(200), &pos);
+                n = 0;
+                pd_layout_page_markup(L, pg, NULL, 0, &n);
             }
 
             pos.block = pd_doc_next_paragraph(d, 0);
@@ -66,6 +69,34 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             }
 
             pd_layout_write_pdf(L, NULL, fuzz_discard, &bytes);
+
+            /* review: tracked edits, then every change accepted or rejected, and undone */
+            if (pos.block) {
+                pd_range all;
+                pd_pos e = pos, q;
+                pd_block_id nb;
+
+                for (nb = pos.block; nb; nb = pd_doc_next_paragraph(d, nb)) {
+                    e.block = nb;
+                }
+
+                pd_doc_block_info(d, e.block, &bi);
+                e.offset = bi.text_length;
+                all.start = pos;
+                all.end = e;
+                pd_doc_set_tracking(d, "fuzz");
+                pd_doc_insert_text(d, pos, "ab", 2, PD_FORMAT_INHERIT, &q);
+                if (e.block == pos.block) {
+                    all.end.offset += 2;
+                }
+                pd_doc_delete(d, all, &q);
+                pd_doc_set_tracking(d, NULL);
+                pd_doc_revision_resolve(d, all, (int32_t)(size & 1));
+                pd_layout_update(L, NULL);
+                pd_doc_undo(d);
+                pd_doc_undo(d);
+                pd_doc_undo(d);
+            }
         }
 
         pd_layout_free(L);

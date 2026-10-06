@@ -2383,6 +2383,82 @@ static int has_bytes(const char* t, uint32_t n, const char* want) {
    paragraph; a SEQ caption number is a live counter; a REF keeps Word's
    text and links to its bookmark; a link to a place in the document goes
    there. All of it kept through DOCX. */
+/* the revision kind and author of the text at an offset */
+static int rev_kind_at(const pd_doc* d, pd_block_id p, uint32_t off, const char* author) {
+    pd_run runs[64];
+    int32_t n = 0, i;
+    pd_style_id cs;
+    pd_char_props cp;
+    pd_revision rv;
+
+    pd_doc_para_runs(d, p, runs, 64, &n);
+
+    for (i = 0; i < n; i++) {
+        if (runs[i].start <= off && off < runs[i].end && pd_doc_format_info(d, runs[i].format, &cs, &cp) == PD_OK &&
+                (cp.mask & PD_CP_REVISION) && pd_doc_revision_get(d, cp.revision, &rv) == PD_OK &&
+                (!author || !strcmp(rv.author, author))) {
+            return rv.kind;
+        }
+    }
+
+    return 0;
+}
+
+static void test_docx_review(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:w14=\"w14\"><w:body>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">The </w:t></w:r>"
+        "<w:del w:id=\"1\" w:author=\"Bob\" w:date=\"2026-01-02T03:04:05Z\"><w:r><w:delText>slow </w:delText></w:r></w:del>"
+        "<w:ins w:id=\"2\" w:author=\"Ann\" w:date=\"2026-01-02T03:04:06Z\"><w:r><w:t xml:space=\"preserve\">quick </w:t></w:r></w:ins>"
+        "<w:commentRangeStart w:id=\"7\"/><w:r><w:t>fox</w:t></w:r><w:commentRangeEnd w:id=\"7\"/>"
+        "<w:r><w:commentReference w:id=\"7\"/></w:r>"
+        "<w:commentRangeStart w:id=\"8\"/><w:commentRangeEnd w:id=\"8\"/><w:r><w:commentReference w:id=\"8\"/></w:r>"
+        "<w:r><w:t>.</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>Next.</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        "word/comments.xml",
+        "<w:comments xmlns:w=\"w\" xmlns:w14=\"w14\">"
+        "<w:comment w:id=\"7\" w:author=\"Cy\" w:date=\"2026-01-03T00:00:00Z\"><w:p w14:paraId=\"0A000001\">"
+        "<w:r><w:annotationRef/></w:r><w:r><w:t>Which fox?</w:t></w:r></w:p><w:p w14:paraId=\"0A000002\">"
+        "<w:r><w:t>Really.</w:t></w:r></w:p></w:comment>"
+        "<w:comment w:id=\"8\" w:author=\"Ann\"><w:p w14:paraId=\"0A000003\"><w:r><w:t>The red one.</w:t></w:r></w:p>"
+        "</w:comment></w:comments>",
+        "word/commentsExtended.xml",
+        "<w15:commentsEx xmlns:w15=\"w15\"><w15:commentEx w15:paraId=\"0A000002\" w15:done=\"1\"/>"
+        "<w15:commentEx w15:paraId=\"0A000003\" w15:paraIdParent=\"0A000002\" w15:done=\"0\"/></w15:commentsEx>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id p0;
+        pd_comment c;
+        buf_t md = { NULL, 0 };
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        p0 = pd_doc_next_paragraph(d, 0);
+        CHECK(text_is(d, p0, "The slow quick fox."));
+        CHECK(rev_kind_at(d, p0, 4, "Bob") == PD_REV_DELETE && rev_kind_at(d, p0, 9, "Ann") == PD_REV_INSERT &&
+              rev_kind_at(d, p0, 0, NULL) == 0 && rev_kind_at(d, p0, 15, NULL) == 0);
+        CHECK(pd_doc_comment_count(d) == 2);
+        CHECK(pd_doc_comment_get(d, 1, &c) == PD_OK && !strcmp(c.author, "Cy") && c.text_len == 18 &&
+              !memcmp(c.text, "Which fox?\nReally.", 18) && c.resolved && c.range.start.offset == 15 &&
+              c.range.end.offset == 18 && !strcmp(c.date, "2026-01-03T00:00:00Z"));
+        CHECK(pd_doc_comment_get(d, 2, &c) == PD_OK && c.parent == 1 && !c.resolved && c.text_len == 12);
+        /* other formats get the text as if the changes were accepted */
+        CHECK(pd_doc_export(d, PD_CONV_MARKDOWN, to_buf, &md) == PD_OK && md.p && strstr((char*)md.p, "The quick fox.") &&
+              !strstr((char*)md.p, "slow"));
+        free(md.p);
+    }
+
+    pd_doc_free(d);
+}
+
 static void test_docx_fields(void) {
     pd_doc* d = docx_doc(
         "word/document.xml",
@@ -3212,6 +3288,7 @@ int main(void) {
     test_docx_omml();
     printf("docx fields and references\n");
     test_docx_fields();
+    test_docx_review();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

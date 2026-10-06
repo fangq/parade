@@ -2943,7 +2943,7 @@ typedef struct {
     struct dcmt {               /* comments' ranges in the text, by w:id */
         int wid;
         pd_marker_id m0, m1;
-        int pending;            /* started between paragraphs: at the next one's start */
+        int pending;            /* 1 start, 2 end: marked before a paragraph began, so at its start */
     }* cm;
     int ncm, capcm;
 } dxi;
@@ -4447,13 +4447,23 @@ static void dw_begin_para(dw* w) {
         int ci;
 
         for (ci = 0; ci < w->X->ncm; ci++) {
-            if (w->X->cm[ci].pending && b->para) {
+            struct dcmt* c = &w->X->cm[ci];
+
+            if (c->pending && b->para) {
                 pd_pos at;
 
                 at.block = b->para;
                 at.offset = 0;
-                pd_doc_marker_new(b->d, at, PD_GRAVITY_LEFT, &w->X->cm[ci].m0);
-                w->X->cm[ci].pending = 0;
+
+                if ((c->pending & 1) && !c->m0) {
+                    pd_doc_marker_new(b->d, at, PD_GRAVITY_LEFT, &c->m0);
+                }
+
+                if ((c->pending & 2) && !c->m1) {
+                    pd_doc_marker_new(b->d, at, PD_GRAVITY_LEFT, &c->m1);
+                }
+
+                c->pending = 0;
             }
         }
     }
@@ -4482,12 +4492,17 @@ static void dw_comment_mark(dw* w, int wid, int what) {
         c->wid = wid;
     }
 
-    if (!w->in_p) {
-        c->pending = what == 0 && !c->m0;
+    if (!w->in_p || !w->started) {     /* the paragraph has not begun (beginning it here would put a float
+                                          read before its text after it): at its start, when it does */
+        if (what == 0 && !c->m0) {
+            c->pending |= 1;
+        } else if (what == 1 || (what == 2 && !c->m1 && !(c->pending & 2))) {
+            c->pending |= 2 | (c->m0 ? 0 : 1);
+        }
+
         return;
     }
 
-    dw_begin_para(w);
     at = bld_pos(X->b);
 
     if (!at.block) {
