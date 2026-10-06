@@ -2280,6 +2280,92 @@ static void test_emf(void) {
     free(e.p);
 }
 
+/* the source of the first equation in a document */
+static int first_equation(const pd_doc* d, char* out, size_t cap, int32_t* role) {
+    pd_block_id p;
+
+    for (p = pd_doc_next_paragraph(d, 0); p; p = pd_doc_next_paragraph(d, p)) {
+        const char* t;
+        uint32_t n, k;
+
+        pd_doc_para_text(d, p, &t, &n);
+
+        for (k = 0; k + 3 <= n; k++) {
+            pd_inline o;
+
+            if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at(p, k), &o) == PD_OK &&
+                    o.kind == PD_INLINE_EQUATION) {
+                pd_block_info bi;
+
+                snprintf(out, cap, "%.*s", (int)o.source_len, o.source);
+                pd_doc_block_info(d, p, &bi);
+                *role = bi.role;
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* Word's equations (OMML) as LaTeX: a fraction, scripts on one base, a
+   radical, a sum with limits, a delimiter, Greek and operators, an upright
+   function name; a display equation on its own line. Written back as OMML
+   and read again the same. */
+static void test_docx_omml(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:m=\"m\"><w:body><w:p><m:oMathPara><m:oMath>"
+        "<m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f>"
+        "<m:r><m:t>+</m:t></m:r>"
+        "<m:sSubSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:r><m:t>i</m:t></m:r></m:sub>"
+        "<m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSubSup>"
+        "<m:r><m:t>+</m:t></m:r>"
+        "<m:rad><m:radPr><m:degHide m:val=\"1\"/></m:radPr><m:deg/><m:e><m:r><m:t>y</m:t></m:r></m:e></m:rad>"
+        "<m:nary><m:naryPr><m:chr m:val=\"\xE2\x88\x91\"/></m:naryPr><m:sub><m:r><m:t>k=1</m:t></m:r></m:sub>"
+        "<m:sup><m:r><m:t>n</m:t></m:r></m:sup><m:e><m:r><m:t>\xCE\xB1</m:t></m:r></m:e></m:nary>"
+        "<m:d><m:dPr><m:begChr m:val=\"[\"/><m:endChr m:val=\"]\"/></m:dPr><m:e><m:r><m:t>z\xE2\x89\xA4</m:t></m:r>"
+        "<m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>max</m:t></m:r></m:e></m:d>"
+        "</m:oMath></m:oMathPara></w:p>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">Inline </w:t></w:r><m:oMath><m:r><m:t>E=m</m:t></m:r>"
+        "<m:sSup><m:e><m:r><m:t>c</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>"
+        "<w:r><w:t xml:space=\"preserve\"> here.</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    char first[512] = "", again[512] = "";
+    int32_t role = 0;
+    int pass;
+
+    for (pass = 0; pass < 3; pass++, d = docx_again(d)) {
+        char tex[512];
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        CHECK(first_equation(d, tex, sizeof(tex), &role) && role == PD_ROLE_EQUATION);
+
+        if (pass == 0) {
+            snprintf(first, sizeof(first), "%s", tex);
+            CHECK(strstr(tex, "\\frac{a}{b}") != NULL);
+            CHECK(strstr(tex, "{x}_{i}^{2}") != NULL);
+            CHECK(strstr(tex, "\\sqrt{y}") != NULL);
+            CHECK(strstr(tex, "\\sum_{k=1}^{n} {\\alpha}") != NULL);
+            CHECK(strstr(tex, "\\left[z\\le\\mathrm{max}\\right]") != NULL || !printf("  %s\n", tex));
+            CHECK(find_para(d, "Inline \xEF\xBF\xBC here.") != 0);
+        } else if (pass == 1) {
+            snprintf(again, sizeof(again), "%s", tex);
+        } else {
+            CHECK(strcmp(tex, again) == 0 || !printf("  %s\n  %s\n", again, tex));    /* stable from the first round trip on */
+        }
+    }
+
+    (void)first;
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2920,6 +3006,8 @@ int main(void) {
     test_docx_drawings();
     printf("EMF pictures\n");
     test_emf();
+    printf("docx equations\n");
+    test_docx_omml();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

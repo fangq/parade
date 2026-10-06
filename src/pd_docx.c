@@ -11,6 +11,7 @@
  */
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -289,7 +290,8 @@ static const char* W_NS =
     "xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\" "
     "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" "
     "xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" "
-    "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\"";
+    "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" "
+    "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"";
 
 typedef struct {
     pd_res_id res;
@@ -677,6 +679,99 @@ static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx,
             pb_printf(o, "<a:ln w=\"%lld\">", EMU(jnum(it, "lw")));
             dx_fill(o, (uint32_t)jnum(it, "line"));
             pb_puts(o, "</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>");
+        } else if (pj_get(it, "path")) {    /* a path: a shape of custom geometry in its own box */
+            const pj_node* pts = pj_get(it, "path"), *q;
+            long long bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+            int first = 1, k, start = 1;
+
+            for (q = pts->child, k = 0; q && q->next; q = q->next->next, k++) {
+                long long px = pj_int_or(q, 0), py = pj_int_or(q->next, 0);
+
+                if (px == INT32_MIN) {
+                    continue;
+                }
+
+                px = EMU(px);
+                py = EMU(py);
+
+                if (first || px < bx0) bx0 = px;
+                if (first || py < by0) by0 = py;
+                if (first || px > bx1) bx1 = px;
+                if (first || py > by1) by1 = py;
+                first = 0;
+            }
+
+            if (first) {
+                continue;
+            }
+
+            pb_printf(o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Freeform %d\"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x=\"%lld\" "
+                      "y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:custGeom><a:pathLst><a:path w=\"%lld\" "
+                      "h=\"%lld\">", id, id, bx0, by0, bx1 - bx0, by1 - by0, bx1 - bx0 > 0 ? bx1 - bx0 : 1,
+                      by1 - by0 > 0 ? by1 - by0 : 1);
+
+            for (q = pts->child; q && q->next; q = q->next->next) {
+                long long px = pj_int_or(q, 0), py = pj_int_or(q->next, 0);
+
+                if (px == INT32_MIN) {
+                    if (!start && jnum(it, "closed")) {
+                        pb_puts(o, "<a:close/>");
+                    }
+
+                    start = 1;
+                    continue;
+                }
+
+                pb_printf(o, "<a:%s><a:pt x=\"%lld\" y=\"%lld\"/></a:%s>", start ? "moveTo" : "lnTo", EMU(px) - bx0,
+                          EMU(py) - by0, start ? "moveTo" : "lnTo");
+                start = 0;
+            }
+
+            if (!start && jnum(it, "closed")) {
+                pb_puts(o, "<a:close/>");
+            }
+
+            pb_puts(o, "</a:path></a:pathLst></a:custGeom>");
+            dx_fill(o, (uint32_t)jnum(it, "fill"));
+            pb_printf(o, "<a:ln w=\"%lld\">", EMU(jnum(it, "lw")));
+            dx_fill(o, (uint32_t)jnum(it, "line"));
+            pb_puts(o, "</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>");
+        } else if (pj_get(it, "label")) {   /* a line of text at its baseline: a text box around it */
+            const pj_node* t = pj_get(it, "label"), *f = pj_get(it, "f");
+            long long sz = EMU(jnum(it, "sz")), lx = EMU(jnum(it, "x")), ly = EMU(jnum(it, "y")) - sz;
+            long long lw2 = sz * (long long)(t && t->type == PJ_STR ? t->len : 1) * 6 / 10 + sz;
+            int ha = (int)jnum(it, "ha");
+
+            if (!t || t->type != PJ_STR) {
+                continue;
+            }
+
+            lx -= ha == 1 ? lw2 / 2 : ha == 2 ? lw2 : 0;
+            pb_printf(o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Label %d\"/><wps:cNvSpPr txBox=\"1\"/><wps:spPr><a:xfrm>"
+                      "<a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/>"
+                      "</a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr>"
+                      "<w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/><w:jc w:val=\"%s\"/></w:pPr><w:r><w:rPr>",
+                      id, id, lx, ly, lw2, sz * 13 / 10, ha == 1 ? "center" : ha == 2 ? "right" : "left");
+
+            if (f && f->type == PJ_STR) {
+                pb_puts(o, "<w:rFonts w:ascii=\"");
+                xesc(o, f->s, f->len);
+                pb_puts(o, "\" w:hAnsi=\"");
+                xesc(o, f->s, f->len);
+                pb_puts(o, "\"/>");
+            }
+
+            pb_puts(o, jnum(it, "w") >= 600 ? "<w:b/>" : "");
+            pb_puts(o, jnum(it, "i") ? "<w:i/>" : "");
+
+            if ((uint32_t)jnum(it, "c") & 0xFFFFFF) {
+                pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(jnum(it, "c") & 0xFFFFFF));
+            }
+
+            pb_printf(o, "<w:sz w:val=\"%d\"/></w:rPr><w:t xml:space=\"preserve\">", (int)SCALE(jnum(it, "sz"), 2, 65536));
+            xesc(o, t->s, t->len);
+            pb_puts(o, "</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" "
+                    "anchor=\"b\"/></wps:wsp>");
         } else if (pj_get(it, "text")) {
             const pj_node* p, *r, *ins = pj_get(it, "ins"), *an = pj_get(it, "anchor");
 
@@ -903,14 +998,14 @@ static int dx_span(void* user, const pd_span* sp) {
                 dx_picture(x, ob, NULL);
                 break;
 
-            case PD_INLINE_EQUATION:
-                pb_puts(o, "<w:r><w:rPr><w:i/></w:rPr>");
+            case PD_INLINE_EQUATION:     /* as Word's own math, a display one on its line */
+                if (ob->source && ob->source_len > 0) {
+                    pd_block_info pi;
 
-                if (ob->source) {
-                    dx_text(o, ob->source, (size_t)ob->source_len);
+                    pd_doc_block_info(x->d, x->para, &pi);
+                    pd_latex_to_omml(ob->source, (size_t)ob->source_len, pi.role == PD_ROLE_EQUATION, o);
                 }
 
-                pb_puts(o, "</w:r>");
                 break;
 
             case PD_INLINE_FIELD: {
@@ -3392,6 +3487,7 @@ typedef struct {
     int posh_page, posh_has_off;    /* its offset is from the page's edge; it has one */
     pd_res_id drawing_res;      /* a group or canvas made into a drawing resource */
     int in_vml;                 /* inside w:object or w:pict: a VML picture */
+    int math_para;              /* the paragraph opens with display math (m:oMathPara) */
     const char* tbx;            /* a floating text box's content, in the part being read */
     size_t tbn;
     long long posh_off, dist;
@@ -3882,6 +3978,11 @@ static void dw_begin_para(dw* w) {
         }
     }
 
+    if (w->math_para) {     /* display math, on a line of its own */
+        b->role = PD_ROLE_EQUATION;
+        b->level = 0;
+    }
+
     bld_begin_para(b);
     w->started = 1;
 }
@@ -4167,7 +4268,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     dxfrm_in xf;
     int nfr = 1, depth = 1, in_grpsppr = 0, root_frame = !canvas, kind = 0, in_sppr = 0, in_ln = 0, in_txbx = 0;
     int in_rpr = 0, in_body_t = 0, para_open = 0, first_item = 1, have_fill = 0, have_line = 0, style_fill = 0;
-    int style_line = 0, in_fillref = 0, in_lnref = 0, in_gs = 0, nopara = 1;
+    int style_line = 0, in_fillref = 0, in_lnref = 0, in_gs = 0, nopara = 1, head_arrow = 0, tail_arrow = 0;
+    double cg_xy[4096], cg_pt[6];   /* a custom geometry's points (its own space), NAN pairs between rings */
+    long long cg_w = 0, cg_h = 0;
+    int cg_n = 0, cg_npt = 0, cg_closed = 0, cg_new_ring = 1, k2;
+    char cg_cmd = 'm';
     char blip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
     uint32_t fill = 0, line = 0, sfill = 0, sline = 0;
     long long lw = 9525, ins[4] = { 91440, 45720, 91440, 45720 };
@@ -4305,6 +4410,10 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             blip[0] = '\0';
             strcpy(geom, "rect");
             have_fill = have_line = style_fill = style_line = 0;
+            head_arrow = tail_arrow = 0;
+            cg_n = cg_npt = cg_closed = 0;
+            cg_w = cg_h = 0;
+            cg_new_ring = 1;
             fill = line = sfill = sline = 0;
             lw = 9525;
             ins[0] = ins[2] = 91440;
@@ -4335,9 +4444,91 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 }
             } else if (kind == 2) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
+                int turned = xf.rot % 21600000 != 0, isline = !strcmp(geom, "line");
 
-                if (xf.rot % 10800000 != 0 && strcmp(geom, "rect") && strcmp(geom, "ellipse")) {
-                    l = 0;      /* a turned line or arrow: not drawn */
+                if (!strcmp(geom, "cust") && cg_n >= 2 && (f || l)) {     /* custom geometry: its path in the box */
+                    double gx = cg_w > 0 ? cw / cg_w : 1, gy = cg_h > 0 ? ch / cg_h : 1;
+                    int k;
+
+                    ITEM_SEP();
+                    pb_puts(&o, "{\"path\":[");
+
+                    for (k = 0; k < cg_n; k++) {
+                        if (isnan(cg_xy[2 * k])) {
+                            pb_printf(&o, "%s%d,%d", k ? "," : "", (int)INT32_MIN, (int)INT32_MIN);
+                        } else {
+                            pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(x + cg_xy[2 * k] * gx),
+                                      (int)emu_sp(y + cg_xy[2 * k + 1] * gy));
+                        }
+                    }
+
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", cg_closed, (unsigned)f, (unsigned)l,
+                              (int)emu_sp((double)lw));
+                    f = l = 0;
+                }
+
+                if ((f || l) && (turned || isline)) {
+                    /* a turned box or ellipse, or a line in any direction: as a path, turned about its centre */
+                    double cxm = x + cw / 2, cym = y + ch / 2, a = xf.rot / 60000.0 * 3.14159265358979 / 180;
+                    double ca = cos(a), sa = sin(a), px[64], py[64];
+                    int np = 0, k;
+
+                    if (isline) {   /* corner to corner; the flips say which */
+                        px[0] = xf.fliph ? x + cw : x;
+                        py[0] = xf.flipv ? y + ch : y;
+                        px[1] = xf.fliph ? x : x + cw;
+                        py[1] = xf.flipv ? y : y + ch;
+                        np = 2;
+                    } else if (!strcmp(geom, "ellipse")) {
+                        for (k = 0; k < 48; k++) {
+                            px[k] = cxm + cw / 2 * cos(k * 6.2831853 / 48);
+                            py[k] = cym + ch / 2 * sin(k * 6.2831853 / 48);
+                        }
+
+                        np = 48;
+                    } else {
+                        px[0] = x; py[0] = y;
+                        px[1] = x + cw; py[1] = y;
+                        px[2] = x + cw; py[2] = y + ch;
+                        px[3] = x; py[3] = y + ch;
+                        np = 4;
+                    }
+
+                    ITEM_SEP();
+                    pb_puts(&o, "{\"path\":[");
+
+                    for (k = 0; k < np; k++) {
+                        double rx = cxm + (px[k] - cxm) * ca - (py[k] - cym) * sa;
+                        double ry = cym + (px[k] - cxm) * sa + (py[k] - cym) * ca;
+
+                        px[k] = rx;
+                        py[k] = ry;
+                        pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(rx), (int)emu_sp(ry));
+                    }
+
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", isline ? 0 : 1,
+                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp((double)lw));
+
+                    /* arrowheads: a filled triangle at the end the line says */
+                    for (k = 0; isline && l && k < 2; k++) {
+                        if ((k == 0 && head_arrow) || (k == 1 && tail_arrow)) {
+                            double tx = k ? px[1] : px[0], ty = k ? py[1] : py[0];
+                            double fx = k ? px[0] : px[1], fy = k ? py[0] : py[1];
+                            double dx = tx - fx, dy = ty - fy, len = sqrt(dx * dx + dy * dy), s3 = lw * 3 > 50800 ? lw * 3 : 50800;
+
+                            if (len > 0) {
+                                dx /= len;
+                                dy /= len;
+                                ITEM_SEP();
+                                pb_printf(&o, "{\"path\":[%d,%d,%d,%d,%d,%d],\"closed\":1,\"fill\":%u,\"line\":0,\"lw\":0}",
+                                          (int)emu_sp(tx), (int)emu_sp(ty), (int)emu_sp(tx - dx * s3 * 2 - dy * s3),
+                                          (int)emu_sp(ty - dy * s3 * 2 + dx * s3), (int)emu_sp(tx - dx * s3 * 2 + dy * s3),
+                                          (int)emu_sp(ty - dy * s3 * 2 - dx * s3), (unsigned)l);
+                            }
+                        }
+                    }
+
+                    f = l = 0;  /* drawn */
                 }
 
                 if (f || l) {
@@ -4396,6 +4587,44 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             continue;
         } else if (in_sppr && !in_ln && (!strcmp(t, "xfrm") || !strcmp(t, "off") || !strcmp(t, "ext"))) {
             xfrm_attr(&g, t, &xf);
+        } else if (in_sppr && !strcmp(t, "custGeom")) {
+            strcpy(geom, "cust");
+        } else if (in_sppr && !strcmp(t, "path") && !strcmp(geom, "cust")) {   /* its coordinate space */
+            cg_w = mu_attr(&g, "w", v, sizeof(v)) ? atoll(v) : 0;
+            cg_h = mu_attr(&g, "h", v, sizeof(v)) ? atoll(v) : 0;
+            cg_new_ring = 1;
+        } else if (in_sppr && !strcmp(geom, "cust") && (!strcmp(t, "moveTo") || !strcmp(t, "lnTo") ||
+                   !strcmp(t, "cubicBezTo") || !strcmp(t, "quadBezTo"))) {
+            cg_new_ring |= !strcmp(t, "moveTo");
+            cg_cmd = t[0];
+            cg_npt = 0;
+        } else if (in_sppr && !strcmp(geom, "cust") && !strcmp(t, "close")) {
+            cg_closed = 1;
+        } else if (in_sppr && !strcmp(geom, "cust") && !strcmp(t, "pt") && cg_n + 4 < 2048) {
+            double px = mu_attr(&g, "x", v, sizeof(v)) ? atof(v) : 0, py = mu_attr(&g, "y", v, sizeof(v)) ? atof(v) : 0;
+
+            cg_pt[2 * cg_npt] = px;
+            cg_pt[2 * cg_npt + 1] = py;
+            cg_npt++;
+
+            /* a point, or the end of a curve: a curve as its end point and its control points, straightened */
+            if ((cg_cmd == 'c' && cg_npt == 3) || (cg_cmd == 'q' && cg_npt == 2) || cg_cmd == 'm' || cg_cmd == 'l') {
+                if (cg_new_ring && cg_n > 0) {
+                    cg_xy[2 * cg_n] = NAN;
+                    cg_xy[2 * cg_n + 1] = NAN;
+                    cg_n++;
+                }
+
+                cg_new_ring = 0;
+
+                for (k2 = 0; k2 < cg_npt; k2++) {
+                    cg_xy[2 * cg_n] = cg_pt[2 * k2];
+                    cg_xy[2 * cg_n + 1] = cg_pt[2 * k2 + 1];
+                    cg_n++;
+                }
+
+                cg_npt = 0;
+            }
         } else if (in_sppr && !strcmp(t, "prstGeom") && mu_attr(&g, "prst", v, sizeof(v))) {
             snprintf(geom, sizeof(geom), "%s", !strcmp(v, "ellipse") ? "ellipse" : !strcmp(v, "line") ||
                      strstr(v, "Connector") ? "line" : "rect");
@@ -4415,6 +4644,14 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             } else if (in_lnref) {
                 sline = c;
                 style_line = 1;
+            }
+        } else if (in_ln && (!strcmp(t, "headEnd") || !strcmp(t, "tailEnd"))) {
+            int arrow = mu_attr(&g, "type", v, sizeof(v)) && strcmp(v, "none") != 0;
+
+            if (t[0] == 'h') {
+                head_arrow = arrow;
+            } else {
+                tail_arrow = arrow;
             }
         } else if (in_sppr && !in_ln && !strcmp(t, "noFill")) {
             have_fill = 1;
@@ -4682,6 +4919,49 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
+        if (m.type == MT_OPEN && (strcmp(t, "oMathPara") == 0 || strcmp(t, "oMath") == 0) && !w->in_drawing) {
+            /* an equation: Word's math as the LaTeX Parade typesets */
+            pd_markup g;
+            int depth = 1;
+            size_t end = 0;
+            char* tex;
+
+            mu_init(&g, m.s + m.pos, m.n - m.pos, 0);
+
+            while (depth > 0 && mu_next(&g) != MT_END) {
+                if (g.type == MT_OPEN) {
+                    depth++;
+                } else if (g.type == MT_CLOSE && --depth == 0) {
+                    break;
+                }
+
+                end = g.pos;
+            }
+
+            if ((tex = pd_omml_to_latex(m.s + m.pos, end, t)) != NULL) {
+                pd_inline o;
+
+                if (t[1] == 'M' && t[5] == 'P' && !w->started) {    /* oMathPara opening the paragraph: a display */
+                    w->math_para = 1;
+                }
+
+                memset(&o, 0, sizeof(o));
+                o.kind = PD_INLINE_EQUATION;
+                o.source = tex;
+                o.source_len = (int32_t)strlen(tex);
+
+                if (o.source_len > 0) {
+                    dw_begin_para(w);
+                    bld_inline(X->b, &o);
+                }
+
+                free(tex);
+            }
+
+            m.pos += g.pos;
+            continue;
+        }
+
         if (m.type == MT_OPEN && w->in_drawing && w->anchor && !w->tbx && strcmp(t, "txbxContent") == 0 &&
                 X->depth < 3) {
             /* a floating text box: its paragraphs become a float's, read once the anchoring paragraph ends */
@@ -4722,6 +5002,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
             if (strcmp(t, "p") == 0) {
                 dw_begin_cell(w);
+                w->math_para = 0;
                 w->in_p = 1;
                 w->started = 0;
                 w->pstyle[0] = '\0';

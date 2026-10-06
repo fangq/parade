@@ -214,4 +214,14 @@ int pd_metafile_kind(const unsigned char* p, size_t n);
    resources), the original's resource src kept in it; 0 if there is nothing to draw */
 pd_res_id pd_metafile_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src);
 
+/* ------------------------------------------------------------------ */
+/* equations (pd_omml.c)                                              */
+/* ------------------------------------------------------------------ */
+
+/* the OMML inside an element (root: its local name, oMath or oMathPara), from after its
+   opening tag to its end, as LaTeX; malloc'ed, NULL on failure */
+char* pd_omml_to_latex(const char* xml, size_t n, const char* root);
+/* LaTeX as OMML: m:oMath, in m:oMathPara when display */
+void pd_latex_to_omml(const char* tex, size_t n, int display, pd_buf* out);
+
 #endif /* PD_CONV_H */
