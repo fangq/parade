@@ -218,6 +218,7 @@ typedef struct {
     int32_t page_start_n, page_start_nrules;
     int resume;                 /* fill: continue on the current page */
     pd_block_id prev_para;      /* building: the paragraph just before, for the space between */
+    pd_sp top;                  /* where the text starts: the top margin, or below a header taller than it */
 } filler;
 
 /* ------------------------------------------------------------------ */
@@ -667,6 +668,16 @@ static pd_sp para_gap(const pd_doc* d, pd_block_id prev, pd_sp prev_after, pd_bl
 
     room += top ? pp->border_width + pp->border_space : 0;
     return room + (sp && sp->add_spacing ? before + prev_after : before > prev_after ? before : prev_after);
+}
+
+/* where a wrapped float goes across a column of width colw (*ox, from its
+   left edge) and how much of the column's width it takes from the text */
+static pd_sp float_taken(const pd_float_props* fp, pd_sp w, pd_sp colw, pd_sp* ox) {
+    pd_sp x = (fp->placement & PD_PLACE_OFFSET) ? fp->offset_x : fp->wrap == PD_WRAP_LEFT ? 0 : colw - w;
+    pd_sp t = fp->wrap == PD_WRAP_LEFT ? x + w + fp->gap : colw - x + fp->gap;
+
+    *ox = x;
+    return t < 0 ? 0 : t > colw ? colw : t;
 }
 
 /* lay out the paragraphs of a block stack at a width; returns total height */
@@ -1360,6 +1371,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             F->prev_para = b->id;
         } else if (b->kind == PD_BLOCK_FLOAT) {
             pfloat* f;
+            pd_sp ox;
 
             clear_wrap(F);
 
@@ -1380,7 +1392,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             }
 
             /* text wraps only beside a float that leaves it room */
-            if (f->fp.wrap != PD_WRAP_NONE && (int64_t)(f->w + f->fp.gap) * 4 > (int64_t)F->colw * 3) {
+            if (f->fp.wrap != PD_WRAP_NONE && (int64_t)float_taken(&f->fp, f->w, F->colw, &ox) * 4 > (int64_t)F->colw * 3) {
                 f->fp.wrap = PD_WRAP_NONE;
             }
 
@@ -1389,7 +1401,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             if (f->fp.wrap != PD_WRAP_NONE) {
                 push(F, VI_FLOAT, 0, 0, NULL, 0, b->id);
                 F->wrap_rem = f->h + f->fp.gap;
-                F->wrap_w = f->w + f->fp.gap;
+                F->wrap_w = float_taken(&f->fp, f->w, F->colw, &ox);
                 F->wrap_side = f->fp.wrap;
             } else {
                 push(F, VI_FLOAT, f->h + 2 * f->fp.gap, 0, NULL, 0, b->id);
@@ -1506,7 +1518,7 @@ static int float_page(filler* F) {
         }
 
         place_stack(F->L, f->block, f->w, F->page, col_x(F, F->page, 0) + (F->colw - f->w) / 2,
-                    F->sp->margin_top + y + f->fp.gap, 3);
+                    F->top + y + f->fp.gap, 3);
         f->state = FL_PLACED;
         y += h;
         placed++;
@@ -1535,7 +1547,7 @@ static int next_column(filler* F, int force_page) {
 
         if (top_ok && (small || (F->top_used == 0 && (!(f->fp.placement & PD_PLACE_PAGE) || stuck)))) {
             place_stack(F->L, f->block, f->w, F->page, col_x(F, F->page, F->col) + (F->colw - f->w) / 2,
-                        F->sp->margin_top + F->top_used + f->fp.gap, 3);
+                        F->top + F->top_used + f->fp.gap, 3);
             f->state = FL_PLACED;
             F->top_used += h;
             memmove(F->queue, F->queue + 1, (size_t)(--F->nq) * sizeof(int32_t));
@@ -1695,7 +1707,7 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
 /* emit a column's content (records before cut), its footnotes, and bottom floats in what is left */
 static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_at_cut, pd_sp fn_at_cut) {
-    pd_sp x = col_x(F, F->page, F->col), y0 = F->sp->margin_top + F->top_used;
+    pd_sp x = col_x(F, F->page, F->col), y0 = F->top + F->top_used;
     pd_sp avail = F->colh - F->top_used, bottom = avail - fn_area(F, fn_at_cut);
     int32_t i, k;
 
@@ -1712,7 +1724,10 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
             pfloat* f = &F->fl[v->line];
 
             if (f->fp.wrap != PD_WRAP_NONE) {   /* at the anchor, against the column edge */
-                place_stack(F->L, f->block, f->w, F->page, f->fp.wrap == PD_WRAP_LEFT ? x : x + F->colw - f->w,
+                pd_sp ox;
+
+                float_taken(&f->fp, f->w, F->colw, &ox);
+                place_stack(F->L, f->block, f->w, F->page, x + ox,
                             y0 + r[i].y, 3);
             } else {
                 place_stack(F->L, f->block, f->w, F->page, x + (F->colw - f->w) / 2, y0 + r[i].y + f->fp.gap, 3);
@@ -1925,7 +1940,7 @@ static pd_status fill(filler* F, int32_t start) {
                         (int64_t)(F->top_used + v->h) * 1000 <= (int64_t)F->colh * TOP_FRACTION) {
                     /* nothing on this column yet: its top is still free */
                     place_stack(F->L, f->block, f->w, F->page, col_x(F, F->page, F->col) + (F->colw - f->w) / 2,
-                                F->sp->margin_top + F->top_used + f->fp.gap, 3);
+                                F->top + F->top_used + f->fp.gap, 3);
                     f->state = FL_PLACED;
                     F->top_used += v->h;
                     avail = F->colh - F->top_used;
@@ -2497,12 +2512,111 @@ static void balance(filler* F) {
 /* update                                                             */
 /* ------------------------------------------------------------------ */
 
+/* a paragraph of a header or footer, where it goes relative to the story's top left */
+typedef struct {
+    pcache* c;
+    pd_sp x, y;
+} spart;
+
+/* lay one paragraph of a story out at a width and add it to the parts */
+static pcache* story_para(pd_layout* L, pd_block_id id, pd_sp width, pd_sp x, pd_sp y, pd_field_fn fn, void* user,
+                          spart** parts, int32_t* n, int32_t* cap) {
+    pcache* c = (pcache*)calloc(1, sizeof(pcache));
+
+    if (!c || pd_para_new(&c->para) != PD_OK || grow((void**)parts, cap, (int64_t)*n + 1, sizeof(spart)) ||
+            build_into(L, c, id, width, fn, user) != PD_OK) {
+        pcache_free(c);
+        return NULL;
+    }
+
+    (*parts)[*n].c = c;
+    (*parts)[*n].x = x;
+    (*parts)[*n].y = y;
+    (*n)++;
+    return c;
+}
+
+/* A header's or footer's paragraphs, laid out at the text width: one under
+   the other, and a picture float that wraps (a logo) at its side of the
+   width, the paragraphs that start beside it narrower by its width and gap.
+   Returns the story's height; the parts' layouts belong to the caller. */
+static pd_sp story_flow(pd_layout* L, pd_block_id story, pd_sp tw, pd_field_fn fn, void* user, spart** parts,
+                        int32_t* n) {
+    const pd_doc* d = L->doc;
+    const blk* sb = pd_doc_blk(d, story);
+    pd_block_id prev = 0;
+    pd_sp y = 0, prev_after = 0, fl_bottom = 0, fl_w = 0, end = 0;
+    int32_t i, cap = 0, fl_side = 0;
+
+    *parts = NULL;
+    *n = 0;
+
+    for (i = 0; sb && i < sb->nkids; i++) {
+        const blk* k = d->tab[sb->kids[i]];
+
+        if (k->kind == PD_BLOCK_FLOAT && (k->st.fp.wrap == PD_WRAP_LEFT || k->st.fp.wrap == PD_WRAP_RIGHT)) {
+            pd_block_id ids[16];
+            int32_t m = 0, j;
+            pd_sp fw = k->st.fp.width > 0 && k->st.fp.width < tw ? k->st.fp.width : tw / 3, fy = 0, fx, taken;
+
+            taken = float_taken(&k->st.fp, fw, tw, &fx);
+            collect_paras(d, k->id, ids, &m, 16);
+
+            for (j = 0; j < m && j < 16; j++) {
+                pcache* c = story_para(L, ids[j], fw, fx, y + fy, fn, user, parts, n, &cap);
+
+                fy += c ? c->height : 0;
+            }
+
+            fl_side = k->st.fp.wrap;
+            fl_w = taken;
+            fl_bottom = y + fy;
+            end = fl_bottom > end ? fl_bottom : end;
+            continue;
+        }
+
+        {
+            pd_block_id ids[64];
+            int32_t m = 0, j;
+
+            collect_paras(d, k->id, ids, &m, 64);
+
+            for (j = 0; j < m && j < 64; j++) {
+                pd_sp gy = y, beside, x = 0;
+                pcache* c;
+
+                if (prev) {     /* the gap needs the paragraph's own properties: lay it out first at full width */
+                    pd_para_props pp;
+
+                    pd_doc_effective_pp(d, pd_doc_blk(d, ids[j]), &pp, NULL);
+                    gy = y + para_gap(d, prev, prev_after, ids[j], &pp);
+                }
+
+                beside = gy < fl_bottom ? fl_w : 0;
+                x = beside && fl_side == PD_WRAP_LEFT ? fl_w : 0;
+                c = story_para(L, ids[j], tw - beside > PD_PT(36) ? tw - beside : tw, x, gy, fn, user, parts, n, &cap);
+
+                if (!c) {
+                    continue;
+                }
+
+                y = gy + c->height;
+                end = y > end ? y : end;
+                prev = ids[j];
+                prev_after = c->pp.space_after;
+            }
+        }
+    }
+
+    return end;
+}
+
 /* a header or footer, laid out for this page so its fields have their values */
 static void place_story(pd_layout* L, int32_t page, pd_block_id story, int footer) {
     ppage* p = &L->pages[page];
-    pd_block_id ids[64];
-    int32_t n = 0, i, k, first = p->nowned;
-    pd_sp h = 0, y, prev_after = 0;
+    spart* parts;
+    int32_t n, i, k;
+    pd_sp h, y;
     page_ctx ctx;
 
     if (!story || !pd_doc_blk(L->doc, story)) {
@@ -2511,48 +2625,40 @@ static void place_story(pd_layout* L, int32_t page, pd_block_id story, int foote
 
     ctx.L = L;
     ctx.page = page;
-    collect_paras(L->doc, story, ids, &n, 64);
+    h = story_flow(L, story, p->text_w, page_field, &ctx, &parts, &n);
+    y = footer ? p->h - p->sp->footer_distance - h : p->sp->header_distance;
 
-    for (i = 0; i < n && i < 64; i++) {
-        pcache* c = (pcache*)calloc(1, sizeof(pcache));
-
-        if (!c || pd_para_new(&c->para) != PD_OK ||
-                grow((void**)&p->owned, &p->capowned, (int64_t)p->nowned + 1, sizeof(pcache*))) {
-            if (c) {
-                pd_para_free(c->para);
+    for (i = 0; i < n; i++) {
+        if (grow((void**)&p->owned, &p->capowned, (int64_t)p->nowned + 1, sizeof(pcache*))) {
+            for (; i < n; i++) {
+                pcache_free(parts[i].c);
             }
 
-            free(c);
-            return;
+            break;
         }
 
-        p->owned[p->nowned++] = c;
+        p->owned[p->nowned++] = parts[i].c;
 
-        if (build_into(L, c, ids[i], p->text_w, page_field, &ctx) != PD_OK) {
-            return;
+        for (k = 0; k < parts[i].c->nlines; k++) {
+            add_line(L, page, parts[i].c, k, p->text_x + parts[i].x, y + parts[i].y, footer ? 2 : 1);
         }
-
-        h += (i > 0 ? para_gap(L->doc, ids[i - 1], prev_after, ids[i], &c->pp) : 0) + c->height;
-        prev_after = c->pp.space_after;
     }
 
-    y = footer ? p->h - p->sp->footer_distance - h : p->sp->header_distance;
-    prev_after = 0;
+    free(parts);
+}
 
-    for (i = first; i < p->nowned; i++) {
-        pcache* c = p->owned[i];
+/* a header's or footer's height at a width, its fields at their placeholders */
+static pd_sp story_height(pd_layout* L, pd_block_id story, pd_sp tw) {
+    spart* parts;
+    int32_t n, i;
+    pd_sp h = story_flow(L, story, tw, body_field, L, &parts, &n);
 
-        if (i > first) {
-            y += para_gap(L->doc, p->owned[i - 1]->block, prev_after, c->block, &c->pp);
-        }
-
-        for (k = 0; k < c->nlines; k++) {
-            add_line(L, page, c, k, p->text_x, y, footer ? 2 : 1);
-        }
-
-        y += c->height;
-        prev_after = c->pp.space_after;
+    for (i = 0; i < n; i++) {
+        pcache_free(parts[i].c);
     }
+
+    free(parts);
+    return h;
 }
 
 pd_status pd_layout_new(const pd_doc* doc, pd_layout** out) {
@@ -2659,6 +2765,40 @@ static void run_counters(pd_layout* L) {
     free(lseen);
 }
 
+static pd_sp story_height(pd_layout* L, pd_block_id story, pd_sp tw);
+
+/* The text area of a section's pages, top and height: inside the margins,
+   or clear of a header or footer that reaches past them -- Word moves the
+   text down (or the bottom up) rather than letting them overlap. The
+   tallest of the section's headers (and footers) counts for all its pages. */
+static void body_area(pd_layout* L, const pd_section_props* sp, pd_sp* top, pd_sp* height) {
+    pd_block_id hs[3] = { sp->header, sp->title_page ? sp->header_first : 0, sp->facing_pages ? sp->header_even : 0 };
+    pd_block_id fs[3] = { sp->footer, sp->title_page ? sp->footer_first : 0, sp->facing_pages ? sp->footer_even : 0 };
+    pd_sp tw = sp->page_width - sp->margin_left - sp->margin_right, bottom = sp->margin_bottom, h;
+    int k;
+
+    *top = sp->margin_top;
+
+    for (k = 0; k < 3 && tw > 0; k++) {
+        if (hs[k] && pd_doc_blk(L->doc, hs[k]) && (h = story_height(L, hs[k], tw)) > 0 &&
+                sp->header_distance + h > *top) {
+            *top = sp->header_distance + h;
+        }
+
+        if (fs[k] && pd_doc_blk(L->doc, fs[k]) && (h = story_height(L, fs[k], tw)) > 0 &&
+                sp->footer_distance + h > bottom) {
+            bottom = sp->footer_distance + h;
+        }
+    }
+
+    *height = sp->page_height - *top - bottom;
+
+    if (*height < PD_PT(72) && sp->page_height - sp->margin_top - sp->margin_bottom >= PD_PT(72)) {
+        *top = sp->margin_top;      /* headers that would leave no room: the margins as they are */
+        *height = sp->page_height - sp->margin_top - sp->margin_bottom;
+    }
+}
+
 static pd_status paginate(pd_layout* L) {
     const pd_doc* d = L->doc;
     blk* root;
@@ -2700,7 +2840,7 @@ static pd_status paginate(pd_layout* L) {
         F.sp = &sec->st.sp;
         F.ncols = F.sp->columns < 1 ? 1 : F.sp->columns;
         F.gap = F.sp->column_gap;
-        F.colh = F.sp->page_height - F.sp->margin_top - F.sp->margin_bottom;
+        body_area(L, F.sp, &F.top, &F.colh);
         F.colw = (F.sp->page_width - F.sp->margin_left - F.sp->margin_right - (F.ncols - 1) * F.gap) / F.ncols;
         F.number = F.sp->first_page_number > 0 && !F.sp->continuous ? F.sp->first_page_number : number;
         F.floor_page = -1;
@@ -2728,7 +2868,7 @@ static pd_status paginate(pd_layout* L) {
                          lp->rules[i].y + lp->rules[i].h : bottom;
             }
 
-            bottom += PD_PT(12) - F.sp->margin_top;
+            bottom += PD_PT(12) - F.top;
 
             if (lp->w == F.sp->page_width && lp->h == F.sp->page_height && !lp->float_page && !notes &&
                     bottom > 0 && bottom < F.colh - PD_PT(36)) {

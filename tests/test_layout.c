@@ -1929,6 +1929,67 @@ static void test_line_numbers(void) {
     pd_doc_free(d);
 }
 
+/* A header taller than the top margin pushes the text down, as Word does,
+   instead of running into it; a float in the header sits at its side and
+   the header's text goes beside it. */
+static void test_header_room(void) {
+    pd_block_id sec, p, hdr, fl, fp_para, hp;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_section_props sp;
+    pd_float_props fp;
+    pd_inline o;
+    pd_draw* it;
+    int32_t n, k;
+    pd_sp body_y = -1, hdr_bottom = 0, hdr_text_x = PD_PT(10000);
+
+    p = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p, 0), "Body.", 5, PD_FORMAT_INHERIT, NULL);
+
+    pd_doc_insert_block(d, 0, -1, PD_BLOCK_STORY, &hdr);
+    hp = pd_doc_child(d, hdr, 0);
+    pd_doc_insert_text(d, at(hp, 0), "One\nTwo\nThree\nFour\nFive\nSix", 27, PD_FORMAT_INHERIT, NULL);
+    CHECK(pd_doc_insert_block(d, hdr, 0, PD_BLOCK_FLOAT, &fl) == PD_OK);
+    pd_doc_float_props(d, fl, &fp);
+    fp.wrap = PD_WRAP_LEFT;
+    fp.width = PD_PT(100);
+    fp.gap = PD_PT(10);
+    pd_doc_set_float_props(d, fl, &fp);
+    fp_para = pd_doc_child(d, fl, 0);
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_IMAGE;
+    o.width = PD_PT(100);
+    o.height = PD_PT(30);
+    pd_doc_insert_inline(d, at(fp_para, 0), &o, NULL);
+
+    pd_doc_section_props(d, sec, &sp);
+    sp.header = hdr;
+    sp.margin_top = PD_PT(36);
+    sp.header_distance = PD_PT(18);
+    pd_doc_set_section_props(d, sec, &sp);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    it = items(L, 0, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].region == 1 && it[k].kind == PD_DRAW_GLYPH) {
+            hdr_bottom = it[k].y > hdr_bottom ? it[k].y : hdr_bottom;
+            hdr_text_x = it[k].x < hdr_text_x ? it[k].x : hdr_text_x;
+        } else if (it[k].region == 0 && it[k].kind == PD_DRAW_GLYPH && body_y < 0) {
+            body_y = it[k].y;
+        }
+    }
+
+    CHECK(hdr_bottom > sp.margin_top);              /* six lines from 18pt down: past the margin */
+    CHECK(body_y > hdr_bottom + PD_PT(5));          /* and the text below them */
+    CHECK(hdr_text_x == sp.margin_left + PD_PT(110));  /* beside the picture at the left and its gap */
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1983,6 +2044,8 @@ int main(void) {
     test_label_font();
     printf("line numbers\n");
     test_line_numbers();
+    printf("header room\n");
+    test_header_room();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

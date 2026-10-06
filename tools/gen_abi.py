@@ -11,7 +11,7 @@ STRUCTS = {
     "pd_style": "font size space_stretch space_shrink kerning color user hyph text_case letter_space hidden",
     "pd_params": "mode align width indent line_penalty adj_demerits double_hyphen_demerits final_hyphen_demerits "
                  "hyphen_penalty ex_hyphen_penalty tex_badness rag_stretch baseline_skip line_spacing hysteresis "
-                 "freeze_offset direction looseness protrusion expansion",
+                 "freeze_offset direction looseness protrusion expansion full_lines",
     "pd_break_info": "lines demerits overfull underfull reused_breakpoints frozen_lines height",
     "pd_line": "text_start text_end x baseline width ascent descent ratio badness hyphenated overfull underfull",
     "pd_glyph": "glyph cluster x y advance style kind user scale",
@@ -31,7 +31,7 @@ STRUCTS = {
     "pd_inline": "kind resource width height depth field target level name source source_len user title title_len "
                  "alt alt_len",
     "pd_para_attrs": "quote_depth task loose lang cont div_class",
-    "pd_float_props": "placement wrap width width_fraction span_columns gap sequence",
+    "pd_float_props": "placement wrap width width_fraction span_columns gap sequence offset_x",
     "pd_section_props": "page_width page_height margin_top margin_bottom margin_left margin_right header_distance "
                         "footer_distance columns column_gap first_page_number page_number_format title_page "
                         "facing_pages header header_first header_even footer footer_first footer_even continuous page_breaking "

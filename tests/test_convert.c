@@ -1930,6 +1930,62 @@ static void test_docx_line_numbers(void) {
     pd_doc_free(d);
 }
 
+/* A header's logo: its picture named in the header's own relationships
+   (rId5 means something else in the document's), a float in the header
+   beside its text, placed from the page's edge -- kept through DOCX. */
+static void test_docx_header_logo(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId1\" Type=\"t/header\" Target=\"header1.xml\"/>"
+        "<Relationship Id=\"rId5\" Type=\"t/styles\" Target=\"styles.xml\"/></Relationships>",
+        "word/_rels/header1.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/header1.xml",
+        "<w:hdr xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:p><w:pPr><w:jc w:val=\"right\"/>"
+        "</w:pPr>" DRAWING("anchor", "<wp:positionH relativeFrom=\"page\"><wp:posOffset>457200</wp:posOffset></wp:positionH>"
+                           "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset></wp:positionV>"
+                           "<wp:wrapSquare wrapText=\"bothSides\"/>")
+        "<w:r><w:t>Title</w:t></w:r></w:p></w:hdr>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:r=\"r\"><w:body><w:p><w:r><w:t>Body.</w:t></w:r></w:p>"
+        "<w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId1\"/>"
+        "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\"/>"
+        "</w:sectPr></w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_section_props sp;
+        pd_block_id fl, p;
+        pd_block_info bi;
+        pd_float_props fp;
+        pd_inline o;
+        const char* mime = NULL;
+        const void* data;
+        size_t len = 0;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        CHECK(pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp) == PD_OK && sp.header != 0);
+        fl = pd_doc_child(d, sp.header, 0);
+        CHECK(pd_doc_block_info(d, fl, &bi) == PD_OK && bi.kind == PD_BLOCK_FLOAT);
+        CHECK(pd_doc_float_props(d, fl, &fp) == PD_OK && fp.wrap == PD_WRAP_LEFT && (fp.placement & PD_PLACE_OFFSET));
+        CHECK(fp.offset_x == PD_PT(36) - PD_PT(72));    /* half an inch from the page's edge: in the margin */
+        p = pd_doc_child(d, fl, 0);
+        CHECK(pd_doc_inline_at(d, at(p, 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE);
+        CHECK(pd_doc_resource(d, o.resource, &mime, &data, &len) == PD_OK && strcmp(mime, "image/png") == 0 && len > 8);
+        CHECK(text_is(d, pd_doc_child(d, sp.header, 1), "Title"));
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2564,6 +2620,8 @@ int main(void) {
     test_docx_list_levels();
     printf("docx line numbers\n");
     test_docx_line_numbers();
+    printf("docx header logo\n");
+    test_docx_header_logo();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

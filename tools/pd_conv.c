@@ -5,8 +5,10 @@
  *
  * Formats come from the file extensions (or, for input, the content).
  * PDF output lays the document out with Parade itself (Liberation Serif, and
- * Liberation Sans for sans-serif families such as Arial; DejaVu Sans Mono for
- * code, Noto CJK as a fallback when installed).
+ * Liberation Sans for sans-serif families such as Arial, its narrow faces for
+ * Arial Narrow and the like; Carlito and Caladea for Calibri and Cambria,
+ * whose metrics they share; DejaVu Sans Mono for code, Noto CJK as a fallback
+ * when installed).
  */
 
 #include <stdio.h>
@@ -15,7 +17,7 @@
 #include "parade_convert.h"
 #include "parade_layout.h"
 
-#define NFONTS 10                   /* serif x4, sans x4, mono, CJK */
+#define NFONTS 22                   /* serif x4, sans x4, mono, CJK, narrow sans x4, Carlito x4, Caladea x4 */
 static pd_font* fonts[NFONTS];
 static pd_font* mathf;
 
@@ -27,6 +29,20 @@ static const pd_font* resolve(void* user, const char* family, int32_t weight, in
 
     if (cls == PD_FAMILY_MONO) {
         return fonts[8];
+    }
+
+    /* Calibri and Cambria: the faces with their metrics, so lines break where they did in Word */
+    if (family && !strncmp(family, "Calibri", 7) && fonts[14 + face]) {
+        return fonts[14 + face];
+    }
+
+    if (family && !strncmp(family, "Cambria", 7) && strcmp(family, "Cambria Math") && fonts[18 + face]) {
+        return fonts[18 + face];
+    }
+
+    if (cls == PD_FAMILY_SANS && family && (strstr(family, "Narrow") || strstr(family, "Condensed")) &&
+            fonts[10 + face]) {
+        return fonts[10 + face];    /* Arial Narrow and the like: a narrow face, so lines break where they did */
     }
 
     return cls == PD_FAMILY_SANS && fonts[4 + face] ? fonts[4 + face] : fonts[face];
@@ -113,7 +129,19 @@ int main(int argc, char** argv) {
         "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Italic.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSansNarrow-BoldItalic.ttf",
+        "/usr/share/fonts/truetype/crosextra/Carlito-Regular.ttf",
+        "/usr/share/fonts/truetype/crosextra/Carlito-Bold.ttf",
+        "/usr/share/fonts/truetype/crosextra/Carlito-Italic.ttf",
+        "/usr/share/fonts/truetype/crosextra/Carlito-BoldItalic.ttf",
+        "/usr/share/fonts/truetype/crosextra/Caladea-Regular.ttf",
+        "/usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf",
+        "/usr/share/fonts/truetype/crosextra/Caladea-Italic.ttf",
+        "/usr/share/fonts/truetype/crosextra/Caladea-BoldItalic.ttf"
     };
     FILE* f;
     char* data;
@@ -176,7 +204,7 @@ int main(int argc, char** argv) {
         pd_layout_info info;
         const pd_font* fb[1];
 
-        for (i = 0; i < NFONTS; i++) {     /* the sans faces and CJK are optional */
+        for (i = 0; i < NFONTS; i++) {     /* all but the serif faces and the mono face are optional */
             if (pd_font_load_file(paths[i], 0, &fonts[i]) != PD_OK && (i < 4 || i == 8)) {
                 fprintf(stderr, "cannot load %s\n", paths[i]);
                 return 1;

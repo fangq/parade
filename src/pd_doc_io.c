@@ -590,6 +590,11 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
             put_bool(w, "SpanColumns", p->span_columns);
             put_int(w, "Gap", p->gap);
             put_str(w, "Sequence", p->sequence);
+
+            if (p->placement & PD_PLACE_OFFSET) {
+                put_int(w, "OffsetX", p->offset_x);
+            }
+
             pj_obj_end(w);
             break;
         }
@@ -1278,7 +1283,9 @@ static void load_float(loader* L, const pj_node* o, pd_float_props* p) {
     }
 
     REQUIRE(x->type == PJ_OBJ);
-    p->placement = (uint32_t)int_or(pj_get(x, "Placement"), p->placement, 1, 31, L);
+    p->placement = (uint32_t)int_or(pj_get(x, "Placement"), p->placement, 1, 63, L);
+    REQUIRE(p->placement & 31);
+    p->offset_x = (pd_sp)int_or(pj_get(x, "OffsetX"), 0, -PD_PT(10000), PD_PT(10000), L);
     p->wrap = pj_get(x, "Wrap") ? enum_of(pj_get(x, "Wrap"), NAMES(wrap_names)) : 0;
     REQUIRE(p->wrap >= 0);
     p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);

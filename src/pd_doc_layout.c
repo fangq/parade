@@ -357,6 +357,23 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
     prm->line_spacing = pp.line_spacing;
     prm->direction = pp.direction;
 
+    {   /* a word processor's section: full line boxes, so that paragraphs stack as lines do */
+        const blk* sb = b;
+        int32_t hops;
+
+        for (hops = 0; sb && sb->kind != PD_BLOCK_SECTION && sb->parent && hops < 64; hops++) {
+            sb = pd_doc_blk(d, sb->parent);
+        }
+
+        if (!sb || sb->kind != PD_BLOCK_SECTION) {  /* a story: the first section's */
+            const blk* root = pd_doc_blk(d, PD_ROOT_ID);
+
+            sb = root && root->nkids > 0 ? pd_doc_blk(d, root->kids[0]) : NULL;
+        }
+
+        prm->full_lines = sb && sb->kind == PD_BLOCK_SECTION && sb->st.sp.add_spacing;
+    }
+
     if (s->role == PD_ROLE_EQUATION && !(s->pp.mask & PD_PP_ALIGN)) {
         prm->align = PD_ALIGN_CENTER;   /* a display equation sits in the middle */
     }

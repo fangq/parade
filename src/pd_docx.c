@@ -516,14 +516,26 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
                   "<wp:extent cx=\"%lld\" cy=\"%lld\"/>", cx, cy);
     } else {
         long long gap = EMU(fp->gap);
+        int off = (fp->placement & PD_PLACE_OFFSET) && fp->wrap != PD_WRAP_NONE;
 
         pb_printf(o, "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"%lld\" distR=\"%lld\" "
                   "simplePos=\"0\" relativeHeight=\"%d\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" "
-                  "allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\"><wp:align>%s"
-                  "</wp:align></wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset>"
+                  "allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\">",
+                  gap, gap, x->docpr);
+
+        if (off) {
+            pb_printf(o, "<wp:posOffset>%lld</wp:posOffset>", EMU(fp->offset_x));
+        } else {
+            pb_printf(o, "<wp:align>%s</wp:align>", fp->wrap == PD_WRAP_LEFT ? "left" : fp->wrap == PD_WRAP_RIGHT ?
+                      "right" : "center");
+        }
+
+        /* at an offset, which side the text is on says which side the picture is */
+        pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset>"
                   "</wp:positionV><wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s",
-                  gap, gap, x->docpr, fp->wrap == PD_WRAP_LEFT ? "left" : fp->wrap == PD_WRAP_RIGHT ? "right" : "center",
-                  cx, cy, fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : "<wp:wrapSquare wrapText=\"bothSides\"/>");
+                  cx, cy, fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : !off ?
+                  "<wp:wrapSquare wrapText=\"bothSides\"/>" : fp->wrap == PD_WRAP_LEFT ?
+                  "<wp:wrapSquare wrapText=\"right\"/>" : "<wp:wrapSquare wrapText=\"left\"/>");
     }
 
     pb_printf(o, "<wp:docPr id=\"%d\" name=\"Picture %d\"", x->docpr, x->docpr);
@@ -2097,6 +2109,7 @@ typedef struct {
     pd_block_id hf_last[6];     /* the previous section's: header default/first/even, footer the same */
     char def_pstyle[64];        /* the paragraph style of a paragraph that names none */
     char theme_major[64], theme_minor[64];  /* the theme's heading and body fonts */
+    pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
 } dxi;
 
 static const char* rel_target(const dxi* X, const char* id, int* external) {
@@ -3079,11 +3092,12 @@ typedef struct {
     char blip[64];
     long long cx, cy;
     int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
+    int posh_page, posh_has_off;    /* its offset is from the page's edge; it has one */
     long long posh_off, dist;
     struct {
         pd_res_id res;
-        pd_sp w, h, gap;
-        int wrap;
+        pd_sp w, h, gap, off_x;
+        int wrap, has_off;
     } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
     int npend_fl;
     /* tables */
@@ -3601,6 +3615,39 @@ static void dw_link(dw* w, const char* url, size_t n) {
 
 static void dw_parse(dxi* X, const char* xml, size_t n, int note);
 
+/* A part's own relationships (word/_rels/<name>.rels) in place of the
+   document's while it is read: the pictures and links of a header, a
+   footer or the notes are named there. Returns whether it has its own;
+   *saved keeps the document's to put back. */
+static int part_rels_begin(dxi* X, const char* part, drel** saved, int* saved_n) {
+    const char* slash = strrchr(part, '/');
+    char path[320];
+    char* xml;
+    size_t len = 0;
+
+    snprintf(path, sizeof(path), "%.*s_rels/%s.rels", slash ? (int)(slash - part + 1) : 0, part, slash ? slash + 1 : part);
+
+    if ((xml = (char*)zip_read(&X->z, path, &len)) == NULL) {
+        return 0;
+    }
+
+    *saved = X->rels;
+    *saved_n = X->nrels;
+    X->rels = NULL;
+    X->nrels = 0;
+    read_rels(X, xml, len);
+    free(xml);
+    return 1;
+}
+
+static void part_rels_end(dxi* X, int swapped, drel* saved, int saved_n) {
+    if (swapped) {
+        free(X->rels);
+        X->rels = saved;
+        X->nrels = saved_n;
+    }
+}
+
 static void dw_footnote(dw* w, int id, int endnote) {
     dxi* X = w->X;
     const dnote* notes = endnote ? X->en : X->notes;
@@ -3610,12 +3657,16 @@ static void dw_footnote(dw* w, int id, int endnote) {
     for (i = 0; i < n; i++) {
         if (notes[i].id == id && X->depth < 3) {
             pd_char_props keep = X->b->cp;
+            int saved_n = 0, swapped;
+            drel* saved = NULL;
 
             dw_begin_para(w);
             bld_note_begin(X->b, endnote);
+            swapped = part_rels_begin(X, endnote ? "word/endnotes.xml" : "word/footnotes.xml", &saved, &saved_n);
             X->depth++;
             dw_parse(X, xml + notes[i].a, notes[i].b - notes[i].a, 1);
             X->depth--;
+            part_rels_end(X, swapped, saved, saved_n);
             bld_footnote_end(X->b);
             X->b->cp = keep;
             return;
@@ -3643,6 +3694,12 @@ static void dw_floats(dw* w) {
             fp.wrap = w->pend_fl[k].wrap;
             fp.width = w->pend_fl[k].w;
             fp.gap = w->pend_fl[k].gap > 0 ? w->pend_fl[k].gap : PD_PT(9);
+
+            if (w->pend_fl[k].has_off && fp.wrap != PD_WRAP_NONE) {    /* where Word has it across the column */
+                fp.placement |= PD_PLACE_OFFSET;
+                fp.offset_x = w->pend_fl[k].off_x;
+            }
+
             pd_doc_set_float_props(b->d, fl, &fp);
         }
 
@@ -3702,6 +3759,8 @@ static void dw_image(dw* w) {
                 w->pend_fl[k].h = o.height;
                 w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
                 w->pend_fl[k].wrap = w->wrap;
+                w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
+                w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
 
                 if (!w->started) {  /* anchored before any text: the float goes first */
                     dw_floats(w);
@@ -3766,11 +3825,16 @@ static pd_block_id hf_story(dxi* X, const char* rid) {
     snprintf(path, sizeof(path), "%s%s", target[0] == '/' ? "" : "word/", target[0] == '/' ? target + 1 : target);
 
     if ((xml = (char*)zip_read(&X->z, path, &len)) != NULL) {
+        int saved_n = 0, swapped;
+        drel* saved = NULL;
+
+        swapped = part_rels_begin(X, path, &saved, &saved_n);
         story = bld_story_begin(X->b);
         X->depth++;
         dw_parse(X, xml, len, 1);
         X->depth--;
         bld_story_end(X->b);
+        part_rels_end(X, swapped, saved, saved_n);
         free(xml);
     }
 
@@ -3837,6 +3901,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                                 strstr(tv, "center") ? PD_WRAP_NONE : PD_WRAP_LEFT;
             } else {
                 w->posh_off = atoll(tv);
+                w->posh_has_off = 1;
             }
 
             continue;
@@ -3906,6 +3971,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->sp.margin_top = abs(attr_int(&m, "w:top", 1440)) * 65536 / 20;
                     w->sp.margin_bottom = abs(attr_int(&m, "w:bottom", 1440)) * 65536 / 20;
                     w->sp.margin_left = attr_int(&m, "w:left", 1440) * 65536 / 20;
+                    w->X->margin_left = w->sp.margin_left;  /* for the pictures of its headers, read next */
                     w->sp.margin_right = attr_int(&m, "w:right", 1440) * 65536 / 20;
                     w->sp.header_distance = attr_int(&m, "w:header", 720) * 65536 / 20;
                     w->sp.footer_distance = attr_int(&m, "w:footer", 720) * 65536 / 20;
@@ -4013,6 +4079,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->wrap = PD_WRAP_NONE;
                 w->posh_align = -1;
                 w->posh_off = 0;
+                w->posh_page = w->posh_has_off = 0;
                 w->dist = 0;
             } else if (w->in_drawing && strcmp(t, "anchor") == 0) {
                 w->anchor = 1;
@@ -4033,6 +4100,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
             } else if (w->in_drawing && strcmp(t, "positionH") == 0) {
                 w->in_posh = m.type == MT_OPEN;
+                w->posh_page = mu_attr(&m, "relativeFrom", v, sizeof(v)) && (strcmp(v, "page") == 0 ||
+                               strcmp(v, "leftMargin") == 0);
             } else if (w->in_posh && strcmp(t, "align") == 0) {
                 w->in_align = m.type == MT_OPEN;
             } else if (w->in_posh && strcmp(t, "posOffset") == 0) {
@@ -4371,6 +4440,7 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     pd_status st;
 
     memset(&X, 0, sizeof(X));
+    X.margin_left = PD_PT(72);
 
     if (zip_open(&X.z, s, n) != 0) {
         return PD_ERR_FORMAT;

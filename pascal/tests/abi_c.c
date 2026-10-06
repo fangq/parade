@@ -55,6 +55,7 @@ int main(void) {
     printf("pd_params.looseness %zu\n", offsetof(pd_params, looseness));
     printf("pd_params.protrusion %zu\n", offsetof(pd_params, protrusion));
     printf("pd_params.expansion %zu\n", offsetof(pd_params, expansion));
+    printf("pd_params.full_lines %zu\n", offsetof(pd_params, full_lines));
     printf("pd_break_info %zu\n", sizeof(pd_break_info));
     printf("pd_break_info.lines %zu\n", offsetof(pd_break_info, lines));
     printf("pd_break_info.demerits %zu\n", offsetof(pd_break_info, demerits));
@@ -204,6 +205,7 @@ int main(void) {
     printf("pd_float_props.span_columns %zu\n", offsetof(pd_float_props, span_columns));
     printf("pd_float_props.gap %zu\n", offsetof(pd_float_props, gap));
     printf("pd_float_props.sequence %zu\n", offsetof(pd_float_props, sequence));
+    printf("pd_float_props.offset_x %zu\n", offsetof(pd_float_props, offset_x));
     printf("pd_section_props %zu\n", sizeof(pd_section_props));
     printf("pd_section_props.page_width %zu\n", offsetof(pd_section_props, page_width));
     printf("pd_section_props.page_height %zu\n", offsetof(pd_section_props, page_height));

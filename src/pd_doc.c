@@ -573,9 +573,11 @@ int pd_doc_child_allowed(int32_t pk, int32_t kk) {
         case PD_BLOCK_SECTION:
             return kk == PD_BLOCK_PARAGRAPH || kk == PD_BLOCK_FLOAT || kk == PD_BLOCK_TABLE || kk == PD_BLOCK_BREAK;
 
+        case PD_BLOCK_STORY:    /* a header's logo beside its text */
+            return kk == PD_BLOCK_PARAGRAPH || kk == PD_BLOCK_TABLE || kk == PD_BLOCK_FLOAT;
+
         case PD_BLOCK_FLOAT:
         case PD_BLOCK_CELL:
-        case PD_BLOCK_STORY:
             return kk == PD_BLOCK_PARAGRAPH || kk == PD_BLOCK_TABLE;
 
         case PD_BLOCK_TABLE:
@@ -2826,7 +2828,8 @@ pd_status pd_doc_set_float_props(pd_doc* d, pd_block_id id, const pd_float_props
     blk* b = d ? pd_doc_blk(d, id) : NULL;
 
     BLOCK_OP("Float", b && b->kind == PD_BLOCK_FLOAT && fp && fp->wrap >= PD_WRAP_NONE && fp->wrap <= PD_WRAP_RIGHT &&
-             fp->width >= 0 && fp->width_fraction >= 0 && fp->width_fraction <= 1000 && (fp->placement & 31),
+             fp->width >= 0 && fp->width_fraction >= 0 && fp->width_fraction <= 1000 && (fp->placement & 31) &&
+             fp->placement <= 63,
              (b->st.fp = *fp, b->st.fp.sequence[sizeof(b->st.fp.sequence) - 1] = '\0'));
 }
 

@@ -713,6 +713,13 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
 
         if (i == 0) {
             y = asc;
+
+            if (prm->full_lines) {  /* the first line's leading too, above it, as for every other line */
+                int64_t step = ((int64_t)desc + asc + gap) * prm->line_spacing / 1000;
+
+                step = step < prm->baseline_skip ? prm->baseline_skip : step;
+                y += step > asc + desc ? (pd_sp)(step - asc - desc) : 0;
+            }
         } else {
             int64_t step = ((int64_t)prev_desc + asc + gap) * prm->line_spacing / 1000;
 

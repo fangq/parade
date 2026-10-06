@@ -190,6 +190,7 @@ const
   PD_PLACE_BOTTOM = 4;
   PD_PLACE_PAGE = 8;
   PD_PLACE_FORCE = 16;
+  PD_PLACE_OFFSET = 32;
 
   PD_WRAP_NONE = 0;
   PD_WRAP_LEFT = 1;
@@ -294,6 +295,7 @@ type
     direction: Int32;
     looseness: Int32;
     protrusion, expansion: Int32;
+    full_lines: Int32;
   end;
   Ppd_params = ^pd_params;
 
@@ -437,6 +439,7 @@ type
     width_fraction, span_columns: Int32;
     gap: pd_sp;
     sequence: array[0..31] of AnsiChar;
+    offset_x: pd_sp;
   end;
   Ppd_float_props = ^pd_float_props;
 

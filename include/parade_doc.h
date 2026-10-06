@@ -456,6 +456,7 @@ PD_API pd_status pd_doc_resource(const pd_doc* doc, pd_res_id res, const char** 
 #define PD_PLACE_BOTTOM 4u      /**< bottom of a page */
 #define PD_PLACE_PAGE   8u      /**< on a float-only page */
 #define PD_PLACE_FORCE  16u     /**< exactly at the anchor, even if it leaves a gap (LaTeX [H]) */
+#define PD_PLACE_OFFSET 32u     /**< a wrapped float at offset_x, not against its side of the column */
 
 typedef enum {
     PD_WRAP_NONE = 0,           /**< full width; text above and below */
@@ -471,6 +472,8 @@ typedef struct {
     int32_t span_columns;       /**< 1 = spans all columns in multi-column sections */
     pd_sp gap;                  /**< space between float and text */
     char sequence[32];          /**< numbering sequence of its caption ("Figure", "Table") */
+    pd_sp offset_x;             /**< with PD_PLACE_OFFSET: its left edge from the column's (negative: in the
+                                     margin); the text gives way only where it reaches into the column */
 } pd_float_props;
 
 typedef struct {
