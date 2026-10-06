@@ -249,6 +249,18 @@ static void save_cp(pj_writer* w, const pd_char_props* c) {
         put_int(w, "Link", c->link_target);
     }
 
+    if (m & PD_CP_CAPS) {
+        put_bool(w, "Caps", c->caps);
+    }
+
+    if (m & PD_CP_HIDDEN) {
+        put_bool(w, "Hidden", c->hidden);
+    }
+
+    if (m & PD_CP_POSITION) {
+        put_int(w, "Position", c->position);
+    }
+
     pj_obj_end(w);
 }
 
@@ -876,7 +888,7 @@ static void load_cp(const pj_node* o, pd_char_props* c, loader* L) {
     F("Italic", PD_CP_ITALIC, italic, 0, 1);
     F("Color", PD_CP_COLOR, color, 0, 0xFFFFFFFFLL);
     F("Background", PD_CP_BACKGROUND, background, 0, 0xFFFFFFFFLL);
-    F("Underline", PD_CP_UNDERLINE, underline, 0, 2);
+    F("Underline", PD_CP_UNDERLINE, underline, 0, PD_UNDERLINE_WORDS);
     F("Strike", PD_CP_STRIKE, strike, 0, 2);
 
     if ((x = pj_get(o, "Shift"))) {
@@ -895,6 +907,9 @@ static void load_cp(const pj_node* o, pd_char_props* c, loader* L) {
 
     F("SmallCaps", PD_CP_SMALLCAPS, small_caps, 0, 1);
     F("Link", PD_CP_LINK, link_target, 0, PD_MAX_BLOCKS);
+    F("Caps", PD_CP_CAPS, caps, 0, 1);
+    F("Hidden", PD_CP_HIDDEN, hidden, 0, 1);
+    F("Position", PD_CP_POSITION, position, SP_MIN, SP_MAX);
 #undef F
     pd_doc_cp_normalize(c);
 }

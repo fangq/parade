@@ -59,6 +59,9 @@ begin
   WriteLn('pd_style.color ', PtrUInt(@v_pd_style.color) - PtrUInt(@v_pd_style));
   WriteLn('pd_style.user ', PtrUInt(@v_pd_style.user) - PtrUInt(@v_pd_style));
   WriteLn('pd_style.hyph ', PtrUInt(@v_pd_style.hyph) - PtrUInt(@v_pd_style));
+  WriteLn('pd_style.text_case ', PtrUInt(@v_pd_style.text_case) - PtrUInt(@v_pd_style));
+  WriteLn('pd_style.letter_space ', PtrUInt(@v_pd_style.letter_space) - PtrUInt(@v_pd_style));
+  WriteLn('pd_style.hidden ', PtrUInt(@v_pd_style.hidden) - PtrUInt(@v_pd_style));
   WriteLn('pd_params ', SizeOf(pd_params));
   WriteLn('pd_params.mode ', PtrUInt(@v_pd_params.mode) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.align ', PtrUInt(@v_pd_params.align) - PtrUInt(@v_pd_params));
@@ -147,6 +150,9 @@ begin
   WriteLn('pd_char_props.lang ', PtrUInt(@v_pd_char_props.lang) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_char_props.small_caps ', PtrUInt(@v_pd_char_props.small_caps) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_char_props.link_target ', PtrUInt(@v_pd_char_props.link_target) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.caps ', PtrUInt(@v_pd_char_props.caps) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.hidden ', PtrUInt(@v_pd_char_props.hidden) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.position ', PtrUInt(@v_pd_char_props.position) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_para_props ', SizeOf(pd_para_props));
   WriteLn('pd_para_props.mask ', PtrUInt(@v_pd_para_props.mask) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.align ', PtrUInt(@v_pd_para_props.align) - PtrUInt(@v_pd_para_props));

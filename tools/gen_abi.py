@@ -8,7 +8,7 @@ STRUCTS = {
     "pd_font_metrics": "units_per_em ascender descender line_gap x_height cap_height num_glyphs has_kerning",
     "pd_outline_sink": "move_to line_to quad_to cubic_to close",
     "pd_glyph_image": "width height left top",
-    "pd_style": "font size space_stretch space_shrink kerning color user hyph",
+    "pd_style": "font size space_stretch space_shrink kerning color user hyph text_case letter_space hidden",
     "pd_params": "mode align width indent line_penalty adj_demerits double_hyphen_demerits final_hyphen_demerits "
                  "hyphen_penalty ex_hyphen_penalty tex_badness rag_stretch baseline_skip line_spacing hysteresis "
                  "freeze_offset direction looseness protrusion expansion",
@@ -20,7 +20,7 @@ STRUCTS = {
     "pd_block_info": "kind id parent child_count index role level list_level style list break_kind text_length "
                      "revision",
     "pd_char_props": "mask family size weight italic color background underline strike shift letter_space kerning "
-                     "lang small_caps link_target",
+                     "lang small_caps link_target caps hidden position",
     "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
                      "border_color border_width shading direction ntabs tabs tab_interval",

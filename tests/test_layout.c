@@ -1501,6 +1501,116 @@ static void test_tabs(void) {
     pd_doc_free(d);
 }
 
+/* the format of a range: one property set */
+static void set_cp(pd_doc* d, pd_block_id p, uint32_t a, uint32_t b, const pd_char_props* cp) {
+    pd_range r;
+
+    r.start = at(p, a);
+    r.end = at(p, b);
+    pd_doc_set_char_props(d, r, cp);
+}
+
+/* Character effects in the layout: capitals and small capitals drawn with
+   the capitals' glyphs (the text keeps its case), hidden text taking no
+   room and not drawn, letter spacing, a raised run, and the underline
+   kinds as their rules. */
+static void test_char_effects(void) {
+    pd_block_id sec, p[6];
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_char_props cp;
+    pd_draw* it;
+    int32_t n, k, rules[6] = { 0 };
+    pd_sp x0, x1, y0 = 0, y1 = 0;
+    uint32_t gA = pd_font_glyph_index(font, 'A'), ga = pd_font_glyph_index(font, 'a');
+    const char* t;
+    uint32_t tn;
+    int i;
+
+    p[0] = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p[0], 0), "aa aa aa", 8, PD_FORMAT_INHERIT, NULL);
+    for (i = 1; i < 6; i++) {
+        p[i] = add_para(d, sec, "word word");
+    }
+
+    memset(&cp, 0, sizeof(cp));
+    cp.mask = PD_CP_CAPS;
+    cp.caps = 1;
+    set_cp(d, p[0], 0, 2, &cp);         /* AA */
+    cp.mask = PD_CP_SMALLCAPS;
+    cp.small_caps = 1;
+    set_cp(d, p[0], 3, 5, &cp);         /* small AA */
+    cp.mask = PD_CP_HIDDEN;
+    cp.hidden = 1;
+    set_cp(d, p[1], 0, 5, &cp);         /* "word " hidden */
+    cp.mask = PD_CP_LETTERSPACE;
+    cp.letter_space = PD_PT(3);
+    set_cp(d, p[2], 0, 4, &cp);
+    cp.mask = PD_CP_POSITION;
+    cp.position = PD_PT(3);
+    set_cp(d, p[3], 0, 4, &cp);
+    cp.mask = PD_CP_UNDERLINE;
+    cp.underline = PD_UNDERLINE_DOUBLE;
+    set_cp(d, p[4], 0, 4, &cp);
+    cp.underline = PD_UNDERLINE_DOTTED;
+    set_cp(d, p[5], 0, 4, &cp);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    it = items(L, 0, &n);
+
+    /* capitals' glyphs, the text unchanged; small capitals smaller */
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].block == p[0]) {
+            if (it[k].offset < 2) {
+                CHECK(it[k].glyph == gA && it[k].size == PD_PT(10));
+            } else if (it[k].offset >= 3 && it[k].offset < 5) {
+                CHECK(it[k].glyph == gA && it[k].size == PD_PT(8));
+            } else if (it[k].offset >= 6) {
+                CHECK(it[k].glyph == ga);
+            }
+        }
+    }
+
+    pd_doc_para_text(d, p[0], &t, &tn);
+    CHECK(tn == 8 && memcmp(t, "aa aa aa", 8) == 0);
+
+    /* hidden: not drawn, and the visible word starts at the margin */
+    CHECK(glyph_x(it, n, p[1], 0, NULL) < 0 && glyph_x(it, n, p[1], 5, NULL) == glyph_x(it, n, p[2], 0, NULL));
+
+    /* letter spacing: each spaced glyph 3pt further on */
+    x0 = glyph_x(it, n, p[2], 1, NULL) - glyph_x(it, n, p[2], 0, NULL);
+    x1 = glyph_x(it, n, p[3], 1, NULL) - glyph_x(it, n, p[3], 0, NULL);
+    CHECK(x0 - x1 == PD_PT(3));
+
+    /* raised: the first word's baseline 3pt above the second's */
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].block == p[3]) {
+            if (it[k].offset == 0) y0 = it[k].y;
+            if (it[k].offset == 5) y1 = it[k].y;
+        }
+    }
+
+    CHECK(y1 - y0 == PD_PT(3));
+
+    /* double: two rules under each glyph; dotted: pieces */
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_RULE) {
+            for (i = 4; i < 6; i++) {
+                if (it[k].block == p[i]) {
+                    rules[i]++;
+                }
+            }
+        }
+    }
+
+    CHECK(rules[4] == 8 && rules[5] > 8);
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1543,6 +1653,8 @@ int main(void) {
     test_endnotes();
     printf("tab stops\n");
     test_tabs();
+    printf("character effects\n");
+    test_char_effects();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -344,6 +344,12 @@ static void xesc(pd_buf* o, const char* s, size_t n) {
     pb_put(o, s + j, n - j);
 }
 
+static const char* dx_u_name(int32_t u) {
+    static const char* names[] = { "none", "single", "double", "thick", "dotted", "dash", "wave", "words" };
+
+    return u >= 0 && u <= PD_UNDERLINE_WORDS ? names[u] : "single";
+}
+
 static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const char* rstyle) {
     pd_buf* o = x->o;
     size_t mark;
@@ -376,20 +382,44 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_puts(o, "<w:i/>");
     }
 
+    if (!c->caps != !b->caps) {
+        pb_puts(o, c->caps ? "<w:caps/>" : "<w:caps w:val=\"0\"/>");
+    }
+
+    if (!c->small_caps != !b->small_caps) {
+        pb_puts(o, c->small_caps ? "<w:smallCaps/>" : "<w:smallCaps w:val=\"0\"/>");
+    }
+
     if (c->strike && !b->strike) {
         pb_puts(o, "<w:strike/>");
+    }
+
+    if (!c->hidden != !b->hidden) {
+        pb_puts(o, c->hidden ? "<w:vanish/>" : "<w:vanish w:val=\"0\"/>");
     }
 
     if (c->color != b->color) {
         pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(c->color & 0xFFFFFF));
     }
 
+    if (c->letter_space != b->letter_space) {
+        pb_printf(o, "<w:spacing w:val=\"%d\"/>", TW(c->letter_space));
+    }
+
+    if (!c->kerning != !b->kerning) {
+        pb_printf(o, "<w:kern w:val=\"%d\"/>", c->kerning ? 2 : 0);
+    }
+
+    if (c->position != b->position) {
+        pb_printf(o, "<w:position w:val=\"%d\"/>", (int)SCALE(c->position, 2, 65536));
+    }
+
     if (c->size != b->size) {
         pb_printf(o, "<w:sz w:val=\"%d\"/>", (int)SCALE(c->size, 2, 65536));
     }
 
-    if (c->underline && !b->underline) {
-        pb_puts(o, c->underline == 2 ? "<w:u w:val=\"double\"/>" : "<w:u w:val=\"single\"/>");
+    if (c->underline != b->underline) {
+        pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name(c->underline));
     }
 
     if (c->background && c->background != b->background) {
@@ -1362,6 +1392,10 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
         pb_puts(o, c->italic ? "<w:i/>" : "<w:i w:val=\"0\"/>");
     }
 
+    if (m & PD_CP_CAPS) {
+        pb_puts(o, c->caps ? "<w:caps/>" : "<w:caps w:val=\"0\"/>");
+    }
+
     if (m & PD_CP_SMALLCAPS) {
         pb_puts(o, c->small_caps ? "<w:smallCaps/>" : "<w:smallCaps w:val=\"0\"/>");
     }
@@ -1370,8 +1404,24 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
         pb_puts(o, c->strike ? "<w:strike/>" : "<w:strike w:val=\"0\"/>");
     }
 
+    if (m & PD_CP_HIDDEN) {
+        pb_puts(o, c->hidden ? "<w:vanish/>" : "<w:vanish w:val=\"0\"/>");
+    }
+
     if (m & PD_CP_COLOR) {
         pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(c->color & 0xFFFFFF));
+    }
+
+    if (m & PD_CP_LETTERSPACE) {
+        pb_printf(o, "<w:spacing w:val=\"%d\"/>", TW(c->letter_space));
+    }
+
+    if (m & PD_CP_KERNING) {
+        pb_printf(o, "<w:kern w:val=\"%d\"/>", c->kerning ? 2 : 0);
+    }
+
+    if (m & PD_CP_POSITION) {
+        pb_printf(o, "<w:position w:val=\"%d\"/>", (int)SCALE(c->position, 2, 65536));
     }
 
     if (m & PD_CP_SIZE) {
@@ -1380,8 +1430,7 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
     }
 
     if (m & PD_CP_UNDERLINE) {
-        pb_puts(o, c->underline == 2 ? "<w:u w:val=\"double\"/>" : c->underline ? "<w:u w:val=\"single\"/>" :
-                "<w:u w:val=\"none\"/>");
+        pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name(c->underline));
     }
 
     if ((m & PD_CP_BACKGROUND) && c->background) {
@@ -1414,8 +1463,9 @@ static void dx_styles(dxo* x, pd_buf* o) {
     pb_printf(o, "<w:styles %s>", W_NS);
     pb_puts(o, "<w:docDefaults><w:rPrDefault><w:rPr>");
     dx_fonts(o, "Times New Roman");     /* what a family-less Parade document is set in: a serif */
-    pb_printf(o, "<w:sz w:val=\"%d\"/><w:szCs w:val=\"%d\"/><w:lang w:val=\"%s\"/></w:rPr></w:rPrDefault>",
-              (int)SCALE(dc.size, 2, 65536), (int)SCALE(dc.size, 2, 65536), dc.lang[0] ? dc.lang : "en-US");
+    pb_printf(o, "<w:kern w:val=\"%d\"/><w:sz w:val=\"%d\"/><w:szCs w:val=\"%d\"/><w:lang w:val=\"%s\"/>"
+              "</w:rPr></w:rPrDefault>", dc.kerning ? 2 : 0, (int)SCALE(dc.size, 2, 65536), (int)SCALE(dc.size, 2, 65536),
+              dc.lang[0] ? dc.lang : "en-US");
     pb_puts(o, "<w:pPrDefault><w:pPr>");
     dx_ppr_head(o, &dp, PD_PP_WIDOWS);
     dx_ppr_tail(o, &dp, PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_LINE_SPACING, x->hyph_auto);
@@ -1939,7 +1989,12 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
         cp->italic = attr_on(m);
     } else if (strcmp(t, "u") == 0) {
         cp->mask |= PD_CP_UNDERLINE;
-        cp->underline = attr_on(m) ? (mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "double") == 0 ? 2 : 1) : 0;
+        cp->underline = !attr_on(m) ? 0 : !mu_attr(m, "w:val", v, sizeof(v)) ? PD_UNDERLINE_SINGLE :
+                        strcmp(v, "none") == 0 ? 0 : strcmp(v, "double") == 0 || strcmp(v, "wavyDouble") == 0 ?
+                        PD_UNDERLINE_DOUBLE : strcmp(v, "thick") == 0 ? PD_UNDERLINE_THICK : strcmp(v, "words") == 0 ?
+                        PD_UNDERLINE_WORDS : strncmp(v, "wav", 3) == 0 ? PD_UNDERLINE_WAVY : strncmp(v, "dotted", 6) == 0 ?
+                        PD_UNDERLINE_DOTTED : strncmp(v, "dash", 4) == 0 || strncmp(v, "dot", 3) == 0 ?
+                        PD_UNDERLINE_DASHED : PD_UNDERLINE_SINGLE;
     } else if (strcmp(t, "strike") == 0 || strcmp(t, "dstrike") == 0) {
         cp->mask |= PD_CP_STRIKE;
         cp->strike = attr_on(m);
@@ -1977,6 +2032,21 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "smallCaps") == 0) {
         cp->mask |= PD_CP_SMALLCAPS;
         cp->small_caps = attr_on(m);
+    } else if (strcmp(t, "caps") == 0) {
+        cp->mask |= PD_CP_CAPS;
+        cp->caps = attr_on(m);
+    } else if (strcmp(t, "vanish") == 0) {
+        cp->mask |= PD_CP_HIDDEN;
+        cp->hidden = attr_on(m);
+    } else if (strcmp(t, "spacing") == 0) {         /* between letters, in twips */
+        cp->mask |= PD_CP_LETTERSPACE;
+        cp->letter_space = twips(attr_int(m, "w:val", 0));
+    } else if (strcmp(t, "position") == 0) {        /* raised or lowered, in half-points */
+        cp->mask |= PD_CP_POSITION;
+        cp->position = (pd_sp)((int64_t)attr_int(m, "w:val", 0) * 65536 / 2);
+    } else if (strcmp(t, "kern") == 0) {            /* kerned from a size up: Word's own default is not to */
+        cp->mask |= PD_CP_KERNING;
+        cp->kerning = attr_int(m, "w:val", 0) > 0;
     } else if (strcmp(t, "rStyle") == 0 && rstyle) {
         mu_attr(m, "w:val", rstyle, rcap);
     }
@@ -2138,6 +2208,11 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sc->mask & PD_CP_STRIKE) dc->strike = sc->strike;
     if (sc->mask & PD_CP_SHIFT) dc->shift = sc->shift;
     if (sc->mask & PD_CP_SMALLCAPS) dc->small_caps = sc->small_caps;
+    if (sc->mask & PD_CP_CAPS) dc->caps = sc->caps;
+    if (sc->mask & PD_CP_HIDDEN) dc->hidden = sc->hidden;
+    if (sc->mask & PD_CP_LETTERSPACE) dc->letter_space = sc->letter_space;
+    if (sc->mask & PD_CP_POSITION) dc->position = sc->position;
+    if (sc->mask & PD_CP_KERNING) dc->kerning = sc->kerning;
 
     dc->mask |= sc->mask;
 }
@@ -2602,6 +2677,11 @@ static void dw_apply_run(dw* w) {
     DW_DIFF(PD_CP_STRIKE, strike)
     DW_DIFF(PD_CP_SHIFT, shift)
     DW_DIFF(PD_CP_SMALLCAPS, small_caps)
+    DW_DIFF(PD_CP_CAPS, caps)
+    DW_DIFF(PD_CP_HIDDEN, hidden)
+    DW_DIFF(PD_CP_LETTERSPACE, letter_space)
+    DW_DIFF(PD_CP_POSITION, position)
+    DW_DIFF(PD_CP_KERNING, kerning)
 #undef DW_DIFF
 
     bld_set_format(w->X->b, &cp);
@@ -3562,6 +3642,8 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     /* Word hyphenates only when the document asks it to */
     X.defaults.pp.mask |= PD_PP_HYPHENATE;
     X.defaults.pp.hyphenate = 0;
+    X.defaults.cp.mask |= PD_CP_KERNING;    /* nor kerns, unless w:kern says so */
+    X.defaults.cp.kerning = 0;
 
     if ((xml = (char*)zip_read(&X.z, "word/settings.xml", &len)) != NULL) {
         read_settings(&X, xml, len);

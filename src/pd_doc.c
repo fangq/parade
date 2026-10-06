@@ -150,6 +150,18 @@ void pd_doc_cp_normalize(pd_char_props* cp) {
         z.link_target = cp->link_target;
     }
 
+    if (m & PD_CP_CAPS) {
+        z.caps = cp->caps;
+    }
+
+    if (m & PD_CP_HIDDEN) {
+        z.hidden = cp->hidden;
+    }
+
+    if (m & PD_CP_POSITION) {
+        z.position = cp->position;
+    }
+
     *cp = z;
 }
 
@@ -255,6 +267,18 @@ static void cp_apply(pd_char_props* dst, const pd_char_props* src) {
 
     if (m & PD_CP_LINK) {
         dst->link_target = src->link_target;
+    }
+
+    if (m & PD_CP_CAPS) {
+        dst->caps = src->caps;
+    }
+
+    if (m & PD_CP_HIDDEN) {
+        dst->hidden = src->hidden;
+    }
+
+    if (m & PD_CP_POSITION) {
+        dst->position = src->position;
     }
 
     dst->mask |= m;

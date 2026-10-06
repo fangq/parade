@@ -203,6 +203,47 @@ int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t
 int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen);
 uint32_t pd_crc32(const void* data, size_t n);
 
+/* the capital of a letter whose capital is one code point (Latin, Greek,
+   Cyrillic, Armenian, fullwidth Latin); others unchanged */
+static inline uint32_t pd_uni_upper(uint32_t c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 0xE0 && c <= 0xFE && c != 0xF7) || (c >= 0x3B1 && c <= 0x3CB && c != 0x3C2) ||
+            (c >= 0x430 && c <= 0x44F) || (c >= 0xFF41 && c <= 0xFF5A)) {
+        return c - 0x20;
+    }
+
+    if (c == 0xFF) {
+        return 0x178;
+    }
+
+    if (c == 0x3C2) {
+        return 0x3A3;   /* final sigma */
+    }
+
+    if (c >= 0x3AC && c <= 0x3AF) {
+        return c == 0x3AC ? 0x386 : c + 0x388 - 0x3AD;
+    }
+
+    if (c >= 0x450 && c <= 0x45F) {
+        return c - 0x50;
+    }
+
+    if (c >= 0x561 && c <= 0x586) {
+        return c - 0x30;
+    }
+
+    /* Latin Extended-A and the even/odd pairs of Cyrillic beyond the basic block */
+    if (((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177) || (c >= 0x460 && c <= 0x481) ||
+            (c >= 0x48A && c <= 0x4BF) || (c >= 0x4D0 && c <= 0x52F)) && (c & 1)) {
+        return c - 1;
+    }
+
+    if (((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E) || (c >= 0x4C1 && c <= 0x4CE)) && !(c & 1)) {
+        return c - 1;
+    }
+
+    return c;
+}
+
 /* line breaking, implemented in pd_break.c */
 pd_status pd_break_lines(pd_para* p, const pd_params* prm, pd_break_info* info);
 

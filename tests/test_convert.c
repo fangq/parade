@@ -1569,6 +1569,94 @@ static void test_docx_writer(void) {
     pd_doc_free(d);
 }
 
+/* Word's character effects: capitals, small capitals, hidden text, letter
+   spacing, a raised run, kerning and the kinds of underline -- read, and
+   kept through DOCX, HTML, RTF (what it has) and JData. */
+static void check_effects(const pd_doc* d, const char* fmt) {
+    pd_block_id p = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0);
+    pd_char_props c;
+    int all = strcmp(fmt, "RTF") != 0;
+
+    c = chars_at(d, p, 0);      /* "Caps" */
+    CHECK(c.caps == 1 && !c.small_caps);
+    c = chars_at(d, p, 5);      /* "Small" */
+    CHECK(c.small_caps == 1 && !c.caps);
+    c = chars_at(d, p, 11);     /* "dbl" */
+    CHECK(c.underline == PD_UNDERLINE_DOUBLE);
+    c = chars_at(d, p, 15);     /* "dot" */
+    CHECK(c.underline == PD_UNDERLINE_DOTTED);
+    c = chars_at(d, p, 19);     /* "wave" */
+    CHECK(c.underline == PD_UNDERLINE_WAVY);
+    c = chars_at(d, p, 24);     /* "words" */
+    CHECK(c.underline == PD_UNDERLINE_WORDS);
+
+    if (all) {
+        c = chars_at(d, p, 30); /* "hide" */
+        CHECK(c.hidden == 1);
+        c = chars_at(d, p, 35); /* "wide" */
+        CHECK(c.letter_space == PD_PT(2) && !c.hidden);
+        c = chars_at(d, p, 40); /* "up" */
+        CHECK(c.position == PD_PT(3));
+    }
+
+    if (strcmp(fmt, "DOCX") == 0 || strcmp(fmt, "JData") == 0) {
+        c = chars_at(d, p, 0);  /* Word kerns only where it says so */
+        CHECK(c.kerning == 0);
+        c = chars_at(d, p, 40);
+        CHECK(c.kerning == 1);
+    }
+
+    c = chars_at(d, p, 40);     /* and no further than their runs */
+    CHECK(!c.caps && !c.small_caps && c.underline == 0);
+}
+
+static void test_docx_effects(void) {
+    static const struct {
+        pd_conv_format f;
+        const char* name;
+    } fmts[] = { { PD_CONV_DOCX, "DOCX" }, { PD_CONV_HTML, "HTML" }, { PD_CONV_RTF, "RTF" }, { PD_CONV_JDATA, "JData" } };
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body><w:p>"
+        "<w:r><w:rPr><w:caps/></w:rPr><w:t xml:space=\"preserve\">Caps </w:t></w:r>"
+        "<w:r><w:rPr><w:smallCaps/></w:rPr><w:t xml:space=\"preserve\">Small </w:t></w:r>"
+        "<w:r><w:rPr><w:u w:val=\"double\"/></w:rPr><w:t>dbl</w:t></w:r><w:r><w:t xml:space=\"preserve\"> </w:t></w:r>"
+        "<w:r><w:rPr><w:u w:val=\"dottedHeavy\"/></w:rPr><w:t>dot</w:t></w:r><w:r><w:t xml:space=\"preserve\"> </w:t></w:r>"
+        "<w:r><w:rPr><w:u w:val=\"wave\"/></w:rPr><w:t>wave</w:t></w:r><w:r><w:t xml:space=\"preserve\"> </w:t></w:r>"
+        "<w:r><w:rPr><w:u w:val=\"words\"/></w:rPr><w:t>words</w:t></w:r><w:r><w:t xml:space=\"preserve\"> </w:t></w:r>"
+        "<w:r><w:rPr><w:vanish/></w:rPr><w:t>hide</w:t></w:r><w:r><w:t xml:space=\"preserve\"> </w:t></w:r>"
+        "<w:r><w:rPr><w:spacing w:val=\"40\"/></w:rPr><w:t>wide</w:t></w:r><w:r><w:t xml:space=\"preserve\"> </w:t></w:r>"
+        "<w:r><w:rPr><w:kern w:val=\"16\"/><w:position w:val=\"6\"/></w:rPr><w:t>up</w:t></w:r>"
+        "</w:p></w:body></w:document>",
+        NULL);
+    size_t i;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    check_effects(d, "DOCX");
+
+    for (i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
+        buf_t b = { NULL, 0 };
+        pd_doc* t = NULL;
+
+        CHECK(pd_doc_export(d, fmts[i].f, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, fmts[i].f, &t) == PD_OK);
+
+        if (t) {
+            check_effects(t, fmts[i].name);
+            pd_doc_free(t);
+        }
+
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2191,6 +2279,8 @@ int main(void) {
     test_docx_floats();
     printf("docx writer\n");
     test_docx_writer();
+    printf("docx character effects\n");
+    test_docx_effects();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

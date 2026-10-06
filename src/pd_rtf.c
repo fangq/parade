@@ -124,8 +124,18 @@ static void rx_font_cmds(rx* x, const pd_char_props* c, const pd_char_props* b) 
         pb_puts(o, "\\i");
     }
 
-    if (c->underline && !(b && b->underline)) {
-        pb_puts(o, c->underline == 2 ? "\\uldb" : "\\ul");
+    if (c->underline && !(b && b->underline == c->underline)) {
+        static const char* ul[] = { "\\ulnone", "\\ul", "\\uldb", "\\ulth", "\\uld", "\\uldash", "\\ulwave", "\\ulw" };
+
+        pb_puts(o, ul[c->underline >= 0 && c->underline <= PD_UNDERLINE_WORDS ? c->underline : 1]);
+    }
+
+    if (c->caps && !(b && b->caps)) {
+        pb_puts(o, "\\caps");
+    }
+
+    if (c->small_caps && !(b && b->small_caps)) {
+        pb_puts(o, "\\scaps");
     }
 
     if (c->strike && !(b && b->strike)) {
@@ -641,7 +651,7 @@ enum {
 
 typedef struct {
     int dest;
-    int bold, italic, ul, strike, shift, font, fs, cf, bg, uc, hidden;
+    int bold, italic, ul, strike, shift, font, fs, cf, bg, uc, hidden, caps, scaps;
     int note_end;               /* this group is a footnote: end it on close */
     int saved[6];               /* footnotes: the paragraph state to go back to */
     int field_end;              /* this group is a field: end its link on close */
@@ -720,6 +730,16 @@ static void ri_format(ri* r) {
     if (g->shift) {
         cp.mask |= PD_CP_SHIFT;
         cp.shift = g->shift;
+    }
+
+    if (g->caps) {
+        cp.mask |= PD_CP_CAPS;
+        cp.caps = 1;
+    }
+
+    if (g->scaps) {
+        cp.mask |= PD_CP_SMALLCAPS;
+        cp.small_caps = 1;
     }
 
     if (g->font > 0) {
@@ -1168,15 +1188,30 @@ static void ri_word(ri* r, const char* w, int has_num, int num) {
     /* character formatting (group scoped) */
     else if (IS("plain")) {
         g->bold = g->italic = g->ul = g->strike = g->shift = g->font = g->cf = g->bg = g->hidden = 0;
+        g->caps = g->scaps = 0;
         g->fs = 24;
     } else if (IS("b")) {
         g->bold = !has_num || num != 0;
     } else if (IS("i")) {
         g->italic = !has_num || num != 0;
-    } else if (IS("ul") || IS("ulw") || IS("uld") || IS("uldash")) {
+    } else if (IS("ul")) {
         g->ul = !has_num || num != 0;
-    } else if (IS("uldb")) {
-        g->ul = 2;
+    } else if (IS("ulw")) {
+        g->ul = PD_UNDERLINE_WORDS;
+    } else if (IS("uld")) {
+        g->ul = PD_UNDERLINE_DOTTED;
+    } else if (IS("uldash") || IS("uldashd") || IS("uldashdd") || IS("ulldash")) {
+        g->ul = PD_UNDERLINE_DASHED;
+    } else if (IS("ulth") || IS("ulthd") || IS("ulthdash")) {
+        g->ul = PD_UNDERLINE_THICK;
+    } else if (IS("ulwave") || IS("ulhwave")) {
+        g->ul = PD_UNDERLINE_WAVY;
+    } else if (IS("uldb") || IS("ululdbwave")) {
+        g->ul = PD_UNDERLINE_DOUBLE;
+    } else if (IS("caps")) {
+        g->caps = !has_num || num != 0;
+    } else if (IS("scaps")) {
+        g->scaps = !has_num || num != 0;
     } else if (IS("ulnone")) {
         g->ul = 0;
     } else if (IS("strike") || IS("striked")) {

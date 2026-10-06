@@ -265,7 +265,7 @@ static void close_box(builder* b) {
 static int add_glyph(builder* b, uint32_t cp, uint32_t cluster, uint32_t cluster_end) {
     pd_para* p = b->p;
     const pd_font* f = b->st->font;
-    uint32_t g = pd_font_glyph_index(f, cp);
+    uint32_t g = pd_font_glyph_index(f, b->st->text_case == 1 ? pd_uni_upper(cp) : cp);
     pd_item* box;
     pd_gl* gl;
 
@@ -290,7 +290,7 @@ static int add_glyph(builder* b, uint32_t cp, uint32_t cluster, uint32_t cluster
         return -1;
     }
 
-    if (box->glyph_count > 0 && b->st->kerning) {
+    if (box->glyph_count > 0 && b->st->kerning && !b->st->hidden) {
         int32_t k = pd_font_kerning(f, b->prev_glyph, g);
 
         if (k) {
@@ -304,7 +304,7 @@ static int add_glyph(builder* b, uint32_t cp, uint32_t cluster, uint32_t cluster
     gl->glyph = g;
     gl->cluster = cluster;
     gl->xoff = gl->yoff = 0;
-    gl->advance = pd_scale(pd_font_glyph_advance(f, g), b->st->size, b->upem);
+    gl->advance = b->st->hidden ? 0 : pd_scale(pd_font_glyph_advance(f, g), b->st->size, b->upem) + b->st->letter_space;
     box->width += gl->advance;
     box->glyph_count++;
     box->text_end = cluster_end;
@@ -347,6 +347,11 @@ static int add_shaped(builder* b, const pd_shaped* g, int32_t n, uint32_t text_s
         gl->advance = pd_scale(g[k].advance, b->st->size, b->upem);
         gl->xoff = pd_scale(g[k].xoff, b->st->size, b->upem);
         gl->yoff = pd_scale(g[k].yoff, b->st->size, b->upem);
+
+        if (k + 1 == n || g[k + 1].cluster != g[k].cluster) {
+            gl->advance += b->st->letter_space;
+        }
+
         box->width += gl->advance;
         box->glyph_count++;
     }
@@ -370,7 +375,8 @@ static int is_special(uint32_t cp) {
 
 static int add_space(builder* b, uint32_t cluster, uint32_t cluster_end, int nobreak) {
     const pd_font* f = b->st->font;
-    int32_t w = pd_scale(pd_font_glyph_advance(f, pd_font_glyph_index(f, ' ')), b->st->size, b->upem);
+    int32_t w = pd_scale(pd_font_glyph_advance(f, pd_font_glyph_index(f, ' ')), b->st->size, b->upem) +
+                b->st->letter_space;
     pd_item* it;
 
     close_box(b);
@@ -553,6 +559,22 @@ pd_status pd_para_add_text(pd_para* p, const char* utf8, size_t len, const pd_st
 
             w0 = w1;
         }
+    }
+
+    if (st->hidden) {   /* present for the caret, nothing to see or break at */
+        free(hyp);
+        hyp = NULL;
+
+        for (ci = first; ci < n; ci++) {
+            if (add_glyph(&b, cps[ci], offs[ci], offs[ci + 1])) {
+                free(brk);
+                free(cps);
+                free(offs);
+                return PD_ERR_NOMEM;
+            }
+        }
+
+        first = n;
     }
 
     for (ci = first; ci < n; ci++) {

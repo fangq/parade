@@ -256,7 +256,9 @@ static int hx_span(void* user, const pd_span* sp) {
         int bold = c->weight >= 600 && b->weight < 600, it = c->italic && !b->italic;
         int mono = !x->in_code && pd_conv_is_mono(c) && !pd_conv_is_mono(b);
         int span = c->color != b->color || c->background != b->background || c->size != b->size ||
-                   (!mono && strcmp(c->family, b->family) && !pd_conv_is_mono(c));
+                   (!mono && strcmp(c->family, b->family) && !pd_conv_is_mono(c)) || c->caps != b->caps ||
+                   c->small_caps != b->small_caps || c->hidden != b->hidden || c->letter_space != b->letter_space ||
+                   c->position != b->position || (c->underline > 1 && c->underline != b->underline);
         size_t i, j = 0;
 
         if (bold) {
@@ -308,6 +310,40 @@ static int hx_span(void* user, const pd_span* sp) {
                 pb_puts(o, "font-family:'");
                 esc(o, c->family, strlen(c->family), 1);
                 pb_puts(o, "';");
+            }
+
+            if (c->caps != b->caps) {
+                pb_puts(o, c->caps ? "text-transform:uppercase;" : "text-transform:none;");
+            }
+
+            if (c->small_caps != b->small_caps) {
+                pb_puts(o, c->small_caps ? "font-variant:small-caps;" : "font-variant:normal;");
+            }
+
+            if (c->hidden != b->hidden) {
+                pb_puts(o, c->hidden ? "display:none;" : "display:inline;");
+            }
+
+            if (c->letter_space != b->letter_space) {
+                pb_printf(o, "letter-spacing:%gpt;", c->letter_space / 65536.0);
+            }
+
+            if (c->position != b->position) {
+                pb_printf(o, "vertical-align:%gpt;", c->position / 65536.0);
+            }
+
+            if (c->underline > 1 && c->underline != b->underline) {
+                static const char* deco[] = { "", "", "double", "solid", "dotted", "dashed", "wavy", "solid" };
+
+                pb_printf(o, "text-decoration-style:%s;", deco[c->underline <= PD_UNDERLINE_WORDS ? c->underline : 1]);
+
+                if (c->underline == PD_UNDERLINE_THICK) {
+                    pb_puts(o, "text-decoration-thickness:2px;");
+                }
+
+                if (c->underline == PD_UNDERLINE_WORDS) {
+                    pb_puts(o, "text-decoration-skip:spaces;");
+                }
             }
 
             pb_puts(o, "\">");
@@ -1069,6 +1105,52 @@ static void apply_style(pd_char_props* cp, const char* style) {
             cp->mask |= PD_CP_STRIKE;
             cp->strike = 1;
         }
+    }
+
+    if (css_prop(style, "text-decoration-style", v, sizeof(v))) {
+        int u = strstr(v, "double") ? PD_UNDERLINE_DOUBLE : strstr(v, "dotted") ? PD_UNDERLINE_DOTTED :
+                strstr(v, "dashed") ? PD_UNDERLINE_DASHED : strstr(v, "wavy") ? PD_UNDERLINE_WAVY : 0;
+
+        if (u && ((cp->mask & PD_CP_UNDERLINE) ? cp->underline : 1)) {
+            cp->mask |= PD_CP_UNDERLINE;
+            cp->underline = u;
+        }
+    }
+
+    if (css_prop(style, "text-decoration-skip", v, sizeof(v)) && strstr(v, "spaces") && (cp->mask & PD_CP_UNDERLINE) &&
+            cp->underline == PD_UNDERLINE_SINGLE) {
+        cp->underline = PD_UNDERLINE_WORDS;
+    }
+
+    if (css_prop(style, "text-decoration-thickness", v, sizeof(v)) && (cp->mask & PD_CP_UNDERLINE) &&
+            cp->underline == PD_UNDERLINE_SINGLE) {
+        cp->underline = PD_UNDERLINE_THICK;
+    }
+
+    if (css_prop(style, "text-transform", v, sizeof(v))) {
+        cp->mask |= PD_CP_CAPS;
+        cp->caps = strstr(v, "uppercase") != NULL;
+    }
+
+    if (css_prop(style, "font-variant", v, sizeof(v)) || css_prop(style, "font-variant-caps", v, sizeof(v))) {
+        cp->mask |= PD_CP_SMALLCAPS;
+        cp->small_caps = strstr(v, "small-caps") != NULL;
+    }
+
+    if (css_prop(style, "display", v, sizeof(v))) {
+        cp->mask |= PD_CP_HIDDEN;
+        cp->hidden = strstr(v, "none") != NULL;
+    }
+
+    if (css_prop(style, "letter-spacing", v, sizeof(v)) && (isdigit((unsigned char)v[0]) || v[0] == '-' || v[0] == '.')) {
+        cp->mask |= PD_CP_LETTERSPACE;
+        cp->letter_space = css_length(v);
+    }
+
+    if (css_prop(style, "vertical-align", v, sizeof(v)) && (isdigit((unsigned char)v[0]) || v[0] == '-' ||
+            v[0] == '.')) {
+        cp->mask |= PD_CP_POSITION;
+        cp->position = css_length(v);
     }
 
     if (css_prop(style, "color", v, sizeof(v)) && css_color(v, &c)) {

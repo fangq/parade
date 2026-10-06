@@ -40,6 +40,9 @@ pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
     st->kerning = cp->kerning;
     st->color = cp->color;
     st->user = (int32_t)fmt;
+    st->text_case = cp->caps || cp->small_caps ? 1 : 0;
+    st->letter_space = cp->letter_space;
+    st->hidden = cp->hidden;
     return PD_OK;
 }
 
@@ -199,6 +202,44 @@ static pd_status add_with_fallback(const pd_doc* d, pd_para* out, const char* te
     return st;
 }
 
+/* Add text in small capitals: the lowercase letters as capitals at 4/5 of
+   the size (the text itself keeps its case), the rest at full size. */
+static pd_status add_small_caps(const pd_doc* d, pd_para* out, const char* text, uint32_t len, const pd_style* ps) {
+    uint32_t* cps, *offs, seg = 0;
+    int32_t n, i, cur = -1;
+    pd_status st = PD_OK;
+
+    n = pd_text_decode(text, len, &cps, &offs);
+
+    if (n < 0) {
+        return PD_ERR_NOMEM;
+    }
+
+    for (i = 0; i <= n && st == PD_OK; i++) {
+        int32_t low = i < n ? pd_uni_upper(cps[i]) != cps[i] : -1;
+
+        if (i == n || (low != cur && i > 0)) {
+            pd_style fs = *ps;
+
+            if (cur == 1) {
+                fs.size = ps->size * 4 / 5;
+            }
+
+            if (offs[i] > seg) {
+                st = add_with_fallback(d, out, text + seg, offs[i] - seg, &fs);
+            }
+
+            seg = offs[i < n ? i : n];
+        }
+
+        cur = low;
+    }
+
+    free(cps);
+    free(offs);
+    return st;
+}
+
 /* the registered patterns whose language prefix best matches a tag */
 static const pd_hyph* find_hyph(const pd_doc* d, const char* lang) {
     const pd_hyph* best = NULL;
@@ -298,7 +339,9 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                 stop = s->inl[k].offset;
             }
 
-            if (stop > pos && (st = add_with_fallback(d, out, s->text + pos, stop - pos, &ps)) != PD_OK) {
+            if (stop > pos && (st = cp.small_caps && !cp.caps && !cp.hidden ?
+                               add_small_caps(d, out, s->text + pos, stop - pos, &ps) :
+                               add_with_fallback(d, out, s->text + pos, stop - pos, &ps)) != PD_OK) {
                 return st;
             }
 

@@ -198,6 +198,20 @@ typedef enum {
 #define PD_CP_LANG        (1u << 11)
 #define PD_CP_SMALLCAPS   (1u << 12)
 #define PD_CP_LINK        (1u << 13)
+#define PD_CP_CAPS        (1u << 14)
+#define PD_CP_HIDDEN      (1u << 15)
+#define PD_CP_POSITION    (1u << 16)
+
+typedef enum {
+    PD_UNDERLINE_NONE = 0,
+    PD_UNDERLINE_SINGLE = 1,
+    PD_UNDERLINE_DOUBLE = 2,
+    PD_UNDERLINE_THICK = 3,
+    PD_UNDERLINE_DOTTED = 4,
+    PD_UNDERLINE_DASHED = 5,
+    PD_UNDERLINE_WAVY = 6,
+    PD_UNDERLINE_WORDS = 7      /**< single, under the words and not the spaces between them */
+} pd_underline;
 
 typedef enum {
     PD_SHIFT_NONE = 0,
@@ -213,7 +227,7 @@ typedef struct {
     int32_t italic;
     uint32_t color;             /**< 0xAARRGGBB */
     uint32_t background;        /**< 0 = none */
-    int32_t underline;          /**< 0 none, 1 single, 2 double */
+    int32_t underline;          /**< pd_underline */
     int32_t strike;
     int32_t shift;              /**< pd_shift */
     pd_sp letter_space;
@@ -221,6 +235,9 @@ typedef struct {
     char lang[16];              /**< BCP 47 tag ("en-US", "zh-Hans"): hyphenation, line breaking */
     int32_t small_caps;
     pd_block_id link_target;    /**< internal link (cross-reference); external URLs are inlines */
+    int32_t caps;               /**< shown in capitals; the text keeps its case */
+    int32_t hidden;             /**< kept in the text, not shown and taking no room */
+    pd_sp position;             /**< baseline raised (positive) or lowered, at full size (not a super/subscript) */
 } pd_char_props;
 
 /* paragraph property mask bits */

@@ -202,6 +202,9 @@ typedef struct {
     uint32_t color;         /**< 0xAARRGGBB, opaque to the layout engine */
     int32_t user;           /**< caller tag, returned with every glyph */
     const pd_hyph* hyph;    /**< hyphenation patterns for this text, NULL = no automatic hyphens */
+    int32_t text_case;      /**< 1: glyphs of the capitals (the text and its offsets unchanged) */
+    pd_sp letter_space;     /**< added after every glyph */
+    int32_t hidden;         /**< glyphs of no width, no break opportunities: text present but not shown */
 } pd_style;
 
 /** fill a style with defaults for the given font and size */

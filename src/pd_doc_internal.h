@@ -203,7 +203,7 @@ const pd_doc* pd_layout_doc(const struct pd_layout* L);
 /* the paragraph-engine style (font through the resolver) of a format in a paragraph */
 pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, pd_style* st, pd_char_props* cp);
 
-#define PD_CP_ALL ((1u << 14) - 1)
+#define PD_CP_ALL ((1u << 17) - 1)
 #define PD_PP_ALL ((1u << 19) - 1)
 
 /* a picture's MIME type and pixel size from its first bytes (PNG, JPEG, GIF), NULL if none of those */

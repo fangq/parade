@@ -3023,6 +3023,59 @@ static pd_sp rule_reach(const pd_doc* d, const blk* b, const pd_glyph* g, int32_
     return space ? g[i + 1].x - g[i].x : g[i].advance;
 }
 
+/* an underline of a kind over the span u describes (its top, width and
+   thickness): double and thick rules, dots, dashes and waves as pieces on a
+   grid of the page, so that neighbouring glyphs' pieces line up */
+static void emit_underline(dlist_t* D, const pd_draw* u, int32_t kind) {
+    pd_draw r = *u;
+    pd_sp x, step, end = u->x + u->w;
+
+    switch (kind) {
+        case PD_UNDERLINE_DOUBLE:
+            r.h = u->h * 2 / 3 > 1 ? u->h * 2 / 3 : 1;
+            emit(D, &r);
+            r.y += r.h * 2;
+            emit(D, &r);
+            return;
+
+        case PD_UNDERLINE_THICK:
+            r.h = u->h * 2;
+            emit(D, &r);
+            return;
+
+        case PD_UNDERLINE_DOTTED:
+        case PD_UNDERLINE_DASHED:
+        case PD_UNDERLINE_WAVY:
+            step = kind == PD_UNDERLINE_DOTTED ? u->h * 2 : kind == PD_UNDERLINE_DASHED ? u->h * 6 : u->h * 3;
+
+            if (step <= 0 || u->w <= 0) {
+                return;
+            }
+
+            for (x = u->x - (u->x % step + step) % step; x < end; x += step) {
+                pd_sp a = x > u->x ? x : u->x, w = (kind == PD_UNDERLINE_DASHED ? step * 2 / 3 : step / 2);
+
+                if (kind == PD_UNDERLINE_WAVY) {
+                    w = step;   /* alternately up and down: a coarse wave */
+                    r.y = u->y + ((x / step) & 1 ? u->h : 0);
+                }
+
+                w = (x + w < end ? x + w : end) - a;
+
+                if (w > 0) {
+                    r.x = a;
+                    r.w = w;
+                    emit(D, &r);
+                }
+            }
+
+            return;
+
+        default:
+            emit(D, &r);
+    }
+}
+
 /* what fills the space a tab leaves: dots or hyphens on a grid, so that the
    leaders of lines one above the other line up; or a rule */
 static void emit_leaders(const pd_layout* L, dlist_t* D, const pline* l, const pd_glyph* g, int32_t n,
@@ -3303,6 +3356,10 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
             continue;
         }
 
+        if (cp.hidden) {
+            continue;
+        }
+
         if (cp.background) {
             pd_draw bg = a;
 
@@ -3325,6 +3382,7 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
             a.y += cp.shift == PD_SHIFT_SUPER ? -cp.size / 3 : cp.size / 6;
         }
 
+        a.y -= cp.position;
         emit(D, &a);
 
         if (cp.underline || cp.strike) {
@@ -3335,8 +3393,8 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
 
             if (cp.underline) {
                 u.y = a.y + ps.size / 8;
-                u.w = rule_reach(d, b, g, n, i, 0);
-                emit(D, &u);
+                u.w = cp.underline == PD_UNDERLINE_WORDS ? g[i].advance : rule_reach(d, b, g, n, i, 0);
+                emit_underline(D, &u, cp.underline);
             }
 
             if (cp.strike) {

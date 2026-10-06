@@ -119,6 +119,17 @@ const
   PD_CP_LANG = 1 shl 11;
   PD_CP_SMALLCAPS = 1 shl 12;
   PD_CP_LINK = 1 shl 13;
+  PD_CP_CAPS = 1 shl 14;
+  PD_CP_HIDDEN = 1 shl 15;
+  PD_CP_POSITION = 1 shl 16;
+  PD_UNDERLINE_NONE = 0;
+  PD_UNDERLINE_SINGLE = 1;
+  PD_UNDERLINE_DOUBLE = 2;
+  PD_UNDERLINE_THICK = 3;
+  PD_UNDERLINE_DOTTED = 4;
+  PD_UNDERLINE_DASHED = 5;
+  PD_UNDERLINE_WAVY = 6;
+  PD_UNDERLINE_WORDS = 7;
 
   PD_SHIFT_NONE = 0;
   PD_SHIFT_SUPER = 1;
@@ -250,6 +261,9 @@ type
     color: UInt32;
     user: Int32;
     hyph: Pointer;           { const pd_hyph* }
+    text_case: Int32;
+    letter_space: pd_sp;
+    hidden: Int32;
   end;
   Ppd_style = ^pd_style;
 
@@ -328,6 +342,8 @@ type
     lang: array[0..15] of AnsiChar;
     small_caps: Int32;
     link_target: pd_block_id;
+    caps, hidden: Int32;
+    position: pd_sp;
   end;
   Ppd_char_props = ^pd_char_props;
 

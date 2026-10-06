@@ -31,6 +31,9 @@ int main(void) {
     printf("pd_style.color %zu\n", offsetof(pd_style, color));
     printf("pd_style.user %zu\n", offsetof(pd_style, user));
     printf("pd_style.hyph %zu\n", offsetof(pd_style, hyph));
+    printf("pd_style.text_case %zu\n", offsetof(pd_style, text_case));
+    printf("pd_style.letter_space %zu\n", offsetof(pd_style, letter_space));
+    printf("pd_style.hidden %zu\n", offsetof(pd_style, hidden));
     printf("pd_params %zu\n", sizeof(pd_params));
     printf("pd_params.mode %zu\n", offsetof(pd_params, mode));
     printf("pd_params.align %zu\n", offsetof(pd_params, align));
@@ -119,6 +122,9 @@ int main(void) {
     printf("pd_char_props.lang %zu\n", offsetof(pd_char_props, lang));
     printf("pd_char_props.small_caps %zu\n", offsetof(pd_char_props, small_caps));
     printf("pd_char_props.link_target %zu\n", offsetof(pd_char_props, link_target));
+    printf("pd_char_props.caps %zu\n", offsetof(pd_char_props, caps));
+    printf("pd_char_props.hidden %zu\n", offsetof(pd_char_props, hidden));
+    printf("pd_char_props.position %zu\n", offsetof(pd_char_props, position));
     printf("pd_para_props %zu\n", sizeof(pd_para_props));
     printf("pd_para_props.mask %zu\n", offsetof(pd_para_props, mask));
     printf("pd_para_props.align %zu\n", offsetof(pd_para_props, align));
