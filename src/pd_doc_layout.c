@@ -87,6 +87,11 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
         *label_x = 0;
     }
 
+    /* block quotes inside block quotes: one step in for each beyond the one its QUOTE role has */
+    if (s->at.quote_depth > (s->role == PD_ROLE_QUOTE ? 1 : 0)) {
+        pp->indent_left += PD_PT(24) * (s->at.quote_depth - (s->role == PD_ROLE_QUOTE ? 1 : 0));
+    }
+
     /* a list item's text sits at the level's indent; its label hangs to the left */
     if (s->list && (int32_t)s->list <= d->nlists) {
         const pd_list_level* L = &d->lists[s->list - 1].lv[s->list_level];
@@ -247,7 +252,7 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
         prm->align = PD_ALIGN_CENTER;   /* a display equation sits in the middle */
     }
 
-    if (s->role != PD_ROLE_CODE) {
+    if (s->role != PD_ROLE_CODE && s->role != PD_ROLE_RAW) {
         prm->protrusion = d->protrusion;
         prm->expansion = d->expansion;
     }
@@ -304,6 +309,10 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                 pd_sp ow = o->width, oh = o->height, od = o->depth;
 
                 switch (o->kind) {
+                    case PD_INLINE_IMAGE:
+                        pd_doc_image_size(d, o, &ow, &oh);
+                        break;
+
                     case PD_INLINE_EQUATION:    /* typeset with the math font: its real size */
                         if (d->math_font && o->source && o->source_len > 0) {
                             pd_math_metrics mm;
@@ -345,6 +354,7 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
 
                     case PD_INLINE_LINK:
                     case PD_INLINE_BOOKMARK:
+                    case PD_INLINE_RAW:
                         ow = oh = od = 0;
                         break;
                 }

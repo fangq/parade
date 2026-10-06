@@ -121,6 +121,9 @@ void bld_init(pd_bld* b, pd_doc* d);
 /* properties of the next paragraph (the current one, if it has no text yet) */
 void bld_para_style(pd_bld* b, const char* style, int32_t role, int32_t level);
 void bld_list(pd_bld* b, int32_t kind, int32_t level);
+/* a list definition of its own (kind 1 bullets, 2 numbers; level starts at start): for formats where every
+   list in the text counts on its own and a nested list restarts under each item */
+pd_list_id bld_list_new(pd_bld* b, int32_t kind, int32_t level, int32_t start);
 /* start a paragraph now (ends the current one) */
 pd_block_id bld_begin_para(pd_bld* b);
 void bld_end_para(pd_bld* b);

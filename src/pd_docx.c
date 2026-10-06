@@ -463,7 +463,12 @@ static int dx_span(void* user, const pd_span* sp) {
                 int m = dx_media(x, ob->resource, &name);
 
                 if (m >= 0) {
-                    long long cx = EMU(ob->width), cy = EMU(ob->height);
+                    pd_sp iw, ih;
+                    long long cx, cy;
+
+                    pd_doc_image_display_size(x->d, ob, &iw, &ih);
+                    cx = EMU(iw);
+                    cy = EMU(ih);
 
                     x->docpr++;
                     pb_printf(o, "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">"
@@ -934,6 +939,12 @@ static void dx_block(dxo* x, pd_block_id id) {
             break;
 
         case PD_BLOCK_BREAK:
+            if (bi.break_kind == PD_BREAK_RULE) {   /* an empty paragraph ruled underneath */
+                pb_puts(x->o, "<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" "
+                        "w:color=\"808080\"/></w:pBdr></w:pPr></w:p>");
+                break;
+            }
+
             pb_printf(x->o, "<w:p><w:r><w:br w:type=\"%s\"/></w:r></w:p>", bi.break_kind == PD_BREAK_COLUMN ? "column" :
                       "page");
             break;

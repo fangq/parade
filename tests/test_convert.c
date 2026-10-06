@@ -1705,6 +1705,165 @@ static void test_md_import(void) {
     }
 }
 
+static pd_para_attrs attrs_of(const pd_doc* d, pd_block_id p) {
+    pd_para_attrs at;
+
+    memset(&at, 0, sizeof(at));
+    pd_doc_para_attrs(d, p, &at);
+    return at;
+}
+
+static const char* md_all =
+    "---\ntitle: Front matter\nauthor: Q\n---\n\n"
+    "Text with [a link](http://x.org \"Link title\"), <span class=\"k\">raw</span> and "
+    "![Alt *text*](pic.png \"Image title\").\n\n"
+    "***\n\n"
+    "> Quote one\n>\n> > Quote two\n>\n> ```c\n> int x;\n> ```\n>\n> - item in a quote\n\n"
+    "- [ ] open task\n- [x] done task\n\n"
+    "1. loose one\n\n2. loose two\n\n"
+    "```python\ndef f():\n    pass\n```\n\n"
+    "<div class=\"raw\">\n<b>raw</b> block\n</div>\n\n"
+    "Term\n: Its definition\n";
+
+/* Markdown's elements into the document model: a front matter, link and image titles, image alt
+   text and a picture by address, raw inline and block HTML, a rule, quotes in quotes and code
+   and lists in quotes, tasks, a loose list, a code block's language, a definition list. */
+static void test_md_model(void) {
+    pd_doc* d = md_doc(md_all), *d2;
+    pd_block_id sec, p, q[16];
+    pd_block_info bi;
+    pd_inline o;
+    const char* meta;
+    size_t ml;
+    char* md, *md2;
+    int i, n;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    meta = pd_doc_metadata(d, &ml);
+    CHECK(ml == 29 && memcmp(meta, "title: Front matter\nauthor: Q", 29) == 0);
+
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+    pd_doc_block_info(d, sec, &bi);
+    n = bi.child_count < 16 ? bi.child_count : 16;
+
+    for (i = 0; i < n; i++) {
+        q[i] = pd_doc_child(d, sec, i);
+    }
+
+    /* the first paragraph: a titled link, raw tags, a picture by address with alt and title */
+    p = q[0];
+    CHECK(pd_doc_inline_at(d, at(p, 10), &o) == PD_OK && o.kind == PD_INLINE_LINK && o.title_len == 10 &&
+          memcmp(o.title, "Link title", 10) == 0);
+    {
+        const char* t;
+        uint32_t len, k;
+        int raws = 0, img = 0;
+
+        pd_doc_para_text(d, p, &t, &len);
+
+        for (k = 0; k + 2 < len; k++) {
+            if (memcmp(t + k, "\xEF\xBF\xBC", 3) == 0 && pd_doc_inline_at(d, at(p, k), &o) == PD_OK) {
+                if (o.kind == PD_INLINE_RAW) {
+                    raws++;
+                    CHECK(raws != 1 || (o.source_len == 16 && memcmp(o.source, "<span class=\"k\">", 16) == 0));
+                } else if (o.kind == PD_INLINE_IMAGE) {
+                    img = o.resource == 0 && o.source_len == 7 && memcmp(o.source, "pic.png", 7) == 0 &&
+                          o.alt_len == 10 && memcmp(o.alt, "Alt *text*", 10) == 0 && o.title_len == 11;
+                }
+            }
+        }
+
+        CHECK(raws == 2 && img);
+    }
+
+    pd_doc_block_info(d, q[1], &bi);
+    CHECK(bi.kind == PD_BLOCK_BREAK && bi.break_kind == PD_BREAK_RULE);
+
+    /* quotes: one, two deep, code in one, a list item in one */
+    pd_doc_block_info(d, q[2], &bi);
+    CHECK(bi.role == PD_ROLE_QUOTE && attrs_of(d, q[2]).quote_depth == 1 && para_is(d, q[2], "Quote one"));
+    CHECK(attrs_of(d, q[3]).quote_depth == 2 && para_is(d, q[3], "Quote two"));
+    pd_doc_block_info(d, q[4], &bi);
+    CHECK(bi.role == PD_ROLE_CODE && attrs_of(d, q[4]).quote_depth == 1 && strcmp(attrs_of(d, q[4]).lang, "c") == 0 &&
+          para_is(d, q[4], "int x;"));
+    pd_doc_block_info(d, q[5], &bi);
+    CHECK(bi.list && attrs_of(d, q[5]).quote_depth == 1 && para_is(d, q[5], "item in a quote"));
+
+    /* tasks, tight; then a loose list */
+    CHECK(attrs_of(d, q[6]).task == 1 && para_is(d, q[6], "open task") && !attrs_of(d, q[6]).loose);
+    CHECK(attrs_of(d, q[7]).task == 2 && para_is(d, q[7], "done task"));
+    CHECK(attrs_of(d, q[8]).loose && attrs_of(d, q[9]).loose);
+
+    pd_doc_block_info(d, q[10], &bi);
+    CHECK(bi.role == PD_ROLE_CODE && strcmp(attrs_of(d, q[10]).lang, "python") == 0 &&
+          para_is(d, q[10], "def f():\n    pass"));
+    pd_doc_block_info(d, q[11], &bi);
+    CHECK(bi.role == PD_ROLE_RAW && para_is(d, q[11], "<div class=\"raw\">\n<b>raw</b> block\n</div>"));
+    pd_doc_block_info(d, q[12], &bi);
+    CHECK(bi.role == PD_ROLE_TERM && para_is(d, q[12], "Term"));
+    pd_doc_block_info(d, q[13], &bi);
+    CHECK(bi.role == PD_ROLE_DEFINITION && para_is(d, q[13], "Its definition"));
+
+    /* back out, as it was written; and the same again from that */
+    md = md_of(d);
+    CHECK(md && strcmp(md, md_all) == 0);
+
+    if (md && strcmp(md, md_all) != 0) {
+        printf("--- got:\n%s--- wanted:\n%s---\n", md, md_all);
+    }
+
+    d2 = md ? md_doc(md) : NULL;
+    md2 = d2 ? md_of(d2) : NULL;
+    CHECK(md2 && md && strcmp(md, md2) == 0);
+    free(md2);
+    pd_doc_free(d2);
+    free(md);
+
+    /* the same through JData */
+    {
+        buf_t b;
+        pd_doc* j = NULL;
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_save(d, PD_JDATA_BINARY, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j) == PD_OK);
+        free(b.p);
+        md = j ? md_of(j) : NULL;
+        CHECK(md && strcmp(md, md_all) == 0);
+        free(md);
+        pd_doc_free(j);
+    }
+
+    /* and through HTML, which has all of it but the front matter, the raw markup and looseness */
+    {
+        buf_t b;
+        pd_doc* h = NULL;
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "<hr>") && strstr(b.p, "<blockquote>\n<p>Quote one</p>\n<blockquote>") &&
+              strstr(b.p, "class=\"language-python\"") && strstr(b.p, "<input type=\"checkbox\" disabled checked>") &&
+              strstr(b.p, "<dt>Term</dt>") && strstr(b.p, "title=\"Link title\"") &&
+              strstr(b.p, "<img src=\"pic.png\" alt=\"Alt *text*\" title=\"Image title\">"));
+        CHECK(pd_doc_import(b.p, b.n, PD_CONV_HTML, &h) == PD_OK);
+        free(b.p);
+        md = h ? md_of(h) : NULL;
+        CHECK(md && strstr(md, "[a link](http://x.org \"Link title\")") && strstr(md, "***\n") &&
+              strstr(md, "> Quote one\n>\n> > Quote two") && strstr(md, "```python\n") &&
+              strstr(md, "- [ ] open task\n- [x] done task") && strstr(md, "Term\n: Its definition") &&
+              strstr(md, "![Alt *text*](pic.png \"Image title\")"));
+        free(md);
+        pd_doc_free(h);
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1734,6 +1893,8 @@ int main(void) {
     test_docx_tabs();
     printf("markdown import\n");
     test_md_import();
+    printf("markdown elements\n");
+    test_md_model();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

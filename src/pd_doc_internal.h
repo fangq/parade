@@ -14,12 +14,24 @@
 
 int pd_doc_table_props_ok(const pd_table_props* tp);
 
-/* an inline object; obj.source points at the owned copy */
+/* an inline object; source owns its strings, "source\0title\0alt\0", and obj points into them */
 typedef struct {
     uint32_t offset;
     pd_inline obj;
     char* source;
 } dinline;
+
+/* bytes of an inline's owned strings */
+static inline size_t pd_inl_bytes(const pd_inline* o) {
+    return (size_t)o->source_len + (size_t)o->title_len + (size_t)o->alt_len + 3;
+}
+
+/* obj's string pointers into the owned block (none when there is no block) */
+static inline void pd_inl_point(dinline* x) {
+    x->obj.source = x->source;
+    x->obj.title = x->source ? x->source + x->obj.source_len + 1 : NULL;
+    x->obj.alt = x->source ? x->obj.title + x->obj.title_len + 1 : NULL;
+}
 
 /* everything about a block that an operation can change; snapshotted for undo */
 typedef struct {
@@ -40,6 +52,7 @@ typedef struct {
     pd_section_props sp;
     pd_table_props tp;
     pd_cell_props cell;
+    pd_para_attrs at;           /* paragraphs */
 } bstate;
 
 typedef struct {
@@ -125,6 +138,8 @@ struct pd_doc {
     int32_t nlists, caplists;
     dres* res;
     int32_t nres, capres;
+    char* meta;                 /* pd_doc_set_metadata */
+    size_t meta_len;
     dmarker* markers;
     int32_t nmarkers, capmarkers;
     pd_font_resolver resolver;
@@ -190,6 +205,15 @@ pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
 
 #define PD_CP_ALL ((1u << 14) - 1)
 #define PD_PP_ALL ((1u << 19) - 1)
+
+/* a picture's MIME type and pixel size from its first bytes (PNG, JPEG, GIF), NULL if none of those */
+const char* pd_doc_image_info(const unsigned char* p, size_t n, int32_t* w, int32_t* h);
+/* the size an image inline is shown at: its own, else the picture's at 96 dpi (the other side kept in
+   proportion when one is given), else a placeholder */
+void pd_doc_image_size(const pd_doc* d, const pd_inline* o, pd_sp* w, pd_sp* h);
+
+/* a list label with a task's checkbox: in place of a bullet, after a number; task 0 leaves it */
+void pd_doc_task_label(int32_t task, int bullet, char* buf, size_t cap);
 
 /* tab stops of a pd_para_props, when set, within their ranges */
 int pd_doc_tabs_ok(const pd_para_props* pp);

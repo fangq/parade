@@ -133,9 +133,15 @@ static int lx_span(void* user, const pd_span* sp) {
                 const void* data;
                 size_t len;
 
+                pd_sp iw, ih;
+
+                pd_doc_image_display_size(x->d, ob, &iw, &ih);
+
                 if (pd_doc_resource(x->d, ob->resource, &mime, &data, &len) == PD_OK) {
                     pb_printf(o, "\\pdimage{image%u.%s}{%gpt}{%gpt}", (unsigned)ob->resource, ext_of(mime),
-                              ob->width / 65536.0, ob->height / 65536.0);
+                              iw / 65536.0, ih / 65536.0);
+                } else if (ob->source_len > 0 && !strpbrk(ob->source, "{}%#\\")) {     /* by address */
+                    pb_printf(o, "\\pdimage{%s}{%gpt}{%gpt}", ob->source, iw / 65536.0, ih / 65536.0);
                 }
 
                 break;
@@ -627,7 +633,8 @@ static void lx_block(lx* x, pd_block_id id, int in_figure) {
             break;
 
         case PD_BLOCK_BREAK:
-            pb_puts(x->o, bi.break_kind == PD_BREAK_COLUMN && x->multicols ? "\\columnbreak\n\n" :
+            pb_puts(x->o, bi.break_kind == PD_BREAK_RULE ? "\\noindent\\rule{\\linewidth}{0.4pt}\n\n" :
+                    bi.break_kind == PD_BREAK_COLUMN && x->multicols ? "\\columnbreak\n\n" :
                     bi.break_kind == PD_BREAK_ODD_PAGE ? "\\cleardoublepage\n\n" : "\\newpage\n\n");
             break;
 

@@ -27,7 +27,10 @@ typedef struct {
     pd_block_id para;
     pd_char_props base;
     int in_link, in_code;
-    int quote_open, code_open;
+    int quote_open, code_open;  /* quote_open: <blockquote>s open */
+    int code_multi;             /* the open <pre> holds a block of several lines */
+    char code_lang[32];
+    int dl_open;
 } hx;
 
 static void esc(pd_buf* o, const char* s, size_t n, int attr) {
@@ -58,16 +61,45 @@ static void close_lists(hx* x, int32_t keep) {
     }
 }
 
-static void close_groups(hx* x) {
-    if (x->quote_open) {
-        pb_puts(x->o, "</blockquote>\n");
-        x->quote_open = 0;
-    }
-
+static void close_code(hx* x) {
     if (x->code_open) {
         pb_puts(x->o, "</code></pre>\n");
         x->code_open = 0;
     }
+}
+
+static void close_dl(hx* x) {
+    if (x->dl_open) {
+        pb_puts(x->o, "</dl>\n");
+        x->dl_open = 0;
+    }
+}
+
+/* to a depth of block quotes, lists and code closed first when quotes change */
+static void quotes_to(hx* x, int q) {
+    if (q == x->quote_open) {
+        return;
+    }
+
+    close_code(x);
+    close_dl(x);
+    close_lists(x, 0);
+
+    while (x->quote_open > q) {
+        pb_puts(x->o, "</blockquote>\n");
+        x->quote_open--;
+    }
+
+    while (x->quote_open < q) {
+        pb_puts(x->o, "<blockquote>\n");
+        x->quote_open++;
+    }
+}
+
+static void close_groups(hx* x) {
+    close_code(x);
+    close_dl(x);
+    quotes_to(x, 0);
 }
 
 static int hx_span(void* user, const pd_span* sp) {
@@ -84,13 +116,36 @@ static int hx_span(void* user, const pd_span* sp) {
                 const void* data;
                 size_t len;
 
-                if (pd_doc_resource(x->d, ob->resource, &mime, &data, &len) == PD_OK) {
-                    pb_puts(o, "<img src=\"data:");
-                    esc(o, mime, strlen(mime), 1);
-                    pb_puts(o, ";base64,");
-                    pb_base64(o, (const unsigned char*)data, len);
-                    pb_printf(o, "\" width=\"%d\" height=\"%d\" alt=\"\">", (int)(ob->width / 65536 * 4 / 3),
-                              (int)(ob->height / 65536 * 4 / 3));
+                if (ob->source_len > 0 || pd_doc_resource(x->d, ob->resource, &mime, &data, &len) == PD_OK) {
+                    pb_puts(o, "<img src=\"");
+
+                    if (ob->source_len > 0) {   /* by address, as the document gave it */
+                        esc(o, ob->source, (size_t)ob->source_len, 1);
+                    } else {
+                        pb_puts(o, "data:");
+                        esc(o, mime, strlen(mime), 1);
+                        pb_puts(o, ";base64,");
+                        pb_base64(o, (const unsigned char*)data, len);
+                    }
+
+                    pb_putc(o, '"');
+
+                    if (ob->width > 0 && ob->height > 0 && (ob->source_len == 0 || ob->level == 1)) {
+                        pb_printf(o, " width=\"%d\" height=\"%d\"", (int)(ob->width / 65536 * 4 / 3),
+                                  (int)(ob->height / 65536 * 4 / 3));
+                    }
+
+                    pb_puts(o, " alt=\"");
+                    esc(o, ob->alt ? ob->alt : "", (size_t)ob->alt_len, 1);
+                    pb_putc(o, '"');
+
+                    if (ob->title_len > 0) {
+                        pb_puts(o, " title=\"");
+                        esc(o, ob->title, (size_t)ob->title_len, 1);
+                        pb_putc(o, '"');
+                    }
+
+                    pb_putc(o, '>');
                 }
 
                 break;
@@ -136,8 +191,21 @@ static int hx_span(void* user, const pd_span* sp) {
                 if (ob->source && ob->source_len > 0) {
                     pb_puts(o, "<a href=\"");
                     esc(o, ob->source, (size_t)ob->source_len, 1);
+
+                    if (ob->title_len > 0) {
+                        pb_puts(o, "\" title=\"");
+                        esc(o, ob->title, (size_t)ob->title_len, 1);
+                    }
+
                     pb_puts(o, "\">");
                     x->in_link = 1;
+                }
+
+                break;
+
+            case PD_INLINE_RAW:     /* markup the document carried: through as it is */
+                if (ob->source) {
+                    pb_put(o, ob->source, (size_t)ob->source_len);
                 }
 
                 break;
@@ -277,8 +345,9 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
     pd_block_info bi;
     pd_para_props pp;
     int32_t level = 0;
-    int kind = pd_conv_list_kind(x->d, p, &level);
+    int kind = pd_conv_list_kind(x->d, p, &level), task = 0;
     const char* align = "";
+    char lang[32];
 
     pd_doc_block_info(x->d, p, &bi);
     pd_doc_style_resolve(x->d, bi.style, &pp, NULL);
@@ -294,14 +363,22 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
     align = pp.align == PD_ALIGN_CENTER ? " style=\"text-align:center\"" : pp.align == PD_ALIGN_RIGHT ?
             " style=\"text-align:right\"" : "";
 
-    if (bi.role != PD_ROLE_CODE && x->code_open) {
-        pb_puts(x->o, "</code></pre>\n");
-        x->code_open = 0;
+    {
+        pd_para_attrs at;
+
+        memset(&at, 0, sizeof(at));
+        pd_doc_para_attrs(x->d, p, &at);
+        quotes_to(x, at.quote_depth > 0 ? at.quote_depth : bi.role == PD_ROLE_QUOTE ? 1 : 0);
+        task = at.task;
+        snprintf(lang, sizeof(lang), "%s", at.lang);
     }
 
-    if (bi.role != PD_ROLE_QUOTE && x->quote_open) {
-        pb_puts(x->o, "</blockquote>\n");
-        x->quote_open = 0;
+    if (bi.role != PD_ROLE_CODE) {
+        close_code(x);
+    }
+
+    if (bi.role != PD_ROLE_TERM && bi.role != PD_ROLE_DEFINITION) {
+        close_dl(x);
     }
 
     /* lists: open, close or continue to this item's level */
@@ -317,8 +394,17 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
         }
 
         while (x->ldepth < level + 1) {
+            pd_list_level lv[9];
+            int32_t nlv = 0;
+
             x->lkind[x->ldepth] = x->ldepth == level ? kind : 1;
-            pb_puts(x->o, x->lkind[x->ldepth] == 2 ? "<ol>\n" : "<ul>\n");
+
+            if (x->lkind[x->ldepth] == 2 && x->ldepth == level && pd_doc_list_info(x->d, bi.list, &nlv, lv) == PD_OK &&
+                    level < nlv && lv[level].start != 1) {
+                pb_printf(x->o, "<ol start=\"%d\">\n", (int)lv[level].start);
+            } else {
+                pb_puts(x->o, x->lkind[x->ldepth] == 2 ? "<ol>\n" : "<ul>\n");
+            }
 
             if (x->ldepth < level) {
                 pb_puts(x->o, "<li>");
@@ -328,6 +414,12 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
         }
 
         pb_printf(x->o, "<li%s>", align);
+
+        if (task) {
+            pb_puts(x->o, task == 2 ? "<input type=\"checkbox\" disabled checked> " :
+                    "<input type=\"checkbox\" disabled> ");
+        }
+
         hx_inline(x, p);
         return;
     }
@@ -354,14 +446,31 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
             return;
 
         case PD_ROLE_QUOTE:
-            if (!x->quote_open) {
-                pb_puts(x->o, "<blockquote>\n");
-                x->quote_open = 1;
-            }
-
             pb_printf(x->o, "<p%s>", align);
             hx_inline(x, p);
             pb_puts(x->o, "</p>\n");
+            return;
+
+        case PD_ROLE_RAW: {     /* markup the document carried: through as it is */
+            const char* t;
+            uint32_t n;
+
+            pd_doc_para_text(x->d, p, &t, &n);
+            pb_put(x->o, t, n);
+            pb_putc(x->o, '\n');
+            return;
+        }
+
+        case PD_ROLE_TERM:
+        case PD_ROLE_DEFINITION:
+            if (!x->dl_open) {
+                pb_puts(x->o, "<dl>\n");
+                x->dl_open = 1;
+            }
+
+            pb_puts(x->o, bi.role == PD_ROLE_TERM ? "<dt>" : "<dd>");
+            hx_inline(x, p);
+            pb_puts(x->o, bi.role == PD_ROLE_TERM ? "</dt>\n" : "</dd>\n");
             return;
 
         case PD_ROLE_EQUATION:
@@ -370,13 +479,37 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
             pb_puts(x->o, "</p>\n");
             return;
 
-        case PD_ROLE_CODE:
-            pb_puts(x->o, x->code_open ? "\n" : "<pre><code>");
+        case PD_ROLE_CODE: {
+            const char* t;
+            uint32_t n;
+            int multi;
+
+            pd_doc_para_text(x->d, p, &t, &n);
+            multi = memchr(t, '\n', n) != NULL;
+
+            /* one <pre> per code block; code that came a line to a paragraph is run together */
+            if (x->code_open && (multi || x->code_multi || strcmp(lang, x->code_lang) != 0)) {
+                close_code(x);
+            }
+
+            if (x->code_open) {
+                pb_putc(x->o, '\n');
+            } else if (lang[0]) {
+                pb_puts(x->o, "<pre><code class=\"language-");
+                esc(x->o, lang, strlen(lang), 1);
+                pb_puts(x->o, "\">");
+            } else {
+                pb_puts(x->o, "<pre><code>");
+            }
+
             x->code_open = 1;
+            x->code_multi = multi;
+            snprintf(x->code_lang, sizeof(x->code_lang), "%s", lang);
             x->in_code = 1;
             hx_inline(x, p);
             x->in_code = 0;
             return;
+        }
 
         default:
             pb_printf(x->o, "<p%s>", align);
@@ -481,6 +614,16 @@ static void hx_table(hx* x, pd_block_id t) {
                 pb_printf(x->o, " rowspan=\"%d\"", (int)down);
             }
 
+            {   /* the cell's alignment is its paragraph's */
+                pd_para_props cpp;
+
+                if (pd_doc_para_props(x->d, pd_doc_child(x->d, cell, 0), &cpp) == PD_OK && (cpp.mask & PD_PP_ALIGN) &&
+                        cpp.align != PD_ALIGN_JUSTIFY) {
+                    pb_puts(x->o, cpp.align == PD_ALIGN_CENTER ? " align=\"center\"" : cpp.align == PD_ALIGN_RIGHT ?
+                            " align=\"right\"" : " align=\"left\"");
+                }
+            }
+
             if (cp.background || cp.valign) {
                 pb_puts(x->o, " style=\"");
 
@@ -550,7 +693,9 @@ static void hx_block(hx* x, pd_block_id id, int in_figure) {
             break;
 
         case PD_BLOCK_BREAK:
-            pb_puts(x->o, "<div class=\"page-break\" style=\"break-after:page\"></div>\n");
+            close_groups(x);
+            pb_puts(x->o, bi.break_kind == PD_BREAK_RULE ? "<hr>\n" :
+                    "<div class=\"page-break\" style=\"break-after:page\"></div>\n");
             break;
 
         default:
@@ -664,7 +809,11 @@ typedef struct {
     int level;                  /* headings */
     int align;                  /* -1 = none */
     pd_char_props cp;           /* character state to restore on close */
-    int title;
+    int title;                  /* E_P: 2 an equation, 3 a <dt>, 4 a <dd> */
+    pd_list_id list;            /* E_UL/E_OL: its list, made with its first item */
+    int start;                  /* E_OL: <ol start> */
+    int task;                   /* E_LI: a checkbox opened it, 1 empty, 2 checked */
+    char lang[32];              /* E_PRE: <code class="language-..."> */
 } hel;
 
 typedef struct {
@@ -921,11 +1070,15 @@ static int block_kind(const char* n, int* level) {
         return E_P;
     }
 
+    if (!strcmp(n, "dl")) {
+        return E_DIV;
+    }
+
     if (!strcmp(n, "li")) {
         return E_LI;
     }
 
-    if (!strcmp(n, "ul") || !strcmp(n, "menu") || !strcmp(n, "dl")) {
+    if (!strcmp(n, "ul") || !strcmp(n, "menu")) {
         return E_UL;
     }
 
@@ -984,14 +1137,18 @@ static int block_kind(const char* n, int* level) {
 /* the paragraph a text run opens, from the enclosing elements */
 static void hi_begin_para(hi* h) {
     pd_bld* b = h->b;
-    int32_t i, lists = 0, lkind = 1, align = -1;
-    const hel* inner = NULL;
+    int32_t i, lists = 0, lkind = 1, align = -1, quotes = 0;
+    hel* inner = NULL, *list = NULL, *item = NULL;
+    pd_para_attrs at;
+    pd_block_id p;
+
+    memset(&at, 0, sizeof(at));
 
     for (i = h->depth - 1; i >= 0; i--) {
-        const hel* e = &h->stack[i];
+        hel* e = &h->stack[i];
 
         if (!inner && (e->kind == E_H || e->kind == E_PRE || e->kind == E_QUOTE || e->kind == E_LI || e->kind == E_CAP ||
-                       (e->kind == E_P && e->title == 2))) {
+                       (e->kind == E_P && e->title >= 2))) {
             inner = e;
         }
 
@@ -999,18 +1156,27 @@ static void hi_begin_para(hi* h) {
             align = e->align;
         }
 
+        if (e->kind == E_LI && !item && lists == 0) {
+            item = e;
+        }
+
         if (e->kind == E_UL || e->kind == E_OL) {
             if (lists == 0) {
                 lkind = e->kind == E_OL ? 2 : 1;
+                list = e;
             }
 
             lists++;
         }
 
+        quotes += e->kind == E_QUOTE;
+
         if (e->kind == E_CELL || e->kind == E_FIG || e->kind == E_BARRIER) {
             break;
         }
     }
+
+    at.quote_depth = quotes < 9 ? quotes : 9;
 
     if (inner && inner->kind == E_H) {
         if (inner->title) {
@@ -1023,6 +1189,11 @@ static void hi_begin_para(hi* h) {
         }
     } else if (inner && inner->kind == E_PRE) {
         bld_para_style(b, "Code", PD_ROLE_CODE, 0);
+        snprintf(at.lang, sizeof(at.lang), "%s", inner->lang);
+    } else if (inner && inner->kind == E_P && inner->title == 3) {
+        bld_para_style(b, "Term", PD_ROLE_TERM, 0);
+    } else if (inner && inner->kind == E_P && inner->title == 4) {
+        bld_para_style(b, "Definition", PD_ROLE_DEFINITION, 0);
     } else if (inner && inner->kind == E_QUOTE) {
         bld_para_style(b, "Quote", PD_ROLE_QUOTE, 0);
     } else if (inner && inner->kind == E_CAP) {
@@ -1032,7 +1203,20 @@ static void hi_begin_para(hi* h) {
     }
 
     if (lists > 0) {
-        bld_list(b, lkind, lists - 1);
+        int32_t lv = lists - 1 < 8 ? lists - 1 : 8;
+
+        bld_list(b, lkind, lv);
+
+        if (list && !list->list) {  /* each <ul>/<ol> a list of its own, from its start */
+            list->list = bld_list_new(b, lkind, lv, list->start > 0 ? list->start : 1);
+        }
+
+        b->list_id = list ? list->list : 0;
+    }
+
+    if (item && inner == item) {
+        at.task = item->task;
+        item->task = 0;     /* the item's first paragraph has it */
     }
 
     if (align >= 0) {
@@ -1040,7 +1224,12 @@ static void hi_begin_para(hi* h) {
         b->pp.align = align;
     }
 
-    bld_begin_para(b);
+    p = bld_begin_para(b);
+
+    if (p && (at.quote_depth || at.task || at.lang[0])) {
+        pd_doc_set_para_attrs(b->d, p, &at);
+    }
+
     h->space = 0;
 }
 
@@ -1112,6 +1301,32 @@ static void hi_end_para(hi* h) {
     h->space = 0;
 }
 
+static int strncasecmp_n(const char* a, const char* b, size_t n) {
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/* a boolean attribute, which may stand without a value: <input checked> */
+static int attr_flag(const pd_markup* m, const char* name) {
+    size_t i, k = strlen(name);
+
+    for (i = 0; m->attrs && i + k <= m->alen; i++) {
+        if ((i == 0 || isspace((unsigned char)m->attrs[i - 1])) && strncasecmp_n(m->attrs + i, name, k) &&
+                (i + k == m->alen || !isalnum((unsigned char)m->attrs[i + k]))) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* an HTML width/height attribute: pixels unless it says pt */
 static pd_sp attr_length(const pd_markup* m, const char* name, pd_sp dflt) {
     char v[32];
@@ -1131,6 +1346,8 @@ static void hi_image(hi* h, const pd_markup* m) {
     if (!src) {
         return;
     }
+
+    src[0] = '\0';
 
     if (mu_attr(m, "src", src, m->alen + 1) && strncmp(src, "data:", 5) == 0 && strstr(src, ";base64,")) {
         char mime[64];
@@ -1162,8 +1379,37 @@ static void hi_image(hi* h, const pd_markup* m) {
         }
 
         free(bytes);
-    } else if (mu_attr(m, "alt", src, m->alen + 1) && src[0]) {
-        hi_text(h, src, strlen(src));
+    } else if (src[0] || mu_attr(m, "src", src, m->alen + 1)) {   /* by address: loaded later, if at all */
+        char* alt = (char*)malloc(m->alen + 1), *title = (char*)malloc(m->alen + 1);
+
+        memset(&o, 0, sizeof(o));
+        o.kind = PD_INLINE_IMAGE;
+        o.source = src;
+        o.source_len = (int32_t)strlen(src);
+        o.width = attr_length(m, "width", 0);
+        o.height = attr_length(m, "height", 0);
+        o.level = o.width > 0 || o.height > 0;
+
+        if (alt && mu_attr(m, "alt", alt, m->alen + 1)) {
+            o.alt = alt;
+            o.alt_len = (int32_t)strlen(alt);
+        }
+
+        if (title && mu_attr(m, "title", title, m->alen + 1)) {
+            o.title = title;
+            o.title_len = (int32_t)strlen(title);
+        }
+
+        if (o.source_len > 0) {
+            if (!h->b->para) {
+                hi_begin_para(h);
+            }
+
+            bld_inline(h->b, &o);
+        }
+
+        free(alt);
+        free(title);
     }
 
     free(src);
@@ -1342,7 +1588,26 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                 continue;
             }
 
-            if (!strcmp(m.name, "hr") || !strcmp(m.name, "meta") || !strcmp(m.name, "link") ||
+            if (!strcmp(m.name, "hr")) {    /* a rule across the column */
+                hi_end_para(h);
+                bld_break(h->b, PD_BREAK_RULE);
+                continue;
+            }
+
+            if (!strcmp(m.name, "input") && mu_attr(&m, "type", v, sizeof(v)) && !strcmp(v, "checkbox")) {
+                int32_t q;
+
+                for (q = h->depth - 1; q >= 0 && h->stack[q].kind != E_LI; q--) {
+                }
+
+                if (q >= 0 && !h->b->para) {    /* a task list item */
+                    h->stack[q].task = attr_flag(&m, "checked") ? 2 : 1;
+                }
+
+                continue;
+            }
+
+            if (!strcmp(m.name, "meta") || !strcmp(m.name, "link") ||
                     !strcmp(m.name, "input") || !strcmp(m.name, "wbr") || !strcmp(m.name, "col") ||
                     !strcmp(m.name, "source") || !strcmp(m.name, "area") || !strcmp(m.name, "base")) {
                 continue;
@@ -1380,8 +1645,8 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                     v[0] = '\0';
                 }
 
-                if (strncmp(v, "#fnref", 6) == 0 || ((note = find_note(h, v)) != NULL && depth < 4)) {
-                    if (strncmp(v, "#fnref", 6) != 0) {
+                if ((v[0] == '#' && strncmp(v + 1, "fnref", 5) == 0) || ((note = find_note(h, v)) != NULL && depth < 4)) {
+                    if (!(v[0] == '#' && strncmp(v + 1, "fnref", 5) == 0)) {
                         pd_char_props saved = h->b->cp;
 
                         if (!h->b->para) {
@@ -1420,13 +1685,37 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                     continue;
                 }
 
+                {
+                    char id[64];
+
+                    if (!v[0] && (mu_attr(&m, "id", id, sizeof(id)) || mu_attr(&m, "name", id, sizeof(id))) && id[0]) {
+                        pd_inline o;    /* an anchor: a bookmark */
+
+                        memset(&o, 0, sizeof(o));
+                        o.kind = PD_INLINE_BOOKMARK;
+                        snprintf(o.name, sizeof(o.name), "%.31s", id);
+
+                        if (!h->b->para) {
+                            hi_begin_para(h);
+                        }
+
+                        bld_inline(h->b, &o);
+                    }
+                }
+
                 if (v[0] && v[0] != '#') {
                     pd_inline o;
+                    char ttl[256];
 
                     memset(&o, 0, sizeof(o));
                     o.kind = PD_INLINE_LINK;
                     o.source = v;
                     o.source_len = (int32_t)strlen(v);
+
+                    if (mu_attr(&m, "title", ttl, sizeof(ttl)) && ttl[0]) {
+                        o.title = ttl;
+                        o.title_len = (int32_t)strlen(ttl);
+                    }
 
                     if (!h->b->para) {
                         hi_begin_para(h);
@@ -1491,6 +1780,15 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
             if (kind == 0) {    /* inline formatting */
                 pd_char_props* cp = &h->b->cp;
                 const char* t = m.name;
+
+                if (!strcmp(t, "code") && m.type == MT_OPEN && mu_attr(&m, "class", v, sizeof(v))) {
+                    const char* lg = strstr(v, "language-");
+                    int32_t q = innermost(h, E_PRE);
+
+                    if (lg && q >= 0 && !h->b->para) {   /* <pre><code class="language-x">: the block's language */
+                        snprintf(h->stack[q].lang, sizeof(h->stack[q].lang), "%.*s", (int)strcspn(lg + 9, " \t"), lg + 9);
+                    }
+                }
 
                 if (!strcmp(t, "b") || !strcmp(t, "strong")) {
                     cp->mask |= PD_CP_WEIGHT;
@@ -1560,6 +1858,14 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
 
             if (kind == E_P && mu_attr(&m, "class", v, sizeof(v)) && strstr(v, "equation")) {
                 e.title = 2;    /* a display equation */
+            }
+
+            if (kind == E_P && (!strcmp(m.name, "dt") || !strcmp(m.name, "dd"))) {
+                e.title = m.name[1] == 't' ? 3 : 4;     /* a definition list's term, its definition */
+            }
+
+            if (kind == E_OL && mu_attr(&m, "start", v, sizeof(v))) {
+                e.start = atoi(v);
             }
 
             switch (kind) {

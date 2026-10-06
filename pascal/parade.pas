@@ -92,11 +92,15 @@ const
   PD_ROLE_CODE = 5;
   PD_ROLE_EQUATION = 6;
   PD_ROLE_FIGURE_CONTENT = 7;
+  PD_ROLE_RAW = 8;
+  PD_ROLE_TERM = 9;
+  PD_ROLE_DEFINITION = 10;
 
   PD_BREAK_PAGE = 0;
   PD_BREAK_COLUMN = 1;
   PD_BREAK_ODD_PAGE = 2;
   PD_BREAK_EVEN_PAGE = 3;
+  PD_BREAK_RULE = 4;
 
   PD_STYLE_PARAGRAPH = 0;
   PD_STYLE_CHARACTER = 1;
@@ -159,6 +163,7 @@ const
   PD_INLINE_BOOKMARK = 5;
   PD_INLINE_TAB = 6;
   PD_INLINE_USER = 7;
+  PD_INLINE_RAW = 8;
 
   PD_FIELD_PAGE = 0;
   PD_FIELD_PAGES = 1;
@@ -371,8 +376,18 @@ type
     name: array[0..31] of AnsiChar;
     source: PAnsiChar;
     source_len, user: Int32;
+    title: PAnsiChar;         { links and images }
+    title_len: Int32;
+    alt: PAnsiChar;           { images }
+    alt_len: Int32;
   end;
   Ppd_inline = ^pd_inline;
+
+  pd_para_attrs = record
+    quote_depth, task, loose: Int32;
+    lang: array[0..31] of AnsiChar;
+  end;
+  Ppd_para_attrs = ^pd_para_attrs;
 
   pd_float_props = record
     placement: UInt32;
@@ -425,6 +440,8 @@ type
 
   pd_doc_listener = procedure(user: Pointer; change: Ppd_change); cdecl;
   pd_writer = function(user: Pointer; data: Pointer; len: csize_t): cint; cdecl;
+  { fetches a picture by its address: writes its bytes through write(sink, ...), 0 on success }
+  pd_image_fetch = function(user: Pointer; address: PAnsiChar; write: pd_writer; sink: Pointer): cint; cdecl;
 
   { ---- parade_layout.h ---- }
   pd_layout_info = record
@@ -567,6 +584,12 @@ function pd_doc_set_char_style(doc: Ppd_doc; range: pd_range; style: pd_style_id
 function pd_doc_set_para_style(doc: Ppd_doc; paragraph: pd_block_id; style: pd_style_id): pd_status; cdecl; PDEXT;
 function pd_doc_set_para_props(doc: Ppd_doc; paragraph: pd_block_id; constref props: pd_para_props): pd_status; cdecl; PDEXT;
 function pd_doc_set_role(doc: Ppd_doc; paragraph: pd_block_id; role, level: Int32): pd_status; cdecl; PDEXT;
+function pd_doc_para_attrs(doc: Ppd_doc; paragraph: pd_block_id; out attrs: pd_para_attrs): pd_status; cdecl; PDEXT;
+function pd_doc_set_para_attrs(doc: Ppd_doc; paragraph: pd_block_id; const attrs: pd_para_attrs): pd_status; cdecl;
+  PDEXT;
+function pd_doc_set_metadata(doc: Ppd_doc; text: PAnsiChar; len: csize_t): pd_status; cdecl; PDEXT;
+function pd_doc_metadata(doc: Ppd_doc; out len: csize_t): PAnsiChar; cdecl; PDEXT;
+procedure pd_doc_image_display_size(doc: Ppd_doc; const image: pd_inline; out width, height: pd_sp); cdecl; PDEXT;
 function pd_doc_set_list(doc: Ppd_doc; paragraph: pd_block_id; list: pd_list_id; level: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_insert_block(doc: Ppd_doc; parent: pd_block_id; index, kind: Int32; out block: pd_block_id): pd_status; cdecl; PDEXT;
 function pd_doc_remove_block(doc: Ppd_doc; block: pd_block_id): pd_status; cdecl; PDEXT;
@@ -601,6 +624,7 @@ function pd_doc_marker_set(doc: Ppd_doc; marker: pd_marker_id; pos: pd_pos): pd_
 
 procedure pd_doc_set_listener(doc: Ppd_doc; fn: pd_doc_listener; user: Pointer); cdecl; PDEXT;
 function pd_doc_save(doc: Ppd_doc; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+function pd_doc_load_images(doc: Ppd_doc; fetch: pd_image_fetch; user: Pointer): Int32; cdecl; PDEXT;
 function pd_doc_load(data: Pointer; len: csize_t; format: Int32; out doc: Ppd_doc): pd_status; cdecl; PDEXT;
 function pd_doc_para_build(doc: Ppd_doc; paragraph: pd_block_id; column_width: pd_sp; para: Ppd_para;
   params: Ppd_params): pd_status; cdecl; PDEXT;

@@ -170,6 +170,15 @@ int main(void) {
     printf("pd_inline.source %zu\n", offsetof(pd_inline, source));
     printf("pd_inline.source_len %zu\n", offsetof(pd_inline, source_len));
     printf("pd_inline.user %zu\n", offsetof(pd_inline, user));
+    printf("pd_inline.title %zu\n", offsetof(pd_inline, title));
+    printf("pd_inline.title_len %zu\n", offsetof(pd_inline, title_len));
+    printf("pd_inline.alt %zu\n", offsetof(pd_inline, alt));
+    printf("pd_inline.alt_len %zu\n", offsetof(pd_inline, alt_len));
+    printf("pd_para_attrs %zu\n", sizeof(pd_para_attrs));
+    printf("pd_para_attrs.quote_depth %zu\n", offsetof(pd_para_attrs, quote_depth));
+    printf("pd_para_attrs.task %zu\n", offsetof(pd_para_attrs, task));
+    printf("pd_para_attrs.loose %zu\n", offsetof(pd_para_attrs, loose));
+    printf("pd_para_attrs.lang %zu\n", offsetof(pd_para_attrs, lang));
     printf("pd_float_props %zu\n", sizeof(pd_float_props));
     printf("pd_float_props.placement %zu\n", offsetof(pd_float_props, placement));
     printf("pd_float_props.wrap %zu\n", offsetof(pd_float_props, wrap));

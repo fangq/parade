@@ -119,8 +119,11 @@ enum {
     VI_PEN = 2,
     VI_FLOAT = 3,
     VI_BREAK = 4,
-    VI_ROW = 5
+    VI_ROW = 5,
+    VI_RULE = 6                 /* a horizontal rule (PD_BREAK_RULE): a line of its own height */
 };
+
+#define RULE_H PD_PT(12)        /* the space a horizontal rule takes, the rule in its middle */
 
 typedef struct {
     int32_t kind;
@@ -812,6 +815,7 @@ static void count_walk(pd_layout* L, pd_block_id id, seqc* seq, int32_t* nseq, i
             buf[o] = '\0';
         }
 
+        pd_doc_task_label(b->st.at.task, l->lv[lv].format == PD_NUM_BULLET, buf, sizeof(buf));
         set_label(L, id, buf, 0);
     }
 }
@@ -1320,6 +1324,17 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             }
 
             F->it[F->n - 1].line = F->nfl - 1;  /* float index */
+        } else if (b->kind == PD_BLOCK_BREAK && b->st.break_kind == PD_BREAK_RULE) {
+            clear_wrap(F);
+
+            if (!*first) {
+                push(F, VI_PEN, 0, *prev_keep ? INF_PEN : 0, NULL, 0, 0);
+            }
+
+            push(F, VI_RULE, RULE_H, 0, NULL, 0, b->id);
+            *prev_after = 0;
+            *prev_keep = 0;
+            *first = 0;
         } else if (b->kind == PD_BLOCK_BREAK) {
             clear_wrap(F);
             push(F, VI_BREAK, 0, 0, NULL, 0, 0);
@@ -1557,6 +1572,8 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
             add_line(F->L, F->page, v->pc, v->line, x, y0 + r[i].y - v->pc->top[v->line], 0);
         } else if (v->kind == VI_ROW) {
             place_row(F, v, x, y0 + r[i].y);
+        } else if (v->kind == VI_RULE) {
+            add_rule(F->L, F->page, x, y0 + r[i].y + RULE_H / 2, F->colw, PD_SP_PER_PT / 2, 0xFF808080u, 0, v->block);
         } else if (v->kind == VI_FLOAT) {
             pfloat* f = &F->fl[v->line];
 
@@ -1797,6 +1814,7 @@ static pd_status fill(filler* F, int32_t start) {
 
             case VI_LINE:
             case VI_ROW:
+            case VI_RULE:
                 if (used + v->h + fn_area(F, fn + v->fn_h) > avail && !empty) {
                     cut = 1;
                     at = best >= 0 ? best : i;     /* no legal break: emergency, right here */
@@ -1978,7 +1996,7 @@ static int64_t optimal_breaks(filler* F, uint8_t* chosen, int32_t* ends, int64_t
                         continue;
                     }
 
-                    if (v && (v->kind == VI_LINE || v->kind == VI_ROW)) {
+                    if (v && (v->kind == VI_LINE || v->kind == VI_ROW || v->kind == VI_RULE)) {
                         if (used + v->h + fn_area(F, fn + v->fn_h) > cap && !empty) {
                             break;
                         }
@@ -3120,6 +3138,43 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
             free(M.d);
             emit_text(L, D, l->pc->label, &ls, l->ox + ln.x - w - PD_PT(1), l->oy + ln.baseline - ls.size / 2, b->id, 0,
                       l->region);
+        } else if (b->st.at.task) {     /* a checklist's box, drawn, so that no font has to have one */
+            char lab[32];
+            size_t k = strlen(l->pc->label);
+            pd_sp bx = l->ox + l->pc->label_x, side = ls.size * 3 / 4, bw = ls.size / 14 > PD_SP_PER_PT / 3 ?
+                       ls.size / 14 : PD_SP_PER_PT / 3, top = l->oy + ln.baseline - side;
+            pd_draw r;
+
+            snprintf(lab, sizeof(lab), "%s", l->pc->label);
+
+            if (k >= 3 && (memcmp(lab + k - 3, "\xE2\x98\x90", 3) == 0 || memcmp(lab + k - 3, "\xE2\x98\x91", 3) == 0)) {
+                lab[k - 3] = '\0';     /* a number before it stays text */
+                k -= 3;
+
+                while (k > 0 && lab[k - 1] == ' ') {
+                    lab[--k] = '\0';
+                }
+            }
+
+            if (lab[0]) {
+                bx += emit_text(L, D, lab, &ls, bx, l->oy + ln.baseline, b->id, 0, l->region) + ls.size / 4;
+            }
+
+            memset(&r, 0, sizeof(r));
+            r.kind = PD_DRAW_RULE;
+            r.color = ls.color;
+            r.block = b->id;
+            r.region = l->region;
+#define BOXR(X, Y, W, H) do { r.x = (X); r.y = (Y); r.w = (W); r.h = (H); emit(D, &r); } while (0)
+            BOXR(bx, top, side, bw);
+            BOXR(bx, top + side - bw, side, bw);
+            BOXR(bx, top, bw, side);
+            BOXR(bx + side - bw, top, bw, side);
+
+            if (b->st.at.task == 2) {   /* checked: filled inside */
+                BOXR(bx + 3 * bw, top + 3 * bw, side - 6 * bw, side - 6 * bw);
+            }
+#undef BOXR
         } else {
             emit_text(L, D, l->pc->label, &ls, l->ox + l->pc->label_x, l->oy + ln.baseline, b->id, 0, l->region);
         }
@@ -3151,6 +3206,14 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
 
             a.h = q->obj.height + q->obj.depth;
             a.y = l->oy + g[i].y - q->obj.height;
+
+            if (q->obj.kind == PD_INLINE_IMAGE) {   /* its natural size when none is set */
+                pd_sp iw, ih;
+
+                pd_doc_image_size(d, &q->obj, &iw, &ih);
+                a.h = ih + q->obj.depth;
+                a.y = l->oy + g[i].y - ih;
+            }
 
             if (q->obj.kind == PD_INLINE_IMAGE) {
                 a.kind = PD_DRAW_IMAGE;

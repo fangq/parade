@@ -473,6 +473,31 @@ void bld_list(pd_bld* b, int32_t kind, int32_t level) {
     b->list_level = level < 0 ? 0 : level > 8 ? 8 : level;
 }
 
+pd_list_id bld_list_new(pd_bld* b, int32_t kind, int32_t level, int32_t start) {
+    static const char* bullets[] = { "\xE2\x80\xA2", "\xE2\x97\xA6", "\xE2\x96\xAA" };
+    pd_list_level lv[9];
+    pd_list_id id = 0;
+    int32_t i;
+
+    memset(lv, 0, sizeof(lv));
+
+    for (i = 0; i < 9; i++) {
+        lv[i].format = kind == 1 ? PD_NUM_BULLET : PD_NUM_DECIMAL;
+        lv[i].start = i == level && start >= 0 ? start : 1;
+        lv[i].indent = PD_PT(18) * (i + 1);
+        lv[i].hanging = PD_PT(18);
+
+        if (kind == 1) {
+            strcpy(lv[i].text, bullets[i % 3]);
+        } else {
+            snprintf(lv[i].text, sizeof(lv[i].text), "%%%d.", (int)i + 1);
+        }
+    }
+
+    pd_doc_list_define(b->d, 9, lv, &id);
+    return id;
+}
+
 static pd_list_id bld_list_id(pd_bld* b, int32_t kind) {
     if (!b->lists[kind]) {
         pd_list_level lv[9];
@@ -1083,6 +1108,14 @@ static void copy_attrs(copier* C, pd_block_id sp, pd_block_id dp) {
 
         pd_doc_set_para_props(C->d, dp, &pp);
     }
+
+    {
+        pd_para_attrs at;
+
+        if (pd_doc_para_attrs(C->s, sp, &at) == PD_OK && (at.quote_depth || at.task || at.loose || at.lang[0])) {
+            pd_doc_set_para_attrs(C->d, dp, &at);
+        }
+    }
 }
 
 static pd_status copy_block(copier* C, pd_block_id src, pd_block_id parent, int32_t index, pd_block_id* out) {
@@ -1236,6 +1269,11 @@ static void text_walk(const pd_doc* d, pd_block_id id, text_ctx* x) {
         x->para = id;
         pd_conv_spans(d, id, text_span, x);
         pb_putc(x->out, '\n');
+        return;
+    }
+
+    if (bi.kind == PD_BLOCK_BREAK && bi.break_kind == PD_BREAK_RULE) {
+        pb_puts(x->out, "----------\n");
         return;
     }
 

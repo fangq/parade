@@ -17,7 +17,7 @@ interface
 
 uses
   Classes, SysUtils, Controls, Graphics, LCLType, LCLIntf, ExtCtrls, StdCtrls, Forms, Clipbrd,
-  IntfGraphics, GraphType, FPImage, ctypes, parade;
+  IntfGraphics, GraphType, FPImage, LazFileUtils, ctypes, parade;
 
 type
   TParadeFontEntry = record
@@ -49,6 +49,9 @@ type
     FBlink: TTimer;
     FCaretOn: Boolean;
     FGlyphs: TStringList;          { key -> PGlyphBmp }
+    FPics: array of TLazIntfImage; { by resource id - 1: the picture, decoded once }
+    FPicSized: array of TLazIntfImage; { ... and at the size it was last drawn }
+    FPicDoc: Ppd_doc;              { the document they are of }
     FOrder: array of Int32;        { block id -> reading-order index, -1 = not in the main flow }
     FOrderRev: UInt64;
     FDragging: Boolean;
@@ -61,6 +64,8 @@ type
     procedure BlinkTimer(Sender: TObject);
     procedure ScrollBarChange(Sender: TObject);
     procedure ClearGlyphCache;
+    procedure ClearPictures;
+    function GetPicture(Res: pd_res_id; W, H: Integer): TLazIntfImage;
     function GetGlyphBmp(AFont: Ppd_font; GlyphId: UInt32; PxPerEm: pd_sp; Sub: Integer): PGlyphBmp;
     function PxPerSp: Double;
     function PageTop(Page: Integer): Integer;
@@ -205,6 +210,39 @@ begin
   Result := 0;
 end;
 
+{ a picture by its address, for pd_doc_load_images: a path relative to the document's folder (user
+  points at it, a string) or absolute, or a file:// URL; nothing is fetched from the network }
+function FetchFile(user: Pointer; address: PAnsiChar; write: pd_writer; sink: Pointer): cint; cdecl;
+var
+  Path: string;
+  Ms: TMemoryStream;
+begin
+  Result := 1;
+  Path := StrPas(address);
+  if Pos('file://', Path) = 1 then
+    Delete(Path, 1, 7)
+  else if Pos('://', Path) > 0 then
+    Exit;
+  if (Path = '') or (Pos('data:', Path) = 1) then
+    Exit;
+  if not FilenameIsAbsolute(Path) then
+    Path := PString(user)^ + Path;
+  if not FileExists(Path) then
+    Exit;
+  Ms := TMemoryStream.Create;
+  try
+    try
+      Ms.LoadFromFile(Path);
+      if Ms.Size > 0 then
+        Result := write(sink, Ms.Memory, Ms.Size);
+    except
+      Result := 1;
+    end;
+  finally
+    Ms.Free;
+  end;
+end;
+
 { converter format of a file name: PD_CONV_*, PD_CONV_JDATA for .pdoc/.bpdoc, -1 unknown }
 function FormatOfFile(const FileName: string): Int32;
 var
@@ -341,6 +379,7 @@ begin
   if FDoc <> nil then
     pd_doc_free(FDoc);
   ClearGlyphCache;
+  ClearPictures;
   FGlyphs.Free;
   for I := 0 to High(FFonts) do
     pd_font_free(FFonts[I].Font);
@@ -437,6 +476,7 @@ procedure TParadeEdit.LoadFromStream(Stream: TStream; Format: Int32; const FileN
 var
   Ms: TMemoryStream;
   D: Ppd_doc;
+  Base: string;
 begin
   Ms := TMemoryStream.Create;
   try
@@ -455,6 +495,11 @@ begin
   if FDoc <> nil then
     pd_doc_free(FDoc);
   FDoc := D;
+  { pictures the document only names (Markdown, HTML), from beside the file }
+  Base := ExtractFilePath(ExpandFileName(FileName));
+  if FileName = '' then
+    Base := IncludeTrailingPathDelimiter(GetCurrentDir);
+  pd_doc_load_images(FDoc, @FetchFile, @Base);
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
   pd_doc_set_math_font(FDoc, FMathFont);
   ParadeCheck(pd_layout_new(FDoc, FLayout), 'layout');
@@ -640,6 +685,82 @@ begin
   for I := 0 to FGlyphs.Count - 1 do
     Dispose(PGlyphBmp(FGlyphs.Objects[I]));
   FGlyphs.Clear;
+end;
+
+procedure TParadeEdit.ClearPictures;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FPics) do
+  begin
+    FPics[I].Free;
+    FPicSized[I].Free;
+  end;
+  FPics := nil;
+  FPicSized := nil;
+  FPicDoc := nil;
+end;
+
+{ a resource of the document as a picture W x H pixels, nil if it is not one the LCL reads }
+function TParadeEdit.GetPicture(Res: pd_res_id; W, H: Integer): TLazIntfImage;
+var
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  Ms: TMemoryStream;
+  Pic: TPicture;
+  Src: TLazIntfImage;
+  X, Y, I: Integer;
+begin
+  Result := nil;
+  if (Res = 0) or (W <= 0) or (H <= 0) or (W > 8000) or (H > 8000) then
+    Exit;
+  if FPicDoc <> FDoc then
+  begin
+    ClearPictures;
+    FPicDoc := FDoc;
+  end;
+  I := Integer(Res) - 1;
+  if I >= Length(FPics) then
+  begin
+    SetLength(FPics, I + 1);
+    SetLength(FPicSized, I + 1);
+  end;
+  if FPics[I] = nil then
+  begin
+    if pd_doc_resource(FDoc, Res, @Mime, @Data, @Len) <> PD_OK then
+      Exit;
+    Ms := TMemoryStream.Create;
+    Pic := TPicture.Create;
+    try
+      try
+        Ms.WriteBuffer(Data^, Len);
+        Ms.Position := 0;
+        Pic.LoadFromStream(Ms);
+        if Pic.Graphic is TRasterImage then
+          FPics[I] := TRasterImage(Pic.Graphic).CreateIntfImage;
+      except
+        FPics[I] := nil;   { not a picture the LCL can read: the placeholder stays }
+      end;
+    finally
+      Pic.Free;
+      Ms.Free;
+    end;
+    if FPics[I] = nil then
+      Exit;
+  end;
+  { scaled once per size, nearest pixel: the page is redrawn far more often than it is zoomed }
+  if (FPicSized[I] = nil) or (FPicSized[I].Width <> W) or (FPicSized[I].Height <> H) then
+  begin
+    FPicSized[I].Free;
+    Src := FPics[I];
+    FPicSized[I] := TLazIntfImage.Create(0, 0, [riqfRGB, riqfAlpha]);
+    FPicSized[I].SetSize(W, H);
+    for Y := 0 to H - 1 do
+      for X := 0 to W - 1 do
+        FPicSized[I].Colors[X, Y] := Src.Colors[X * Src.Width div W, Y * Src.Height div H];
+  end;
+  Result := FPicSized[I];
 end;
 
 function TParadeEdit.GetGlyphBmp(AFont: Ppd_font; GlyphId: UInt32; PxPerEm: pd_sp; Sub: Integer): PGlyphBmp;
@@ -1495,6 +1616,35 @@ type
   end;
   PPixel = ^TPixel;
 
+{ a picture onto the page at X, Y, over what is there by its alpha }
+procedure BlendPicture(Img, Pic: TLazIntfImage; X, Y: Integer);
+var
+  PX, PY, A: Integer;
+  C: TFPColor;
+  Pix: PPixel;
+begin
+  for PY := 0 to Pic.Height - 1 do
+  begin
+    if (Y + PY < 0) or (Y + PY >= Img.Height) then
+      Continue;
+    for PX := 0 to Pic.Width - 1 do
+    begin
+      if (X + PX < 0) or (X + PX >= Img.Width) then
+        Continue;
+      C := Pic.Colors[PX, PY];
+      A := C.alpha shr 8;
+      if A = 0 then
+        Continue;
+      Pix := PPixel(Img.GetDataLineStart(Y + PY));
+      Inc(Pix, X + PX);
+      Pix^.R := (Pix^.R * (255 - A) + (C.red shr 8) * A) div 255;
+      Pix^.G := (Pix^.G * (255 - A) + (C.green shr 8) * A) div 255;
+      Pix^.B := (Pix^.B * (255 - A) + (C.blue shr 8) * A) div 255;
+      Pix^.A := 255;
+    end;
+  end;
+end;
+
 procedure FillRectImg(Img: TLazIntfImage; X0, Y0, X1, Y1: Integer; Col: UInt32; Alpha: Integer);
 var
   X, Y: Integer;
@@ -1581,6 +1731,7 @@ var
   Sel: Boolean;
   A, B, Q: pd_pos;
   G: PGlyphBmp;
+  Pic: TLazIntfImage;
   CPage: Int32;
   CX, CBase, CAsc, CDesc: pd_sp;
 begin
@@ -1621,10 +1772,17 @@ begin
             OY + Round((y + h) * PxScale) + 1, color and $FFFFFF, 255);
         PD_DRAW_IMAGE:
           begin
-            FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale),
-              OY + Round((y + h) * PxScale), $004A90D9, 255);
-            FillRectImg(Img, OX + Round(x * PxScale) + 1, OY + Round(y * PxScale) + 1, OX + Round((x + w) * PxScale) - 1,
-              OY + Round((y + h) * PxScale) - 1, $00DFE9F5, 255);
+            IX := OX + Round(x * PxScale);
+            IY := OY + Round(y * PxScale);
+            Pic := GetPicture(resource, OX + Round((x + w) * PxScale) - IX, OY + Round((y + h) * PxScale) - IY);
+            if Pic <> nil then
+              BlendPicture(Img, Pic, IX, IY)
+            else
+            begin   { not loaded, or not a picture: a frame in its place }
+              FillRectImg(Img, IX, IY, OX + Round((x + w) * PxScale), OY + Round((y + h) * PxScale), $004A90D9, 255);
+              FillRectImg(Img, IX + 1, IY + 1, OX + Round((x + w) * PxScale) - 1, OY + Round((y + h) * PxScale) - 1,
+                $00DFE9F5, 255);
+            end;
           end;
         PD_DRAW_BOX:
           FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale),

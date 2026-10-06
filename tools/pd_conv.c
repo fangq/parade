@@ -32,6 +32,32 @@ static const pd_font* resolve(void* user, const char* family, int32_t weight, in
     return cls == PD_FAMILY_SANS && fonts[4 + face] ? fonts[4 + face] : fonts[face];
 }
 
+/* a picture the document names, from beside the input file (user: its folder, with the separator) */
+static int fetch_file(void* user, const char* address, pd_writer write, void* sink) {
+    char path[4096];
+    FILE* f;
+    char buf[65536];
+    size_t n;
+    int rc = 0;
+
+    if (strstr(address, "://") || strncmp(address, "data:", 5) == 0) {
+        return 1;   /* nothing from the network */
+    }
+
+    snprintf(path, sizeof(path), "%s%s", address[0] == '/' ? "" : (const char*)user, address);
+
+    if ((f = fopen(path, "rb")) == NULL) {
+        return 1;
+    }
+
+    while (!rc && (n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        rc = write(sink, buf, n);
+    }
+
+    fclose(f);
+    return rc;
+}
+
 static int to_file(void* user, const void* data, size_t len) {
     return fwrite(data, 1, len, (FILE*)user) != len;
 }
@@ -128,6 +154,14 @@ int main(int argc, char** argv) {
     if (st != PD_OK) {
         fprintf(stderr, "cannot import %s: %s\n", argv[1], pd_status_string(st));
         return 1;
+    }
+
+    {   /* pictures the input only names, from its folder */
+        char dir[4096];
+        const char* sl = strrchr(argv[1], '/');
+
+        snprintf(dir, sizeof(dir), "%.*s", sl ? (int)(sl - argv[1] + 1) : 0, argv[1]);
+        pd_doc_load_images(d, fetch_file, dir);
     }
 
     if ((f = fopen(argv[2], "wb")) == NULL) {

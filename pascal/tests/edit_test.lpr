@@ -75,6 +75,10 @@ var
   N: Int32;
   Runs: array of pd_run;
   Ms: TMemoryStream;
+  Items: array of pd_draw;
+  Pic: Integer;
+  Bmp: TBitmap;
+  PX: TColor;
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -242,6 +246,52 @@ begin
   SavePage(E, 0, Dir + 'edit_typed_p1.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
   E.ExportPDF(Dir + 'edit_typed.pdf');
   Check(FileExists(Dir + 'edit_typed.pdf'), 'PDF export');
+
+  { 8. a picture Markdown only names, beside the file: loaded and drawn }
+  Step('pictures');
+  with TStringList.Create do
+    try
+      Add('A photo:');
+      Add('');
+      Add('![a photo](edit_photo.jpg "The photo")');
+      SaveToFile(Dir + 'edit_pictures.md');
+    finally
+      Free;
+    end;
+  with TMemoryStream.Create do
+    try
+      LoadFromFile('tests/data/photo.jpg');
+      SaveToFile(Dir + 'edit_photo.jpg');
+    finally
+      Free;
+    end;
+  E.LoadFromFile(Dir + 'edit_pictures.md');
+  begin
+    Items := nil;
+    N := 0;
+    pd_layout_page_items(E.Layout, 0, nil, 0, N);
+    SetLength(Items, N + 1);
+    pd_layout_page_items(E.Layout, 0, @Items[0], N, N);
+    Pic := -1;
+    for I := 0 to N - 1 do
+      if Items[I].kind = PD_DRAW_IMAGE then
+        Pic := I;
+    Check((Pic >= 0) and (Items[Pic].resource <> 0), 'the named picture is loaded');
+    Check((Pic >= 0) and (Items[Pic].w = 60 * 3 * 65536 div 4), 'at its own size, 96 dpi');
+    if Pic >= 0 then
+    begin
+      Bmp := TBitmap.Create;
+      try
+        E.RenderPage(0, Bmp, 1.0 * 96 / 72 / PD_SP_PER_PT);
+        PX := Bmp.Canvas.Pixels[Round((Items[Pic].x + Items[Pic].w div 2) * 96 / 72 / 65536) + 1,
+          Round((Items[Pic].y + Items[Pic].h div 2) * 96 / 72 / 65536) + 1];
+        { the photo's middle is a warm yellow, not the frame's pale blue }
+        Check((Red(PX) > 200) and (Green(PX) > 150) and (Blue(PX) < 100), 'and drawn: ' + IntToHex(PX, 6));
+      finally
+        Bmp.Free;
+      end;
+    end;
+  end;
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

@@ -5,13 +5,20 @@
  * new document through ordinary operations (its undo history is cleared),
  * an export walks the document read-only. What each format keeps:
  *
- *   HTML      headings, paragraphs (alignment), lists, quotes, code,
- *             character formats, links, images (data: URIs), tables,
+ *   HTML      headings, paragraphs (alignment), lists (start numbers,
+ *             checkboxes), nested quotes, code (its language), definition
+ *             lists, rules, character formats, links (titles), images
+ *             (data: URIs or by address, alt text, titles), tables,
  *             figures with captions, footnotes; import is tolerant (real
  *             web pages, office clipboard fragments)
- *   Markdown  CommonMark blocks and inlines plus GFM tables,
- *             strikethrough and footnotes; underline, super/subscript
- *             as inline HTML
+ *   Markdown  CommonMark blocks and inlines -- quotes and lists nested in
+ *             each other, reference links, fenced code with its language,
+ *             rules, raw HTML kept as it is -- plus GFM tables (column
+ *             alignment), task lists, strikethrough and footnotes; pandoc
+ *             heading ids, definition lists and image sizes; YAML front
+ *             matter as the document's metadata; underline, super/subscript
+ *             as inline HTML. Pictures by address are kept as addresses
+ *             (pd_doc_load_images fetches them)
  *   LaTeX     export only: article class, sectioning, lists, tables
  *             (longtable with repeated header), figures, footnotes,
  *             cross-references, inline and display equations

@@ -135,14 +135,18 @@ typedef enum {
     PD_ROLE_QUOTE = 4,
     PD_ROLE_CODE = 5,           /**< preformatted: no justification, no hyphenation */
     PD_ROLE_EQUATION = 6,       /**< display equation: holds one equation inline */
-    PD_ROLE_FIGURE_CONTENT = 7  /**< the content paragraph of a float (image, ...) */
+    PD_ROLE_FIGURE_CONTENT = 7, /**< the content paragraph of a float (image, ...) */
+    PD_ROLE_RAW = 8,            /**< markup passed through untouched (an HTML block in Markdown): shown as code */
+    PD_ROLE_TERM = 9,           /**< the term of a definition list */
+    PD_ROLE_DEFINITION = 10     /**< its definition, indented below it */
 } pd_role;
 
 typedef enum {
     PD_BREAK_PAGE = 0,
     PD_BREAK_COLUMN = 1,
     PD_BREAK_ODD_PAGE = 2,
-    PD_BREAK_EVEN_PAGE = 3
+    PD_BREAK_EVEN_PAGE = 3,
+    PD_BREAK_RULE = 4           /**< no break at all: a horizontal rule across the column (Markdown ***, HTML <hr>) */
 } pd_break_kind;
 
 typedef struct {
@@ -358,7 +362,8 @@ typedef enum {
     PD_INLINE_LINK = 4,         /**< start of an external hyperlink (URL in source); an empty URL ends it */
     PD_INLINE_BOOKMARK = 5,     /**< named anchor for cross-references */
     PD_INLINE_TAB = 6,          /**< tab stop (positions from the paragraph style) */
-    PD_INLINE_USER = 7          /**< host-defined object of the given size */
+    PD_INLINE_USER = 7,         /**< host-defined object of the given size */
+    PD_INLINE_RAW = 8           /**< markup passed through untouched (inline HTML in Markdown), in source: no size */
 } pd_inline_kind;
 
 typedef enum {
@@ -381,13 +386,25 @@ typedef struct {
     int32_t level;              /**< HEADING field level; FOOTNOTE: 0 a footnote, 1 an endnote (numbered i, ii, ...
                                      on its own, laid out after the last section's text) */
     char name[32];              /**< SEQ name or bookmark name */
-    const char* source;         /**< equation source or link URL, UTF-8; copied on insert, doc-owned on read */
+    const char* source;         /**< equation source, link URL, the address of an image not embedded (resource 0)
+                                     or raw markup; UTF-8, copied on insert, doc-owned on read */
     int32_t source_len;
     int32_t user;
+    const char* title;          /**< links and images: the tooltip title; UTF-8, as source */
+    int32_t title_len;
+    const char* alt;            /**< images: the text that stands for the picture; UTF-8, as source */
+    int32_t alt_len;
 } pd_inline;
 
 /** the inline object at a byte offset (which must hold U+FFFC) */
 PD_API pd_status pd_doc_inline_at(const pd_doc* doc, pd_pos pos, pd_inline* out);
+
+/**
+ * The size an image inline is shown at: its own when set, else the
+ * picture's pixel size at 96 dpi (the other side kept in proportion when one
+ * is given), else -- not loaded, or not a PNG, JPEG or GIF -- a placeholder.
+ */
+PD_API void pd_doc_image_display_size(const pd_doc* doc, const pd_inline* image, pd_sp* width, pd_sp* height);
 
 /** embed binary data (image bytes, ...); the document copies it */
 PD_API pd_status pd_doc_add_resource(pd_doc* doc, const char* mime, const void* data, size_t len, pd_res_id* out);
@@ -517,6 +534,26 @@ PD_API pd_status pd_doc_set_char_style(pd_doc* doc, pd_range range, pd_style_id 
 PD_API pd_status pd_doc_set_para_style(pd_doc* doc, pd_block_id paragraph, pd_style_id style);
 PD_API pd_status pd_doc_set_para_props(pd_doc* doc, pd_block_id paragraph, const pd_para_props* props);
 PD_API pd_status pd_doc_set_role(pd_doc* doc, pd_block_id paragraph, pd_role role, int32_t level);
+
+/** what a paragraph is beyond its role, for formats that say so (Markdown, HTML) */
+typedef struct {
+    int32_t quote_depth;        /**< block quotes it is inside, 0-9; a QUOTE role with 0 counts as one */
+    int32_t task;               /**< a list item's checkbox: 0 none, 1 open, 2 checked */
+    int32_t loose;              /**< 1 = an item of a loose list (blank lines between its items) */
+    char lang[32];              /**< a code block's language ("python"), UTF-8, "" = none */
+} pd_para_attrs;
+
+PD_API pd_status pd_doc_para_attrs(const pd_doc* doc, pd_block_id paragraph, pd_para_attrs* out);
+PD_API pd_status pd_doc_set_para_attrs(pd_doc* doc, pd_block_id paragraph, const pd_para_attrs* attrs);
+
+/**
+ * Document metadata as the source format wrote it -- a Markdown file's YAML
+ * front matter, without its --- lines. UTF-8; NULL/0 clears it. Saved with
+ * the document; not part of the undo history.
+ */
+PD_API pd_status pd_doc_set_metadata(pd_doc* doc, const char* text, size_t len);
+PD_API const char* pd_doc_metadata(const pd_doc* doc, size_t* len);
+
 PD_API pd_status pd_doc_set_list(pd_doc* doc, pd_block_id paragraph, pd_list_id list, int32_t level);
 
 /**
@@ -605,6 +642,17 @@ PD_API void pd_doc_set_listener(pd_doc* doc, pd_doc_listener fn, void* user);
 
 /** receives output bytes; return nonzero to abort */
 typedef int (*pd_writer)(void* user, const void* data, size_t len);
+
+/**
+ * Pictures given by address rather than embedded (PD_INLINE_IMAGE with
+ * resource 0 and the address in source): fetch writes the bytes of one
+ * through write(sink, data, len) and returns 0, or nonzero when it cannot.
+ * Each picture fetched becomes a resource of the document; one with no size
+ * takes its pixel size at 96 dpi. Not part of the undo history. Returns how
+ * many were loaded.
+ */
+typedef int (*pd_image_fetch)(void* user, const char* address, pd_writer write, void* sink);
+PD_API int32_t pd_doc_load_images(pd_doc* doc, pd_image_fetch fetch, void* user);
 
 typedef enum {
     PD_JDATA_AUTO = -1,         /**< load only: detect from the first bytes */

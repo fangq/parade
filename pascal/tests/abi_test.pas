@@ -19,6 +19,7 @@ var
   v_pd_list_level: pd_list_level;
   v_pd_run: pd_run;
   v_pd_inline: pd_inline;
+  v_pd_para_attrs: pd_para_attrs;
   v_pd_float_props: pd_float_props;
   v_pd_section_props: pd_section_props;
   v_pd_table_props: pd_table_props;
@@ -197,6 +198,15 @@ begin
   WriteLn('pd_inline.source ', PtrUInt(@v_pd_inline.source) - PtrUInt(@v_pd_inline));
   WriteLn('pd_inline.source_len ', PtrUInt(@v_pd_inline.source_len) - PtrUInt(@v_pd_inline));
   WriteLn('pd_inline.user ', PtrUInt(@v_pd_inline.user) - PtrUInt(@v_pd_inline));
+  WriteLn('pd_inline.title ', PtrUInt(@v_pd_inline.title) - PtrUInt(@v_pd_inline));
+  WriteLn('pd_inline.title_len ', PtrUInt(@v_pd_inline.title_len) - PtrUInt(@v_pd_inline));
+  WriteLn('pd_inline.alt ', PtrUInt(@v_pd_inline.alt) - PtrUInt(@v_pd_inline));
+  WriteLn('pd_inline.alt_len ', PtrUInt(@v_pd_inline.alt_len) - PtrUInt(@v_pd_inline));
+  WriteLn('pd_para_attrs ', SizeOf(pd_para_attrs));
+  WriteLn('pd_para_attrs.quote_depth ', PtrUInt(@v_pd_para_attrs.quote_depth) - PtrUInt(@v_pd_para_attrs));
+  WriteLn('pd_para_attrs.task ', PtrUInt(@v_pd_para_attrs.task) - PtrUInt(@v_pd_para_attrs));
+  WriteLn('pd_para_attrs.loose ', PtrUInt(@v_pd_para_attrs.loose) - PtrUInt(@v_pd_para_attrs));
+  WriteLn('pd_para_attrs.lang ', PtrUInt(@v_pd_para_attrs.lang) - PtrUInt(@v_pd_para_attrs));
   WriteLn('pd_float_props ', SizeOf(pd_float_props));
   WriteLn('pd_float_props.placement ', PtrUInt(@v_pd_float_props.placement) - PtrUInt(@v_pd_float_props));
   WriteLn('pd_float_props.wrap ', PtrUInt(@v_pd_float_props.wrap) - PtrUInt(@v_pd_float_props));

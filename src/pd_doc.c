@@ -399,18 +399,18 @@ static int bstate_copy(bstate* dst, const bstate* src) {
             dst->inl[i] = src->inl[i];
 
             if (src->inl[i].source) {
-                size_t n = (size_t)src->inl[i].obj.source_len;
+                size_t n = pd_inl_bytes(&src->inl[i].obj);
 
-                dst->inl[i].source = (char*)malloc(n + 1);
+                dst->inl[i].source = (char*)malloc(n);
 
                 if (!dst->inl[i].source) {
                     return -1;
                 }
 
-                memcpy(dst->inl[i].source, src->inl[i].source, n + 1);
+                memcpy(dst->inl[i].source, src->inl[i].source, n);
             }
 
-            dst->inl[i].obj.source = dst->inl[i].source;
+            pd_inl_point(&dst->inl[i]);
         }
     }
 
@@ -619,6 +619,7 @@ void pd_doc_free(pd_doc* d) {
         free(d->res[i].data);
     }
 
+    free(d->meta);
     free(d->tab);
     free(d->styles);
     free(d->formats);
@@ -744,6 +745,17 @@ void pd_doc_install_builtin_styles(pd_doc* d) {
     cp.mask = PD_CP_WEIGHT;
     cp.weight = 700;
     add_style_raw(d, "Strong", PD_STYLE_CHARACTER, 0, NULL, &cp, NULL);
+
+    /* a definition list: the term in bold, its definition indented below it */
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_KEEP_NEXT | PD_PP_SPACE_AFTER;
+    pp.keep_with_next = 1;
+    add_style_raw(d, "Term", PD_STYLE_PARAGRAPH, normal, &pp, &cp, NULL);
+    memset(&pp, 0, sizeof(pp));
+    memset(&cp, 0, sizeof(cp));
+    pp.mask = PD_PP_INDENT_LEFT;
+    pp.indent_left = PD_PT(36);
+    add_style_raw(d, "Definition", PD_STYLE_PARAGRAPH, normal, &pp, NULL, NULL);
 }
 
 /* a container with one empty paragraph */
@@ -1410,6 +1422,7 @@ pd_status pd_doc_list_label(const pd_doc* d, pd_block_id para, char* buf, int32_
             if (L->format == PD_NUM_BULLET) {
                 strncpy(buf, L->text, (size_t)cap - 1);
                 buf[cap - 1] = '\0';
+                pd_doc_task_label(b->st.at.task, 1, buf, (size_t)cap);
                 return PD_OK;
             }
 
@@ -1433,11 +1446,27 @@ pd_status pd_doc_list_label(const pd_doc* d, pd_block_id para, char* buf, int32_
             }
 
             buf[o] = '\0';
+            pd_doc_task_label(b->st.at.task, 0, buf, (size_t)cap);
             return PD_OK;
         }
     }
 
     return PD_OK;
+}
+
+void pd_doc_task_label(int32_t task, int bullet, char* buf, size_t cap) {
+    const char* box = task == 2 ? "\xE2\x98\x91" : "\xE2\x98\x90";    /* U+2611 checked, U+2610 open */
+    size_t n = strlen(buf);
+
+    if (!task || cap < 5) {
+        return;
+    }
+
+    if (bullet || n + 5 > cap) {    /* a checklist's box stands for its bullet */
+        snprintf(buf, cap, "%s", box);
+    } else {                        /* and follows its number */
+        snprintf(buf + n, cap - n, " %s", box);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1507,7 +1536,7 @@ pd_status pd_doc_inline_at(const pd_doc* d, pd_pos pos, pd_inline* out) {
     }
 
     *out = b->st.inl[i].obj;
-    out->source = b->st.inl[i].source;
+    out->source = b->st.inl[i].obj.source;
     return PD_OK;
 }
 
@@ -2345,8 +2374,10 @@ pd_status pd_doc_insert_inline(pd_doc* d, pd_pos at, const pd_inline* obj, pd_po
         return PD_ERR_RANGE;
     }
 
-    if (obj->kind < PD_INLINE_IMAGE || obj->kind > PD_INLINE_USER || obj->width < 0 ||
-            (obj->kind == PD_INLINE_IMAGE && (obj->resource < 1 || (int32_t)obj->resource > d->nres)) ||
+    if (obj->kind < PD_INLINE_IMAGE || obj->kind > PD_INLINE_RAW || obj->width < 0 ||
+            (obj->kind == PD_INLINE_IMAGE && (obj->resource < (obj->source_len > 0 ? 0u : 1u) ||
+                    (int32_t)obj->resource > d->nres)) ||    /* embedded, or by address */
+            obj->title_len < 0 || (obj->title_len && !obj->title) || obj->alt_len < 0 || (obj->alt_len && !obj->alt) ||
             (obj->kind == PD_INLINE_FOOTNOTE && (!pd_doc_blk(d, obj->target) ||
                     d->tab[obj->target]->kind != PD_BLOCK_STORY)) ||
             (obj->kind == PD_INLINE_FIELD && (obj->field < PD_FIELD_PAGE || obj->field > PD_FIELD_DATE)) ||
@@ -2359,22 +2390,32 @@ pd_status pd_doc_insert_inline(pd_doc* d, pd_pos at, const pd_inline* obj, pd_po
     x.obj = *obj;
     x.obj.name[sizeof(x.obj.name) - 1] = '\0';
 
-    if (obj->source_len) {
-        if (!pd_doc_utf8_valid(obj->source, (size_t)obj->source_len, 0)) {
+    if (obj->source_len || obj->title_len || obj->alt_len) {
+        char* q;
+
+        if ((obj->source_len && !pd_doc_utf8_valid(obj->source, (size_t)obj->source_len, 0)) ||
+                (obj->title_len && !pd_doc_utf8_valid(obj->title, (size_t)obj->title_len, 0)) ||
+                (obj->alt_len && !pd_doc_utf8_valid(obj->alt, (size_t)obj->alt_len, 0))) {
             return PD_ERR_ARG;
         }
 
-        x.source = (char*)malloc((size_t)obj->source_len + 1);
+        x.source = q = (char*)malloc(pd_inl_bytes(obj));
 
         if (!x.source) {
             return PD_ERR_NOMEM;
         }
 
-        memcpy(x.source, obj->source, (size_t)obj->source_len);
-        x.source[obj->source_len] = '\0';
+        memcpy(q, obj->source ? obj->source : "", (size_t)obj->source_len);
+        q += obj->source_len;
+        *q++ = '\0';
+        memcpy(q, obj->title ? obj->title : "", (size_t)obj->title_len);
+        q += obj->title_len;
+        *q++ = '\0';
+        memcpy(q, obj->alt ? obj->alt : "", (size_t)obj->alt_len);
+        q[obj->alt_len] = '\0';
     }
 
-    x.obj.source = NULL;
+    pd_inl_point(&x);
 
     if (op_begin(d, "Insert object", 0, at.block, at.offset) || snap(d, b) ||
             content_insert(&b->st, at.offset, "\xEF\xBF\xBC", 3, format_at(&b->st, at.offset, 1)) ||
@@ -2389,7 +2430,6 @@ pd_status pd_doc_insert_inline(pd_doc* d, pd_pos at, const pd_inline* obj, pd_po
 
         memmove(b->st.inl + i + 1, b->st.inl + i, (size_t)(b->st.ninl - i) * sizeof(dinline));
         b->st.inl[i] = x;
-        b->st.inl[i].obj.source = x.source;
         b->st.ninl++;
         markers_insert(d, at.block, at.offset, 3);
         touch(d, PD_CHANGE_TEXT, at.block, 0);
@@ -2728,7 +2768,7 @@ pd_status pd_doc_set_para_props(pd_doc* d, pd_block_id para, const pd_para_props
 pd_status pd_doc_set_role(pd_doc* d, pd_block_id para, pd_role role, int32_t level) {
     blk* b = d ? para_of(d, para) : NULL;
 
-    BLOCK_OP("Paragraph role", b && role >= PD_ROLE_BODY && role <= PD_ROLE_FIGURE_CONTENT &&
+    BLOCK_OP("Paragraph role", b && role >= PD_ROLE_BODY && role <= PD_ROLE_DEFINITION &&
              (role == PD_ROLE_HEADING ? level >= 1 && level <= 6 : level == 0),
              (b->st.role = role, b->st.level = level));
 }
@@ -2804,7 +2844,7 @@ pd_status pd_doc_set_cell_props(pd_doc* d, pd_block_id id, const pd_cell_props* 
 pd_status pd_doc_set_break(pd_doc* d, pd_block_id id, pd_break_kind kind) {
     blk* b = d ? pd_doc_blk(d, id) : NULL;
 
-    BLOCK_OP("Break", b && b->kind == PD_BLOCK_BREAK && kind >= PD_BREAK_PAGE && kind <= PD_BREAK_EVEN_PAGE,
+    BLOCK_OP("Break", b && b->kind == PD_BLOCK_BREAK && kind >= PD_BREAK_PAGE && kind <= PD_BREAK_RULE,
              b->st.break_kind = kind);
 }
 
@@ -3212,4 +3252,235 @@ void pd_doc_set_undo_limit(pd_doc* d, int32_t steps) {
         d->undo_limit = steps;
         enforce_limit(d);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* paragraph attributes, metadata, pictures by address                */
+/* ------------------------------------------------------------------ */
+
+void pd_doc_image_display_size(const pd_doc* d, const pd_inline* o, pd_sp* w, pd_sp* h) {
+    pd_doc_image_size(d, o, w, h);
+}
+
+void pd_doc_image_size(const pd_doc* d, const pd_inline* o, pd_sp* w, pd_sp* h) {
+    int32_t pw = 0, ph = 0;
+
+    *w = o->width;
+    *h = o->height;
+
+    if (*w > 0 && *h > 0) {
+        return;
+    }
+
+    if (o->resource >= 1 && (int32_t)o->resource <= d->nres) {
+        pd_doc_image_info(d->res[o->resource - 1].data, d->res[o->resource - 1].len, &pw, &ph);
+    }
+
+    if (pw <= 0 || ph <= 0) {   /* not loaded, or not a picture this can read: a placeholder */
+        pw = 128;
+        ph = 96;
+    }
+
+    if (*w > 0) {
+        *h = (pd_sp)((int64_t)*w * ph / pw);
+    } else if (*h > 0) {
+        *w = (pd_sp)((int64_t)*h * pw / ph);
+    } else {
+        *w = (pd_sp)((int64_t)pw * 3 * 65536 / 4);  /* pixels at 96 dpi */
+        *h = (pd_sp)((int64_t)ph * 3 * 65536 / 4);
+    }
+}
+
+pd_status pd_doc_para_attrs(const pd_doc* d, pd_block_id para, pd_para_attrs* out) {
+    blk* b = d ? para_of(d, para) : NULL;
+
+    if (!b || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = b->st.at;
+    return PD_OK;
+}
+
+pd_status pd_doc_set_para_attrs(pd_doc* d, pd_block_id para, const pd_para_attrs* at) {
+    blk* b = d ? para_of(d, para) : NULL;
+    pd_para_attrs a;
+
+    memset(&a, 0, sizeof(a));
+
+    if (at) {
+        a = *at;
+        a.lang[sizeof(a.lang) - 1] = '\0';
+    }
+
+    BLOCK_OP("Paragraph attributes", b && at && a.quote_depth >= 0 && a.quote_depth <= 9 && a.task >= 0 &&
+             a.task <= 2 && (a.loose == 0 || a.loose == 1) && pd_doc_utf8_valid(a.lang, strlen(a.lang), 0),
+             b->st.at = a);
+}
+
+pd_status pd_doc_set_metadata(pd_doc* d, const char* text, size_t len) {
+    char* m = NULL;
+
+    if (!d || (len && !text) || len > 0x10000000 || (len && !pd_doc_utf8_valid(text, len, 1))) {
+        return PD_ERR_ARG;
+    }
+
+    if (len && (m = (char*)malloc(len + 1)) == NULL) {
+        return PD_ERR_NOMEM;
+    }
+
+    if (m) {
+        memcpy(m, text, len);
+        m[len] = '\0';
+    }
+
+    free(d->meta);
+    d->meta = m;
+    d->meta_len = len;
+    return PD_OK;
+}
+
+const char* pd_doc_metadata(const pd_doc* d, size_t* len) {
+    if (len) {
+        *len = d ? d->meta_len : 0;
+    }
+
+    return d && d->meta ? d->meta : "";
+}
+
+/* a picture's type and pixel size from its first bytes: PNG, JPEG, GIF */
+const char* pd_doc_image_info(const unsigned char* p, size_t n, int32_t* w, int32_t* h) {
+    *w = *h = 0;
+
+    if (n >= 24 && memcmp(p, "\x89PNG\r\n\x1a\n", 8) == 0 && memcmp(p + 12, "IHDR", 4) == 0) {
+        *w = (int32_t)(((uint32_t)p[16] << 24) | ((uint32_t)p[17] << 16) | ((uint32_t)p[18] << 8) | p[19]);
+        *h = (int32_t)(((uint32_t)p[20] << 24) | ((uint32_t)p[21] << 16) | ((uint32_t)p[22] << 8) | p[23]);
+        return "image/png";
+    }
+
+    if (n >= 10 && (memcmp(p, "GIF87a", 6) == 0 || memcmp(p, "GIF89a", 6) == 0)) {
+        *w = p[6] | (p[7] << 8);
+        *h = p[8] | (p[9] << 8);
+        return "image/gif";
+    }
+
+    if (n >= 4 && p[0] == 0xFF && p[1] == 0xD8) {
+        size_t i = 2;
+
+        while (i + 9 < n && p[i] == 0xFF) {
+            int mk = p[i + 1];
+            size_t len = ((size_t)p[i + 2] << 8) | p[i + 3];
+
+            if ((mk >= 0xC0 && mk <= 0xCF && mk != 0xC4 && mk != 0xC8 && mk != 0xCC)) {     /* a frame header */
+                *h = (p[i + 5] << 8) | p[i + 6];
+                *w = (p[i + 7] << 8) | p[i + 8];
+                break;
+            }
+
+            i += 2 + len;
+        }
+
+        return "image/jpeg";
+    }
+
+    return NULL;
+}
+
+typedef struct {
+    unsigned char* p;
+    size_t n, cap;
+    int err;
+} ibuf;
+
+static int to_ibuf(void* user, const void* data, size_t len) {
+    ibuf* b = (ibuf*)user;
+
+    if (b->err || len > ((size_t)1 << 30) - b->n) {     /* a picture over a gigabyte is not one */
+        return b->err = 1;
+    }
+
+    if (b->n + len > b->cap) {
+        size_t nc = (b->n + len) * 2;
+        unsigned char* q = (unsigned char*)realloc(b->p, nc);
+
+        if (!q) {
+            return b->err = 1;
+        }
+
+        b->p = q;
+        b->cap = nc;
+    }
+
+    memcpy(b->p + b->n, data, len);
+    b->n += len;
+    return 0;
+}
+
+static int32_t load_images_in(pd_doc* d, blk* b, pd_image_fetch fetch, void* user) {
+    int32_t i, n = 0;
+
+    if (!b) {
+        return 0;
+    }
+
+    for (i = 0; i < b->nkids; i++) {
+        n += load_images_in(d, d->tab[b->kids[i]], fetch, user);
+    }
+
+    for (i = 0; b->kind == PD_BLOCK_PARAGRAPH && i < b->st.ninl; i++) {
+        pd_inline* o = &b->st.inl[i].obj;
+        ibuf data;
+        const char* mime;
+        int32_t w, h;
+        pd_res_id rid;
+
+        if (o->kind != PD_INLINE_IMAGE || o->resource || o->source_len <= 0) {
+            continue;
+        }
+
+        memset(&data, 0, sizeof(data));
+
+        if (fetch(user, o->source, to_ibuf, &data) == 0 && !data.err && data.n > 0 &&
+                (mime = pd_doc_image_info(data.p, data.n, &w, &h)) != NULL &&
+                pd_doc_add_resource(d, mime, data.p, data.n, &rid) == PD_OK) {
+            o->resource = rid;
+
+            if (w > 0 && h > 0 && (o->width <= 0 || o->height <= 0)) {     /* at 96 dpi; one side given: keep the shape */
+                pd_sp nw = (pd_sp)((int64_t)w * 3 * 65536 / 4), nh = (pd_sp)((int64_t)h * 3 * 65536 / 4);
+
+                if (o->width > 0) {
+                    nh = (pd_sp)((int64_t)nh * o->width / nw);
+                    nw = o->width;
+                } else if (o->height > 0) {
+                    nw = (pd_sp)((int64_t)nw * o->height / nh);
+                    nh = o->height;
+                }
+
+                o->width = nw;
+                o->height = nh;
+            }
+
+            touch(d, PD_CHANGE_TEXT, b->id, 0);
+            n++;
+        }
+
+        free(data.p);
+    }
+
+    return n;
+}
+
+int32_t pd_doc_load_images(pd_doc* d, pd_image_fetch fetch, void* user) {
+    int32_t n;
+
+    if (!d || !fetch) {
+        return 0;
+    }
+
+    d->revision++;
+    d->ntouched = 0;
+    n = load_images_in(d, d->tab[PD_ROOT_ID], fetch, user) + load_images_in(d, pd_doc_blk(d, PD_STORYROOT_ID), fetch,
+            user);
+    notify(d);
+    return n;
 }

@@ -28,11 +28,11 @@ static const char* const kind_names[] = { "root", "section", "paragraph", "float
                                           "story"
                                         };
 static const char* const role_names[] = { "body", "title", "heading", "caption", "quote", "code", "equation",
-                                          "figure"
+                                          "figure", "raw", "term", "definition"
                                         };
 static const char* const align_names[] = { "justify", "left", "right", "center" };
 static const char* const inline_names[] = { "image", "equation", "field", "footnote", "link", "bookmark", "tab",
-                                            "user"
+                                            "user", "raw"
                                           };
 static const char* const field_names[] = { "page", "pages", "sectionpage", "refnumber", "refpage", "seq",
                                            "heading", "date"
@@ -41,7 +41,7 @@ static const char* const num_names[] = { "bullet", "decimal", "loweralpha", "upp
                                          "upperroman", "none"
                                        };
 static const char* const wrap_names[] = { "none", "left", "right" };
-static const char* const break_names[] = { "page", "column", "oddpage", "evenpage" };
+static const char* const break_names[] = { "page", "column", "oddpage", "evenpage", "rule" };
 static const char* const shift_names[] = { "none", "super", "sub" };
 static const char* const mode_names[] = { "optimal", "greedy" };
 static const char* const style_kind_names[] = { "paragraph", "character" };
@@ -316,6 +316,29 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
                 put_int(w, "EmptyFormat", fmt_id(sv, s->empty_format));
             }
 
+            if (s->at.quote_depth || s->at.task || s->at.loose || s->at.lang[0]) {
+                pj_key(w, "Attrs");
+                pj_obj_begin(w);
+
+                if (s->at.quote_depth) {
+                    put_int(w, "QuoteDepth", s->at.quote_depth);
+                }
+
+                if (s->at.task) {
+                    put_int(w, "Task", s->at.task);
+                }
+
+                if (s->at.loose) {
+                    put_bool(w, "Loose", s->at.loose);
+                }
+
+                if (s->at.lang[0]) {
+                    put_str(w, "Language", s->at.lang);
+                }
+
+                pj_obj_end(w);
+            }
+
             pj_key(w, "Text");
             pj_str(w, s->text ? s->text : "", s->len);
 
@@ -372,9 +395,19 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
                         put_str(w, "Name", o->name);
                     }
 
-                    if (s->inl[i].source) {
+                    if (s->inl[i].source && o->source_len) {
                         pj_key(w, "Source");
-                        pj_str(w, s->inl[i].source, (size_t)o->source_len);
+                        pj_str(w, o->source, (size_t)o->source_len);
+                    }
+
+                    if (o->title_len) {
+                        pj_key(w, "Title");
+                        pj_str(w, o->title, (size_t)o->title_len);
+                    }
+
+                    if (o->alt_len) {
+                        pj_key(w, "Alt");
+                        pj_str(w, o->alt, (size_t)o->alt_len);
                     }
 
                     if (o->user) {
@@ -643,6 +676,11 @@ pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, voi
 
     pj_arr_end(&w);
 
+    if (d->meta_len) {
+        pj_key(&w, "Metadata");
+        pj_str(&w, d->meta, d->meta_len);
+    }
+
     pj_key(&w, "Document");
     save_block(&w, &sv, d->tab[PD_ROOT_ID]);
 
@@ -882,6 +920,14 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
     REQUIRE(!(s->pp.mask & PD_PP_NEXT_STYLE) || !s->pp.next_style || d->styles[s->pp.next_style - 1].alive);
     s->empty_format = (pd_format_id)int_or(pj_get(o, "EmptyFormat"), 0, 0, d->nformats, L);
 
+    if ((x = pj_get(o, "Attrs"))) {
+        REQUIRE(x->type == PJ_OBJ);
+        s->at.quote_depth = (int32_t)int_or(pj_get(x, "QuoteDepth"), 0, 0, 9, L);
+        s->at.task = (int32_t)int_or(pj_get(x, "Task"), 0, 0, 2, L);
+        s->at.loose = (int32_t)int_or(pj_get(x, "Loose"), 0, 0, 1, L);
+        copy_name(pj_get(x, "Language"), s->at.lang, sizeof(s->at.lang), L);
+    }
+
     x = pj_get(o, "Text");
     REQUIRE(x && x->type == PJ_STR && x->len < 0x40000000 && pd_doc_utf8_valid(x->s, x->len, 1));
 
@@ -950,7 +996,7 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
             q->obj.height = (pd_sp)int_or(pj_get(x, "Height"), 0, SP_MIN, SP_MAX, L);
             q->obj.depth = (pd_sp)int_or(pj_get(x, "Depth"), 0, SP_MIN, SP_MAX, L);
             q->obj.resource = (pd_res_id)int_or(pj_get(x, "Resource"), 0, 0, d->nres, L);
-            REQUIRE(q->obj.kind != PD_INLINE_IMAGE || q->obj.resource >= 1);
+            REQUIRE(q->obj.kind != PD_INLINE_IMAGE || q->obj.resource >= 1 || pj_get(x, "Source"));
 
             if ((y = pj_get(x, "Field"))) {
                 q->obj.field = enum_of(y, NAMES(field_names));
@@ -968,15 +1014,42 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
             copy_name(pj_get(x, "Name"), q->obj.name, sizeof(q->obj.name), L);
             q->obj.user = (int32_t)int_or(pj_get(x, "User"), 0, INT32_MIN, INT32_MAX, L);
 
-            if ((y = pj_get(x, "Source"))) {
-                REQUIRE(y->type == PJ_STR && y->len < 0x10000000 && pd_doc_utf8_valid(y->s, y->len, 0));
-                q->source = (char*)malloc(y->len + 1);
-                REQUIRE(q->source);
-                memcpy(q->source, y->s, y->len + 1);
-                q->obj.source_len = (int32_t)y->len;
+            {
+                const pj_node* sv2[3];
+                int32_t* ln[3];
+                size_t total = 3;
+                int k2;
+                char* p2;
+
+                sv2[0] = pj_get(x, "Source");
+                sv2[1] = pj_get(x, "Title");
+                sv2[2] = pj_get(x, "Alt");
+                ln[0] = &q->obj.source_len;
+                ln[1] = &q->obj.title_len;
+                ln[2] = &q->obj.alt_len;
+
+                for (k2 = 0; k2 < 3; k2++) {
+                    REQUIRE(!sv2[k2] || (sv2[k2]->type == PJ_STR && sv2[k2]->len < 0x10000000 &&
+                                         pd_doc_utf8_valid(sv2[k2]->s, sv2[k2]->len, 0)));
+                    total += sv2[k2] ? sv2[k2]->len : 0;
+                }
+
+                if (sv2[0] || sv2[1] || sv2[2]) {   /* one block: source\0title\0alt\0 */
+                    q->source = p2 = (char*)malloc(total);
+                    REQUIRE(q->source);
+
+                    for (k2 = 0; k2 < 3; k2++) {
+                        size_t n2 = sv2[k2] ? sv2[k2]->len : 0;
+
+                        memcpy(p2, sv2[k2] ? sv2[k2]->s : "", n2);
+                        p2[n2] = '\0';
+                        p2 += n2 + 1;
+                        *ln[k2] = (int32_t)n2;
+                    }
+                }
             }
 
-            q->obj.source = q->source;
+            pd_inl_point(q);
         }
     }
 }
@@ -1324,6 +1397,12 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
         }
 
         free(data);
+    }
+
+    if ((x = pj_get(r, "Metadata")) != NULL) {
+        if (x->type != PJ_STR || pd_doc_set_metadata(d, x->s, x->len) != PD_OK) {
+            L->bad = 1;
+        }
     }
 
     /* blocks: the main tree, then the hidden story container */

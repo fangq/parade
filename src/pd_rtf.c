@@ -174,7 +174,12 @@ static int rx_span(void* user, const pd_span* sp) {
 
                 if (pd_doc_resource(x->d, ob->resource, &mime, &data, &len) == PD_OK &&
                         (strstr(mime, "png") || strstr(mime, "jpeg") || strstr(mime, "jpg"))) {
-                    int w = TWIPS(ob->width), h = TWIPS(ob->height);
+                    pd_sp iw, ih;
+                    int w, h;
+
+                    pd_doc_image_display_size(x->d, ob, &iw, &ih);
+                    w = TWIPS(iw);
+                    h = TWIPS(ih);
 
                     pb_printf(o, "{\\pict%s\\picw%d\\pich%d\\picwgoal%d\\pichgoal%d\n", strstr(mime, "png") ? "\\pngblip" :
                               "\\jpegblip", w / 15 > 0 ? w / 15 : 1, h / 15 > 0 ? h / 15 : 1, w, h);
@@ -503,7 +508,8 @@ static void rx_block(rx* x, pd_block_id id, int in_table) {
             break;
 
         case PD_BLOCK_BREAK:
-            pb_puts(x->o, bi.break_kind == PD_BREAK_COLUMN ? "\\column\n" : "\\page\n");
+            pb_puts(x->o, bi.break_kind == PD_BREAK_RULE ? "\\pard\\brdrb\\brdrs\\brdrw10\\brsp20\\par\\pard\n" :
+                    bi.break_kind == PD_BREAK_COLUMN ? "\\column\n" : "\\page\n");
             break;
 
         case PD_BLOCK_SECTION: {
