@@ -157,6 +157,30 @@ Parade's own layout. `make conv-check` checks the output with other
 software: lxml, mistune, python-docx, LuaLaTeX, LibreOffice Writer when
 installed, and reads python-docx/LibreOffice-written files back.
 
+## Collaboration (`include/parade_sync.h`, optional)
+
+Real-time co-editing through [yrs](https://github.com/y-crdt/y-crdt), the
+Rust port of the Yjs CRDT, through its C API. Each editor's document gets
+a `pd_sync`: local edits become updates for the others (`pd_sync_set_sender`),
+updates received are merged and the document is edited to match
+(`pd_sync_receive`), through the ordinary operations, so carets and layout
+follow. A replica that was away sends `pd_sync_state_vector` and applies the
+`pd_sync_diff` it gets back. Shared: the block tree, text with each character
+property merged on its own, inline objects and their pictures, paragraph and
+block properties, styles, lists, tracked changes. Not yet: comments,
+metadata, per-user undo. Updates must reach each replica in an order that
+keeps every update after the ones it depends on -- what a server or relay
+forwarding them as received gives (yrs 0.28 loses an update that arrives
+before one it depends on).
+
+    # yrs 0.28.0 with Rust >= 1.91 (Ubuntu: apt install rustc-1.91 cargo-1.91)
+    git clone --depth 1 --branch v0.28.0 https://github.com/y-crdt/y-crdt build/yrs/src
+    (cd build/yrs/src && git apply ../../../tools/yrs-rust-1.91.patch && cargo build --release --locked -p yffi)
+    make SYNC=yrs BUILD=build-sync test     # adds pd_sync and test_sync
+
+`tools/yrs-rust-1.91.patch` rewrites
+the one `if let` guard yrs uses, which Rust 1.91 does not have yet.
+
 ## Lazarus / Free Pascal (`pascal/`)
 
 - `parade.pas`: the binding for all three headers (static link by default,

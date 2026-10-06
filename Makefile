@@ -10,6 +10,14 @@ ifeq ($(HARFBUZZ),1)
 PD_CFLAGS += -DPD_WITH_HARFBUZZ $(shell pkg-config --cflags harfbuzz)
 LDLIBS += $(shell pkg-config --libs harfbuzz)
 endif
+# optional real-time collaboration through yrs: make SYNC=yrs (its C library built in YRS_DIR, see
+# README); adds pd_sync and test_sync
+SYNC    ?=
+YRS_DIR ?= build/yrs/src
+ifeq ($(SYNC),yrs)
+PD_CFLAGS += -DPD_WITH_SYNC -isystem $(YRS_DIR)/tests-ffi/include
+LDLIBS += $(YRS_DIR)/target/release/libyrs.a -lpthread -ldl
+endif
 LDLIBS  += -lm
 AR      ?= ar
 
@@ -21,16 +29,23 @@ ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_unidata.c src/pd_text.c src/pd_bidi.c src/pd_shape.c src/pd_hyph.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
            src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c src/pd_conv.c src/pd_markup.c src/pd_html.c \
            src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c src/pd_math.c src/pd_emf.c src/pd_omml.c
+ifeq ($(SYNC),yrs)
+SRC     += src/pd_sync.c
+endif
 BUILD   ?= build
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)
 LIB     := $(BUILD)/libparade.a
 SO      := $(BUILD)/libparade.so
 TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout $(BUILD)/test_pdf $(BUILD)/test_convert
+ifeq ($(SYNC),yrs)
+TESTS   += $(BUILD)/test_sync
+endif
 BENCH   := $(BUILD)/bench_parade
 
 all: $(LIB) $(SO) $(TESTS) $(BENCH) $(BUILD)/pd_dump $(BUILD)/pd_conv
 
 $(BUILD)/%.o: src/%.c include/parade.h include/parade_doc.h include/parade_layout.h include/parade_convert.h \
+           include/parade_sync.h \
            src/pd_internal.h src/pd_doc_internal.h src/pd_json.h src/pd_conv.h | $(BUILD)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) -c $< -o $@
 

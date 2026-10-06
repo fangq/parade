@@ -207,6 +207,9 @@ struct pd_doc {
     uint64_t sent_comment_rev, sent_meta_rev;
     uint64_t delta_serial;
     int applying;               /* pd_doc_apply_delta under way: nothing to report */
+    /* the replication binding (pd_sync.c): told of every finished operation, while the touched list is there */
+    void (*sync_fn)(void* user);
+    void* sync_user;
 };
 
 /* shared by pd_doc.c and pd_doc_io.c */
@@ -248,6 +251,18 @@ void pd_doc_set_alive(pd_doc* d, pd_block_id id, int alive);
 void pd_doc_bstate_free(bstate* s);
 void pd_doc_touched(const pd_doc* d, int32_t i, int32_t* kind, pd_block_id* block, pd_style_id* style);
 int32_t pd_doc_touched_count(const pd_doc* d);
+/* give a range one exact format (replacing styles and overrides), as an undoable operation */
+pd_status pd_doc_set_format(pd_doc* d, pd_range r, pd_format_id fmt);
+/* the native format's property readers and writers, for pd_sync.c: a block's own properties as
+   JData (paragraphs' text, runs and inlines left out; with_id 0 leaves the id out too), and back */
+struct pj_writer_s;
+void pd_jd_put_block(void* pj_writer, const pd_doc* d, const blk* b, int with_id);
+void pd_jd_put_pp(void* pj_writer, const pd_para_props* p);
+void pd_jd_put_cp(void* pj_writer, const pd_char_props* c);
+int  pd_jd_get_pp(pd_doc* d, const void* pj_node, pd_para_props* p);
+int  pd_jd_get_cp(pd_doc* d, const void* pj_node, pd_char_props* c);
+/* a non-paragraph block's properties (the object pd_jd_put_block writes) into a state */
+int  pd_jd_get_block(pd_doc* d, const void* pj_node, int32_t kind, bstate* st);
 /* pd_doc_comment_add outside the undo history (loading) */
 pd_status pd_doc_comment_add_raw(pd_doc* d, const pd_comment* in, pd_comment_id* out);
 /* a resolved run's look under the document's markup mode: author colours, deletions hidden or struck */

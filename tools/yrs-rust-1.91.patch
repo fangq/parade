@@ -1,0 +1,27 @@
+diff --git a/yrs/src/block.rs b/yrs/src/block.rs
+index a56f7c5..36d2262 100644
+--- a/yrs/src/block.rs
++++ b/yrs/src/block.rs
+@@ -1015,12 +1015,16 @@ impl<'doc> TransactionMut<'doc> {
+                 item.parent = TypePtr::Branch(branch);
+                 branch
+             }
+-            TypePtr::ID(id)
+-                if let Some(branch) = store.blocks.get_item(id).and_then(|i| i.as_branch()) =>
+-            {
+-                item.parent = TypePtr::Branch(branch);
+-                branch
+-            }
++            TypePtr::ID(id) => match store.blocks.get_item(id).and_then(|i| i.as_branch()) {
++                Some(branch) => {
++                    item.parent = TypePtr::Branch(branch);
++                    branch
++                }
++                None => {
++                    self.integrate_gc(item.range(), offset);
++                    return None;
++                }
++            },
+             _ => {
+                 self.integrate_gc(item.range(), offset);
+                 return None;

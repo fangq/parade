@@ -1812,6 +1812,10 @@ static void notify(pd_doc* d) {
         pd_doc_delta_emit(d);
     }
 
+    if (d->sync_fn) {
+        d->sync_fn(d->sync_user);
+    }
+
     d->ndnew = 0;
 
     for (i = 0; i < d->ntouched; i++) {
@@ -2365,6 +2369,9 @@ static int range_map_formats(pd_doc* d, bstate* s, uint32_t a, uint32_t e, int m
             cp_apply(&nf.cp, cp);
         } else if (mode == 1) {     /* clear overrides */
             nf.cp.mask &= ~mask;
+        } else if (mode == 3) {     /* one exact format, given in style */
+            r->format = (pd_format_id)style;
+            continue;
         } else {                    /* character style */
             nf.style = style;
         }
@@ -2779,6 +2786,10 @@ pd_status pd_doc_set_char_props(pd_doc* d, pd_range r, const pd_char_props* prop
     cp = *props;
     pd_doc_cp_normalize(&cp);
     return for_range(d, r, 0, &cp, 0, 0, "Format");
+}
+
+pd_status pd_doc_set_format(pd_doc* d, pd_range r, pd_format_id fmt) {
+    return d && format_of(d, fmt) ? for_range(d, r, 3, NULL, 0, (pd_style_id)fmt, "Format") : PD_ERR_ARG;
 }
 
 pd_status pd_doc_clear_char_props(pd_doc* d, pd_range r, uint32_t mask) {

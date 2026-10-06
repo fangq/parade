@@ -332,7 +332,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
     pj_obj_begin(w);
     pj_key(w, tag);
     pj_obj_begin(w);
-    put_int(w, "ID", b->id);
+
+    if (kids >= 0) {    /* -1: the properties alone, for pd_sync */
+        put_int(w, "ID", b->id);
+    }
 
     switch (b->kind) {
         case PD_BLOCK_PARAGRAPH:
@@ -632,7 +635,7 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
     pj_obj_end(w);
 
-    if (b->nkids && kids) {
+    if (b->nkids && kids > 0) {
         pj_key(w, "_TreeChildren_");
         pj_arr_begin(w);
 
@@ -2757,4 +2760,80 @@ end:
     pj_free(j);
     pd_doc_delta_commit(d);
     return st;
+}
+
+/* ------------------------------------------------------------------ */
+/* for pd_sync.c                                                      */
+/* ------------------------------------------------------------------ */
+
+void pd_jd_put_block(void* w, const pd_doc* d, const blk* b, int with_id) {
+    saver sv;
+
+    memset(&sv, 0, sizeof(sv));
+    sv.d = d;
+    sv.exact = 1;
+    save_block_ex((pj_writer*)w, &sv, b, with_id ? 0 : -1);
+}
+
+void pd_jd_put_pp(void* w, const pd_para_props* p) {
+    save_pp((pj_writer*)w, p);
+}
+
+void pd_jd_put_cp(void* w, const pd_char_props* c) {
+    save_cp((pj_writer*)w, c);
+}
+
+int pd_jd_get_pp(pd_doc* d, const void* o, pd_para_props* p) {
+    loader L;
+
+    memset(&L, 0, sizeof(L));
+    L.d = d;
+    memset(p, 0, sizeof(*p));
+    load_pp((const pj_node*)o, p, &L);
+    pd_doc_pp_normalize(p);
+    return !L.bad;
+}
+
+int pd_jd_get_cp(pd_doc* d, const void* o, pd_char_props* c) {
+    loader L;
+
+    memset(&L, 0, sizeof(L));
+    L.d = d;
+    memset(c, 0, sizeof(*c));
+    load_cp((const pj_node*)o, c, &L);
+    return !L.bad;
+}
+
+int pd_jd_get_block(pd_doc* d, const void* node, int32_t kind, bstate* st) {
+    const pj_node* c, *data = NULL;
+    loader L;
+
+    for (c = node && ((const pj_node*)node)->type == PJ_OBJ ? ((const pj_node*)node)->child : NULL; c; c = c->next) {
+        if (c->keylen > 12 && memcmp(c->key, "_TreeNode_(", 11) == 0 && c->type == PJ_OBJ) {
+            data = c;
+        }
+    }
+
+    if (!data) {
+        return 0;
+    }
+
+    memset(&L, 0, sizeof(L));
+    L.d = d;
+
+    if (kind == PD_BLOCK_SECTION) {
+        load_section(&L, data, &st->sp);
+    } else if (kind == PD_BLOCK_FLOAT) {
+        load_float(&L, data, &st->fp);
+    } else if (kind == PD_BLOCK_TABLE) {
+        load_table(&L, data, &st->tp);
+    } else if (kind == PD_BLOCK_CELL) {
+        load_cell(&L, data, &st->cell);
+    } else if (kind == PD_BLOCK_BREAK && pj_get(data, "Break")) {
+        st->break_kind = enum_of(pj_get(data, "Break"), NAMES(break_names));
+        L.bad |= st->break_kind < 0;
+    }
+
+    free(L.story_refs);
+    return !L.bad;
 }
