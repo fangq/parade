@@ -90,6 +90,21 @@ pd_status pd_doc_label_style(const pd_doc* d, pd_block_id para, pd_style* st) {
     return PD_OK;
 }
 
+/* the style of the document's Normal text: line numbers and the like */
+pd_status pd_doc_default_style(const pd_doc* d, pd_style* st) {
+    pd_char_props cp;
+    const pd_font* f;
+
+    if (pd_doc_style_resolve(d, pd_doc_style_find(d, "Normal"), NULL, &cp) != PD_OK || (f = resolve_font(d, &cp)) == NULL) {
+        return PD_ERR_STATE;
+    }
+
+    pd_style_init(st, f, cp.size);
+    st->color = cp.color;
+    st->user = -1;
+    return PD_OK;
+}
+
 /* width of n copies of a character in a style: placeholder fields, tabs */
 static pd_sp char_width(const pd_style* st, uint32_t cp, int n) {
     pd_font_metrics m;

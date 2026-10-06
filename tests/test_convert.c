@@ -1901,6 +1901,35 @@ static void test_docx_list_levels(void) {
     pd_doc_free(d);
 }
 
+/* Word's line numbering: every fifth line from 1 (Word writes 0), 18pt
+   from the text, counted again in each section */
+static void test_docx_line_numbers(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>One.</w:t></w:r></w:p>"
+        "<w:sectPr><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/>"
+        "<w:lnNumType w:countBy=\"5\" w:start=\"0\" w:distance=\"360\" w:restart=\"newSection\"/></w:sectPr>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_section_props sp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        CHECK(pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp) == PD_OK);
+        CHECK(sp.line_numbers == 5 && sp.line_number_start == 1 && sp.line_number_distance == PD_PT(18) &&
+              sp.line_number_restart == PD_LINENUM_SECTION);
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2533,6 +2562,8 @@ int main(void) {
     test_docx_table_styles();
     printf("docx list levels\n");
     test_docx_list_levels();
+    printf("docx line numbers\n");
+    test_docx_line_numbers();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

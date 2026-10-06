@@ -1261,6 +1261,14 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
               "w:gutter=\"0\"/>", TW(sp->margin_top), TW(sp->margin_right), TW(sp->margin_bottom), TW(sp->margin_left),
               TW(sp->header_distance), TW(sp->footer_distance));
 
+    if (sp->line_numbers > 0) {     /* Word's start is one less than the first number */
+        pb_printf(o, "<w:lnNumType w:countBy=\"%d\" w:start=\"%d\" w:distance=\"%d\" w:restart=\"%s\"/>",
+                  (int)sp->line_numbers, (int)(sp->line_number_start > 1 ? sp->line_number_start - 1 : 0),
+                  TW(sp->line_number_distance > 0 ? sp->line_number_distance : PD_PT(18)),
+                  sp->line_number_restart == PD_LINENUM_SECTION ? "newSection" :
+                  sp->line_number_restart == PD_LINENUM_CONTINUOUS ? "continuous" : "newPage");
+    }
+
     if (sp->first_page_number > 0 || sp->page_number_format != PD_NUM_DECIMAL) {
         static const char* fmts[] = { "decimal", "decimal", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman",
                                       "decimal"
@@ -3910,6 +3918,18 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     mu_attr(&m, "r:id", w->hf_ref[k], sizeof(w->hf_ref[0]));
                 } else if (strcmp(t, "titlePg") == 0) {
                     w->sp.title_page = attr_on(&m);
+                } else if (strcmp(t, "lnNumType") == 0) {
+                    int by = attr_int(&m, "w:countBy", 0);
+                    char rs[16] = "";
+
+                    w->sp.line_numbers = by < 0 ? 0 : by > 100 ? 100 : by;
+                    w->sp.line_number_start = attr_int(&m, "w:start", 0) + 1;   /* Word writes one less */
+                    w->sp.line_number_start = w->sp.line_number_start < 1 ? 1 : w->sp.line_number_start;
+                    w->sp.line_number_distance = twips(attr_int(&m, "w:distance", 0));
+                    w->sp.line_number_distance = w->sp.line_number_distance < 0 ? 0 : w->sp.line_number_distance;
+                    mu_attr(&m, "w:restart", rs, sizeof(rs));
+                    w->sp.line_number_restart = strcmp(rs, "newSection") == 0 ? PD_LINENUM_SECTION :
+                                                strcmp(rs, "continuous") == 0 ? PD_LINENUM_CONTINUOUS : PD_LINENUM_PAGE;
                 } else if (strcmp(t, "pgNumType") == 0) {
                     if (mu_attr(&m, "w:start", v, sizeof(v))) {
                         w->sp.first_page_number = atoi(v);

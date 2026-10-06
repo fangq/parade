@@ -214,6 +214,9 @@ const
   PD_BORDER_BOTTOM = 4;
   PD_BORDER_LEFT = 8;
   PD_BORDER_BETWEEN = 16;
+  PD_LINENUM_PAGE = 0;
+  PD_LINENUM_SECTION = 1;
+  PD_LINENUM_CONTINUOUS = 2;
   PD_TBORDER_TOP = 1;
   PD_TBORDER_RIGHT = 2;
   PD_TBORDER_BOTTOM = 4;
@@ -449,6 +452,9 @@ type
     continuous, page_breaking: Int32;
     footnote_skip: pd_sp;
     add_spacing: Int32;
+    line_numbers, line_number_start: Int32;
+    line_number_distance: pd_sp;
+    line_number_restart: Int32;
   end;
   Ppd_section_props = ^pd_section_props;
 

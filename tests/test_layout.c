@@ -1867,6 +1867,68 @@ static void test_label_font(void) {
     pd_doc_free(d);
 }
 
+/* Line numbers: every second body line numbered in the margin, flush right
+   18pt from the text; a table's lines are not counted; numbering goes on
+   across a page break in a section that numbers continuously */
+static void test_line_numbers(void) {
+    pd_block_id sec, p0, p1;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_section_props sp;
+    pd_draw* it;
+    pd_sp base[256];
+    int32_t n, k, j, lines = 0, nums = 0, bad_x = 0, last = 0, cur = 0;
+    pd_sp right = 0, prev_y = -1;
+
+    p0 = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p0, 0), frog, strlen(frog), PD_FORMAT_INHERIT, NULL);
+    add_table(d, sec, 2, 2, 0, short_text);
+    p1 = add_para(d, sec, frog);
+    pd_doc_section_props(d, sec, &sp);
+    sp.line_numbers = 2;
+    sp.line_number_restart = PD_LINENUM_CONTINUOUS;
+    pd_doc_set_section_props(d, sec, &sp);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK && info.pages == 1);
+    it = items(L, 0, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind != PD_DRAW_GLYPH) {
+            continue;
+        }
+
+        if ((it[k].block == p0 || it[k].block == p1) && it[k].x >= sp.margin_left) {    /* the body's lines */
+            for (j = 0; j < lines && base[j] != it[k].y; j++) {
+            }
+
+            if (j == lines && lines < 256) {
+                base[lines++] = it[k].y;
+            }
+        } else if (it[k].x < sp.margin_left) {      /* a digit of a number in the margin */
+            if (it[k].y != prev_y) {
+                nums++;
+                last = cur;
+                cur = 0;
+            }
+
+            cur = cur * 10 + (int32_t)(it[k].text - '0');
+            prev_y = it[k].y;
+            right = it[k].x + it[k].w > right ? it[k].x + it[k].w : right;
+            bad_x += it[k].x + it[k].w > sp.margin_left - PD_PT(17);
+        }
+    }
+
+    last = cur;
+    CHECK(lines >= 6 && nums == lines / 2);
+    CHECK(last == lines - lines % 2);
+    CHECK(bad_x == 0 && right > sp.margin_left - PD_PT(19));
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1919,6 +1981,8 @@ int main(void) {
     test_table_edges();
     printf("list label fonts\n");
     test_label_font();
+    printf("line numbers\n");
+    test_line_numbers();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

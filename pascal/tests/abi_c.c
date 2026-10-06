@@ -229,6 +229,10 @@ int main(void) {
     printf("pd_section_props.page_breaking %zu\n", offsetof(pd_section_props, page_breaking));
     printf("pd_section_props.footnote_skip %zu\n", offsetof(pd_section_props, footnote_skip));
     printf("pd_section_props.add_spacing %zu\n", offsetof(pd_section_props, add_spacing));
+    printf("pd_section_props.line_numbers %zu\n", offsetof(pd_section_props, line_numbers));
+    printf("pd_section_props.line_number_start %zu\n", offsetof(pd_section_props, line_number_start));
+    printf("pd_section_props.line_number_distance %zu\n", offsetof(pd_section_props, line_number_distance));
+    printf("pd_section_props.line_number_restart %zu\n", offsetof(pd_section_props, line_number_restart));
     printf("pd_table_props %zu\n", sizeof(pd_table_props));
     printf("pd_table_props.width %zu\n", offsetof(pd_table_props, width));
     printf("pd_table_props.align %zu\n", offsetof(pd_table_props, align));

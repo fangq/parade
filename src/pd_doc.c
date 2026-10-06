@@ -2845,7 +2845,9 @@ pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_p
              story_ok(d, sp->header) && story_ok(d, sp->header_first) && story_ok(d, sp->header_even) &&
              story_ok(d, sp->footer) && story_ok(d, sp->footer_first) && story_ok(d, sp->footer_even) &&
              (sp->continuous == 0 || sp->continuous == 1) && sp->page_breaking >= PD_PAGES_GREEDY &&
-             sp->page_breaking <= PD_PAGES_OPTIMAL && sp->footnote_skip >= 0,
+             sp->page_breaking <= PD_PAGES_OPTIMAL && sp->footnote_skip >= 0 && sp->line_numbers >= 0 &&
+             sp->line_numbers <= 100 && sp->line_number_start >= 0 && sp->line_number_distance >= 0 &&
+             sp->line_number_restart >= PD_LINENUM_PAGE && sp->line_number_restart <= PD_LINENUM_CONTINUOUS,
              b->st.sp = *sp);
 }
 

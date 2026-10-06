@@ -106,6 +106,7 @@ typedef struct {
     const pd_section_props* sp;
     prule* rules;
     int32_t nrules, caprules;
+    int32_t lnum_first;         /* line numbering: lines counted before this page's first, in its scope */
 } ppage;
 
 typedef struct {
@@ -2812,6 +2813,74 @@ static int remember_pages(pd_layout* L) {
     return 0;
 }
 
+/* a body line that gets a number: not in a table, in a section that numbers its lines */
+static const pd_section_props* line_numbered(const pd_layout* L, const pline* l) {
+    const pd_doc* d = L->doc;
+    const blk* b;
+    const pd_section_props* sp;
+    int32_t hops;
+
+    if (l->region != 0 || l->line < 0 || !l->pc) {
+        return NULL;
+    }
+
+    for (b = pd_doc_blk(d, l->pc->block), hops = 0; b && b->kind != PD_BLOCK_SECTION && hops < 64; hops++) {
+        if (b->kind == PD_BLOCK_CELL || b->kind == PD_BLOCK_FLOAT) {
+            return NULL;
+        }
+
+        b = b->parent ? pd_doc_blk(d, b->parent) : NULL;
+    }
+
+    sp = b && b->kind == PD_BLOCK_SECTION ? &b->st.sp : NULL;
+    return sp && sp->line_numbers > 0 ? sp : NULL;
+}
+
+/* the count of the next numbered line: *cnt and *sec carried along the lines in order */
+static int32_t line_number_step(const pd_section_props* sp, const pd_section_props** sec, int first_on_page,
+                                int32_t* cnt) {
+    if (sp != *sec && (sp->line_number_restart != PD_LINENUM_CONTINUOUS || !*sec)) {
+        *cnt = 0;   /* a new section's numbering */
+    }
+
+    if (sp->line_number_restart == PD_LINENUM_PAGE && first_on_page) {
+        *cnt = 0;
+    }
+
+    *sec = sp;
+    return (*cnt)++;
+}
+
+/* where each page's line numbers start, after pagination */
+static void number_lines(pd_layout* L) {
+    const pd_section_props* sec = NULL;
+    int32_t pg, i, cnt = 0;
+
+    for (pg = 0; pg < L->npages; pg++) {
+        ppage* p = &L->pages[pg];
+        int first = 1;
+
+        p->lnum_first = -1;
+
+        for (i = 0; i < p->n; i++) {
+            const pd_section_props* sp = line_numbered(L, &p->lines[i]);
+
+            if (sp) {
+                if (p->lnum_first < 0) {
+                    const pd_section_props* s0 = sec;
+                    int32_t c0 = cnt;
+
+                    line_number_step(sp, &s0, 1, &c0);
+                    p->lnum_first = c0 - 1;
+                }
+
+                line_number_step(sp, &sec, first, &cnt);
+                first = 0;
+            }
+        }
+    }
+}
+
 pd_status pd_layout_update(pd_layout* L, pd_layout_info* info) {
     pd_status st;
     uint32_t k;
@@ -2857,6 +2926,7 @@ pd_status pd_layout_update(pd_layout* L, pd_layout_info* info) {
         }
     }
 
+    number_lines(L);
     L->info.pages = L->npages;
 
     if (info) {
@@ -3652,6 +3722,44 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
     free(g);
 }
 
+/* the numbers in the margin beside a page's numbered lines */
+static void emit_line_numbers(const pd_layout* L, dlist_t* D, const ppage* p) {
+    const pd_doc* d = L->doc;
+    pd_style ns;
+    int32_t i, cnt = p->lnum_first;
+
+    if (p->lnum_first < 0 || pd_doc_default_style(d, &ns) != PD_OK) {
+        return;
+    }
+
+    for (i = 0; i < p->n; i++) {
+        const pline* l = &p->lines[i];
+        const pd_section_props* sp = line_numbered(L, l);
+        int32_t num;
+        pd_line ln;
+        dlist_t M;
+        char text[16];
+        pd_sp w;
+
+        if (!sp) {
+            continue;
+        }
+
+        num = (sp->line_number_start > 0 ? sp->line_number_start : 1) + cnt++;
+
+        if (num % sp->line_numbers != 0 || pd_para_get_line(l->pc->para, l->line, &ln) != PD_OK) {
+            continue;
+        }
+
+        snprintf(text, sizeof(text), "%d", (int)num);
+        memset(&M, 0, sizeof(M));
+        w = emit_text(L, &M, text, &ns, 0, 0, l->pc->block, 0, l->region);   /* its width, to set it flush right */
+        free(M.d);
+        emit_text(L, D, text, &ns, l->ox - (sp->line_number_distance > 0 ? sp->line_number_distance : PD_PT(18)) - w,
+                  l->oy + ln.baseline, l->pc->block, 0, l->region);
+    }
+}
+
 pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, int32_t cap, int32_t* count) {
     dlist_t D;
     int32_t i;
@@ -3687,6 +3795,8 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
     for (i = 0; i < L->pages[page].n; i++) {
         emit_line(L, &D, &L->pages[page], &L->pages[page].lines[i]);
     }
+
+    emit_line_numbers(L, &D, &L->pages[page]);
 
     if (D.err) {
         free(D.d);

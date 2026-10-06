@@ -257,6 +257,10 @@ begin
   WriteLn('pd_section_props.page_breaking ', PtrUInt(@v_pd_section_props.page_breaking) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.footnote_skip ', PtrUInt(@v_pd_section_props.footnote_skip) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.add_spacing ', PtrUInt(@v_pd_section_props.add_spacing) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.line_numbers ', PtrUInt(@v_pd_section_props.line_numbers) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.line_number_start ', PtrUInt(@v_pd_section_props.line_number_start) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.line_number_distance ', PtrUInt(@v_pd_section_props.line_number_distance) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.line_number_restart ', PtrUInt(@v_pd_section_props.line_number_restart) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_table_props ', SizeOf(pd_table_props));
   WriteLn('pd_table_props.width ', PtrUInt(@v_pd_table_props.width) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.align ', PtrUInt(@v_pd_table_props.align) - PtrUInt(@v_pd_table_props));

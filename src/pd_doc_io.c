@@ -494,6 +494,13 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
                 put_bool(w, "AddSpacing", p->add_spacing);
             }
 
+            if (p->line_numbers) {
+                put_int(w, "LineNumbers", p->line_numbers);
+                put_int(w, "LineNumberStart", p->line_number_start);
+                put_int(w, "LineNumberDistance", p->line_number_distance);
+                put_int(w, "LineNumberRestart", p->line_number_restart);
+            }
+
             pj_obj_end(w);
             break;
         }
@@ -1190,6 +1197,10 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->continuous = (int32_t)int_or(pj_get(x, "Continuous"), 0, 0, 1, L);
     p->footnote_skip = (pd_sp)int_or(pj_get(x, "FootnoteSkip"), p->footnote_skip, 0, SP_MAX, L);
     p->add_spacing = (int32_t)int_or(pj_get(x, "AddSpacing"), 0, 0, 1, L);
+    p->line_numbers = (int32_t)int_or(pj_get(x, "LineNumbers"), 0, 0, 100, L);
+    p->line_number_start = (int32_t)int_or(pj_get(x, "LineNumberStart"), 0, 0, 1000000, L);
+    p->line_number_distance = (pd_sp)int_or(pj_get(x, "LineNumberDistance"), 0, 0, PD_PT(1000), L);
+    p->line_number_restart = (int32_t)int_or(pj_get(x, "LineNumberRestart"), 0, 0, 2, L);
 
     if (pj_get(x, "PageBreaking")) {
         static const char* const pb_names[] = { "greedy", "optimal" };

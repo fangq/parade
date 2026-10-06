@@ -491,6 +491,10 @@ typedef struct {
     pd_sp footnote_skip;        /**< space between the text and the footnotes (a rule sits in it) */
     int32_t add_spacing;        /**< 1: a paragraph's space after and the next one's before add up (word
                                      processors); 0: the larger of the two (CSS, TeX) */
+    int32_t line_numbers;       /**< lines of the text numbered in the margin, every this many (0 = none) */
+    int32_t line_number_start;  /**< the first number (0 = 1) */
+    pd_sp line_number_distance; /**< from the numbers to the text (0 = 18pt) */
+    int32_t line_number_restart;    /**< PD_LINENUM_* */
 } pd_section_props;
 
 typedef enum {
@@ -515,6 +519,11 @@ typedef struct {
     int32_t border_sides;       /**< PD_TBORDER_* rules the grid has, 0 = all */
     pd_sp cell_padding_v;       /**< top and bottom padding of the cells, < 0 = cell_padding */
 } pd_table_props;
+
+/* when line numbers start again */
+#define PD_LINENUM_PAGE       0
+#define PD_LINENUM_SECTION    1
+#define PD_LINENUM_CONTINUOUS 2
 
 /* the rules of a table grid: its outer edges and those between the rows and columns */
 #define PD_TBORDER_TOP      (1 << 0)
