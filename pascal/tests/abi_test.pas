@@ -190,6 +190,12 @@ begin
   WriteLn('pd_list_level.text ', PtrUInt(@v_pd_list_level.text) - PtrUInt(@v_pd_list_level));
   WriteLn('pd_list_level.indent ', PtrUInt(@v_pd_list_level.indent) - PtrUInt(@v_pd_list_level));
   WriteLn('pd_list_level.hanging ', PtrUInt(@v_pd_list_level.hanging) - PtrUInt(@v_pd_list_level));
+  WriteLn('pd_list_level.restart_after ', PtrUInt(@v_pd_list_level.restart_after) - PtrUInt(@v_pd_list_level));
+  WriteLn('pd_list_level.label_family ', PtrUInt(@v_pd_list_level.label_family) - PtrUInt(@v_pd_list_level));
+  WriteLn('pd_list_level.label_size ', PtrUInt(@v_pd_list_level.label_size) - PtrUInt(@v_pd_list_level));
+  WriteLn('pd_list_level.label_weight ', PtrUInt(@v_pd_list_level.label_weight) - PtrUInt(@v_pd_list_level));
+  WriteLn('pd_list_level.label_italic ', PtrUInt(@v_pd_list_level.label_italic) - PtrUInt(@v_pd_list_level));
+  WriteLn('pd_list_level.label_color ', PtrUInt(@v_pd_list_level.label_color) - PtrUInt(@v_pd_list_level));
   WriteLn('pd_run ', SizeOf(pd_run));
   WriteLn('pd_run.start ', PtrUInt(@v_pd_run.start) - PtrUInt(@v_pd_run));
   WriteLn('pd_run.end ', PtrUInt(@v_pd_run.finish) - PtrUInt(@v_pd_run));

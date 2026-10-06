@@ -352,6 +352,13 @@ typedef struct {
     char text[32];              /**< label template: "%1." or "%1.%2)" for numbers, the bullet for bullets */
     pd_sp indent;               /**< text indent of this level */
     pd_sp hanging;              /**< label hangs this far to the left of the text */
+    int32_t restart_after;      /**< 0: counts again after any shallower level's item; -1: never; k: after an
+                                     item of levels 1..k (counted from 1) */
+    char label_family[32];      /**< the label's own font, "" = the text's */
+    pd_sp label_size;           /**< 0 = the text's */
+    int32_t label_weight;       /**< 0 = the text's */
+    int32_t label_italic;       /**< 0 as the text, 1 italic, -1 upright */
+    uint32_t label_color;       /**< 0 = the text's */
 } pd_list_level;
 
 /** a list definition with up to 9 levels; paragraphs join it through pd_doc_set_list */

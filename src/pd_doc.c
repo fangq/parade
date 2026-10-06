@@ -1350,6 +1350,7 @@ pd_status pd_doc_list_define(pd_doc* d, int32_t n, const pd_list_level* lv, pd_l
 
         l->lv[i] = lv[i];
         l->lv[i].text[sizeof(l->lv[i].text) - 1] = '\0';
+        l->lv[i].label_family[sizeof(l->lv[i].label_family) - 1] = '\0';
     }
 
     d->nlists++;
@@ -1446,8 +1447,12 @@ pd_status pd_doc_list_label(const pd_doc* d, pd_block_id para, char* buf, int32_
         cnt[lv] = seen[lv] ? cnt[lv] + 1 : l->lv[lv].start;
         seen[lv] = 1;
 
-        for (k = lv + 1; k < 9; k++) {
-            seen[k] = 0;
+        for (k = lv + 1; k < 9; k++) {      /* deeper levels count again, as each says */
+            int32_t ra = k < l->n ? l->lv[k].restart_after : 0;
+
+            if (ra == 0 || (ra > 0 && lv < ra)) {
+                seen[k] = 0;
+            }
         }
 
         if (cur == para) {

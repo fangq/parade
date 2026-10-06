@@ -162,6 +162,12 @@ int main(void) {
     printf("pd_list_level.text %zu\n", offsetof(pd_list_level, text));
     printf("pd_list_level.indent %zu\n", offsetof(pd_list_level, indent));
     printf("pd_list_level.hanging %zu\n", offsetof(pd_list_level, hanging));
+    printf("pd_list_level.restart_after %zu\n", offsetof(pd_list_level, restart_after));
+    printf("pd_list_level.label_family %zu\n", offsetof(pd_list_level, label_family));
+    printf("pd_list_level.label_size %zu\n", offsetof(pd_list_level, label_size));
+    printf("pd_list_level.label_weight %zu\n", offsetof(pd_list_level, label_weight));
+    printf("pd_list_level.label_italic %zu\n", offsetof(pd_list_level, label_italic));
+    printf("pd_list_level.label_color %zu\n", offsetof(pd_list_level, label_color));
     printf("pd_run %zu\n", sizeof(pd_run));
     printf("pd_run.start %zu\n", offsetof(pd_run, start));
     printf("pd_run.end %zu\n", offsetof(pd_run, end));

@@ -3422,6 +3422,8 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
 
         if (pd_doc_run_style(d, b->id, b->st.nruns ? b->st.runs[0].format : b->st.empty_format, &ls, &lcp) != PD_OK) {
             /* no style: no label */
+        } else if (!l->pc->note && pd_doc_label_style(d, b->id, &ls) != PD_OK) {
+            /* no font for it: no label */
         } else if (l->pc->note) {     /* a footnote's number: raised, small, just before its text */
             dlist_t M;
             pd_sp w;

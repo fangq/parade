@@ -6,7 +6,7 @@
  *   "NextID": n,
  *   "Styles": [ {"Name","Kind","Parent","Para":{...},"Char":{...}} | null ],
  *   "Formats": [ {"Style": id, "Char": {...}} ],
- *   "Lists": [ {"Levels": [ {"Format","Start","Text","Indent","Hanging"} ]} ],
+ *   "Lists": [ {"Levels": [ {"Format","Start","Text","Indent","Hanging","RestartAfter","Label*"} ]} ],
  *   "Resources": [ {"_ByteStream_": {"_DataInfo_": {"MediaType","ByteLength"}, "Data": bytes}} ],
  *   "Document": {"_TreeNode_(root)": {"ID": 1}, "_TreeChildren_": [ ... ]},
  *   "Stories": [ {"_TreeNode_(story)": {...}, "_TreeChildren_": [...]} ]
@@ -711,6 +711,31 @@ pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, voi
             put_str(&w, "Text", L->text);
             put_int(&w, "Indent", L->indent);
             put_int(&w, "Hanging", L->hanging);
+
+            if (L->restart_after) {
+                put_int(&w, "RestartAfter", L->restart_after);
+            }
+
+            if (L->label_family[0]) {
+                put_str(&w, "LabelFamily", L->label_family);
+            }
+
+            if (L->label_size) {
+                put_int(&w, "LabelSize", L->label_size);
+            }
+
+            if (L->label_weight) {
+                put_int(&w, "LabelWeight", L->label_weight);
+            }
+
+            if (L->label_italic) {
+                put_int(&w, "LabelItalic", L->label_italic);
+            }
+
+            if (L->label_color) {
+                put_int(&w, "LabelColor", (int64_t)L->label_color);
+            }
+
             pj_obj_end(&w);
         }
 
@@ -1450,6 +1475,16 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
             copy_name(pj_get(y, "Text"), v->text, sizeof(v->text), L);
             v->indent = (pd_sp)int_or(pj_get(y, "Indent"), 0, SP_MIN, SP_MAX, L);
             v->hanging = (pd_sp)int_or(pj_get(y, "Hanging"), 0, SP_MIN, SP_MAX, L);
+            v->restart_after = (int32_t)int_or(pj_get(y, "RestartAfter"), 0, -1, 9, L);
+
+            if (pj_get(y, "LabelFamily")) {
+                copy_name(pj_get(y, "LabelFamily"), v->label_family, sizeof(v->label_family), L);
+            }
+
+            v->label_size = (pd_sp)int_or(pj_get(y, "LabelSize"), 0, 0, PD_PT(1000), L);
+            v->label_weight = (int32_t)int_or(pj_get(y, "LabelWeight"), 0, 0, 1000, L);
+            v->label_italic = (int32_t)int_or(pj_get(y, "LabelItalic"), 0, -1, 1, L);
+            v->label_color = (uint32_t)int_or(pj_get(y, "LabelColor"), 0, 0, 0xFFFFFFFFLL, L);
             L->bad |= v->format < 0;
         }
 

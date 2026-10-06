@@ -388,6 +388,11 @@ type
     format, start: Int32;
     text: array[0..31] of AnsiChar;
     indent, hanging: pd_sp;
+    restart_after: Int32;
+    label_family: array[0..31] of AnsiChar;
+    label_size: pd_sp;
+    label_weight, label_italic: Int32;
+    label_color: UInt32;
   end;
   Ppd_list_level = ^pd_list_level;
 

@@ -1824,6 +1824,49 @@ static void test_table_edges(void) {
     pd_doc_free(d);
 }
 
+/* a list level's own label font: the label drawn in its size and colour,
+   the item's text in its own */
+static void test_label_font(void) {
+    pd_block_id sec, p;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_list_level lv;
+    pd_list_id list;
+    pd_draw* it;
+    int32_t n, k, label = 0, text = 0;
+
+    memset(&lv, 0, sizeof(lv));
+    lv.format = PD_NUM_DECIMAL;
+    lv.start = 1;
+    strcpy(lv.text, "%1.");
+    lv.indent = PD_PT(36);
+    lv.hanging = PD_PT(18);
+    lv.label_size = PD_PT(14);
+    lv.label_color = 0xFFC00000u;
+    CHECK(pd_doc_list_define(d, 1, &lv, &list) == PD_OK);
+    p = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p, 0), "item", 4, PD_FORMAT_INHERIT, NULL);
+    pd_doc_set_list(d, p, list, 0);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    it = items(L, 0, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].color == 0xFFC00000u && it[k].size == PD_PT(14)) {
+            label++;
+        } else if (it[k].kind == PD_DRAW_GLYPH && it[k].size == PD_PT(10)) {
+            text++;
+        }
+    }
+
+    CHECK(label == 2 && text == 4);     /* "1." and "item" */
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1874,6 +1917,8 @@ int main(void) {
     test_para_borders();
     printf("table edges\n");
     test_table_edges();
+    printf("list label fonts\n");
+    test_label_font();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

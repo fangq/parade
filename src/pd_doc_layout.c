@@ -6,6 +6,7 @@
  * layout: a caret or hit-test result needs no translation.
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
@@ -43,6 +44,49 @@ pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
     st->text_case = cp->caps || cp->small_caps ? 1 : 0;
     st->letter_space = cp->letter_space;
     st->hidden = cp->hidden;
+    return PD_OK;
+}
+
+/* the style of a list paragraph's label: its first characters', with what
+   the list level says of its label's font over them */
+pd_status pd_doc_label_style(const pd_doc* d, pd_block_id para, pd_style* st) {
+    const blk* b = pd_doc_blk(d, para);
+    const pd_list_level* L;
+    pd_char_props cp;
+    const pd_font* f;
+
+    if (!b || pd_doc_run_style(d, para, b->st.nruns ? b->st.runs[0].format : b->st.empty_format, st, &cp) != PD_OK) {
+        return PD_ERR_STATE;
+    }
+
+    if (!b->st.list || (int32_t)b->st.list > d->nlists) {
+        return PD_OK;
+    }
+
+    L = &d->lists[b->st.list - 1].lv[b->st.list_level < d->lists[b->st.list - 1].n ? b->st.list_level :
+                                      d->lists[b->st.list - 1].n - 1];
+
+    if (!L->label_family[0] && !L->label_size && !L->label_weight && !L->label_italic && !L->label_color) {
+        return PD_OK;
+    }
+
+    if (L->label_family[0]) {
+        snprintf(cp.family, sizeof(cp.family), "%s", L->label_family);
+    }
+
+    cp.size = L->label_size > 0 ? L->label_size : cp.size;
+    cp.weight = L->label_weight > 0 ? L->label_weight : cp.weight;
+    cp.italic = L->label_italic ? L->label_italic > 0 : cp.italic;
+    cp.color = L->label_color ? L->label_color : cp.color;
+
+    if ((f = resolve_font(d, &cp)) != NULL) {
+        int32_t user = st->user;
+
+        pd_style_init(st, f, cp.size);
+        st->color = cp.color;
+        st->user = user;
+    }
+
     return PD_OK;
 }
 

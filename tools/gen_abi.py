@@ -25,7 +25,8 @@ STRUCTS = {
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
                      "border_color border_width shading direction ntabs tabs tab_interval contextual border_sides border_space",
     "pd_tab_stop": "position align leader",
-    "pd_list_level": "format start text indent hanging",
+    "pd_list_level": "format start text indent hanging restart_after label_family label_size label_weight "
+                     "label_italic label_color",
     "pd_run": "start end format",
     "pd_inline": "kind resource width height depth field target level name source source_len user title title_len "
                  "alt alt_len",

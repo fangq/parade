@@ -1684,11 +1684,36 @@ static void dx_numbering(dxo* x, pd_buf* o) {
                 }
             }
 
-            pb_printf(o, "<w:lvl w:ilvl=\"%d\"><w:start w:val=\"%d\"/><w:numFmt w:val=\"%s\"/><w:lvlText w:val=\"",
-                      k, (int)(L.start >= 0 ? L.start : 1), fmts[f]);
+            pb_printf(o, "<w:lvl w:ilvl=\"%d\"><w:start w:val=\"%d\"/><w:numFmt w:val=\"%s\"/>", k,
+                      (int)(L.start >= 0 ? L.start : 1), fmts[f]);
+
+            if (L.restart_after) {
+                pb_printf(o, "<w:lvlRestart w:val=\"%d\"/>", L.restart_after < 0 ? 0 : (int)L.restart_after);
+            }
+
+            pb_puts(o, "<w:lvlText w:val=\"");
             xesc(o, L.text, strlen(L.text));
-            pb_printf(o, "\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"%d\" w:hanging=\"%d\"/></w:pPr></w:lvl>",
+            pb_printf(o, "\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"%d\" w:hanging=\"%d\"/></w:pPr>",
                       TW(L.indent), TW(L.hanging));
+
+            if (L.label_family[0] || L.label_size || L.label_weight || L.label_italic || L.label_color) {
+                pd_char_props lc;
+
+                memset(&lc, 0, sizeof(lc));
+                lc.mask = (L.label_family[0] ? PD_CP_FAMILY : 0) | (L.label_size ? PD_CP_SIZE : 0) |
+                          (L.label_weight ? PD_CP_WEIGHT : 0) | (L.label_italic ? PD_CP_ITALIC : 0) |
+                          (L.label_color ? PD_CP_COLOR : 0);
+                snprintf(lc.family, sizeof(lc.family), "%s", L.label_family);
+                lc.size = L.label_size;
+                lc.weight = L.label_weight;
+                lc.italic = L.label_italic > 0;
+                lc.color = L.label_color;
+                pb_puts(o, "<w:rPr>");
+                dx_rpr_set(o, &lc);
+                pb_puts(o, "</w:rPr>");
+            }
+
+            pb_puts(o, "</w:lvl>");
         }
 
         pb_puts(o, "</w:abstractNum>");
@@ -2783,7 +2808,7 @@ static void bullet_text(const char* v, char* out, size_t cap) {
 
 static void read_numbering(dxi* X, const char* xml, size_t n) {
     pd_markup m;
-    int cur_abs = -1, cur_lvl = -1, cur_num = -1, ovr_lvl = -1, i;
+    int cur_abs = -1, cur_lvl = -1, cur_num = -1, ovr_lvl = -1, i, in_rpr = 0;
 
     mu_init(&m, xml, n, 0);
 
@@ -2791,6 +2816,11 @@ static void read_numbering(dxi* X, const char* xml, size_t n) {
         const char* t = mu_local(m.name);
         pd_list_level* L = cur_abs >= 0 && cur_lvl >= 0 && cur_lvl < 9 ? &X->abss[cur_abs].lv[cur_lvl] : NULL;
         char v[64] = "";
+
+        if (strcmp(t, "rPr") == 0) {
+            in_rpr = m.type == MT_OPEN;
+            continue;
+        }
 
         if (m.type == MT_CLOSE) {
             if (strcmp(t, "lvl") == 0) {
@@ -2824,6 +2854,33 @@ static void read_numbering(dxi* X, const char* xml, size_t n) {
             cur_num = -1;
         } else if (strcmp(t, "lvl") == 0 && cur_abs >= 0 && cur_num < 0) {
             cur_lvl = attr_int(&m, "w:ilvl", 0);
+        } else if (L && in_rpr) {     /* the label's own font */
+            pd_char_props lc;
+
+            memset(&lc, 0, sizeof(lc));
+            rpr_elem(X, &m, t, &lc, NULL, 0);
+
+            if ((lc.mask & PD_CP_FAMILY) && L->format != PD_NUM_BULLET) {   /* a bullet's symbol font: read as Unicode */
+                snprintf(L->label_family, sizeof(L->label_family), "%.31s", lc.family);
+            }
+
+            if (lc.mask & PD_CP_SIZE) {
+                L->label_size = lc.size;
+            }
+
+            if (lc.mask & PD_CP_WEIGHT) {
+                L->label_weight = lc.weight;
+            }
+
+            if (lc.mask & PD_CP_ITALIC) {
+                L->label_italic = lc.italic ? 1 : -1;
+            }
+
+            if (lc.mask & PD_CP_COLOR) {
+                L->label_color = lc.color;
+            }
+        } else if (L && strcmp(t, "lvlRestart") == 0) {
+            L->restart_after = attr_int(&m, "w:val", 0) <= 0 ? -1 : attr_int(&m, "w:val", 0);
         } else if (L && strcmp(t, "start") == 0) {
             L->start = attr_int(&m, "w:val", 1);
         } else if (L && strcmp(t, "numFmt") == 0) {

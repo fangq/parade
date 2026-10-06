@@ -1849,6 +1849,58 @@ static void test_docx_table_styles(void) {
     pd_doc_free(d);
 }
 
+/* a list level's label font (bold, a family, a colour) and its restart
+   rule: a second level that never counts again, so its items go on 1, 2
+   then 3 under the next first-level item */
+static void test_docx_list_levels(void) {
+    pd_doc* d = docx_doc(
+        "word/numbering.xml",
+        "<w:numbering xmlns:w=\"w\"><w:abstractNum w:abstractNumId=\"0\">"
+        "<w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.\"/>"
+        "<w:pPr><w:ind w:left=\"720\" w:hanging=\"360\"/></w:pPr>"
+        "<w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\"/><w:b/><w:color w:val=\"C00000\"/></w:rPr></w:lvl>"
+        "<w:lvl w:ilvl=\"1\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlRestart w:val=\"0\"/>"
+        "<w:lvlText w:val=\"%2)\"/><w:pPr><w:ind w:left=\"1440\" w:hanging=\"360\"/></w:pPr></w:lvl>"
+        "</w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num></w:numbering>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>A</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"1\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>a</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"1\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>b</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>B</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"1\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>c</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec;
+        pd_block_info bi;
+        pd_list_level lv[9];
+        int32_t nlv = 0;
+        char lab[32];
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        label_of(d, pd_doc_child(d, sec, 3), lab);
+        CHECK(strcmp(lab, "2.") == 0);
+        label_of(d, pd_doc_child(d, sec, 4), lab);
+        CHECK(strcmp(lab, "3)") == 0);      /* not 1) */
+
+        pd_doc_block_info(d, pd_doc_child(d, sec, 0), &bi);
+        CHECK(pd_doc_list_info(d, bi.list, &nlv, lv) == PD_OK && nlv >= 2);
+        CHECK(strcmp(lv[0].label_family, "Arial") == 0 && lv[0].label_weight == 700 && lv[0].label_color == 0xFFC00000u);
+        CHECK(lv[0].restart_after == 0 && lv[1].restart_after == -1 && lv[1].label_family[0] == 0);
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2479,6 +2531,8 @@ int main(void) {
     test_docx_borders();
     printf("docx table styles\n");
     test_docx_table_styles();
+    printf("docx list levels\n");
+    test_docx_list_levels();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");
