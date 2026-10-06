@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pd_doc_internal.h"
+#include "pd_json.h"
 #include "parade_layout.h"
 
 #define INF_PEN 10000
@@ -3521,6 +3522,232 @@ static void emit_rect(dlist_t* D, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t c
     emit(D, &a);
 }
 
+/* ------------------------------------------------------------------ */
+/* drawings: a Word canvas or group, made one picture by the importer   */
+/* ------------------------------------------------------------------ */
+
+#define DRAWING_MIME "application/vnd.parade.drawing+json"
+
+static void emit_rect(dlist_t* D, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color, pd_block_id block, int32_t region);
+
+static pd_sp jsp(const pj_node* o, const char* k) {
+    return (pd_sp)pj_int_or(pj_get(o, k), 0);
+}
+
+/* a text box of a drawing: its paragraphs set in its width less its insets,
+   at its top, middle or bottom */
+static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp bx, pd_sp by, pd_sp bw, pd_sp bh,
+                         double sc, pd_block_id block, uint32_t off, int32_t region) {
+    const pj_node* paras = pj_get(it, "text"), *ins = pj_get(it, "ins"), *an = pj_get(it, "anchor"), *p;
+    pd_sp il = (pd_sp)(pj_int_or(pj_at(ins, 0), 0) * sc), it_ = (pd_sp)(pj_int_or(pj_at(ins, 1), 0) * sc);
+    pd_sp ir = (pd_sp)(pj_int_or(pj_at(ins, 2), 0) * sc), ib = (pd_sp)(pj_int_or(pj_at(ins, 3), 0) * sc);
+    pd_sp width = bw - il - ir, y = 0, dy;
+    dlist_t M;
+    int32_t i;
+
+    if (!paras || width <= 0) {
+        return;
+    }
+
+    memset(&M, 0, sizeof(M));
+
+    for (p = paras->child; p; p = p->next) {
+        const pj_node* runs = pj_get(p, "runs"), *r;
+        char text[4096];        /* the paragraph's text, for the code points drawn */
+        size_t tl = 0;
+        pd_params prm;
+        pd_break_info bi;
+        int32_t nl, li;
+
+        pd_para_clear(L->scratch);
+        pd_para_set_shape(L->scratch, 0, NULL, NULL);
+
+        for (r = runs ? runs->child : NULL; r; r = r->next) {
+            const pj_node* tn = pj_get(r, "t"), *fn = pj_get(r, "f");
+            pd_char_props c;
+            pd_style st;
+
+            if (!tn || tn->type != PJ_STR || tn->len == 0) {
+                continue;
+            }
+
+            memset(&c, 0, sizeof(c));
+            c.size = (pd_sp)(jsp(r, "sz") * sc);
+            c.size = c.size > 0 ? c.size : PD_PT(10);
+            c.weight = (int32_t)pj_int_or(pj_get(r, "w"), 400);
+            c.weight = c.weight > 0 ? c.weight : 400;
+            c.italic = (int32_t)pj_int_or(pj_get(r, "i"), 0);
+            c.color = (uint32_t)pj_int_or(pj_get(r, "c"), 0xFF000000LL);
+            c.color = c.color ? c.color : 0xFF000000u;
+            c.shift = (int32_t)pj_int_or(pj_get(r, "s"), 0);
+
+            if (fn && fn->type == PJ_STR) {
+                snprintf(c.family, sizeof(c.family), "%.*s", (int)(fn->len < 63 ? fn->len : 63), fn->s);
+            }
+
+            if (pd_doc_cp_style(L->doc, &c, &st) == PD_OK && pd_para_add_text(L->scratch, tn->s, tn->len, &st) == PD_OK &&
+                    tl + tn->len < sizeof(text)) {
+                memcpy(text + tl, tn->s, tn->len);
+                tl += tn->len;
+            }
+        }
+
+        if (tl == 0) {      /* an empty paragraph: a line of the default size */
+            pd_char_props c;
+            pd_style st;
+
+            memset(&c, 0, sizeof(c));
+            c.size = (pd_sp)(PD_PT(10) * sc);
+            c.weight = 400;
+            c.color = 0xFF000000u;
+
+            if (pd_doc_cp_style(L->doc, &c, &st) == PD_OK) {
+                pd_para_add_text(L->scratch, "", 0, &st);
+            }
+        }
+
+        pd_params_init(&prm);
+        prm.width = width;
+        prm.align = (int32_t)pj_int_or(pj_get(p, "a"), PD_ALIGN_LEFT);
+        prm.mode = PD_BREAK_GREEDY;
+        prm.full_lines = 1;
+
+        if (pd_para_break(L->scratch, &prm, &bi) == PD_OK) {
+            nl = pd_para_line_count(L->scratch);
+
+            for (li = 0; li < nl; li++) {
+                pd_line ln;
+                pd_glyph g[512];
+                int32_t n = 0;
+
+                pd_para_get_line(L->scratch, li, &ln);
+                pd_para_get_glyphs(L->scratch, li, g, 512, &n);
+
+                for (i = 0; i < n && i < 512; i++) {
+                    pd_style gs;
+                    pd_draw a;
+
+                    if (g[i].kind != PD_GLYPH || pd_para_get_style(L->scratch, g[i].style, &gs) != PD_OK) {
+                        continue;
+                    }
+
+                    memset(&a, 0, sizeof(a));
+                    a.kind = PD_DRAW_GLYPH;
+                    a.scale = g[i].scale ? g[i].scale : 65536;
+                    a.x = bx + il + g[i].x;
+                    a.y = y + g[i].y;
+                    a.w = g[i].advance;
+                    a.glyph = g[i].glyph;
+                    a.text = tl ? cp_at(text, tl, g[i].cluster) : 0;
+                    a.font = gs.font;
+                    a.size = gs.size;
+                    a.color = gs.color;
+                    a.block = block;
+                    a.offset = off;
+                    a.region = region;
+                    emit(&M, &a);
+                }
+            }
+
+            y += bi.height;
+        }
+    }
+
+    /* where the text sits in the box */
+    dy = by + it_;
+
+    if (an && an->type == PJ_STR && an->len >= 3 && !memcmp(an->s, "ctr", 3)) {
+        dy = by + it_ + (bh - it_ - ib - y) / 2;
+    } else if (an && an->type == PJ_STR && an->len >= 1 && an->s[0] == 'b') {
+        dy = by + bh - ib - y;
+    }
+
+    for (i = 0; i < M.n; i++) {
+        M.d[i].y += dy;
+        emit(D, &M.d[i]);
+    }
+
+    free(M.d);
+}
+
+/* A drawing resource in the box (x, y, w, h): its pictures, its shapes'
+   fills and straight edges, its text boxes. Returns 0 if res is no drawing. */
+static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
+                        pd_block_id block, uint32_t off, int32_t region) {
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t len = 0;
+    pj_doc* doc;
+    const pj_node* root, *items, *it;
+    double sx, sy;
+
+    if (pd_doc_resource(L->doc, res, &mime, &data, &len) != PD_OK || !mime || strcmp(mime, DRAWING_MIME) != 0) {
+        return 0;
+    }
+
+    if ((doc = pj_parse(data, len, 0, NULL)) == NULL) {
+        return 1;   /* a drawing, but unreadable: nothing */
+    }
+
+    root = pj_root(doc);
+    sx = jsp(root, "w") > 0 ? (double)w / jsp(root, "w") : 1;
+    sy = jsp(root, "h") > 0 ? (double)h / jsp(root, "h") : 1;
+    items = pj_get(root, "items");
+
+    for (it = items ? items->child : NULL; it; it = it->next) {
+        pd_sp ix = x + (pd_sp)(jsp(it, "x") * sx), iy = y + (pd_sp)(jsp(it, "y") * sy);
+        pd_sp iw = (pd_sp)(jsp(it, "w") * sx), ih = (pd_sp)(jsp(it, "h") * sy);
+
+        if (pj_get(it, "img")) {
+            pd_draw a;
+
+            memset(&a, 0, sizeof(a));
+            a.kind = PD_DRAW_IMAGE;
+            a.resource = (pd_res_id)pj_int_or(pj_get(it, "img"), 0);
+            a.x = ix;
+            a.y = iy;
+            a.w = iw;
+            a.h = ih;
+            a.block = block;
+            a.offset = off;
+            a.region = region;
+            emit(D, &a);
+        } else if (pj_get(it, "shape")) {
+            const pj_node* sh = pj_get(it, "shape");
+            uint32_t fill = (uint32_t)pj_int_or(pj_get(it, "fill"), 0), line = (uint32_t)pj_int_or(pj_get(it, "line"), 0);
+            pd_sp lw = (pd_sp)(jsp(it, "lw") * sx);
+            int ell = sh->type == PJ_STR && sh->len == 7 && !memcmp(sh->s, "ellipse", 7);
+            int ln = sh->type == PJ_STR && sh->len == 4 && !memcmp(sh->s, "line", 4);
+
+            lw = lw > PD_SP_PER_PT / 4 ? lw : PD_SP_PER_PT / 4;
+
+            if (ln) {           /* a straight line: drawn when it runs across or down */
+                if (line && ih <= lw) {
+                    emit_rect(D, ix, iy - lw / 2, iw, lw, line, block, region);
+                } else if (line && iw <= lw) {
+                    emit_rect(D, ix - lw / 2, iy, lw, ih, line, block, region);
+                }
+            } else if (!ell) {  /* a box: its fill, then its edges */
+                if (fill) {
+                    emit_rect(D, ix, iy, iw, ih, fill, block, region);
+                }
+
+                if (line) {
+                    emit_rect(D, ix, iy, iw, lw, line, block, region);
+                    emit_rect(D, ix, iy + ih - lw, iw, lw, line, block, region);
+                    emit_rect(D, ix, iy, lw, ih, line, block, region);
+                    emit_rect(D, ix + iw - lw, iy, lw, ih, line, block, region);
+                }
+            }
+        } else if (pj_get(it, "text")) {
+            emit_textbox(L, D, it, ix, iy, iw, ih, sx, block, off, region);
+        }
+    }
+
+    pj_free(doc);
+    return 1;
+}
+
 /* Paragraph shading and borders, under the text: one box round the lines of
    paragraphs that share it, its top edge only where the first of them
    starts and its bottom where the last ends (a box broken by the page stays
@@ -3722,9 +3949,15 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
             }
 
             if (q->obj.kind == PD_INLINE_IMAGE) {
-                a.kind = PD_DRAW_IMAGE;
-                a.resource = q->obj.resource;
-                emit(D, &a);
+                pd_sp iw, ih;
+
+                pd_doc_image_size(d, &q->obj, &iw, &ih);
+
+                if (!emit_drawing(L, D, q->obj.resource, a.x, a.y, iw, ih, b->id, g[i].cluster, l->region)) {
+                    a.kind = PD_DRAW_IMAGE;
+                    a.resource = q->obj.resource;
+                    emit(D, &a);
+                }
             } else if (q->obj.kind == PD_INLINE_EQUATION && d->math_font && q->obj.source && q->obj.source_len > 0) {
                 /* the formula itself: glyphs of the math font and rules */
                 pd_math_item* mi = NULL;

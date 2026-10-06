@@ -1986,6 +1986,124 @@ static void test_docx_header_logo(void) {
     pd_doc_free(d);
 }
 
+/* the items of a drawing resource, as text (caller frees) */
+static char* drawing_json(const pd_doc* d, pd_res_id res) {
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t len = 0;
+    char* out;
+
+    if (pd_doc_resource(d, res, &mime, &data, &len) != PD_OK || strcmp(mime, "application/vnd.parade.drawing+json")) {
+        return NULL;
+    }
+
+    out = (char*)malloc(len + 1);
+    memcpy(out, data, len);
+    out[len] = '\0';
+    return out;
+}
+
+/* A Word drawing canvas with pictures, a group inside it (whose own
+   coordinates scale its picture), a filled box and a text box: one picture
+   of the whole, every part where the canvas has it. And a floating text box
+   holding a picture and its caption: a float with those paragraphs. Both
+   kept through DOCX. */
+static void test_docx_drawings(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\" xmlns:wpc=\"wpc\" "
+        "xmlns:wpg=\"wpg\" xmlns:wps=\"wps\" xmlns:mc=\"mc\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"1270000\"/><a:graphic><a:graphicData><wpc:wpc>"
+        "<pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/>"
+        "<a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm></pic:spPr></pic:pic>"
+        "<wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x=\"1270000\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/>"
+        "<a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"2540000\" cy=\"1270000\"/></a:xfrm></wpg:grpSpPr>"
+        "<pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/>"
+        "<a:ext cx=\"2540000\" cy=\"1270000\"/></a:xfrm></pic:spPr></pic:pic></wpg:wgp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"635000\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill><a:ln><a:noFill/></a:ln>"
+        "</wps:spPr><wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"635000\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>"
+        "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val=\"18\"/></w:rPr><w:t>(b) label</w:t>"
+        "</w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr anchor=\"ctr\"/></wps:wsp>"
+        "</wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">Text </w:t></w:r><w:r><mc:AlternateContent><mc:Choice Requires=\"wps\">"
+        "<w:drawing><wp:anchor distL=\"114300\" distR=\"114300\"><wp:positionH relativeFrom=\"column\"><wp:align>right"
+        "</wp:align></wp:positionH><wp:extent cx=\"2540000\" cy=\"1905000\"/><wp:wrapSquare wrapText=\"bothSides\"/>"
+        "<a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"1270000\"/><a:graphic><a:graphicData><pic:pic>"
+        "<pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline>"
+        "</w:drawing></w:r></w:p><w:p><w:r><w:t>Fig. 9. A caption.</w:t></w:r></w:p>"
+        "</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>"
+        "<mc:Fallback><w:pict><w:t>old</w:t></w:pict></mc:Fallback></mc:AlternateContent></w:r>"
+        "<w:r><w:t>beside.</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec, p0, fl = 0;
+        pd_inline o;
+        char* js;
+        int32_t i, n;
+        pd_block_info bi;
+        pd_float_props fp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        p0 = pd_doc_child(d, sec, 0);
+        CHECK(pd_doc_inline_at(d, at(p0, 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE);
+        CHECK(o.width == PD_PT(200) && o.height == PD_PT(100));
+        js = drawing_json(d, o.resource);
+        CHECK(js != NULL);
+
+        if (js) {   /* the group's picture at half scale in the right half; the box below left; the label */
+            char want[160];
+
+            snprintf(want, sizeof(want), "\"x\":%d,\"y\":0,\"w\":%d,\"h\":%d", (int)PD_PT(100), (int)PD_PT(100), (int)PD_PT(50));
+            CHECK(strstr(js, want) != NULL);
+            CHECK(strstr(js, "\"fill\":4294901760") != NULL);   /* 0xFFFF0000 */
+            CHECK(strstr(js, "(b) label") != NULL && strstr(js, "\"anchor\":\"ctr\"") != NULL);
+            CHECK(strstr(js, "\"w\":700") != NULL && strstr(js, "\"sz\":589824") != NULL);   /* bold, 9pt */
+            free(js);
+        }
+
+        /* the text box: a float on the right holding the picture and the caption; the anchoring text goes on */
+        pd_doc_block_info(d, sec, &bi);
+        n = bi.child_count;
+
+        for (i = 0; i < n; i++) {
+            pd_doc_block_info(d, pd_doc_child(d, sec, i), &bi);
+
+            if (bi.kind == PD_BLOCK_FLOAT) {
+                fl = bi.id;
+            }
+        }
+
+        CHECK(fl != 0);
+
+        if (fl) {
+            CHECK(pd_doc_float_props(d, fl, &fp) == PD_OK && fp.wrap == PD_WRAP_RIGHT && fp.width == PD_PT(200));
+            pd_doc_block_info(d, fl, &bi);
+            CHECK(bi.child_count == 2 && text_is(d, pd_doc_child(d, fl, 1), "Fig. 9. A caption."));
+        }
+
+        CHECK(find_para(d, "Text beside.") != 0);
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2622,6 +2740,8 @@ int main(void) {
     test_docx_line_numbers();
     printf("docx header logo\n");
     test_docx_header_logo();
+    printf("docx drawings and text boxes\n");
+    test_docx_drawings();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

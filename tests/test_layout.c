@@ -1990,6 +1990,62 @@ static void test_header_room(void) {
     pd_doc_free(d);
 }
 
+/* A drawing resource drawn as its parts: its two pictures where it puts
+   them inside its box, a filled box, a text box's glyphs centred in it. */
+static void test_drawing(void) {
+    static const char js[] =
+        "{\"w\":13107200,\"h\":6553600,\"items\":["          /* 200pt x 100pt */
+        "{\"img\":7,\"x\":0,\"y\":0,\"w\":6553600,\"h\":3276800},"
+        "{\"img\":8,\"x\":6553600,\"y\":0,\"w\":6553600,\"h\":3276800},"
+        "{\"shape\":\"rect\",\"x\":0,\"y\":3276800,\"w\":6553600,\"h\":3276800,\"fill\":4294901760,\"line\":0,\"lw\":0},"
+        "{\"text\":[{\"a\":3,\"runs\":[{\"t\":\"ab\",\"sz\":655360,\"w\":400,\"i\":0,\"c\":4278190080,\"s\":0,\"u\":0}]}],"
+        "\"x\":6553600,\"y\":3276800,\"w\":6553600,\"h\":3276800,\"ins\":[0,0,0,0],\"anchor\":\"ctr\"}]}";
+    pd_block_id sec, p;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_inline o;
+    pd_draw* it;
+    int32_t n, k, imgs = 0, red = 0, glyphs = 0;
+    pd_sp ox = -1, oy = -1, gx = 0, gy = 0;
+
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_IMAGE;
+    o.width = PD_PT(200);
+    o.height = PD_PT(100);
+    CHECK(pd_doc_add_resource(d, "application/vnd.parade.drawing+json", js, strlen(js), &o.resource) == PD_OK);
+    p = pd_doc_child(d, sec, 0);
+    pd_doc_insert_inline(d, at(p, 0), &o, NULL);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    it = items(L, 0, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_IMAGE) {
+            imgs++;
+            if (it[k].resource == 7) {
+                ox = it[k].x;
+                oy = it[k].y;
+            }
+            CHECK(it[k].w == PD_PT(100) && it[k].h == PD_PT(50));
+        } else if (it[k].kind == PD_DRAW_RULE && it[k].color == 0xFFFF0000u) {
+            red++;
+        } else if (it[k].kind == PD_DRAW_GLYPH) {
+            glyphs++;
+            gx = it[k].x;
+            gy = it[k].y;
+        }
+    }
+
+    CHECK(imgs == 2 && red == 1 && glyphs == 2);
+    CHECK(gx > ox + PD_PT(140) && gx < ox + PD_PT(160));    /* centred in the right half */
+    CHECK(gy > oy + PD_PT(70) && gy < oy + PD_PT(85));      /* and half way down the lower half */
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -2046,6 +2102,8 @@ int main(void) {
     test_line_numbers();
     printf("header room\n");
     test_header_room();
+    printf("drawings\n");
+    test_drawing();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

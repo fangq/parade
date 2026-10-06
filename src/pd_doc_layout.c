@@ -90,6 +90,21 @@ pd_status pd_doc_label_style(const pd_doc* d, pd_block_id para, pd_style* st) {
     return PD_OK;
 }
 
+/* a style for characters described outright (a drawing's text boxes) */
+pd_status pd_doc_cp_style(const pd_doc* d, const pd_char_props* cp, pd_style* st) {
+    const pd_font* f = resolve_font(d, cp);
+
+    if (!f) {
+        return PD_ERR_STATE;
+    }
+
+    pd_style_init(st, f, cp->shift == PD_SHIFT_SUPER || cp->shift == PD_SHIFT_SUB ? cp->size * 7 / 10 : cp->size);
+    st->color = cp->color;
+    st->kerning = cp->kerning;
+    st->user = -1;
+    return PD_OK;
+}
+
 /* the style of the document's Normal text: line numbers and the like */
 pd_status pd_doc_default_style(const pd_doc* d, pd_style* st) {
     pd_char_props cp;

@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pd_conv.h"
+#include "pd_json.h"
 
 /* v * m / d, to the nearest: what is read back converts to the same again */
 #define SCALE(v, m, d) ((int64_t)(v) * (m) >= 0 ? ((int64_t)(v) * (m) + (d) / 2) / (d) : \
@@ -285,7 +286,10 @@ static const char* W_NS =
     "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" "
     "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" "
     "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
-    "xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"";
+    "xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\" "
+    "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" "
+    "xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" "
+    "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\"";
 
 typedef struct {
     pd_res_id res;
@@ -495,12 +499,20 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
 
 /* a picture as a run: inline, or anchored where a float is (fp) -- beside the text on the side the float
    wraps on, or across the column */
+static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx, long long cy);
+
 static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     pd_buf* o = x->o;
-    const char* name;
-    int m = dx_media(x, ob->resource, &name);
+    const char* name = "";
+    const char* mime = "";
+    const void* data = NULL;
+    size_t len = 0;
+    int group = pd_doc_resource(x->d, ob->resource, &mime, &data, &len) == PD_OK &&
+                strcmp(mime, "application/vnd.parade.drawing+json") == 0;
+    int m = group ? 0 : dx_media(x, ob->resource, &name);
     pd_sp iw, ih;
     long long cx, cy;
+    size_t mark;
 
     if (m < 0) {
         return;
@@ -510,6 +522,7 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     cx = EMU(iw);
     cy = EMU(ih);
     x->docpr++;
+    mark = o->n;
 
     if (!fp) {
         pb_printf(o, "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">"
@@ -538,12 +551,33 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
                   "<wp:wrapSquare wrapText=\"right\"/>" : "<wp:wrapSquare wrapText=\"left\"/>");
     }
 
+    if (group) {    /* Word keeps a group in markup it alone reads, and says so: after the run's opening */
+        static const char mc[] = "<mc:AlternateContent><mc:Choice Requires=\"wpg\">";
+        size_t at = mark + strlen("<w:r>"), k = strlen(mc), tail = o->n - at;
+
+        pb_put(o, mc, k);   /* room, then the drawing moved up behind it */
+
+        if (!o->err) {
+            memmove(o->p + at + k, o->p + at, tail);
+            memcpy(o->p + at, mc, k);
+        }
+    }
+
     pb_printf(o, "<wp:docPr id=\"%d\" name=\"Picture %d\"", x->docpr, x->docpr);
 
     if (ob->alt_len > 0) {
         pb_puts(o, " descr=\"");
         xesc(o, ob->alt, (size_t)ob->alt_len);
         pb_putc(o, '"');
+    }
+
+    if (group) {
+        pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\">",
+                  fp ? "<wp:cNvGraphicFramePr/>" : "");
+        dx_drawing_group(x, data, len, cx, cy);
+        pb_printf(o, "</a:graphicData></a:graphic>%s</w:drawing></mc:Choice></mc:AlternateContent></w:r>",
+                  fp ? "</wp:anchor>" : "</wp:inline>");
+        return;
     }
 
     pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
@@ -553,6 +587,135 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
               "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData>"
               "</a:graphic>%s</w:drawing></w:r>", fp ? "<wp:cNvGraphicFramePr/>" : "", x->docpr, name, m + 1, cx, cy,
               fp ? "</wp:anchor>" : "</wp:inline>");
+}
+
+static long long jnum(const pj_node* o, const char* k) {
+    return (long long)pj_int_or(pj_get(o, k), 0);
+}
+
+/* a colour of a drawing as DrawingML: a fill or nothing */
+static void dx_fill(pd_buf* o, uint32_t c) {
+    if (c) {
+        pb_printf(o, "<a:solidFill><a:srgbClr val=\"%06X\"/></a:solidFill>", (unsigned)(c & 0xFFFFFF));
+    } else {
+        pb_puts(o, "<a:noFill/>");
+    }
+}
+
+/* A drawing resource (a Word canvas or group read in) as a Word group: its
+   pictures, shapes and text boxes in the group's own coordinates, the
+   drawing's (sp, as EMU), shown at cx x cy. */
+static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx, long long cy) {
+    pd_buf* o = x->o;
+    pj_doc* doc = pj_parse(data, len, 0, NULL);
+    const pj_node* root = doc ? pj_root(doc) : NULL, *items = root ? pj_get(root, "items") : NULL, *it;
+    int id = 1;
+
+    pb_printf(o, "<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
+              "<a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm></wpg:grpSpPr>", cx, cy,
+              root ? EMU(jnum(root, "w")) : cx, root ? EMU(jnum(root, "h")) : cy);
+
+    for (it = items ? items->child : NULL; it; it = it->next) {
+        long long ix = EMU(jnum(it, "x")), iy = EMU(jnum(it, "y")), iw = EMU(jnum(it, "w")), ih = EMU(jnum(it, "h"));
+        char xfrm[200];
+
+        snprintf(xfrm, sizeof(xfrm), "<a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>", ix,
+                 iy, iw, ih);
+        id++;
+
+        if (pj_get(it, "img")) {
+            const char* name;
+            int m = dx_media(x, (pd_res_id)jnum(it, "img"), &name);
+
+            if (m >= 0) {
+                pb_printf(o, "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr>"
+                          "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
+                          "<pic:spPr>%s<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>", id, name, m + 1,
+                          xfrm);
+            }
+        } else if (pj_get(it, "shape")) {
+            const pj_node* sh = pj_get(it, "shape");
+            char geom[16] = "rect";
+
+            if (sh->type == PJ_STR && sh->len < sizeof(geom)) {
+                memcpy(geom, sh->s, sh->len);
+                geom[sh->len] = '\0';
+            }
+
+            pb_printf(o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Shape %d\"/><wps:cNvSpPr/><wps:spPr>%s"
+                      "<a:prstGeom prst=\"%s\"><a:avLst/></a:prstGeom>", id, id, xfrm, geom);
+            dx_fill(o, (uint32_t)jnum(it, "fill"));
+            pb_printf(o, "<a:ln w=\"%lld\">", EMU(jnum(it, "lw")));
+            dx_fill(o, (uint32_t)jnum(it, "line"));
+            pb_puts(o, "</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>");
+        } else if (pj_get(it, "text")) {
+            const pj_node* p, *r, *ins = pj_get(it, "ins"), *an = pj_get(it, "anchor");
+
+            pb_printf(o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Text Box %d\"/><wps:cNvSpPr txBox=\"1\"/><wps:spPr>%s"
+                      "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>"
+                      "<wps:txbx><w:txbxContent>", id, id, xfrm);
+
+            for (p = pj_get(it, "text")->child; p; p = p->next) {
+                int a = (int)jnum(p, "a");
+
+                pb_printf(o, "<w:p><w:pPr><w:spacing w:after=\"0\"/><w:jc w:val=\"%s\"/></w:pPr>", a == PD_ALIGN_CENTER ?
+                          "center" : a == PD_ALIGN_RIGHT ? "right" : a == PD_ALIGN_JUSTIFY ? "both" : "left");
+
+                for (r = pj_get(p, "runs") ? pj_get(p, "runs")->child : NULL; r; r = r->next) {
+                    const pj_node* t = pj_get(r, "t"), *f = pj_get(r, "f");
+
+                    if (!t || t->type != PJ_STR) {
+                        continue;
+                    }
+
+                    pb_puts(o, "<w:r><w:rPr>");
+
+                    if (f && f->type == PJ_STR) {
+                        pb_puts(o, "<w:rFonts w:ascii=\"");
+                        xesc(o, f->s, f->len);
+                        pb_puts(o, "\" w:hAnsi=\"");
+                        xesc(o, f->s, f->len);
+                        pb_puts(o, "\"/>");
+                    }
+
+                    pb_puts(o, jnum(r, "w") >= 600 ? "<w:b/>" : "");
+                    pb_puts(o, jnum(r, "i") ? "<w:i/>" : "");
+
+                    if ((uint32_t)jnum(r, "c") & 0xFFFFFF) {
+                        pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(jnum(r, "c") & 0xFFFFFF));
+                    }
+
+                    if (jnum(r, "sz") > 0) {
+                        pb_printf(o, "<w:sz w:val=\"%d\"/>", (int)SCALE(jnum(r, "sz"), 2, 65536));
+                    }
+
+                    if (jnum(r, "u")) {
+                        pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name((int32_t)jnum(r, "u")));
+                    }
+
+                    if (jnum(r, "s")) {
+                        pb_puts(o, jnum(r, "s") == PD_SHIFT_SUPER ? "<w:vertAlign w:val=\"superscript\"/>" :
+                                "<w:vertAlign w:val=\"subscript\"/>");
+                    }
+
+                    pb_puts(o, "</w:rPr><w:t xml:space=\"preserve\">");
+                    xesc(o, t->s, t->len);
+                    pb_puts(o, "</w:t></w:r>");
+                }
+
+                pb_puts(o, "</w:p>");
+            }
+
+            pb_printf(o, "</w:txbxContent></wps:txbx><wps:bodyPr lIns=\"%lld\" tIns=\"%lld\" rIns=\"%lld\" bIns=\"%lld\" "
+                      "anchor=\"%s\"/></wps:wsp>", EMU(pj_int_or(pj_at(ins, 0), 0)), EMU(pj_int_or(pj_at(ins, 1), 0)),
+                      EMU(pj_int_or(pj_at(ins, 2), 0)), EMU(pj_int_or(pj_at(ins, 3), 0)),
+                      an && an->type == PJ_STR && an->len >= 3 && !memcmp(an->s, "ctr", 3) ? "ctr" :
+                      an && an->type == PJ_STR && an->len >= 1 && an->s[0] == 'b' ? "b" : "t");
+        }
+    }
+
+    pb_puts(o, "</wpg:wgp>");
+    pj_free(doc);
 }
 
 /* a float that is only a picture: Word anchors it in the paragraph that follows */
@@ -573,20 +736,121 @@ static int dx_float_picture(const dxo* x, pd_block_id fl, pd_inline* ob) {
     return pd_doc_inline_at(x->d, at, ob) == PD_OK && ob->kind == PD_INLINE_IMAGE;
 }
 
-/* the anchored pictures waiting for a paragraph */
-static void dx_anchors(dxo* x) {
-    int i;
+static pd_sp dx_text_width(const dxo* x);
+static void dx_flush_anchors(dxo* x);
 
-    for (i = 0; i < x->npending; i++) {
+/* a rough height for a text box Word sizes to its text: pictures at their height, text at a line per 80 characters */
+static pd_sp dx_block_height(const dxo* x, pd_block_id b, pd_sp width) {
+    pd_block_info bi;
+    pd_sp h = 0;
+    int32_t i;
+
+    if (pd_doc_block_info(x->d, b, &bi) != PD_OK) {
+        return 0;
+    }
+
+    if (bi.kind == PD_BLOCK_PARAGRAPH) {
+        const char* t;
+        uint32_t n, k;
+        pd_sp pic = 0;
+
+        pd_doc_para_text(x->d, b, &t, &n);
+
+        for (k = 0; k + 3 <= n; k++) {
+            pd_inline o;
+            pd_pos at;
+
+            at.block = b;
+            at.offset = k;
+
+            if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(x->d, at, &o) == PD_OK && o.kind == PD_INLINE_IMAGE) {
+                pd_sp iw, ih;
+
+                pd_doc_image_display_size(x->d, &o, &iw, &ih);
+                pic = ih > pic ? ih : pic;
+            }
+        }
+
+        return pic + PD_PT(14) * (1 + (pd_sp)(n * PD_PT(5) / (width > PD_PT(36) ? width : PD_PT(36))));
+    }
+
+    for (i = 0; i < bi.child_count; i++) {
+        h += dx_block_height(x, pd_doc_child(x->d, b, i), width);
+    }
+
+    return h;
+}
+
+/* A float of more than a picture -- a figure with its caption, a box of
+   text -- as an anchored Word text box holding its blocks, beside the text
+   or across the column as the float is, grown by Word to what it holds. */
+static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp) {
+    pd_buf* o = x->o;
+    pd_block_info fi;
+    pd_sp w = fp->width > 0 ? fp->width : (pd_sp)((int64_t)dx_text_width(x) * (fp->width_fraction > 0 ?
+              fp->width_fraction : 1000) / 1000);
+    long long cx = EMU(w), cy = EMU(dx_block_height(x, fl, w)), gap = EMU(fp->gap);
+    int off = (fp->placement & PD_PLACE_OFFSET) && fp->wrap != PD_WRAP_NONE;
+    int32_t i;
+
+    if (pd_doc_block_info(x->d, fl, &fi) != PD_OK) {
+        return;
+    }
+
+    x->docpr++;
+    pb_printf(o, "<w:r><mc:AlternateContent><mc:Choice Requires=\"wps\"><w:drawing><wp:anchor distT=\"0\" distB=\"0\" "
+              "distL=\"%lld\" distR=\"%lld\" simplePos=\"0\" relativeHeight=\"%d\" behindDoc=\"0\" locked=\"0\" "
+              "layoutInCell=\"1\" allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\">",
+              gap, gap, x->docpr);
+
+    if (off) {
+        pb_printf(o, "<wp:posOffset>%lld</wp:posOffset>", EMU(fp->offset_x));
+    } else {
+        pb_printf(o, "<wp:align>%s</wp:align>", fp->wrap == PD_WRAP_LEFT ? "left" : fp->wrap == PD_WRAP_RIGHT ? "right" :
+                  "center");
+    }
+
+    pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset></wp:positionV>"
+              "<wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s"
+              "<wp:docPr id=\"%d\" name=\"Text Box %d\"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData "
+              "uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\"><wps:wsp><wps:cNvSpPr txBox=\"1\"/>"
+              "<wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\">"
+              "<a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>", cx, cy,
+              fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : !off ? "<wp:wrapSquare wrapText=\"bothSides\"/>" :
+              fp->wrap == PD_WRAP_LEFT ? "<wp:wrapSquare wrapText=\"right\"/>" : "<wp:wrapSquare wrapText=\"left\"/>",
+              x->docpr, x->docpr, cx, cy);
+
+    for (i = 0; i < fi.child_count; i++) {
+        dx_block(x, pd_doc_child(x->d, fl, i));
+    }
+
+    dx_flush_anchors(x);
+    pb_puts(o, "</w:txbxContent></wps:txbx><wps:bodyPr rot=\"0\" vert=\"horz\" wrap=\"square\" lIns=\"0\" tIns=\"0\" "
+            "rIns=\"0\" bIns=\"0\" anchor=\"t\"><a:spAutoFit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic>"
+            "</wp:anchor></w:drawing></mc:Choice></mc:AlternateContent></w:r>");
+}
+
+/* the anchored pictures waiting for a paragraph */
+static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp);
+
+static void dx_anchors(dxo* x) {
+    int i, n = x->npending;
+    pd_block_id pend[8];
+
+    /* taken off the list first: a text box's own paragraphs anchor nothing of these */
+    memcpy(pend, x->pending, sizeof(pend));
+    x->npending = 0;
+
+    for (i = 0; i < n; i++) {
         pd_inline ob;
         pd_float_props fp;
 
-        if (dx_float_picture(x, x->pending[i], &ob) && pd_doc_float_props(x->d, x->pending[i], &fp) == PD_OK) {
+        if (dx_float_picture(x, pend[i], &ob) && pd_doc_float_props(x->d, pend[i], &fp) == PD_OK) {
             dx_picture(x, &ob, &fp);
+        } else if (pd_doc_float_props(x->d, pend[i], &fp) == PD_OK) {
+            dx_textbox(x, pend[i], &fp);
         }
     }
-
-    x->npending = 0;
 }
 
 /* ... and when none comes, in a paragraph of their own */
@@ -1175,8 +1439,10 @@ static void dx_block(dxo* x, pd_block_id id) {
         case PD_BLOCK_FLOAT: {
             pd_inline ob;
 
-            if (dx_float_picture(x, id, &ob) && x->npending < 8) {
-                x->pending[x->npending++] = id;     /* anchored in the paragraph after it */
+            (void)ob;
+
+            if (x->npending < 8) {
+                x->pending[x->npending++] = id;     /* anchored in the paragraph after it: a picture or a text box */
                 break;
             }
 
@@ -3093,11 +3359,16 @@ typedef struct {
     long long cx, cy;
     int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
     int posh_page, posh_has_off;    /* its offset is from the page's edge; it has one */
+    pd_res_id drawing_res;      /* a group or canvas made into a drawing resource */
+    const char* tbx;            /* a floating text box's content, in the part being read */
+    size_t tbn;
     long long posh_off, dist;
     struct {
         pd_res_id res;
         pd_sp w, h, gap, off_x;
         int wrap, has_off;
+        const char* tbx;        /* a text box: its w:txbxContent, read into the float */
+        size_t tbn;
     } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
     int npend_fl;
     /* tables */
@@ -3703,6 +3974,18 @@ static void dw_floats(dw* w) {
             pd_doc_set_float_props(b->d, fl, &fp);
         }
 
+        if (w->pend_fl[k].tbx) {    /* a text box: what it holds, read here, in the float */
+            pd_char_props keep = b->cp;
+
+            w->X->depth++;
+            dw_parse(w->X, w->pend_fl[k].tbx, w->pend_fl[k].tbn, 1);
+            w->X->depth--;
+            bld_end_para(b);
+            b->cp = keep;
+            bld_float_end(b);
+            continue;
+        }
+
         memset(&o, 0, sizeof(o));
         o.kind = PD_INLINE_IMAGE;
         o.resource = w->pend_fl[k].res;
@@ -3716,15 +3999,16 @@ static void dw_floats(dw* w) {
     w->npend_fl = 0;
 }
 
-static void dw_image(dw* w) {
-    dxi* X = w->X;
-    const char* target = rel_target(X, w->blip, NULL);
+/* a picture part the relationship id names, as a resource of the document; 0 if none */
+static pd_res_id dw_resource(dxi* X, const char* rid) {
+    const char* target = rel_target(X, rid, NULL);
     char path[300];
     unsigned char* data;
     size_t len = 0;
+    pd_res_id res = 0;
 
-    if (!target || w->cx <= 0 || w->cy <= 0) {
-        return;
+    if (!target) {
+        return 0;
     }
 
     if (target[0] == '/') {
@@ -3740,35 +4024,445 @@ static void dw_image(dw* w) {
         const char* mime = ext && (strcmp(ext, ".png") == 0 || strcmp(ext, ".PNG") == 0) ? "image/png" :
                            ext && (strcmp(ext, ".gif") == 0) ? "image/gif" : ext && (strcmp(ext, ".jpg") == 0 ||
                                    strcmp(ext, ".jpeg") == 0 || strcmp(ext, ".JPG") == 0) ? "image/jpeg" : "application/octet-stream";
-        pd_inline o;
 
-        memset(&o, 0, sizeof(o));
-        o.kind = PD_INLINE_IMAGE;
-        o.width = (pd_sp)(w->cx * 65536 / 12700);
-        o.height = (pd_sp)(w->cy * 65536 / 12700);
-
-        if (o.width > 0 && o.height > 0 && pd_doc_add_resource(X->b->d, mime, data, len, &o.resource) == PD_OK) {
-            if (!w->anchor) {
-                dw_begin_para(w);
-                bld_inline(X->b, &o);
-            } else if (w->npend_fl < 8) {
-                int k = w->npend_fl++;
-
-                w->pend_fl[k].res = o.resource;
-                w->pend_fl[k].w = o.width;
-                w->pend_fl[k].h = o.height;
-                w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
-                w->pend_fl[k].wrap = w->wrap;
-                w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
-                w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
-
-                if (!w->started) {  /* anchored before any text: the float goes first */
-                    dw_floats(w);
-                }
-            }
+        if (pd_doc_add_resource(X->b->d, mime, data, len, &res) != PD_OK) {
+            res = 0;
         }
 
         free(data);
+    }
+
+    return res;
+}
+
+/* ------------------------------------------------------------------ */
+/* drawing canvases and groups                                        */
+/* ------------------------------------------------------------------ */
+
+/* Word's theme colours by name, as Office's default theme has them */
+static uint32_t scheme_color(const char* name) {
+    static const struct {
+        const char* n;
+        uint32_t c;
+    } t[] = { { "accent1", 0x4472C4 }, { "accent2", 0xED7D31 }, { "accent3", 0xA5A5A5 }, { "accent4", 0xFFC000 },
+        { "accent5", 0x5B9BD5 }, { "accent6", 0x70AD47 }, { "tx1", 0x000000 }, { "dk1", 0x000000 }, { "bg1", 0xFFFFFF },
+        { "lt1", 0xFFFFFF }, { "tx2", 0x44546A }, { "dk2", 0x44546A }, { "bg2", 0xE7E6E6 }, { "lt2", 0xE7E6E6 },
+        { "hlink", 0x0563C1 }
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        if (strcmp(name, t[i].n) == 0) {
+            return 0xFF000000u | t[i].c;
+        }
+    }
+
+    return 0xFF000000u;
+}
+
+typedef struct {                /* child coordinates to the drawing's: x * s + o */
+    double ox, oy, sx, sy;
+} dxform;
+
+typedef struct {                /* the xfrm being read: offset, extent, and a group's child space */
+    long long off[2], ext[2], choff[2], chext[2];
+    int rot, fliph, flipv;
+} dxfrm_in;
+
+static void xfrm_attr(const pd_markup* m, const char* t, dxfrm_in* f) {
+    char v[32];
+
+    if (!strcmp(t, "xfrm")) {
+        f->rot = mu_attr(m, "rot", v, sizeof(v)) ? atoi(v) : 0;
+        f->fliph = mu_attr(m, "flipH", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
+        f->flipv = mu_attr(m, "flipV", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
+    } else if (!strcmp(t, "off") || !strcmp(t, "chOff")) {
+        long long* d = !strcmp(t, "off") ? f->off : f->choff;
+
+        d[0] = mu_attr(m, "x", v, sizeof(v)) ? atoll(v) : 0;
+        d[1] = mu_attr(m, "y", v, sizeof(v)) ? atoll(v) : 0;
+    } else if (!strcmp(t, "ext") || !strcmp(t, "chExt")) {
+        long long* d = !strcmp(t, "ext") ? f->ext : f->chext;
+
+        d[0] = mu_attr(m, "cx", v, sizeof(v)) ? atoll(v) : 0;
+        d[1] = mu_attr(m, "cy", v, sizeof(v)) ? atoll(v) : 0;
+    }
+}
+
+static pd_sp emu_sp(double e) {
+    return (pd_sp)(e * 65536.0 / 12700.0);
+}
+
+/* a JSON string */
+static void json_str(pd_buf* o, const char* s, size_t n) {
+    size_t i;
+
+    pb_putc(o, '"');
+
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c == '"' || c == '\\') {
+            pb_putc(o, '\\');
+            pb_putc(o, (char)c);
+        } else if (c < 32) {
+            pb_printf(o, "\\u%04x", c);
+        } else {
+            pb_putc(o, (char)c);
+        }
+    }
+
+    pb_putc(o, '"');
+}
+
+/* A Word drawing canvas (wpc) or group (wpg) as one picture: its pictures,
+   shapes and text boxes where the group's coordinates put them, written as
+   a drawing resource (application/vnd.parade.drawing+json) the layout draws.
+   m is at the group's opening tag; it is left after the closing one. */
+static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
+    dxi* X = w->X;
+    pd_markup g;
+    pd_buf o;
+    dxform fr[17];
+    dxfrm_in xf;
+    int nfr = 1, depth = 1, in_grpsppr = 0, root_frame = !canvas, kind = 0, in_sppr = 0, in_ln = 0, in_txbx = 0;
+    int in_rpr = 0, in_body_t = 0, para_open = 0, first_item = 1, have_fill = 0, have_line = 0, style_fill = 0;
+    int style_line = 0, in_fillref = 0, in_lnref = 0, in_gs = 0, nopara = 1;
+    char blip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
+    uint32_t fill = 0, line = 0, sfill = 0, sline = 0;
+    long long lw = 9525, ins[4] = { 91440, 45720, 91440, 45720 };
+    pd_char_props base, rcp;
+    pd_buf text;
+    int jc = PD_ALIGN_LEFT;
+
+    memset(&xf, 0, sizeof(xf));
+    memset(&o, 0, sizeof(o));
+    memset(&text, 0, sizeof(text));
+    fr[0].ox = fr[0].oy = 0;
+    fr[0].sx = fr[0].sy = 1;
+
+    /* the text boxes' default characters: Normal's, which is the document's default paragraph style by now */
+    pd_doc_style_resolve(X->b->d, pd_doc_style_find(X->b->d, "Normal"), NULL, &base);
+
+    pb_printf(&o, "{\"w\":%d,\"h\":%d,\"items\":[", (int)emu_sp((double)w->cx), (int)emu_sp((double)w->cy));
+    mu_init(&g, m->s + m->pos, m->n - m->pos, 0);
+
+#define FR (&fr[nfr - 1])
+#define ITEM_SEP() do { if (!first_item) pb_putc(&o, ','); first_item = 0; } while (0)
+    while (depth > 0 && mu_next(&g) != MT_END) {
+        const char* t = mu_local(g.name);
+        int open = g.type == MT_OPEN || g.type == MT_EMPTY;
+
+        if (g.type == MT_OPEN) {
+            depth++;
+        } else if (g.type == MT_CLOSE) {
+            depth--;
+        }
+
+        if (depth == 0) {
+            break;
+        }
+
+        if (g.type == MT_TEXT) {
+            if (in_body_t && in_txbx) {
+                pd_buf dec;
+                const char* u;
+                size_t un;
+
+                memset(&dec, 0, sizeof(dec));
+                mu_decode(g.text, g.tlen, &dec);
+                u = dec.p ? dec.p : "";
+                un = dec.n;
+
+                if (un) {
+                    pd_char_props c = base;
+                    dprops a, b;
+
+                    memset(&a, 0, sizeof(a));
+                    memset(&b, 0, sizeof(b));
+                    a.cp = base;
+                    b.cp = rcp;
+                    pr_over(&a, &b);
+                    c = a.cp;
+
+                    if (!para_open) {
+                        pb_printf(&text, "%s{\"a\":%d,\"runs\":[", nopara ? "" : ",", jc);
+                        para_open = 1;
+                        nopara = 0;
+                    } else if (text.n && text.p[text.n - 1] != '[') {
+                        pb_putc(&text, ',');
+                    }
+
+                    pb_puts(&text, "{\"t\":");
+                    json_str(&text, u, un);
+                    pb_printf(&text, ",\"sz\":%d,\"w\":%d,\"i\":%d,\"c\":%u,\"s\":%d,\"u\":%d", (int)c.size, (int)c.weight,
+                              (int)c.italic, (unsigned)c.color, (int)c.shift, (int)c.underline);
+
+                    if ((c.mask & PD_CP_FAMILY) && c.family[0]) {
+                        pb_puts(&text, ",\"f\":");
+                        json_str(&text, c.family, strlen(c.family));
+                    }
+
+                    pb_putc(&text, '}');
+                }
+
+                pb_free(&dec);
+            }
+
+            continue;
+        }
+
+        /* groups: their xfrm maps their children's coordinates into their parent's */
+        if (!strcmp(t, "grpSpPr")) {
+            if (g.type == MT_OPEN) {
+                in_grpsppr = 1;
+                memset(&xf, 0, sizeof(xf));
+            } else if (g.type == MT_CLOSE) {
+                double sx = xf.chext[0] > 0 ? (double)xf.ext[0] / xf.chext[0] : 1;
+                double sy = xf.chext[1] > 0 ? (double)xf.ext[1] / xf.chext[1] : 1;
+
+                in_grpsppr = 0;
+
+                if (root_frame) {   /* the root group: its child space onto the drawing's extent */
+                    sx = xf.chext[0] > 0 ? (double)w->cx / xf.chext[0] : 1;
+                    sy = xf.chext[1] > 0 ? (double)w->cy / xf.chext[1] : 1;
+                    fr[0].sx = sx;
+                    fr[0].sy = sy;
+                    fr[0].ox = -xf.choff[0] * sx;
+                    fr[0].oy = -xf.choff[1] * sy;
+                    root_frame = 0;
+                } else if (nfr < 17) {  /* a nested group: off + (child - chOff) * ext / chExt, in its parent */
+                    dxform* p = &fr[nfr - 1];
+
+                    fr[nfr].sx = p->sx * sx;
+                    fr[nfr].sy = p->sy * sy;
+                    fr[nfr].ox = p->ox + p->sx * (xf.off[0] - xf.choff[0] * sx);
+                    fr[nfr].oy = p->oy + p->sy * (xf.off[1] - xf.choff[1] * sy);
+                    nfr++;
+                }
+            }
+
+            continue;
+        }
+
+        if ((!strcmp(t, "grpSp") || !strcmp(t, "wgp")) && g.type == MT_CLOSE && nfr > 1) {   /* a canvas's groups are wgp */
+            nfr--;
+            continue;
+        }
+
+        if (in_grpsppr) {
+            if (open) {
+                xfrm_attr(&g, t, &xf);
+            }
+
+            continue;
+        }
+
+        /* a picture or a shape: read to its end, then written */
+        if ((!strcmp(t, "pic") || !strcmp(t, "wsp")) && g.type == MT_OPEN) {
+            kind = !strcmp(t, "pic") ? 1 : 2;
+            memset(&xf, 0, sizeof(xf));
+            blip[0] = '\0';
+            strcpy(geom, "rect");
+            have_fill = have_line = style_fill = style_line = 0;
+            fill = line = sfill = sline = 0;
+            lw = 9525;
+            ins[0] = ins[2] = 91440;
+            ins[1] = ins[3] = 45720;
+            strcpy(anchor, "t");
+            text.n = 0;
+            nopara = 1;
+            para_open = 0;
+            continue;
+        }
+
+        if ((!strcmp(t, "pic") || !strcmp(t, "wsp")) && g.type == MT_CLOSE && kind) {
+            double x = FR->ox + FR->sx * xf.off[0], y = FR->oy + FR->sy * xf.off[1];
+            double cw = FR->sx * xf.ext[0], ch = FR->sy * xf.ext[1];
+
+            if (para_open) {
+                pb_puts(&text, "]}");
+                para_open = 0;
+            }
+
+            if (kind == 1 && blip[0]) {
+                pd_res_id r = dw_resource(X, blip);
+
+                if (r) {
+                    ITEM_SEP();
+                    pb_printf(&o, "{\"img\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}", (int)r, (int)emu_sp(x), (int)emu_sp(y),
+                              (int)emu_sp(cw), (int)emu_sp(ch));
+                }
+            } else if (kind == 2) {
+                uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
+
+                if (xf.rot % 10800000 != 0 && strcmp(geom, "rect") && strcmp(geom, "ellipse")) {
+                    l = 0;      /* a turned line or arrow: not drawn */
+                }
+
+                if (f || l) {
+                    ITEM_SEP();
+                    pb_printf(&o, "{\"shape\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", geom,
+                              (int)emu_sp(x), (int)emu_sp(y), (int)emu_sp(cw), (int)emu_sp(ch), (unsigned)f, (unsigned)l,
+                              (int)emu_sp((double)lw));
+                }
+
+                if (!nopara) {
+                    ITEM_SEP();
+                    pb_puts(&o, "{\"text\":[");
+                    pb_put(&o, text.p, text.n);
+                    pb_printf(&o, "],\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"ins\":[%d,%d,%d,%d],\"anchor\":\"%s\"}",
+                              (int)emu_sp(x), (int)emu_sp(y), (int)emu_sp(cw), (int)emu_sp(ch), (int)emu_sp((double)ins[0]),
+                              (int)emu_sp((double)ins[1]), (int)emu_sp((double)ins[2]), (int)emu_sp((double)ins[3]), anchor);
+                }
+            }
+
+            kind = 0;
+            continue;
+        }
+
+        if (!kind) {
+            continue;
+        }
+
+        if (!strcmp(t, "spPr")) {
+            in_sppr = g.type == MT_OPEN;
+        } else if (!strcmp(t, "ln") && in_sppr) {
+            in_ln = g.type == MT_OPEN;
+
+            if (open) {
+                have_line = 1;      /* said here: no colour inside means none */
+                line = 0;
+                lw = mu_attr(&g, "w", v, sizeof(v)) ? atoll(v) : 9525;
+            }
+        } else if (!strcmp(t, "txbxContent")) {
+            in_txbx = g.type == MT_OPEN;
+        } else if (!strcmp(t, "fillRef")) {
+            in_fillref = g.type == MT_OPEN && attr_int(&g, "idx", 0) > 0;
+        } else if (!strcmp(t, "lnRef")) {
+            in_lnref = g.type == MT_OPEN && attr_int(&g, "idx", 0) > 0;
+        } else if (!strcmp(t, "gs")) {
+            in_gs = g.type == MT_OPEN ? in_gs + 1 : 0;
+        } else if (!open) {
+            if (!strcmp(t, "p") && para_open) {
+                pb_puts(&text, "]}");
+                para_open = 0;
+            } else if (!strcmp(t, "rPr")) {
+                in_rpr = 0;
+            } else if (!strcmp(t, "t")) {
+                in_body_t = 0;
+            }
+
+            continue;
+        } else if (in_sppr && !in_ln && (!strcmp(t, "xfrm") || !strcmp(t, "off") || !strcmp(t, "ext"))) {
+            xfrm_attr(&g, t, &xf);
+        } else if (in_sppr && !strcmp(t, "prstGeom") && mu_attr(&g, "prst", v, sizeof(v))) {
+            snprintf(geom, sizeof(geom), "%s", !strcmp(v, "ellipse") ? "ellipse" : !strcmp(v, "line") ||
+                     strstr(v, "Connector") ? "line" : "rect");
+        } else if (!strcmp(t, "srgbClr") || !strcmp(t, "schemeClr")) {
+            uint32_t c = !strcmp(t, "srgbClr") ? (mu_attr(&g, "val", v, sizeof(v)) ?
+                         0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0xFF000000u) :
+                         (mu_attr(&g, "val", v, sizeof(v)) ? scheme_color(v) : 0xFF000000u);
+
+            if (in_ln) {
+                line = c;
+            } else if (in_sppr && (!in_gs || in_gs == 1) && !have_fill) {
+                fill = c;   /* a gradient: its first stop */
+                have_fill = 1;
+            } else if (in_fillref) {
+                sfill = c;
+                style_fill = 1;
+            } else if (in_lnref) {
+                sline = c;
+                style_line = 1;
+            }
+        } else if (in_sppr && !in_ln && !strcmp(t, "noFill")) {
+            have_fill = 1;
+            fill = 0;
+        } else if (kind == 1 && !strcmp(t, "blip")) {
+            mu_attr(&g, "r:embed", blip, sizeof(blip));
+        } else if (!strcmp(t, "bodyPr")) {
+            static const char* in[4] = { "lIns", "tIns", "rIns", "bIns" };
+            int k;
+
+            for (k = 0; k < 4; k++) {
+                if (mu_attr(&g, in[k], v, sizeof(v))) {
+                    ins[k] = atoll(v);
+                }
+            }
+
+            if (mu_attr(&g, "anchor", v, sizeof(v))) {
+                snprintf(anchor, sizeof(anchor), "%.3s", v);
+            }
+        } else if (in_txbx) {
+            if (!strcmp(t, "p")) {
+                jc = PD_ALIGN_LEFT;
+                memset(&rcp, 0, sizeof(rcp));
+            } else if (!strcmp(t, "jc") && mu_attr(&g, "w:val", v, sizeof(v))) {
+                jc = !strcmp(v, "center") ? PD_ALIGN_CENTER : !strcmp(v, "right") || !strcmp(v, "end") ? PD_ALIGN_RIGHT :
+                     !strcmp(v, "both") ? PD_ALIGN_JUSTIFY : PD_ALIGN_LEFT;
+            } else if (!strcmp(t, "r")) {
+                memset(&rcp, 0, sizeof(rcp));
+            } else if (!strcmp(t, "rPr")) {
+                in_rpr = g.type == MT_OPEN;
+            } else if (in_rpr) {
+                rpr_elem(X, &g, t, &rcp, NULL, 0);
+            } else if (!strcmp(t, "t")) {
+                in_body_t = g.type == MT_OPEN;
+            }
+        }
+    }
+#undef FR
+#undef ITEM_SEP
+
+    pb_puts(&o, "]}");
+    m->pos += g.pos;
+
+    if (!o.err && pd_doc_add_resource(X->b->d, "application/vnd.parade.drawing+json", o.p, o.n, &w->drawing_res) != PD_OK) {
+        w->drawing_res = 0;
+    }
+
+    pb_free(&o);
+    pb_free(&text);
+}
+
+/* the drawing's picture -- or the drawing itself, a group or canvas made into one -- inline or floating */
+static void dw_image(dw* w) {
+    dxi* X = w->X;
+    pd_inline o;
+
+    if (w->cx <= 0 || w->cy <= 0) {
+        return;
+    }
+
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_IMAGE;
+    o.width = (pd_sp)(w->cx * 65536 / 12700);
+    o.height = (pd_sp)(w->cy * 65536 / 12700);
+    o.resource = w->drawing_res ? w->drawing_res : dw_resource(X, w->blip);
+
+    if (!o.resource) {
+        return;
+    }
+
+    if (!w->anchor) {
+        dw_begin_para(w);
+        bld_inline(X->b, &o);
+    } else if (w->npend_fl < 8) {
+        int k = w->npend_fl++;
+
+        memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+        w->pend_fl[k].res = o.resource;
+        w->pend_fl[k].w = o.width;
+        w->pend_fl[k].h = o.height;
+        w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
+        w->pend_fl[k].wrap = w->wrap;
+        w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
+        w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
+
+        if (!w->started) {  /* anchored before any text: the float goes first */
+            dw_floats(w);
+        }
     }
 }
 
@@ -3921,6 +4615,31 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->instr[w->ninstr] = '\0';
             }
 
+            continue;
+        }
+
+        if (m.type == MT_OPEN && w->in_drawing && w->anchor && !w->tbx && strcmp(t, "txbxContent") == 0 &&
+                X->depth < 3) {
+            /* a floating text box: its paragraphs become a float's, read once the anchoring paragraph ends */
+            pd_markup g;
+            int depth = 1;
+            size_t end = 0;
+
+            mu_init(&g, m.s + m.pos, m.n - m.pos, 0);
+
+            while (depth > 0 && mu_next(&g) != MT_END) {
+                if (g.type == MT_OPEN) {
+                    depth++;
+                } else if (g.type == MT_CLOSE && --depth == 0) {
+                    break;
+                }
+
+                end = g.pos;
+            }
+
+            w->tbx = m.s + m.pos;
+            w->tbn = end;
+            m.pos += g.pos;
             continue;
         }
 
@@ -4080,7 +4799,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->posh_align = -1;
                 w->posh_off = 0;
                 w->posh_page = w->posh_has_off = 0;
+                w->drawing_res = 0;
+                w->tbx = NULL;
+                w->tbn = 0;
                 w->dist = 0;
+            } else if (w->in_drawing && m.type == MT_OPEN && (strcmp(t, "wpc") == 0 || strcmp(t, "wgp") == 0)) {
+                dw_drawing_group(w, &m, strcmp(t, "wpc") == 0);   /* reads the group to its end */
             } else if (w->in_drawing && strcmp(t, "anchor") == 0) {
                 w->anchor = 1;
                 w->dist = atoll(mu_attr(&m, "distL", v, sizeof(v)) ? v : "0");
@@ -4381,7 +5105,23 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                                            w->posh_off > 2286000 ? PD_WRAP_RIGHT : PD_WRAP_LEFT) : -w->wrap;
             }
 
-            if (w->in_drawing && w->blip[0]) {
+            if (w->in_drawing && w->tbx && w->anchor && w->cx > 0 && w->npend_fl < 8) {
+                int k = w->npend_fl++;
+
+                memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+                w->pend_fl[k].w = (pd_sp)(w->cx * 65536 / 12700);
+                w->pend_fl[k].h = (pd_sp)(w->cy * 65536 / 12700);
+                w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
+                w->pend_fl[k].wrap = w->wrap;
+                w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
+                w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
+                w->pend_fl[k].tbx = w->tbx;
+                w->pend_fl[k].tbn = w->tbn;
+
+                if (!w->started) {
+                    dw_floats(w);
+                }
+            } else if (w->in_drawing && (w->blip[0] || w->drawing_res)) {
                 dw_image(w);
             }
 

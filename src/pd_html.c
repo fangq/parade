@@ -1044,6 +1044,7 @@ static pd_sp css_length(const char* v) {
         x *= 0.12;
     }
 
+    x = x < -20000 ? -20000 : x > 20000 ? 20000 : x;    /* points, in what a pd_sp holds */
     return (pd_sp)(x * 65536);
 }
 
@@ -1519,7 +1520,8 @@ static pd_sp attr_length(const pd_markup* m, const char* name, pd_sp dflt) {
         return dflt;
     }
 
-    return (pd_sp)(x * (strstr(v, "pt") ? 1.0 : 0.75) * 65536);
+    x *= strstr(v, "pt") ? 1.0 : 0.75;
+    return (pd_sp)((x < 20000 ? x : 20000) * 65536);    /* no picture wider than about 7 m */
 }
 
 static void hi_image(hi* h, const pd_markup* m) {
