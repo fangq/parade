@@ -2058,13 +2058,14 @@ begin
     end;
 
   if Full then
-  begin
+  begin   { the display's own kind of bitmap, which takes drawing; one loaded from an image may not }
     FBack.Free;
     FBack := TBitmap.Create;
-    FBack.LoadFromIntfImage(Img);
-  end
-  else if Y1 >= Y0 then
-  begin   { just the changed rectangle }
+    FBack.PixelFormat := pf24bit;
+    FBack.SetSize(W, H);
+  end;
+  if Y1 >= Y0 then
+  begin   { just the changed rectangle (all of it, the first time) }
     Part := NewImage(X1 - X0 + 1, Y1 - Y0 + 1, 0);
     Bmp := TBitmap.Create;
     try
