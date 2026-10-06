@@ -214,6 +214,12 @@ const
   PD_BORDER_BOTTOM = 4;
   PD_BORDER_LEFT = 8;
   PD_BORDER_BETWEEN = 16;
+  PD_TBORDER_TOP = 1;
+  PD_TBORDER_RIGHT = 2;
+  PD_TBORDER_BOTTOM = 4;
+  PD_TBORDER_LEFT = 8;
+  PD_TBORDER_INSIDE_H = 16;
+  PD_TBORDER_INSIDE_V = 32;
 
   PD_GRAVITY_LEFT = 0;
   PD_GRAVITY_RIGHT = 1;
@@ -448,6 +454,9 @@ type
     border_color: UInt32;
     ncols: Int32;
     col_width: array[0..PD_TABLE_MAX_COLS - 1] of pd_sp;
+    indent: pd_sp;
+    width_pct, border_sides: Int32;
+    cell_padding_v: pd_sp;
   end;
   Ppd_table_props = ^pd_table_props;
 
@@ -455,6 +464,10 @@ type
     col_span, valign: Int32;
     background: UInt32;
     merge_up: Int32;         { continues the cell above (vertical merge) }
+    min_height: pd_sp;
+    border_set, border_on: Int32;
+    border_width: pd_sp;
+    border_color: UInt32;
   end;
   Ppd_cell_props = ^pd_cell_props;
 

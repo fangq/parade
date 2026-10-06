@@ -1030,7 +1030,7 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
     pd_sp mn[PD_TABLE_MAX_COLS], mx[PD_TABLE_MAX_COLS], w[PD_TABLE_MAX_COLS], avail, fixed = 0;
     int64_t smin = 0, smax = 0;
     int32_t r, k, c, pass, nauto = 0, ti;
-    pd_sp pad = tp->cell_padding;
+    pd_sp pad = tp->cell_padding, padv = tp->cell_padding_v >= 0 ? tp->cell_padding_v : pad;
     pd_status st = PD_OK;
 
     memset(&T, 0, sizeof(T));
@@ -1105,7 +1105,13 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
         }
     }
 
-    avail = tp->width > 0 && tp->width < F->colw ? tp->width : F->colw;
+    {   /* the width it is given: of the column, or its own; an indented table has less room */
+        pd_sp want = tp->width_pct > 0 ? (pd_sp)((int64_t)F->colw * tp->width_pct / 1000) : tp->width;
+        pd_sp room = F->colw - (tp->align == PD_ALIGN_LEFT && tp->indent > 0 ? tp->indent : 0);
+
+        avail = want > 0 && want < room ? want : room;
+        avail = avail > 0 ? avail : F->colw;
+    }
 
     for (c = 0; c < T.ncols; c++) {
         mx[c] = mx[c] < mn[c] ? mn[c] : mx[c];
@@ -1131,7 +1137,7 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
         if (smax <= rest) {     /* everything fits unbroken; a table of given width stretches */
             w[c] = mx[c];
 
-            if (tp->width > 0) {
+            if (tp->width > 0 || tp->width_pct > 0) {
                 w[c] += (pd_sp)(smax > 0 ? (rest - smax) * mx[c] / smax : (rest - smax) / nauto);
             }
         } else if (smin >= rest) {
@@ -1146,8 +1152,9 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
     }
 
     T.width = T.colx[T.ncols];
-    T.x = tp->align == PD_ALIGN_CENTER ? (F->colw - T.width) / 2 : tp->align == PD_ALIGN_RIGHT ? F->colw - T.width : 0;
-    T.x = T.x < 0 ? 0 : T.x;
+    T.x = tp->align == PD_ALIGN_CENTER ? (F->colw - T.width) / 2 : tp->align == PD_ALIGN_RIGHT ? F->colw - T.width :
+          tp->indent;
+    T.x = T.x < 0 && tp->align != PD_ALIGN_LEFT ? 0 : T.x;
     T.header_rows = tp->header_rows < t->nkids ? tp->header_rows : t->nkids - 1;
     T.header_rows = T.header_rows < 0 ? 0 : T.header_rows;
 
@@ -1198,7 +1205,8 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
                     return st;
                 }
 
-                h += 2 * pad;
+                h += 2 * padv;
+                h = h > cell->st.cell.min_height ? h : cell->st.cell.min_height;
 
                 for (j = r; j < r + down; j++) {
                     have += F->tb[ti].rowh[j];
@@ -1559,6 +1567,45 @@ typedef struct {
     int repeat;                 /* a repeated table header row */
 } rec;
 
+/* the cell of a row whose columns take in col */
+static const blk* cell_over(const pd_doc* d, const ptable* T, const blk* row, int32_t col) {
+    int32_t k, c = 0;
+
+    for (k = 0; row && k < row->nkids && c < T->ncols; k++) {
+        const blk* cell = d->tab[row->kids[k]];
+        int32_t span = cell_span(T, cell, c);
+
+        if (col >= c && col < c + span) {
+            return cell;
+        }
+
+        c += span;
+    }
+
+    return NULL;
+}
+
+/* The rule on one edge of a cell: what the cell says of it, else what the
+   cell across the edge says of its own side there, else the table's rule
+   for an outer edge or one between cells. Returns its width, 0 for none. */
+static pd_sp edge_rule(const ptable* T, const blk* cell, int edge, const blk* across, int across_edge, int outer_bit,
+                       int inner_bit, int outer, uint32_t* color) {
+    int sides = T->tp.border_sides ? T->tp.border_sides : 63;
+
+    if (cell && (cell->st.cell.border_set & edge)) {
+        *color = cell->st.cell.border_color;
+        return (cell->st.cell.border_on & edge) ? cell->st.cell.border_width : 0;
+    }
+
+    if (across && (across->st.cell.border_set & across_edge)) {
+        *color = across->st.cell.border_color;
+        return (across->st.cell.border_on & across_edge) ? across->st.cell.border_width : 0;
+    }
+
+    *color = T->tp.border_color;
+    return (sides & (outer ? outer_bit : inner_bit)) ? T->tp.border : 0;
+}
+
 /* one table row: cell backgrounds, contents and grid rules */
 static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
     const pd_doc* d = F->L->doc;
@@ -1566,8 +1613,8 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
     const blk* row = pd_doc_blk(d, v->block);
     const blk* t = pd_doc_blk(d, T->block);
     const blk* next = t && v->line + 1 < t->nkids ? d->tab[t->kids[v->line + 1]] : NULL;
-    pd_sp pad = T->tp.cell_padding, bw = T->tp.border, tx = x + T->x;
-    uint32_t bc = T->tp.border_color;
+    const blk* prev = t && v->line > 0 ? d->tab[t->kids[v->line - 1]] : NULL;
+    pd_sp pad = T->tp.cell_padding, padv = T->tp.cell_padding_v >= 0 ? T->tp.cell_padding_v : pad, tx = x + T->x;
     int32_t k, c = 0;
     pd_status st;
 
@@ -1580,7 +1627,8 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
         const blk* below = next ? cell_at(d, T, next, c) : NULL;
         int32_t span = cell_span(T, cell, c), down = t ? merge_rows(d, T, t, v->line, c) : 1, j;
         pd_sp cx = tx + T->colx[c], cw = T->colx[c + span] - T->colx[c], inner = cw - 2 * pad, h, off = 0;
-        pd_sp ch = 0;
+        pd_sp ch = 0, bw;
+        uint32_t bc;
 
         for (j = v->line; j < v->line + down && T->rowh && j < T->nrows; j++) {
             ch += T->rowh[j];   /* the merged cell's height: every row it covers */
@@ -1597,31 +1645,50 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
             h = stack_height(F->L, cell->id, inner, &st);
 
             if (h >= 0 && cell->st.cell.valign == 1) {
-                off = (ch - 2 * pad - h) / 2;
+                off = (ch - 2 * padv - h) / 2;
             } else if (h >= 0 && cell->st.cell.valign == 2) {
-                off = ch - 2 * pad - h;
+                off = ch - 2 * padv - h;
             }
 
-            place_stack(F->L, cell->id, inner, F->page, cx + pad, y + pad + (off > 0 ? off : 0), 0);
+            place_stack(F->L, cell->id, inner, F->page, cx + pad, y + padv + (off > 0 ? off : 0), 0);
         }
+
+        /* left edge: every cell's; right edge: the last one's (the next cell's left is the rest) */
+        bw = edge_rule(T, cell, PD_BORDER_LEFT, c > 0 ? cell_over(d, T, row, c - 1) : NULL, PD_BORDER_RIGHT,
+                       PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, c == 0, &bc);
 
         if (bw > 0) {
             add_rule(F->L, F->page, cx - bw / 2, y, bw, v->h, bc, 0, cell->id);
+        }
 
-            if (!cell->st.cell.merge_up) {      /* no rule inside a merged cell */
+        if (c + span >= T->ncols || k + 1 == row->nkids) {
+            bw = edge_rule(T, cell, PD_BORDER_RIGHT, NULL, 0, PD_TBORDER_RIGHT, PD_TBORDER_INSIDE_V,
+                           c + span >= T->ncols, &bc);
+
+            if (bw > 0) {
+                add_rule(F->L, F->page, cx + cw - bw / 2, y, bw, v->h, bc, 0, cell->id);
+            }
+        }
+
+        if (!cell->st.cell.merge_up) {      /* no rule inside a merged cell */
+            bw = edge_rule(T, cell, PD_BORDER_TOP, prev ? cell_over(d, T, prev, c) : NULL, PD_BORDER_BOTTOM,
+                           PD_TBORDER_TOP, PD_TBORDER_INSIDE_H, v->line == 0, &bc);
+
+            if (bw > 0) {
                 add_rule(F->L, F->page, cx - bw / 2, y - bw / 2, cw + bw, bw, bc, 0, cell->id);
             }
+        }
 
-            if (!below || !below->st.cell.merge_up) {
+        if (!below || !below->st.cell.merge_up) {
+            bw = edge_rule(T, cell, PD_BORDER_BOTTOM, next ? cell_over(d, T, next, c) : NULL, PD_BORDER_TOP,
+                           PD_TBORDER_BOTTOM, PD_TBORDER_INSIDE_H, !next, &bc);
+
+            if (bw > 0) {
                 add_rule(F->L, F->page, cx - bw / 2, y + v->h - bw / 2, cw + bw, bw, bc, 0, cell->id);
             }
         }
 
         c += span;
-    }
-
-    if (bw > 0) {
-        add_rule(F->L, F->page, tx + T->colx[c] - bw / 2, y, bw, v->h, bc, 0, v->block);
     }
 }
 

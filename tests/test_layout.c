@@ -1748,6 +1748,82 @@ static void test_para_borders(void) {
     pd_doc_free(d);
 }
 
+static const char* short_text(int32_t r, int32_t c, char* buf) {
+    snprintf(buf, 16, "r%dc%d", (int)r, (int)c);
+    return buf;
+}
+
+/* Table rules by edge: only the top, bottom and the rules between rows (no
+   vertical ones), a cell that takes its top rule away and one that draws
+   a thick red bottom of its own; a row made taller than its text; the
+   table indented and half the column wide. */
+static void test_table_edges(void) {
+    pd_block_id sec, t, c10, c00;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_table_props tp;
+    pd_cell_props cp;
+    pd_section_props sp;
+    pd_draw* it;
+    int32_t n, k, vertical = 0, red = 0, red_other = 0, tops_r1 = 0;
+    pd_sp xmin = PD_PT(10000), xmax = 0, y1 = 0, y2 = 0, colw, red_y = 0;
+
+    t = add_table(d, sec, 3, 2, 0, short_text);
+    pd_doc_table_props(d, t, &tp);
+    tp.border = PD_PT(1);
+    tp.border_sides = PD_TBORDER_TOP | PD_TBORDER_BOTTOM | PD_TBORDER_INSIDE_H;
+    tp.indent = PD_PT(36);
+    tp.width_pct = 500;
+    pd_doc_set_table_props(d, t, &tp);
+
+    c10 = pd_doc_child(d, pd_doc_child(d, t, 1), 0);
+    pd_doc_cell_props(d, c10, &cp);
+    cp.border_set = PD_BORDER_TOP;      /* no rule above it */
+    cp.border_on = 0;
+    cp.min_height = PD_PT(50);
+    pd_doc_set_cell_props(d, c10, &cp);
+    c00 = pd_doc_child(d, pd_doc_child(d, t, 0), 1);
+    pd_doc_cell_props(d, c00, &cp);
+    cp.border_set = cp.border_on = PD_BORDER_BOTTOM;
+    cp.border_width = PD_PT(3);
+    cp.border_color = 0xFFFF0000u;
+    pd_doc_set_cell_props(d, c00, &cp);
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    it = items(L, 0, &n);
+    pd_doc_section_props(d, sec, &sp);
+    colw = sp.page_width - sp.margin_left - sp.margin_right;
+    page_of(L, pd_doc_child(d, c10, 0), 0, &y1);
+    page_of(L, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 2), 0), 0), 0, &y2);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind != PD_DRAW_RULE) {
+            continue;
+        }
+
+        vertical += it[k].h > it[k].w;
+        if (it[k].color == 0xFFFF0000u && it[k].h == PD_PT(3)) {   /* one place: the shared edge, from either side */
+            red_y = red++ ? red_y : it[k].y;
+            red_other += it[k].y != red_y;
+        }
+        xmin = it[k].x < xmin ? it[k].x : xmin;
+        xmax = it[k].x + it[k].w > xmax ? it[k].x + it[k].w : xmax;
+
+        /* the rule between rows 0 and 1 over the first column: taken away by the cell below */
+        tops_r1 += it[k].block == c10 && it[k].y < y1 && it[k].y > y1 - PD_PT(20);
+    }
+
+    CHECK(vertical == 0 && red >= 1 && red_other == 0 && tops_r1 == 0);
+    CHECK(xmin >= sp.margin_left + PD_PT(36) - PD_PT(1) && xmin <= sp.margin_left + PD_PT(36));
+    CHECK(xmax - xmin <= colw / 2 + PD_PT(2) && xmax - xmin >= colw / 2 - PD_PT(2));
+    CHECK(y2 - y1 >= PD_PT(50));        /* the tall row */
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1796,6 +1872,8 @@ int main(void) {
     test_contextual();
     printf("paragraph borders and shading\n");
     test_para_borders();
+    printf("table edges\n");
+    test_table_edges();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

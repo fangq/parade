@@ -510,6 +510,22 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
             put_int(w, "Border", p->border);
             put_int(w, "BorderColor", (int64_t)p->border_color);
 
+            if (p->indent) {
+                put_int(w, "Indent", p->indent);
+            }
+
+            if (p->width_pct) {
+                put_int(w, "WidthPerMille", p->width_pct);
+            }
+
+            if (p->border_sides) {
+                put_int(w, "BorderSides", p->border_sides);
+            }
+
+            if (p->cell_padding_v >= 0) {
+                put_int(w, "CellPaddingV", p->cell_padding_v);
+            }
+
             if (p->ncols) {
                 pj_key(w, "ColumnWidths");
                 pj_arr_begin(w);
@@ -528,7 +544,7 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
         case PD_BLOCK_CELL: {
             const pd_cell_props* p = &s->cell;
 
-            if (p->col_span != 1 || p->valign || p->background || p->merge_up) {
+            if (p->col_span != 1 || p->valign || p->background || p->merge_up || p->min_height || p->border_set) {
                 pj_key(w, "Cell");
                 pj_obj_begin(w);
                 put_int(w, "ColumnSpan", p->col_span);
@@ -537,6 +553,17 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
 
                 if (p->merge_up) {
                     put_int(w, "MergeUp", p->merge_up);
+                }
+
+                if (p->min_height) {
+                    put_int(w, "MinHeight", p->min_height);
+                }
+
+                if (p->border_set) {
+                    put_int(w, "BorderSet", p->border_set);
+                    put_int(w, "BorderOn", p->border_on);
+                    put_int(w, "BorderWidth", p->border_width);
+                    put_int(w, "BorderColor", (int64_t)p->border_color);
                 }
                 pj_obj_end(w);
             }
@@ -1171,6 +1198,10 @@ static void load_table(loader* L, const pj_node* o, pd_table_props* p) {
     p->cell_padding = (pd_sp)int_or(pj_get(x, "CellPadding"), p->cell_padding, 0, SP_MAX, L);
     p->border = (pd_sp)int_or(pj_get(x, "Border"), p->border, 0, SP_MAX, L);
     p->border_color = (uint32_t)int_or(pj_get(x, "BorderColor"), p->border_color, 0, 0xFFFFFFFFLL, L);
+    p->indent = (pd_sp)int_or(pj_get(x, "Indent"), 0, -PD_PT(10000), PD_PT(10000), L);
+    p->width_pct = (int32_t)int_or(pj_get(x, "WidthPerMille"), 0, 0, 1000, L);
+    p->border_sides = (int32_t)int_or(pj_get(x, "BorderSides"), 0, 0, 63, L);
+    p->cell_padding_v = (pd_sp)int_or(pj_get(x, "CellPaddingV"), -1, -1, SP_MAX, L);
 
     if ((c = pj_get(x, "ColumnWidths")) != NULL) {
         int32_t i;
@@ -1196,6 +1227,11 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     p->valign = (int32_t)int_or(pj_get(x, "VerticalAlign"), 0, 0, 2, L);
     p->background = (uint32_t)int_or(pj_get(x, "Background"), 0, 0, 0xFFFFFFFFLL, L);
     p->merge_up = (int32_t)int_or(pj_get(x, "MergeUp"), 0, 0, 1, L);
+    p->min_height = (pd_sp)int_or(pj_get(x, "MinHeight"), 0, 0, SP_MAX, L);
+    p->border_set = (int32_t)int_or(pj_get(x, "BorderSet"), 0, 0, 15, L);
+    p->border_on = (int32_t)int_or(pj_get(x, "BorderOn"), 0, 0, 15, L) & p->border_set;
+    p->border_width = (pd_sp)int_or(pj_get(x, "BorderWidth"), 0, 0, SP_MAX, L);
+    p->border_color = (uint32_t)int_or(pj_get(x, "BorderColor"), 0, 0, 0xFFFFFFFFLL, L);
 }
 
 static void load_float(loader* L, const pj_node* o, pd_float_props* p) {

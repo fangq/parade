@@ -503,7 +503,19 @@ typedef struct {
     uint32_t border_color;      /**< 0xAARRGGBB */
     int32_t ncols;              /**< entries used in col_width */
     pd_sp col_width[PD_TABLE_MAX_COLS]; /**< fixed column widths, 0 = automatic */
+    pd_sp indent;               /**< a left-aligned table's distance from the column's left edge */
+    int32_t width_pct;          /**< width in per-mille of the text column, 0 = width says */
+    int32_t border_sides;       /**< PD_TBORDER_* rules the grid has, 0 = all */
+    pd_sp cell_padding_v;       /**< top and bottom padding of the cells, < 0 = cell_padding */
 } pd_table_props;
+
+/* the rules of a table grid: its outer edges and those between the rows and columns */
+#define PD_TBORDER_TOP      (1 << 0)
+#define PD_TBORDER_RIGHT    (1 << 1)
+#define PD_TBORDER_BOTTOM   (1 << 2)
+#define PD_TBORDER_LEFT     (1 << 3)
+#define PD_TBORDER_INSIDE_H (1 << 4)
+#define PD_TBORDER_INSIDE_V (1 << 5)
 
 typedef struct {
     int32_t col_span;           /**< columns this cell covers, >= 1 */
@@ -513,6 +525,11 @@ typedef struct {
                                      rowspan): the first cell of the run holds the content and is drawn
                                      across every row of it, with no rules in between; the run's rows are
                                      kept on one page. The continuing cells' own content is not shown. */
+    pd_sp min_height;           /**< the row is at least this tall */
+    int32_t border_set;         /**< PD_BORDER_TOP/RIGHT/BOTTOM/LEFT edges whose rule the cell decides */
+    int32_t border_on;          /**< of those, the ones ruled (the others have none) */
+    pd_sp border_width;         /**< the cell's own rules */
+    uint32_t border_color;
 } pd_cell_props;
 
 PD_API pd_status pd_doc_float_props(const pd_doc* doc, pd_block_id flt, pd_float_props* out);

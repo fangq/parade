@@ -1668,6 +1668,7 @@ void pd_table_props_init(pd_table_props* tp) {
         memset(tp, 0, sizeof(*tp));
         tp->align = PD_ALIGN_LEFT;
         tp->cell_padding = PD_PT(4);
+        tp->cell_padding_v = -1;
         tp->border = PD_PT(0.4);
         tp->border_color = 0xFF000000u;
     }
@@ -2848,7 +2849,8 @@ int pd_doc_table_props_ok(const pd_table_props* tp) {
 
     if (!tp || tp->width < 0 || tp->align < PD_ALIGN_JUSTIFY || tp->align > PD_ALIGN_CENTER || tp->header_rows < 0 ||
             tp->header_rows > 1000 || tp->cell_padding < 0 || tp->border < 0 || tp->ncols < 0 ||
-            tp->ncols > PD_TABLE_MAX_COLS) {
+            tp->ncols > PD_TABLE_MAX_COLS || tp->indent < -PD_PT(10000) || tp->indent > PD_PT(10000) ||
+            tp->width_pct < 0 || tp->width_pct > 1000 || tp->border_sides < 0 || tp->border_sides > 63) {
         return 0;
     }
 
@@ -2874,7 +2876,8 @@ pd_status pd_doc_set_cell_props(pd_doc* d, pd_block_id id, const pd_cell_props* 
 
     BLOCK_OP("Cell", b && b->kind == PD_BLOCK_CELL && cp && cp->col_span >= 1 &&
              cp->col_span <= PD_TABLE_MAX_COLS && cp->valign >= 0 && cp->valign <= 2 && cp->merge_up >= 0 &&
-             cp->merge_up <= 1, b->st.cell = *cp);
+             cp->merge_up <= 1 && cp->min_height >= 0 && cp->border_width >= 0 && (cp->border_set & ~15) == 0 &&
+             (cp->border_on & ~cp->border_set) == 0, b->st.cell = *cp);
 }
 
 pd_status pd_doc_set_break(pd_doc* d, pd_block_id id, pd_break_kind kind) {

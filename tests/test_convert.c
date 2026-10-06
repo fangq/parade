@@ -1771,6 +1771,84 @@ static void test_docx_borders(void) {
     pd_doc_free(d);
 }
 
+/* Word's table styles: the default style's cell margins, a style's rules
+   (top, bottom and between rows only), its header row (bold, shaded, ruled
+   under) and banded rows, as the table's tblLook allows; the table's own
+   indent, width in percent, a row height and a cell's own edges. Read, and
+   what the model holds kept through DOCX. */
+static void test_docx_table_styles(void) {
+    pd_doc* d = docx_doc(
+        "word/styles.xml",
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">"
+        "<w:name w:val=\"Normal\"/><w:pPr><w:spacing w:after=\"160\"/></w:pPr></w:style>"
+        "<w:style w:type=\"table\" w:default=\"1\" w:styleId=\"TableNormal\"><w:name w:val=\"Normal Table\"/>"
+        "<w:tblPr><w:tblCellMar><w:top w:w=\"0\" w:type=\"dxa\"/><w:left w:w=\"108\" w:type=\"dxa\"/>"
+        "<w:bottom w:w=\"0\" w:type=\"dxa\"/><w:right w:w=\"108\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr></w:style>"
+        "<w:style w:type=\"table\" w:styleId=\"Lined\"><w:name w:val=\"Lined\"/><w:basedOn w:val=\"TableNormal\"/>"
+        "<w:pPr><w:spacing w:after=\"0\"/></w:pPr>"
+        "<w:tblPr><w:tblBorders><w:top w:val=\"single\" w:sz=\"12\" w:color=\"000000\"/>"
+        "<w:bottom w:val=\"single\" w:sz=\"12\" w:color=\"000000\"/>"
+        "<w:insideH w:val=\"single\" w:sz=\"12\" w:color=\"000000\"/></w:tblBorders></w:tblPr>"
+        "<w:tblStylePr w:type=\"firstRow\"><w:rPr><w:b/></w:rPr><w:tcPr><w:shd w:val=\"clear\" w:fill=\"4472C4\"/>"
+        "<w:tcBorders><w:bottom w:val=\"single\" w:sz=\"24\" w:color=\"FF0000\"/></w:tcBorders></w:tcPr></w:tblStylePr>"
+        "<w:tblStylePr w:type=\"band1Horz\"><w:tcPr><w:shd w:val=\"clear\" w:fill=\"D9E2F3\"/></w:tcPr></w:tblStylePr>"
+        "</w:style></w:styles>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body><w:tbl><w:tblPr><w:tblStyle w:val=\"Lined\"/>"
+        "<w:tblW w:w=\"2500\" w:type=\"pct\"/><w:tblInd w:w=\"720\" w:type=\"dxa\"/>"
+        "<w:tblLook w:firstRow=\"1\" w:noHBand=\"0\" w:noVBand=\"1\"/></w:tblPr>"
+        "<w:tblGrid><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"1000\"/></w:tblGrid>"
+        "<w:tr><w:tc><w:p><w:r><w:t>H1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>H2</w:t></w:r></w:p></w:tc></w:tr>"
+        "<w:tr><w:trPr><w:trHeight w:val=\"720\"/></w:trPr>"
+        "<w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr>"
+        "<w:tr><w:tc><w:tcPr><w:tcBorders><w:top w:val=\"nil\"/></w:tcBorders></w:tcPr>"
+        "<w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>d</w:t></w:r></w:p></w:tc></w:tr>"
+        "</w:tbl><w:p/></w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id t;
+        pd_table_props tp;
+        pd_cell_props c;
+        pd_char_props cp;
+        pd_para_props pp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        t = first_table(d);
+        CHECK(t != 0 && pd_doc_table_props(d, t, &tp) == PD_OK);
+        CHECK(tp.border == PD_PT(1.5) && tp.border_sides == (PD_TBORDER_TOP | PD_TBORDER_BOTTOM | PD_TBORDER_INSIDE_H));
+        CHECK(tp.cell_padding == PD_PT(5.4) && tp.cell_padding_v == 0 && tp.indent == PD_PT(36) &&
+              tp.width_pct == 500);
+
+        /* the header row: shaded, a rule of its own under it, bold text; the first body row banded */
+        c = cell_props_at(d, t, 0, 0);
+        CHECK(c.background == 0xFF4472C4u && (c.border_set & PD_BORDER_BOTTOM) && (c.border_on & PD_BORDER_BOTTOM) &&
+              c.border_width == PD_PT(3) && c.border_color == 0xFFFF0000u);
+        cp = chars_at(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 0), 0), 0), 0);
+        CHECK(cp.weight == 700);
+        c = cell_props_at(d, t, 1, 1);
+        CHECK(c.background == 0xFFD9E2F3u && c.min_height == PD_PT(36));
+        cp = chars_at(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 1), 0), 0), 0);
+        CHECK(cp.weight == 400);
+
+        /* the second body row: not banded; a cell that takes its top rule away */
+        c = cell_props_at(d, t, 2, 0);
+        CHECK(c.background == 0 && c.border_set == PD_BORDER_TOP && c.border_on == 0);
+
+        /* the style's paragraph spacing in the cells, over Normal's */
+        pp = para_resolved(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 2), 1), 0));
+        CHECK(pp.space_after == 0);
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2399,6 +2477,8 @@ int main(void) {
     test_docx_contextual();
     printf("docx paragraph borders\n");
     test_docx_borders();
+    printf("docx table styles\n");
+    test_docx_table_styles();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

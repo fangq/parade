@@ -962,7 +962,9 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
     pb_puts(o, "<w:tbl><w:tblPr><w:tblStyle w:val=\"TableGrid\"/>");
 
-    if (tp.width > 0) {
+    if (tp.width_pct > 0) {
+        pb_printf(o, "<w:tblW w:w=\"%d\" w:type=\"pct\"/>", (int)tp.width_pct * 5);     /* fiftieths of a percent */
+    } else if (tp.width > 0) {
         pb_printf(o, "<w:tblW w:w=\"%d\" w:type=\"dxa\"/>", TW(tp.width));
     } else {
         pb_puts(o, "<w:tblW w:w=\"0\" w:type=\"auto\"/>");
@@ -970,6 +972,30 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
     if (tp.align == PD_ALIGN_CENTER || tp.align == PD_ALIGN_RIGHT) {
         pb_puts(o, tp.align == PD_ALIGN_CENTER ? "<w:jc w:val=\"center\"/>" : "<w:jc w:val=\"right\"/>");
+    } else if (tp.indent) {
+        pb_printf(o, "<w:tblInd w:w=\"%d\" w:type=\"dxa\"/>", TW(tp.indent));
+    }
+
+    if (tp.border) {
+        static const char* edge[] = { "top", "left", "bottom", "right", "insideH", "insideV" };
+        static const int bit[] = { PD_TBORDER_TOP, PD_TBORDER_LEFT, PD_TBORDER_BOTTOM, PD_TBORDER_RIGHT,
+                                   PD_TBORDER_INSIDE_H, PD_TBORDER_INSIDE_V
+                                 };
+        int sz = (int)SCALE(tp.border, 8, 65536), sides = tp.border_sides ? tp.border_sides : 63;     /* eighths of a point */
+
+        sz = sz < 2 ? 2 : sz;
+        pb_puts(o, "<w:tblBorders>");
+
+        for (k = 0; k < 6; k++) {
+            if (sides & bit[k]) {
+                pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"/>", edge[k], sz,
+                          (unsigned)(tp.border_color & 0xFFFFFF));
+            } else {
+                pb_printf(o, "<w:%s w:val=\"nil\"/>", edge[k]);
+            }
+        }
+
+        pb_puts(o, "</w:tblBorders>");
     }
 
     /* said outright when Parade sizes the columns: the grid below is then
@@ -978,18 +1004,11 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         pb_puts(o, "<w:tblLayout w:type=\"autofit\"/>");
     }
 
-    if (tp.border) {
-        int sz = (int)SCALE(tp.border, 8, 65536);     /* eighths of a point */
+    {
+        int pv = TW(tp.cell_padding_v >= 0 ? tp.cell_padding_v : tp.cell_padding), ph = TW(tp.cell_padding);
 
-        sz = sz < 2 ? 2 : sz;
-        pb_puts(o, "<w:tblBorders>");
-        pb_printf(o, "<w:top w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"auto\"/>", sz);
-        pb_printf(o, "<w:left w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"auto\"/>", sz);
-        pb_printf(o, "<w:bottom w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"auto\"/>", sz);
-        pb_printf(o, "<w:right w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"auto\"/>", sz);
-        pb_printf(o, "<w:insideH w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"auto\"/>", sz);
-        pb_printf(o, "<w:insideV w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"auto\"/>", sz);
-        pb_puts(o, "</w:tblBorders>");
+        pb_printf(o, "<w:tblCellMar><w:top w:w=\"%d\" w:type=\"dxa\"/><w:left w:w=\"%d\" w:type=\"dxa\"/>"
+                  "<w:bottom w:w=\"%d\" w:type=\"dxa\"/><w:right w:w=\"%d\" w:type=\"dxa\"/></w:tblCellMar>", pv, ph, pv, ph);
     }
 
     pb_puts(o, "<w:tblLook w:val=\"04A0\"/></w:tblPr><w:tblGrid>");
@@ -1007,8 +1026,29 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         pb_puts(o, "<w:tr>");
         col = 0;
 
-        if (r < tp.header_rows) {
-            pb_puts(o, "<w:trPr><w:tblHeader/></w:trPr>");
+        {   /* the row's height: the tallest a cell asks for */
+            pd_sp minh = 0;
+
+            for (c = 0; c < ri.child_count; c++) {
+                pd_cell_props cp;
+
+                pd_doc_cell_props(x->d, pd_doc_child(x->d, row, c), &cp);
+                minh = cp.min_height > minh ? cp.min_height : minh;
+            }
+
+            if (minh > 0 || r < tp.header_rows) {
+                pb_puts(o, "<w:trPr>");
+
+                if (minh > 0) {
+                    pb_printf(o, "<w:trHeight w:val=\"%d\"/>", TW(minh));
+                }
+
+                if (r < tp.header_rows) {
+                    pb_puts(o, "<w:tblHeader/>");
+                }
+
+                pb_puts(o, "</w:trPr>");
+            }
         }
 
         for (c = 0; c < ri.child_count; c++) {
@@ -1025,14 +1065,34 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 pb_printf(o, "<w:gridSpan w:val=\"%d\"/>", (int)cp.col_span);
             }
 
-            if (cp.background) {
-                pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(cp.background & 0xFFFFFF));
-            }
-
             if (cp.merge_up) {
                 pb_puts(o, "<w:vMerge/>");
             } else if (r + 1 < ti.child_count && dx_merges_below(x, pd_doc_child(x->d, t, r + 1), col)) {
                 pb_puts(o, "<w:vMerge w:val=\"restart\"/>");
+            }
+
+            if (cp.border_set) {
+                static const char* edge[] = { "top", "left", "bottom", "right" };
+                static const int bit[] = { PD_BORDER_TOP, PD_BORDER_LEFT, PD_BORDER_BOTTOM, PD_BORDER_RIGHT };
+                int sz = (int)SCALE(cp.border_width, 8, 65536), e;
+
+                sz = sz < 2 ? 2 : sz;
+                pb_puts(o, "<w:tcBorders>");
+
+                for (e = 0; e < 4; e++) {
+                    if (cp.border_on & bit[e]) {
+                        pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"/>", edge[e], sz,
+                                  (unsigned)(cp.border_color & 0xFFFFFF));
+                    } else if (cp.border_set & bit[e]) {
+                        pb_printf(o, "<w:%s w:val=\"nil\"/>", edge[e]);
+                    }
+                }
+
+                pb_puts(o, "</w:tcBorders>");
+            }
+
+            if (cp.background) {
+                pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(cp.background & 0xFFFFFF));
             }
 
             if (cp.valign) {
@@ -1942,6 +2002,38 @@ typedef struct {
     size_t a, b;
 } dnote;
 
+/* rules on the edges of a table or a cell: PD_TBORDER_* bits (top, right,
+   bottom, left, inside H, inside V) said, and of those ruled */
+typedef struct {
+    int set, on;
+    pd_sp w;
+    uint32_t c;
+} dedges;
+
+/* one part of a table style: the whole table, or a condition of it */
+typedef struct {
+    int given;
+    dprops pr;                  /* its w:pPr and w:rPr, for the text of the cells */
+    uint32_t shd;               /* cell shading, with has_shd */
+    int has_shd;
+    dedges cb;                  /* w:tcBorders */
+} dtpart;
+
+enum { TP_WHOLE, TP_FIRST_ROW, TP_LAST_ROW, TP_FIRST_COL, TP_LAST_COL, TP_BAND1V, TP_BAND2V, TP_BAND1H, TP_BAND2H,
+       TP_N
+     };
+
+typedef struct {                /* a table style */
+    char id[64], based_on[64];
+    int is_default;
+    dtpart part[TP_N];
+    dedges tb;                  /* w:tblBorders */
+    pd_sp mar[4];               /* w:tblCellMar top, right, bottom, left; -1 unsaid */
+    pd_sp ind;
+    int has_ind;
+    int row_band, col_band;
+} dtstyle;
+
 typedef struct {
     pd_bld* b;
     zipr z;
@@ -1949,6 +2041,8 @@ typedef struct {
     int nrels;
     dstyle_x* styles;
     int nstyles;
+    dtstyle* tstyles;
+    int ntstyles;
     dnum nums[256];
     int nnums;
     dabs abss[64];
@@ -2414,6 +2508,209 @@ static void read_styles(dxi* X, const char* xml, size_t n) {
     }
 }
 
+/* the edges of a w:tblBorders or w:tcBorders: one child into e */
+static void edge_elem(const pd_markup* m, const char* t, dedges* e) {
+    char v[32];
+    int bit = !strcmp(t, "top") ? PD_TBORDER_TOP : !strcmp(t, "bottom") ? PD_TBORDER_BOTTOM :
+              !strcmp(t, "left") || !strcmp(t, "start") ? PD_TBORDER_LEFT : !strcmp(t, "right") ||
+              !strcmp(t, "end") ? PD_TBORDER_RIGHT : !strcmp(t, "insideH") ? PD_TBORDER_INSIDE_H :
+              !strcmp(t, "insideV") ? PD_TBORDER_INSIDE_V : 0;
+
+    if (!bit) {
+        return;
+    }
+
+    e->set |= bit;
+
+    if (mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "nil") != 0 && strcmp(v, "none") != 0) {
+        pd_sp bw = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
+
+        e->on |= bit;
+        e->w = bw > e->w ? bw : e->w;
+        e->w = e->w > 0 ? e->w : PD_PT(0.25);   /* w:sz 0: the thinnest, 2/8 pt */
+
+        if (mu_attr(m, "w:color", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+            e->c = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+        }
+    } else {
+        e->on &= ~bit;
+    }
+}
+
+/* b's edges over a's: those b says replace a's */
+static void edges_over(dedges* a, const dedges* b) {
+    a->on = (a->on & ~b->set) | (b->on & b->set);
+    a->set |= b->set;
+
+    if (b->on) {
+        a->w = b->w;
+        a->c = b->c ? b->c : a->c;
+    }
+}
+
+static void part_over(dtpart* a, const dtpart* b) {
+    if (!b->given) {
+        return;
+    }
+
+    a->given = 1;
+    pr_over(&a->pr, &b->pr);
+
+    if (b->has_shd) {
+        a->has_shd = 1;
+        a->shd = b->shd;
+    }
+
+    edges_over(&a->cb, &b->cb);
+}
+
+/* the table styles of styles.xml: borders, cell margins and the parts
+   (whole table, header row, banding...) with what they do to the cells */
+static void read_table_styles(dxi* X, const char* xml, size_t n) {
+    pd_markup m;
+    int cap = 0, cur = -1, part = TP_WHOLE, in_ppr = 0, in_rpr = 0, in_tblpr = 0, in_tcpr = 0, in_tb = 0, in_cb = 0;
+    int in_mar = 0, k;
+
+    mu_init(&m, xml, n, 0);
+
+    while (mu_next(&m) != MT_END) {
+        const char* t = mu_local(m.name);
+        int open = m.type == MT_OPEN || m.type == MT_EMPTY;
+        dtstyle* ts = cur >= 0 ? &X->tstyles[cur] : NULL;
+        dtpart* tp = ts ? &ts->part[part] : NULL;
+        char v[64];
+
+        if (m.type == MT_OPEN && strcmp(t, "style") == 0) {
+            if (mu_attr(&m, "w:type", v, sizeof(v)) && strcmp(v, "table") == 0 &&
+                    !pd_grow((void**)&X->tstyles, &cap, (int64_t)X->ntstyles + 1, sizeof(dtstyle))) {
+                cur = X->ntstyles++;
+                ts = &X->tstyles[cur];
+                memset(ts, 0, sizeof(*ts));
+                mu_attr(&m, "w:styleId", ts->id, sizeof(ts->id));
+                ts->is_default = mu_attr(&m, "w:default", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
+
+                for (k = 0; k < 4; k++) {
+                    ts->mar[k] = -1;
+                }
+
+                ts->part[TP_WHOLE].given = 1;
+                part = TP_WHOLE;
+            }
+
+            continue;
+        }
+
+        if (m.type == MT_CLOSE && strcmp(t, "style") == 0) {
+            cur = -1;
+            continue;
+        }
+
+        if (!ts) {
+            continue;
+        }
+
+        if (strcmp(t, "tblStylePr") == 0) {
+            if (m.type == MT_OPEN) {
+                static const char* names[TP_N] = { "wholeTable", "firstRow", "lastRow", "firstCol", "lastCol",
+                                                   "band1Vert", "band2Vert", "band1Horz", "band2Horz"
+                                                 };
+
+                mu_attr(&m, "w:type", v, sizeof(v));
+
+                for (part = TP_N - 1; part > 0 && strcmp(names[part], v) != 0; part--) {
+                }
+
+                ts->part[part].given = 1;
+            } else if (m.type == MT_CLOSE) {
+                part = TP_WHOLE;
+            }
+        } else if (strcmp(t, "pPr") == 0) {
+            in_ppr = m.type == MT_OPEN;
+        } else if (strcmp(t, "rPr") == 0) {
+            in_rpr = m.type == MT_OPEN;
+        } else if (strcmp(t, "tblPr") == 0) {
+            in_tblpr = m.type == MT_OPEN;
+        } else if (strcmp(t, "tcPr") == 0) {
+            in_tcpr = m.type == MT_OPEN;
+        } else if (strcmp(t, "tblBorders") == 0) {
+            in_tb = m.type == MT_OPEN;
+        } else if (strcmp(t, "tcBorders") == 0) {
+            in_cb = m.type == MT_OPEN;
+        } else if (strcmp(t, "tblCellMar") == 0) {
+            in_mar = m.type == MT_OPEN;
+        } else if (!open) {
+            continue;
+        } else if (in_ppr && !in_rpr) {
+            ppr_elem(&m, t, &tp->pr);
+        } else if (in_rpr && !in_ppr) {
+            rpr_elem(X, &m, t, &tp->pr.cp, NULL, 0);
+        } else if (in_tb && part == TP_WHOLE) {
+            edge_elem(&m, t, &ts->tb);
+        } else if (in_cb) {
+            edge_elem(&m, t, &tp->cb);
+        } else if (in_mar && part == TP_WHOLE) {
+            int side = !strcmp(t, "top") ? 0 : !strcmp(t, "right") || !strcmp(t, "end") ? 1 : !strcmp(t, "bottom") ? 2 :
+                       !strcmp(t, "left") || !strcmp(t, "start") ? 3 : -1;
+
+            if (side >= 0) {
+                ts->mar[side] = twips(attr_int(&m, "w:w", 0));
+            }
+        } else if (in_tblpr && part == TP_WHOLE && strcmp(t, "tblInd") == 0) {
+            ts->ind = twips(attr_int(&m, "w:w", 0));
+            ts->has_ind = 1;
+        } else if (in_tblpr && strcmp(t, "tblStyleRowBandSize") == 0) {
+            ts->row_band = attr_int(&m, "w:val", 1);
+        } else if (in_tblpr && strcmp(t, "tblStyleColBandSize") == 0) {
+            ts->col_band = attr_int(&m, "w:val", 1);
+        } else if (in_tcpr && strcmp(t, "shd") == 0) {
+            tp->has_shd = 1;
+            tp->shd = mu_attr(&m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0 ?
+                      0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0;
+        } else if (strcmp(t, "basedOn") == 0) {
+            mu_attr(&m, "w:val", ts->based_on, sizeof(ts->based_on));
+        }
+    }
+}
+
+/* a table style with what it is based on folded in (the farthest first) */
+static void table_style_resolve(const dxi* X, const char* id, dtstyle* out, int depth) {
+    const dtstyle* ts = NULL;
+    int i, k;
+
+    for (i = 0; i < X->ntstyles; i++) {
+        if ((id && id[0]) ? strcmp(X->tstyles[i].id, id) == 0 : X->tstyles[i].is_default) {
+            ts = &X->tstyles[i];
+            break;
+        }
+    }
+
+    if (!ts || depth > 10) {
+        return;
+    }
+
+    if (ts->based_on[0]) {
+        table_style_resolve(X, ts->based_on, out, depth + 1);
+    }
+
+    for (k = 0; k < TP_N; k++) {
+        part_over(&out->part[k], &ts->part[k]);
+    }
+
+    edges_over(&out->tb, &ts->tb);
+
+    for (k = 0; k < 4; k++) {
+        out->mar[k] = ts->mar[k] >= 0 ? ts->mar[k] : out->mar[k];
+    }
+
+    if (ts->has_ind) {
+        out->ind = ts->ind;
+        out->has_ind = 1;
+    }
+
+    out->row_band = ts->row_band > 0 ? ts->row_band : out->row_band;
+    out->col_band = ts->col_band > 0 ? ts->col_band : out->col_band;
+}
+
 /* the theme's font scheme: the Latin face of the major (headings) and minor (body) fonts */
 static void read_theme(dxi* X, const char* xml, size_t n) {
     pd_markup m;
@@ -2677,6 +2974,19 @@ static int list_kind_of(const dxi* X, int num_id, int ilvl) {
     return num_id > 0 ? 1 : 0;
 }
 
+typedef struct {               /* a table being read */
+    char style[64];
+    dtstyle st;                 /* its style, resolved */
+    int look;                   /* w:tblLook: which of the style's parts apply */
+    int row, col;               /* the row under way, the grid column of the cell under way */
+    dedges tb;                  /* its own w:tblBorders */
+    pd_sp mar[4];               /* its own w:tblCellMar, -1 unsaid */
+    pd_sp ind, width_pct;
+    int has_ind;
+    pd_sp row_h;                /* w:trHeight of the row under way */
+    int cspan;                  /* the grid columns the cell under way takes */
+    dtpart cell;                /* what the style does to the cell under way */
+} dtab;
 
 typedef struct {
     dxi* X;
@@ -2712,13 +3022,14 @@ typedef struct {
     } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
     int npend_fl;
     /* tables */
+    dtab tabs[8];               /* each table being read, the innermost last */
+    int ntab;
+    dedges cell_edges;          /* the cell's own w:tcBorders */
     int pend_row, row_header, pend_cell, span, cell_merge, cell_valign;
     uint32_t cell_bg;
-    int in_tblpr, in_grid, in_borders;
+    int in_tblpr, in_grid, in_borders, in_mar, in_cb;
     pd_sp t_width, grid[PD_TABLE_MAX_COLS];
-    int t_jc, t_border_seen, t_border_any, ngrid, t_autofit;
-    pd_sp t_border;
-    uint32_t t_border_color;
+    int t_jc, ngrid, t_autofit;
     int skip;                   /* depth inside an ignored element */
     int note;                   /* parsing a footnote body */
     int after_ref;              /* just after the note's own number: drop the space that follows it */
@@ -2778,6 +3089,38 @@ static void dw_apply_run(dw* w) {
     bld_set_format(w->X->b, &cp);
 }
 
+/* The parts of a table's style that apply to its cell under way -- the
+   whole table, the banding of rows and columns, the first column, the
+   header row, in that order -- as the tblLook allows. */
+static void dw_cell_style(dw* w, dtab* T) {
+    const dtstyle* st = &T->st;
+    int look = T->look, fr = (look & 0x20) != 0, fc = (look & 0x80) != 0;
+    int rb = st->row_band > 0 ? st->row_band : 1, cb = st->col_band > 0 ? st->col_band : 1;
+    int r = T->row - fr, c = T->col - fc;
+
+    memset(&T->cell, 0, sizeof(T->cell));
+    T->cspan = w->span > 0 ? w->span : 1;
+    part_over(&T->cell, &st->part[TP_WHOLE]);
+
+    if (!(look & 0x400) && c >= 0) {
+        part_over(&T->cell, &st->part[(c / cb) % 2 ? TP_BAND2V : TP_BAND1V]);
+    }
+
+    if (!(look & 0x200) && r >= 0) {
+        part_over(&T->cell, &st->part[(r / rb) % 2 ? TP_BAND2H : TP_BAND1H]);
+    }
+
+    if (fc && T->col == 0) {
+        part_over(&T->cell, &st->part[TP_FIRST_COL]);
+    }
+
+    if (fr && T->row == 0) {
+        part_over(&T->cell, &st->part[TP_FIRST_ROW]);
+    }
+
+    T->cell.given = 1;
+}
+
 static void dw_begin_cell(dw* w) {
     pd_bld* b = w->X->b;
 
@@ -2787,8 +3130,39 @@ static void dw_begin_cell(dw* w) {
     }
 
     if (w->pend_cell) {
-        bld_cell_begin(b, w->span, w->cell_bg);
+        uint32_t bg = w->cell_bg;
+        dedges e;
+
+        memset(&e, 0, sizeof(e));
+
+        if (w->ntab >= 1 && w->ntab <= 8) {     /* what the table's style does to this cell */
+            dtpart* c = &w->tabs[w->ntab - 1].cell;
+
+            dw_cell_style(w, &w->tabs[w->ntab - 1]);
+
+            if (!bg && c->has_shd) {
+                bg = c->shd;
+            }
+
+            e = c->cb;
+        }
+
+        edges_over(&e, &w->cell_edges);
+        bld_cell_begin(b, w->span, bg);
         w->pend_cell = 0;
+
+        if ((e.set & 15) || (w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].row_h > 0)) {
+            pd_cell_props cp;
+
+            if (pd_doc_cell_props(b->d, bld_container(b), &cp) == PD_OK) {
+                cp.border_set = e.set & 15;     /* PD_TBORDER_* outer bits are PD_BORDER_* */
+                cp.border_on = e.on & e.set & 15;
+                cp.border_width = e.w;
+                cp.border_color = e.c ? e.c : 0xFF000000u;
+                cp.min_height = w->ntab >= 1 && w->ntab <= 8 ? w->tabs[w->ntab - 1].row_h : 0;
+                pd_doc_set_cell_props(b->d, bld_container(b), &cp);
+            }
+        }
 
         if (w->cell_merge) {
             bld_cell_merge_up(b);
@@ -2849,13 +3223,42 @@ static void dw_table_props(dw* w) {
         tp.align = w->t_jc;
     }
 
-    if (!w->t_border_seen) {
-        tp.border = PD_PT(0.5);     /* Word's own grid: w:sz 4 */
-    } else {                        /* every edge "none" is a table without rules */
-        tp.border = w->t_border_any ? (w->t_border > 0 ? w->t_border : PD_PT(0.25)) : 0;    /* w:sz 0: the thinnest, 2/8 pt */
+    if (w->ntab >= 1 && w->ntab <= 8) {     /* its style, and what it says itself over that */
+        dtab* T = &w->tabs[w->ntab - 1];
+        dedges e;
+        int found = 0;
 
-        if (w->t_border_color) {
-            tp.border_color = w->t_border_color;
+        memset(&T->st, 0, sizeof(T->st));
+
+        for (k = 0; k < 4; k++) {
+            T->st.mar[k] = -1;
+        }
+
+        for (k = 0; k < w->X->ntstyles && !found; k++) {
+            found = T->style[0] ? strcmp(w->X->tstyles[k].id, T->style) == 0 : w->X->tstyles[k].is_default;
+        }
+
+        table_style_resolve(w->X, T->style, &T->st, 0);
+        e = T->st.tb;
+        edges_over(&e, &T->tb);
+
+        if (!e.set && !found && T->style[0]) {
+            tp.border = PD_PT(0.5);     /* a style the document lacks: Word's own grid, w:sz 4 */
+            tp.border_sides = 0;
+        } else {
+            tp.border = e.on ? e.w : 0;
+            tp.border_sides = e.on == 63 ? 0 : e.on ? e.on : 0;
+            tp.border_color = e.c ? e.c : 0xFF000000u;
+        }
+
+        /* cell margins: Word's 5.4pt at the sides and none above and below unless said */
+        tp.cell_padding = T->mar[3] >= 0 ? T->mar[3] : T->st.mar[3] >= 0 ? T->st.mar[3] : twips(108);
+        tp.cell_padding_v = T->mar[0] >= 0 ? T->mar[0] : T->st.mar[0] >= 0 ? T->st.mar[0] : 0;
+        tp.indent = T->has_ind ? T->ind : T->st.has_ind ? T->st.ind : 0;
+        tp.width_pct = (int32_t)T->width_pct;
+
+        if (tp.width_pct > 0) {
+            tp.width = 0;
         }
     }
 
@@ -3038,7 +3441,22 @@ static void dw_begin_para(dw* w) {
         pd_style_id sid = pd_doc_style_find(b->d, b->pstyle[0] ? b->pstyle : "Normal");
         const pd_para_props* f = &full.pp;
 
-        style_chain(w->X, w->pstyle[0] ? w->pstyle : w->X->def_pstyle, &full, 0);
+        {   /* in a table cell, what the table's style says: over Normal's, under any other style's */
+            const dtpart* tc = w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].cell.given ?
+                               &w->tabs[w->ntab - 1].cell : NULL;
+            int plain = !w->pstyle[0] || strcmp(w->pstyle, w->X->def_pstyle) == 0;
+
+            if (tc && !plain) {
+                pr_over(&full, &tc->pr);
+            }
+
+            style_chain(w->X, w->pstyle[0] ? w->pstyle : w->X->def_pstyle, &full, 0);
+
+            if (tc && plain) {
+                pr_over(&full, &tc->pr);
+            }
+        }
+
         pr_over(&full, &w->ppr);
         pd_doc_style_resolve(b->d, sid, &rp, &w->tcp);
         line_finish(&full, (full.cp.mask & PD_CP_SIZE) ? full.cp.size : w->tcp.size);
@@ -3317,6 +3735,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
     pd_markup m;
     dw* w = (dw*)calloc(1, sizeof(dw));
     char v[300];
+    int tk;
 
     if (!w) {
         return;
@@ -3645,11 +4064,20 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
                 dw_begin_cell(w);
                 bld_table_begin(X->b);
+
+                if (w->ntab < 8) {
+                    memset(&w->tabs[w->ntab], 0, sizeof(w->tabs[0]));
+                    w->tabs[w->ntab].look = 0x04A0;     /* Word's when it says nothing: header row, first column */
+                    w->tabs[w->ntab].row = -1;
+
+                    for (tk = 0; tk < 4; tk++) {
+                        w->tabs[w->ntab].mar[tk] = -1;
+                    }
+                }
+
+                w->ntab++;
                 w->t_width = 0;
                 w->t_jc = -1;
-                w->t_border_seen = w->t_border_any = 0;
-                w->t_border = 0;
-                w->t_border_color = 0;
                 w->ngrid = 0;
                 w->t_autofit = 0;
             } else if (strcmp(t, "tblPr") == 0) {
@@ -3661,17 +4089,37 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (w->in_tblpr && strcmp(t, "tblBorders") == 0) {
                 w->in_borders = m.type == MT_OPEN;
             } else if (w->in_tblpr && w->in_borders) {
-                w->t_border_seen = 1;
+                if (w->ntab >= 1 && w->ntab <= 8) {
+                    edge_elem(&m, t, &w->tabs[w->ntab - 1].tb);
+                }
+            } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblStyle") == 0) {
+                mu_attr(&m, "w:val", w->tabs[w->ntab - 1].style, sizeof(w->tabs[0].style));
+            } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblLook") == 0) {
+                int look = 0;
 
-                if (attr_on(&m) && !(mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "nil") == 0)) {
-                    pd_sp bw = (pd_sp)((int64_t)attr_int(&m, "w:sz", 4) * 65536 / 8);    /* eighths of a point */
+                if (mu_attr(&m, "w:val", v, sizeof(v))) {
+                    look = (int)strtol(v, NULL, 16);
+                }
 
-                    w->t_border_any = 1;
-                    w->t_border = bw > w->t_border ? bw : w->t_border;
+                look |= attr_int(&m, "w:firstRow", (look >> 5) & 1) ? 0x20 : 0;
+                look &= attr_int(&m, "w:firstRow", 1) ? ~0 : ~0x20;
+                look = attr_int(&m, "w:firstColumn", (look >> 7) & 1) ? look | 0x80 : look & ~0x80;
+                look = attr_int(&m, "w:lastRow", (look >> 6) & 1) ? look | 0x40 : look & ~0x40;
+                look = attr_int(&m, "w:lastColumn", (look >> 8) & 1) ? look | 0x100 : look & ~0x100;
+                look = attr_int(&m, "w:noHBand", (look >> 9) & 1) ? look | 0x200 : look & ~0x200;
+                look = attr_int(&m, "w:noVBand", (look >> 10) & 1) ? look | 0x400 : look & ~0x400;
+                w->tabs[w->ntab - 1].look = look;
+            } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblInd") == 0) {
+                w->tabs[w->ntab - 1].ind = twips(attr_int(&m, "w:w", 0));
+                w->tabs[w->ntab - 1].has_ind = 1;
+            } else if (w->in_tblpr && strcmp(t, "tblCellMar") == 0) {
+                w->in_mar = m.type == MT_OPEN;
+            } else if (w->in_tblpr && w->in_mar && w->ntab >= 1 && w->ntab <= 8) {
+                int side = !strcmp(t, "top") ? 0 : !strcmp(t, "right") || !strcmp(t, "end") ? 1 :
+                           !strcmp(t, "bottom") ? 2 : !strcmp(t, "left") || !strcmp(t, "start") ? 3 : -1;
 
-                    if (mu_attr(&m, "w:color", v, sizeof(v)) && strcmp(v, "auto") != 0) {
-                        w->t_border_color = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
-                    }
+                if (side >= 0) {
+                    w->tabs[w->ntab - 1].mar[side] = twips(attr_int(&m, "w:w", 0));
                 }
             } else if (w->in_tblpr && strcmp(t, "tblLayout") == 0) {
                 /* written only by an exporter that left the widths to the reader (Parade's own) */
@@ -3679,6 +4127,11 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (w->in_tblpr && strcmp(t, "tblW") == 0) {
                 if (mu_attr(&m, "w:type", v, sizeof(v)) && strcmp(v, "dxa") == 0) {
                     w->t_width = twips(attr_int(&m, "w:w", 0));
+                } else if (strcmp(v, "pct") == 0 && w->ntab >= 1 && w->ntab <= 8 && mu_attr(&m, "w:w", v, sizeof(v))) {
+                    /* fiftieths of a percent, or a percentage written out */
+                    double pct = strchr(v, '%') ? atof(v) * 10 : atof(v) / 5;
+
+                    w->tabs[w->ntab - 1].width_pct = (pd_sp)(pct < 0 ? 0 : pct > 1000 ? 1000 : pct);
                 }
             } else if (w->in_tblpr && strcmp(t, "jc") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                 w->t_jc = strcmp(v, "center") == 0 ? PD_ALIGN_CENTER : strcmp(v, "right") == 0 ||
@@ -3686,10 +4139,18 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (strcmp(t, "tr") == 0) {
                 w->pend_row = 1;
                 w->row_header = 0;
+
+                if (w->ntab >= 1 && w->ntab <= 8) {
+                    w->tabs[w->ntab - 1].row++;
+                    w->tabs[w->ntab - 1].col = 0;
+                    w->tabs[w->ntab - 1].row_h = 0;
+                }
             } else if (strcmp(t, "trPr") == 0) {
                 w->in_trpr = m.type == MT_OPEN;
             } else if (w->in_trpr && strcmp(t, "tblHeader") == 0) {
                 w->row_header = attr_on(&m);
+            } else if (w->in_trpr && strcmp(t, "trHeight") == 0 && w->ntab >= 1 && w->ntab <= 8) {
+                w->tabs[w->ntab - 1].row_h = twips(attr_int(&m, "w:val", 0));    /* at least, or exactly: at least */
             } else if (strcmp(t, "tc") == 0) {
                 if (w->pend_row) {
                     bld_row_begin(X->b, w->row_header);
@@ -3701,6 +4162,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->cell_bg = 0;
                 w->cell_merge = 0;
                 w->cell_valign = 0;
+                memset(&w->cell_edges, 0, sizeof(w->cell_edges));
             } else if (strcmp(t, "tcPr") == 0) {
                 w->in_tcpr = m.type == MT_OPEN;
             } else if (w->in_tcpr) {
@@ -3712,6 +4174,10 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->cell_valign = strcmp(v, "center") == 0 ? 1 : strcmp(v, "bottom") == 0 ? 2 : 0;
                 } else if (strcmp(t, "shd") == 0 && mu_attr(&m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0) {
                     w->cell_bg = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+                } else if (strcmp(t, "tcBorders") == 0) {
+                    w->in_cb = m.type == MT_OPEN;
+                } else if (w->in_cb) {
+                    edge_elem(&m, t, &w->cell_edges);
                 }
             }
 
@@ -3792,10 +4258,20 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             w->in_trpr = 0;
         } else if (strcmp(t, "tcPr") == 0) {
             w->in_tcpr = 0;
+            w->in_cb = 0;
+        } else if (strcmp(t, "tcBorders") == 0) {
+            w->in_cb = 0;
+        } else if (strcmp(t, "tblCellMar") == 0) {
+            w->in_mar = 0;
         } else if (strcmp(t, "tc") == 0) {
             dw_begin_cell(w);
             bld_end_para(X->b);
             bld_cell_end(X->b);
+
+            if (w->ntab >= 1 && w->ntab <= 8) {
+                w->tabs[w->ntab - 1].col += w->tabs[w->ntab - 1].cspan > 0 ? w->tabs[w->ntab - 1].cspan : 1;
+                w->tabs[w->ntab - 1].cell.given = 0;
+            }
         } else if (strcmp(t, "tr") == 0) {
             if (w->pend_row) {
                 bld_row_begin(X->b, w->row_header);
@@ -3803,6 +4279,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             }
         } else if (strcmp(t, "tbl") == 0) {
             bld_table_end(X->b);
+            w->ntab -= w->ntab > 0;
         }
     }
 
@@ -3845,6 +4322,7 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
     if ((xml = (char*)zip_read(&X.z, "word/styles.xml", &len)) != NULL) {
         read_styles(&X, xml, len);
+        read_table_styles(&X, xml, len);
         free(xml);
     }
 
@@ -3888,6 +4366,7 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
         free(X.z.e);
         free(X.rels);
         free(X.styles);
+        free(X.tstyles);
         free(X.notes_xml);
         free(X.notes);
         free(X.en_xml);
@@ -3943,6 +4422,7 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     free(X.z.e);
     free(X.rels);
     free(X.styles);
+    free(X.tstyles);
     free(X.notes_xml);
     free(X.notes);
     free(X.en_xml);
