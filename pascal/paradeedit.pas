@@ -37,6 +37,16 @@ type
   end;
   PGlyphBmp = ^TGlyphBmp;
 
+  { an undo or redo done elsewhere (a collaboration binding's own-edits undo); True when it did one }
+  TParadeUndoEvent = function(Sender: TObject; Redo: Boolean): Boolean of object;
+
+  { someone else's caret and selection in a shared document }
+  TParadeRemoteCaret = record
+    Pos, Anchor: pd_pos;
+    Color: UInt32;              { $RRGGBB }
+    Name: string;
+  end;
+
   { a margin balloon as last drawn: where a click on it selects the text it is about }
   TBalloonHit = record
     R: TRect;
@@ -81,6 +91,11 @@ type
     FTrack: Boolean;
     FHasMarkup: Boolean;           { some page has changes or comments: the balloon column shows }
     FBalloons: array of TBalloonHit;
+    FOnUndo: TParadeUndoEvent;
+    FOnReplacing: TNotifyEvent;
+    FReadOnly: Boolean;
+    FRemote: array of TParadeRemoteCaret;
+    FRemoteRev: Integer;
     function GetPageCount: Integer;
     function MarkupWidth: Integer;
     function HiddenAt(const P: pd_pos): Boolean;
@@ -204,6 +219,11 @@ type
     function ReplyToComment(Id: pd_comment_id; const AText: string): pd_comment_id;
     function CommentAt(const P: pd_pos): pd_comment_id;   { the innermost comment over a position, 0 if none }
     procedure DeleteComment(Id: pd_comment_id);
+    { the document was changed from outside (a collaborator's edit): laid out and drawn again, the
+      view left where it is }
+    procedure ExternalChange;
+    { the others' carets and selections, drawn in their colours with their names }
+    procedure SetRemoteCarets(const Carets: array of TParadeRemoteCaret);
     procedure ResolveComment(Id: pd_comment_id; Resolved: Boolean = True);
 
     property Doc: Ppd_doc read FDoc;
@@ -218,6 +238,12 @@ type
     property Author: string read FAuthor write SetAuthor;
     { PD_MARKUP_*: balloons, inline, final or original }
     property MarkupMode: Integer read GetMarkupMode write SetMarkupMode;
+    { Undo/Redo go here when set (a shared document undoes one's own edits only) }
+    property OnUndo: TParadeUndoEvent read FOnUndo write FOnUndo;
+    { the document is about to be replaced (new, loaded): whatever holds it lets go }
+    property OnReplacing: TNotifyEvent read FOnReplacing write FOnReplacing;
+    { shown, selected and copied, not changed (a viewer of a shared document) }
+    property ReadOnly: Boolean read FReadOnly write FReadOnly;
   published
     property Align;
     property Anchors;
@@ -870,6 +896,8 @@ procedure TParadeEdit.NewDocument;
 var
   D: Ppd_doc;
 begin
+  if Assigned(FOnReplacing) then
+    FOnReplacing(Self);
   ParadeCheck(pd_doc_new(D), 'new document');
   if FLayout <> nil then
     pd_layout_free(FLayout);
@@ -921,6 +949,8 @@ begin
   finally
     Ms.Free;
   end;
+  if Assigned(FOnReplacing) then
+    FOnReplacing(Self);
   if FLayout <> nil then
     pd_layout_free(FLayout);
   if FDoc <> nil then
@@ -1651,6 +1681,8 @@ var
   Grouped: Boolean;
   Fmt: pd_format_id;
 begin
+  if FReadOnly then
+    Exit;
   if S = '' then
     Exit;
   Grouped := HasSelection or (Pos(#10, S) > 0);
@@ -1716,6 +1748,8 @@ procedure TParadeEdit.ToggleCharProp(Mask: UInt32);
 var
   Cur, Props: pd_char_props;
 begin
+  if FReadOnly then
+    Exit;
   if not HasSelection then
     Exit;
   Cur := PropsAt(SelStart);   { the new state is the opposite of the selection start's }
@@ -1754,6 +1788,8 @@ var
   B: pd_block_id;
   Level: Integer;
 begin
+  if FReadOnly then
+    Exit;
   St := pd_doc_style_find(FDoc, PAnsiChar(StyleName));
   if St = 0 then
     Exit;
@@ -1779,6 +1815,17 @@ end;
 
 procedure TParadeEdit.Undo;
 begin
+  if FReadOnly then
+    Exit;
+  if Assigned(FOnUndo) then
+  begin
+    if FOnUndo(Self, False) then
+    begin
+      pd_doc_marker_set(FDoc, FAnchor, CaretPos);
+      Changed;
+    end;
+    Exit;
+  end;
   if pd_doc_undo(FDoc) = PD_OK then
   begin
     pd_doc_marker_set(FDoc, FAnchor, CaretPos);
@@ -1788,6 +1835,17 @@ end;
 
 procedure TParadeEdit.Redo;
 begin
+  if FReadOnly then
+    Exit;
+  if Assigned(FOnUndo) then
+  begin
+    if FOnUndo(Self, True) then
+    begin
+      pd_doc_marker_set(FDoc, FAnchor, CaretPos);
+      Changed;
+    end;
+    Exit;
+  end;
   if pd_doc_redo(FDoc) = PD_OK then
   begin
     pd_doc_marker_set(FDoc, FAnchor, CaretPos);
@@ -1888,6 +1946,8 @@ end;
 
 procedure TParadeEdit.CutToClipboard;
 begin
+  if FReadOnly then
+    Exit;
   if HasSelection then
   begin
     CopyToClipboard;
@@ -1900,6 +1960,8 @@ procedure TParadeEdit.PasteData(Data: Pointer; Len: Integer; Format: Int32);
 var
   After: pd_pos;
 begin
+  if FReadOnly then
+    Exit;
   if Len <= 0 then
     Exit;
   pd_doc_begin_group(FDoc, 'Paste');
@@ -1967,6 +2029,7 @@ begin
     VK_PRIOR: begin FScrollY := FScrollY - ClientHeight; if FScrollY < 0 then FScrollY := 0; UpdateScrollBar; Invalidate; end;
     VK_NEXT: begin FScrollY := FScrollY + ClientHeight; UpdateScrollBar; Invalidate; end;
     VK_RETURN:
+      if not FReadOnly then
       begin
         pd_doc_begin_group(FDoc, 'New paragraph');
         DeleteSelection;
@@ -1980,6 +2043,7 @@ begin
         Changed;
       end;
     VK_BACK, VK_DELETE:
+      if not FReadOnly then
       begin
         if not DeleteSelection then
         begin
@@ -2267,6 +2331,13 @@ begin
         Highlight(Cm.range.start, Cm.range.finish, pd_doc_author_color(FDoc, Cm.author) and $FFFFFF, 40, False);
   if HasSelection then
     Highlight(SelStart, SelEnd, $003390FF, 80, True);
+  for CI := 0 to High(FRemote) do   { the others' selections, faintly in their colours }
+    with FRemote[CI] do
+      if (Pos.block <> Anchor.block) or (Pos.offset <> Anchor.offset) then
+        if Compare(Anchor, Pos) < 0 then
+          Highlight(Anchor, Pos, Color, 50, False)
+        else
+          Highlight(Pos, Anchor, Color, 50, False);
 
   for I := 0 to N - 1 do
     with Items[I] do
@@ -2334,6 +2405,24 @@ begin
           end;
       end;
 
+  { the others' carets, each with its name above it }
+  for CI := 0 to High(FRemote) do
+    with FRemote[CI] do
+      if (pd_layout_caret(FLayout, Pos, CPage, CX, CBase, CAsc, CDesc) = PD_OK) and (CPage = Page) then
+      begin
+        IX := OX + Round(CX * PxScale);
+        IY := OY + Round((CBase - CAsc) * PxScale);
+        FillRectImg(Img, IX, IY, IX + 2, OY + Round((CBase + CDesc) * PxScale), Color, 255);
+        if Name <> '' then
+        begin
+          K := BalloonHeight([Name, ''], Round(140 * FZoom), PxScale, nil, 0, 0, $00FFFFFF);
+          K := K * 7 div 10;    { the label: smaller than a balloon's padding would make it }
+          FillRectImg(Img, IX, IY - K, IX + Round((8 + 7 * Length(Name)) * FZoom), IY, Color, 255);
+          BalloonHeight([Name, ''], Round(140 * FZoom), PxScale, Img, IX - Round(3 * FZoom), IY - K - Round(3 * FZoom),
+            $00FFFFFF);
+        end;
+      end;
+
   if DrawCaret and (pd_layout_caret(FLayout, CaretPos, CPage, CX, CBase, CAsc, CDesc) = PD_OK) and (CPage = Page) then
     FillRectImg(Img, OX + Round(CX * PxScale), OY + Round((CBase - CAsc) * PxScale), OX + Round(CX * PxScale) + 2,
       OY + Round((CBase + CDesc) * PxScale), $00000000, 255);
@@ -2362,8 +2451,8 @@ function TParadeEdit.BackSignature: string;
 var
   A, B: pd_pos;
 begin
-  Result := Format('%d %d %g %d %d %p %d', [ClientWidth, ClientHeight, FZoom, FScrollY, FLayoutEpoch, Pointer(FDoc),
-    Int64(pd_doc_revision(FDoc))]);
+  Result := Format('%d %d %g %d %d %p %d %d', [ClientWidth, ClientHeight, FZoom, FScrollY, FLayoutEpoch, Pointer(FDoc),
+    Int64(pd_doc_revision(FDoc)), FRemoteRev]);
   if HasSelection then
   begin
     A := SelStart;
@@ -2504,6 +2593,28 @@ begin
 end;
 
 
+{ ---------------- collaboration hooks ---------------- }
+
+procedure TParadeEdit.ExternalChange;
+begin
+  FHasDesiredX := False;
+  Relayout;
+  FModified := True;
+  if Assigned(FOnChange) then
+    FOnChange(Self);
+end;
+
+procedure TParadeEdit.SetRemoteCarets(const Carets: array of TParadeRemoteCaret);
+var
+  I: Integer;
+begin
+  SetLength(FRemote, Length(Carets));
+  for I := 0 to High(Carets) do
+    FRemote[I] := Carets[I];
+  Inc(FRemoteRev);
+  Invalidate;
+end;
+
 { ---------------- review: tracked changes and comments ---------------- }
 
 function TParadeEdit.RevisionAt(const P: pd_pos; out Rev: pd_revision): Boolean;
@@ -2607,6 +2718,8 @@ procedure TParadeEdit.ResolveChange(Accept: Boolean);
 var
   R: pd_range;
 begin
+  if FReadOnly then
+    Exit;
   if HasSelection then
     R := PdRange(SelStart, SelEnd)
   else if not ChangeAt(CaretPos, R) then
@@ -2633,12 +2746,16 @@ end;
 
 procedure TParadeEdit.AcceptAllChanges;
 begin
+  if FReadOnly then
+    Exit;
   if pd_doc_revision_resolve(FDoc, PdRange(PdPos(FirstPara, 0), LastPos), 1) = PD_OK then
     Changed;
 end;
 
 procedure TParadeEdit.RejectAllChanges;
 begin
+  if FReadOnly then
+    Exit;
   if pd_doc_revision_resolve(FDoc, PdRange(PdPos(FirstPara, 0), LastPos), 0) = PD_OK then
     Changed;
 end;
@@ -2680,6 +2797,8 @@ var
   S: string;
   A, B: UInt32;
 begin
+  if FReadOnly then
+    Exit(0);
   Result := 0;
   FillChar(C, SizeOf(C), 0);
   if HasSelection then
@@ -2709,6 +2828,8 @@ function TParadeEdit.ReplyToComment(Id: pd_comment_id; const AText: string): pd_
 var
   C: pd_comment;
 begin
+  if FReadOnly then
+    Exit(0);
   Result := 0;
   FillChar(C, SizeOf(C), 0);
   StrPLCopy(C.author, FAuthor, 63);
@@ -2741,6 +2862,8 @@ end;
 
 procedure TParadeEdit.DeleteComment(Id: pd_comment_id);
 begin
+  if FReadOnly then
+    Exit;
   if pd_doc_comment_remove(FDoc, Id) = PD_OK then
     Changed;
 end;
@@ -2749,6 +2872,8 @@ procedure TParadeEdit.ResolveComment(Id: pd_comment_id; Resolved: Boolean);
 var
   C: pd_comment;
 begin
+  if FReadOnly then
+    Exit;
   if pd_doc_comment_get(FDoc, Id, C) <> PD_OK then
     Exit;
   C.resolved := Ord(Resolved);

@@ -2020,20 +2020,21 @@ static void comments_share(pd_sync* s, YTransaction* t);
 static int comments_anchor(pd_sync* s, YTransaction* t, int fix);
 static void comments_pull(pd_sync* s, const YTransaction* t);
 
-static void share(pd_sync* s) {
+/* origin "local": an edit of this replica's, to undo; "fix": a repair, not one */
+static void share_as(pd_sync* s, const char* origin) {
     YTransaction* t;
     int guard = 0, typing = s->d->typing_open;
 
     /* an undo step per operation, typing on in one place gathered into one as Parade does */
-    if (s->um && !(s->prev_typing && typing)) {
+    if (s->um && !(s->prev_typing && typing) && !strcmp(origin, "local")) {
         yundo_manager_stop(s->um);
     }
 
     s->prev_typing = typing;
-    t = ydoc_write_transaction(s->y, 5, "local");
+    t = ydoc_write_transaction(s->y, (uint32_t)strlen(origin), origin);
 
-    if (s->d->comment_rev != s->comment_rev_seen) {    /* a comment on a paragraph not shared yet (a
-                                                          placeholder): the paragraph is shared first */
+    if (s->d->comment_rev != s->comment_rev_seen || s->d->ncomments) {  /* a comment on a paragraph not
+                                                          shared yet (a placeholder): the paragraph is shared first */
         int32_t ci;
 
         for (ci = 1; ci <= s->d->ncomments; ci++) {
@@ -2105,6 +2106,10 @@ static void share(pd_sync* s) {
 
     ytransaction_commit(t);
     shadows_check(s, "share");
+}
+
+static void share(pd_sync* s) {
+    share_as(s, "local");
 }
 
 static void on_doc_change(void* user) {
@@ -2492,7 +2497,14 @@ static void reconcile(pd_sync* s) {
         pd_block_id id = id_of(s, k);
         blk* b = id ? pd_doc_blk(d, id) : NULL;
 
-        if (b) {
+        if (b && !block_map(s, t, k) && b->parent && key_of(s, b->parent)) {
+            /* gone from the shared state (its maker undid making it) though listed still somewhere:
+               shown nowhere, so its parent is made what its list says without it */
+            char pk[KEYLEN];    /* copied: the key table may move meanwhile */
+
+            snprintf(pk, sizeof(pk), "%s", key_of(s, b->parent));
+            reconcile_kids(s, t, b->parent, pk, 0);
+        } else if (b) {
             reconcile_props(s, t, id, k);
 
             if (b->kind == PD_BLOCK_PARAGRAPH) {
@@ -2521,6 +2533,22 @@ static void reconcile(pd_sync* s) {
 
     if (d->nundo && !d->group_depth) {
         pd_doc_clear_undo(d);
+    }
+
+    if (fix && d->ncomments) {  /* a comment the update left on a placeholder: the paragraph shared and the
+                                   comment anchored there, by share_as */
+        int32_t ci, need = 0;
+
+        for (ci = 1; ci <= d->ncomments && !need; ci++) {
+            pd_comment c;
+
+            need = pd_doc_comment_get(d, (pd_comment_id)ci, &c) == PD_OK && !c.parent &&
+                   (!key_of(s, c.range.start.block) || !key_of(s, c.range.end.block));
+        }
+
+        if (need) {
+            share_as(s, "fix");
+        }
     }
 
     if (fix || s->ndp) {    /* comments left without a paragraph, properties lost: put right, and told

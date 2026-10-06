@@ -138,6 +138,16 @@ pascal-edit: $(BUILD)/pascal/lib/libparade.a $(BUILD)/pd_dump
 	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./$(BUILD)/pascal/edit_test $(BUILD)/sample.pdoc $(REVIEW_DOC) \
 	    < /dev/null); rc=$$?; kill `cat $(BUILD)/pascal/xvfb.pid`; exit $$rc
 
+# two editors sharing a document through tools/parade_relay.py, headless under Xvfb (SYNC=yrs build in
+# build-sync/, the relay needs python3 with aiohttp and PyJWT)
+pascal-sync:
+	$(MAKE) SYNC=yrs BUILD=build-sync build-sync/pascal/lib/libparade.a
+	cp $(YRS_DIR)/target/release/libyrs.a build-sync/pascal/lib/
+	$(LAZBUILD) pascal/tests/sync_test.lpi
+	Xvfb $(XVFB_DISPLAY) -screen 0 1400x1000x24 >/dev/null 2>&1 & echo $$! > build-sync/pascal/xvfb.pid; sleep 2; \
+	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./build-sync/pascal/sync_test tools/parade_relay.py \
+	    < /dev/null); rc=$$?; kill `cat build-sync/pascal/xvfb.pid`; exit $$rc
+
 pascal-demo: $(BUILD)/pascal/lib/libparade.a
 	$(LAZBUILD) pascal/demo/paradedemo.lpi
 

@@ -165,21 +165,53 @@ a `pd_sync`: local edits become updates for the others (`pd_sync_set_sender`),
 updates received are merged and the document is edited to match
 (`pd_sync_receive`), through the ordinary operations, so carets and layout
 follow. A replica that was away sends `pd_sync_state_vector` and applies the
-`pd_sync_diff` it gets back. Shared: the block tree, text with each character
-property merged on its own, inline objects and their pictures, paragraph and
-block properties, styles, lists, tracked changes. Not yet: comments,
-metadata, per-user undo. Updates must reach each replica in an order that
-keeps every update after the ones it depends on -- what a server or relay
-forwarding them as received gives (yrs 0.28 loses an update that arrives
-before one it depends on).
+`pd_sync_diff` it gets back.
+
+Shared: the block tree, text with each character property merged on its
+own, inline objects and their pictures, paragraph and block properties,
+styles, lists, tracked changes, and comments with replies (a comment's
+range is the characters carrying its mark, so it moves with them).
+`pd_sync_undo`/`pd_sync_redo` undo this replica's own edits only; with a
+`pd_sync` the document's own undo history is not used. Not yet shared:
+metadata.
+
+Updates must reach each replica in an order that keeps every update after
+the ones it depends on -- what a relay forwarding them in the order received
+gives (yrs 0.28 loses an update that arrives before one it depends on).
 
     # yrs 0.28.0 with Rust >= 1.91 (Ubuntu: apt install rustc-1.91 cargo-1.91)
     git clone --depth 1 --branch v0.28.0 https://github.com/y-crdt/y-crdt build/yrs/src
     (cd build/yrs/src && git apply ../../../tools/yrs-rust-1.91.patch && cargo build --release --locked -p yffi)
     make SYNC=yrs BUILD=build-sync test     # adds pd_sync and test_sync
+    python3 tools/test_relay.py             # the relay (aiohttp, PyJWT)
+    make pascal-sync                        # two editors sharing a document through it
 
-`tools/yrs-rust-1.91.patch` rewrites
-the one `if let` guard yrs uses, which Rust 1.91 does not have yet.
+`tools/yrs-rust-1.91.patch` rewrites the one `if let` guard yrs uses, which
+Rust 1.91 does not have yet.
+
+**The relay** (`tools/parade_relay.py`) is what editors share a document
+through: one append-only log per document, numbered as updates come in and
+read in that order by everyone, over HTTP (catch-up is "everything after
+the last number I have", live updates a long poll on the same request),
+plus presence for carets. Tokens are HS256 JWTs with a user, a document and
+a role (viewer, commenter, editor); a viewer cannot write (a commenter is
+let write like an editor: updates are opaque to the relay).
+
+    python3 tools/parade_relay.py secret > relay.secret
+    python3 tools/parade_relay.py serve --db relay.sqlite --secret-file relay.secret --host 0.0.0.0
+    python3 tools/parade_relay.py token --secret-file relay.secret --user ann --doc proposal --role editor
+
+The log is SQLite by default, Postgres with `--db postgresql://...`
+(asyncpg). It is not compacted yet: a long-lived document's log keeps every
+update, and a new editor reads it all once.
+
+**The editor side** (`pascal/paradesync.pas`, `TParadeSync`): an outbox one
+thread sends in order and retries until the relay takes it (nothing typed
+offline is lost while the program runs), another thread long-polls the log,
+the main thread merges; the others' carets and selections are drawn in their
+colours with their names; Ctrl+Z undoes one's own edits; a viewer's editor
+is read-only. led has Share/Join and a status in the visual editor's
+toolbar when Parade's yrs library is built.
 
 ## Lazarus / Free Pascal (`pascal/`)
 
