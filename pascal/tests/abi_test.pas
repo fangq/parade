@@ -323,6 +323,11 @@ begin
   WriteLn('pd_draw.region ', PtrUInt(@v_pd_draw.region) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.text ', PtrUInt(@v_pd_draw.text) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.scale ', PtrUInt(@v_pd_draw.scale) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.points ', PtrUInt(@v_pd_draw.points) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.npoints ', PtrUInt(@v_pd_draw.npoints) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.path_flags ', PtrUInt(@v_pd_draw.path_flags) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.line_width ', PtrUInt(@v_pd_draw.line_width) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.fill ', PtrUInt(@v_pd_draw.fill) - PtrUInt(@v_pd_draw));
   WriteLn('pd_pdf_options ', SizeOf(pd_pdf_options));
   WriteLn('pd_pdf_options.compress ', PtrUInt(@v_pd_pdf_options.compress) - PtrUInt(@v_pd_pdf_options));
   WriteLn('pd_pdf_options.outlines ', PtrUInt(@v_pd_pdf_options.outlines) - PtrUInt(@v_pd_pdf_options));

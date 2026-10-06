@@ -30,6 +30,7 @@
  *    the display list is generated.
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -108,6 +109,7 @@ typedef struct {
     prule* rules;
     int32_t nrules, caprules;
     int32_t lnum_first;         /* line numbering: lines counted before this page's first, in its scope */
+    pd_sp* pts;                 /* the points of the paths last listed for the page */
 } ppage;
 
 typedef struct {
@@ -2455,6 +2457,7 @@ static void drop_pages_after(pd_layout* L, int32_t page) {
         free(p->lines);
         free(p->rules);
         free(p->owned);
+        free(p->pts);
     }
 }
 
@@ -2687,6 +2690,7 @@ static void clear_pages(pd_layout* L) {
     for (i = 0; i < L->npages; i++) {
         free(L->pages[i].lines);
         free(L->pages[i].rules);
+        free(L->pages[i].pts);
 
         for (k = 0; k < L->pages[i].nowned; k++) {
             pcache_free(L->pages[i].owned[k]);
@@ -3140,6 +3144,8 @@ typedef struct {
     pd_draw* d;
     int32_t n, cap;
     int err;
+    pd_sp* pts;                 /* the paths' points: items hold an index here until the list is handed out */
+    int32_t npts, cappts;
 } dlist_t;
 
 static void emit(dlist_t* D, const pd_draw* x) {
@@ -3149,6 +3155,59 @@ static void emit(dlist_t* D, const pd_draw* x) {
     }
 
     D->d[D->n++] = *x;
+}
+
+/* a path through n points (x, y pairs): filled, stroked or both */
+static void emit_path(dlist_t* D, const pd_sp* xy, int32_t n, int closed, uint32_t fill, uint32_t line, pd_sp lw,
+                      pd_block_id block, int32_t region) {
+    pd_draw a;
+    pd_sp x0, y0, x1, y1;
+    int32_t i;
+
+    if (n < 2 || (!fill && (!line || lw <= 0)) ||
+            grow((void**)&D->pts, &D->cappts, (int64_t)D->npts + 2 * n, sizeof(pd_sp))) {
+        return;
+    }
+
+    memset(&a, 0, sizeof(a));
+    x0 = y0 = INT32_MAX;
+    x1 = y1 = INT32_MIN;
+
+    for (i = 0; i < n; i++) {
+        pd_sp px = xy[2 * i], py = xy[2 * i + 1];
+
+        D->pts[D->npts + 2 * i] = px;
+        D->pts[D->npts + 2 * i + 1] = py;
+
+        if (px == PD_PATH_BREAK) {
+            continue;
+        }
+
+        x0 = px < x0 ? px : x0;
+        x1 = px > x1 ? px : x1;
+        y0 = py < y0 ? py : y0;
+        y1 = py > y1 ? py : y1;
+    }
+
+    if (x1 < x0) {
+        return;
+    }
+
+    a.kind = PD_DRAW_PATH;
+    a.x = x0;
+    a.y = y0;
+    a.w = x1 - x0;
+    a.h = y1 - y0;
+    a.points = (const pd_sp*)(intptr_t)D->npts;    /* an index for now */
+    a.npoints = n;
+    a.path_flags = closed ? PD_PATH_CLOSED : 0;
+    a.fill = fill;
+    a.color = line;
+    a.line_width = line ? lw : 0;
+    a.block = block;
+    a.region = region;
+    D->npts += 2 * n;
+    emit(D, &a);
 }
 
 /* shape a short text (label, field value) in a style and emit it at a pen position */
@@ -3670,10 +3729,80 @@ static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_s
     free(M.d);
 }
 
+/* a single line of text of a drawing at its baseline point: left, centred or right (ha 0, 1, 2) of it */
+static void emit_label(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp x, pd_sp y, double sc,
+                       pd_block_id block, uint32_t off, int32_t region) {
+    const pj_node* tn = pj_get(it, "label"), *fn = pj_get(it, "f");
+    pd_char_props c;
+    pd_style st;
+    pd_params prm;
+    pd_glyph g[256];
+    pd_line ln;
+    int32_t n = 0, i, ha = (int32_t)pj_int_or(pj_get(it, "ha"), 0);
+
+    if (!tn || tn->type != PJ_STR || tn->len == 0) {
+        return;
+    }
+
+    memset(&c, 0, sizeof(c));
+    c.size = (pd_sp)(jsp(it, "sz") * sc);
+    c.size = c.size > PD_SP_PER_PT / 4 ? c.size : PD_SP_PER_PT / 4;
+    c.weight = (int32_t)pj_int_or(pj_get(it, "w"), 400);
+    c.italic = (int32_t)pj_int_or(pj_get(it, "i"), 0);
+    c.color = (uint32_t)pj_int_or(pj_get(it, "c"), 0xFF000000LL);
+
+    if (fn && fn->type == PJ_STR) {
+        snprintf(c.family, sizeof(c.family), "%.*s", (int)(fn->len < 63 ? fn->len : 63), fn->s);
+    }
+
+    pd_para_clear(L->scratch);
+    pd_para_set_shape(L->scratch, 0, NULL, NULL);
+
+    if (pd_doc_cp_style(L->doc, &c, &st) != PD_OK || pd_para_add_text(L->scratch, tn->s, tn->len, &st) != PD_OK) {
+        return;
+    }
+
+    pd_params_init(&prm);
+    prm.width = PD_PT(30000);
+    prm.align = PD_ALIGN_LEFT;
+    prm.mode = PD_BREAK_GREEDY;
+
+    if (pd_para_break(L->scratch, &prm, NULL) != PD_OK || pd_para_get_line(L->scratch, 0, &ln) != PD_OK) {
+        return;
+    }
+
+    pd_para_get_glyphs(L->scratch, 0, g, 256, &n);
+    x -= ha == 1 ? ln.width / 2 : ha == 2 ? ln.width : 0;
+
+    for (i = 0; i < n && i < 256; i++) {
+        pd_draw a;
+
+        if (g[i].kind != PD_GLYPH) {
+            continue;
+        }
+
+        memset(&a, 0, sizeof(a));
+        a.kind = PD_DRAW_GLYPH;
+        a.scale = 65536;
+        a.x = x + g[i].x - ln.x;
+        a.y = y;
+        a.w = g[i].advance;
+        a.glyph = g[i].glyph;
+        a.text = cp_at(tn->s, tn->len, g[i].cluster);
+        a.font = st.font;
+        a.size = st.size;
+        a.color = st.color;
+        a.block = block;
+        a.offset = off;
+        a.region = region;
+        emit(D, &a);
+    }
+}
+
 /* A drawing resource in the box (x, y, w, h): its pictures, its shapes'
    fills and straight edges, its text boxes. Returns 0 if res is no drawing. */
-static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
-                        pd_block_id block, uint32_t off, int32_t region) {
+static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
+                           pd_block_id block, uint32_t off, int32_t region, int depth) {
     const char* mime = NULL;
     const void* data = NULL;
     size_t len = 0;
@@ -3700,10 +3829,15 @@ static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, 
 
         if (pj_get(it, "img")) {
             pd_draw a;
+            pd_res_id cr = (pd_res_id)pj_int_or(pj_get(it, "img"), 0);
+
+            if (cr != res && depth < 4 && emit_drawing_at(L, D, cr, ix, iy, iw, ih, block, off, region, depth + 1)) {
+                continue;   /* a drawing of its own (a metafile in a canvas) */
+            }
 
             memset(&a, 0, sizeof(a));
             a.kind = PD_DRAW_IMAGE;
-            a.resource = (pd_res_id)pj_int_or(pj_get(it, "img"), 0);
+            a.resource = cr;
             a.x = ix;
             a.y = iy;
             a.w = iw;
@@ -3727,7 +3861,19 @@ static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, 
                 } else if (line && iw <= lw) {
                     emit_rect(D, ix - lw / 2, iy, lw, ih, line, block, region);
                 }
-            } else if (!ell) {  /* a box: its fill, then its edges */
+            } else if (ell) {   /* an ellipse: a polygon of 64 sides */
+                pd_sp xy[128];
+                int k;
+
+                for (k = 0; k < 64; k++) {
+                    double t = k * 6.283185307179586 / 64;
+
+                    xy[2 * k] = ix + (pd_sp)(iw / 2.0 * (1 + cos(t)));
+                    xy[2 * k + 1] = iy + (pd_sp)(ih / 2.0 * (1 + sin(t)));
+                }
+
+                emit_path(D, xy, 64, 1, fill, line, lw, block, region);
+            } else {            /* a box: its fill, then its edges */
                 if (fill) {
                     emit_rect(D, ix, iy, iw, ih, fill, block, region);
                 }
@@ -3741,11 +3887,36 @@ static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, 
             }
         } else if (pj_get(it, "text")) {
             emit_textbox(L, D, it, ix, iy, iw, ih, sx, block, off, region);
+        } else if (pj_get(it, "label")) {
+            emit_label(L, D, it, ix, iy, sy, block, off, region);
+        } else if (pj_get(it, "path")) {    /* points in the drawing's coordinates */
+            const pj_node* pts = pj_get(it, "path"), *q;
+            int32_t n = pts->n / 2, k = 0;
+            pd_sp* xy = n >= 2 ? (pd_sp*)malloc((size_t)n * 2 * sizeof(pd_sp)) : NULL;
+            pd_sp lw = (pd_sp)(jsp(it, "lw") * sx);
+
+            for (q = pts->child; xy && q && k < 2 * n; q = q->next, k++) {
+                int64_t v = pj_int_or(q, 0);
+
+                xy[k] = v == PD_PATH_BREAK ? PD_PATH_BREAK : (k & 1) ? y + (pd_sp)(v * sy) : x + (pd_sp)(v * sx);
+            }
+
+            if (xy) {
+                emit_path(D, xy, n, (int)pj_int_or(pj_get(it, "closed"), 0), (uint32_t)pj_int_or(pj_get(it, "fill"), 0),
+                          (uint32_t)pj_int_or(pj_get(it, "line"), 0), lw > PD_SP_PER_PT / 8 ? lw : PD_SP_PER_PT / 8, block,
+                          region);
+                free(xy);
+            }
         }
     }
 
     pj_free(doc);
     return 1;
+}
+
+static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
+                        pd_block_id block, uint32_t off, int32_t region) {
+    return emit_drawing_at(L, D, res, x, y, w, h, block, off, region, 0);
 }
 
 /* Paragraph shading and borders, under the text: one box round the lines of
@@ -4173,7 +4344,21 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
 
     if (D.err) {
         free(D.d);
+        free(D.pts);
         return PD_ERR_NOMEM;
+    }
+
+    {   /* the paths' points: kept with the page until it is listed again */
+        ppage* pg = (ppage*)&L->pages[page];
+
+        free(pg->pts);
+        pg->pts = D.pts;
+
+        for (i = 0; i < D.n; i++) {
+            if (D.d[i].kind == PD_DRAW_PATH) {
+                D.d[i].points = D.pts + (intptr_t)D.d[i].points;
+            }
+        }
     }
 
     *count = D.n;

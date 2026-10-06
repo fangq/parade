@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "parade_convert.h"
+#include "../src/pd_conv.h"
 
 static int failures = 0, checks = 0;
 
@@ -2104,6 +2105,181 @@ static void test_docx_drawings(void) {
     pd_doc_free(d);
 }
 
+static void le32(buf_t* b, uint32_t v) {
+    le(b, v, 4);
+}
+
+/* an EMF record: type, size, then the words */
+static void emr(buf_t* b, uint32_t type, const uint32_t* w, int n) {
+    int i;
+
+    le32(b, type);
+    le32(b, 8 + 4 * (uint32_t)n);
+
+    for (i = 0; i < n; i++) {
+        le32(b, w[i]);
+    }
+}
+
+/* A small EMF made here: a red-filled rectangle, a polygon with a hole
+   drawn as a path, a line of text, a mask-and-picture pair of bitmaps
+   (only the picture shows) and a white "nothing" blit that must not cover
+   it all. Played into a drawing; the DOCX keeps the metafile itself. */
+static void test_emf(void) {
+    buf_t e = { NULL, 0 };
+    uint32_t hdr[20];
+    pd_doc* d;
+    pd_res_id r, src;
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t len = 0;
+    char* js;
+    int k;
+
+    memset(hdr, 0, sizeof(hdr));
+    hdr[0] = 0; hdr[1] = 0; hdr[2] = 99; hdr[3] = 99;         /* bounds, device */
+    hdr[4] = 0; hdr[5] = 0; hdr[6] = 2500; hdr[7] = 2500;     /* frame: 25 mm square, the 100 px of the device */
+    hdr[8] = 0x464D4520u;                                       /* " EMF" */
+    hdr[9] = 0x10000; hdr[10] = 0; hdr[11] = 0; hdr[12] = 4;   /* version, bytes (unchecked), records, handles */
+    hdr[13] = 0; hdr[14] = 0;
+    hdr[16] = 100; hdr[17] = 100;                               /* device: 100 x 100 px */
+    hdr[18] = 25; hdr[19] = 25;                                 /* that is 25 x 25 mm: 4 px per mm */
+    emr(&e, 1, hdr, 20);
+    {
+        uint32_t brush[4] = { 1, 0, 0x000000FF, 0 };            /* solid red (COLORREF 0x00BBGGRR) */
+        uint32_t sel[1] = { 1 }, nullpen[1] = { 0x80000008u };
+        uint32_t rectw[4] = { 10, 10, 50, 30 };
+
+        emr(&e, 39, brush, 4);
+        emr(&e, 37, sel, 1);
+        emr(&e, 37, nullpen, 1);
+        emr(&e, 43, rectw, 4);
+    }
+    {   /* a path: a square with a square hole, POLYPOLYGON inside BEGINPATH .. FILLPATH */
+        uint32_t pp[4 + 2 + 2 + 16] = { 0, 0, 0, 0, 2, 8, 4, 4, 60, 60, 90, 60, 90, 90, 60, 90, 70, 70, 80, 70, 80, 80, 70, 80 };
+
+        emr(&e, 59, NULL, 0);
+        emr(&e, 8, pp, 4 + 2 + 2 + 16);
+        emr(&e, 60, NULL, 0);
+        emr(&e, 62, hdr, 4);
+    }
+    {   /* text: "Hi" at (20, 80), baseline-aligned */
+        uint32_t al[1] = { 24 };
+        uint32_t t[19 + 1];
+
+        emr(&e, 22, al, 1);
+        memset(t, 0, sizeof(t));
+        t[7] = 20; t[8] = 80;           /* reference point */
+        t[9] = 2; t[10] = 8 + 76;       /* chars, offset of the string from the record's start */
+        t[19] = 'H' | ('i' << 16);
+        emr(&e, 84, t, 20);
+    }
+    {   /* a 2 x 1 picture: a 1-bit mask ORed (left out), then 24-bit pixels ANDed */
+        static const uint32_t bmi1[12] = { 40, 2, 1, 1 | (1 << 16), 0, 0, 0, 0, 2, 0, 0x000000, 0xFFFFFF };
+        static const uint32_t bmi24[10] = { 40, 2, 1, 1 | (24 << 16), 0, 0, 0, 0, 0, 0 };
+        uint32_t rec[18 + 12 + 2];
+        int pass;
+
+        for (pass = 0; pass < 2; pass++) {
+            memset(rec, 0, sizeof(rec));
+            rec[4] = 0; rec[5] = 40;        /* xDest, yDest */
+            rec[8] = 2; rec[9] = 1;         /* cxSrc, cySrc */
+            rec[10] = 80;                   /* offBmi: after the 8-byte record head and 18 words */
+            rec[11] = pass ? 40 : 48;
+            rec[12] = 80 + rec[11];         /* offBits */
+            rec[13] = pass ? 8 : 4;         /* a row of 2 pixels: 6 bytes, padded to 8; or 1 bit each, to 4 */
+            rec[15] = pass ? 0x008800C6u : 0x00EE0086u;
+            rec[16] = 20; rec[17] = 10;     /* cxDest, cyDest */
+            memcpy(rec + 18, pass ? bmi24 : bmi1, rec[11]);
+            rec[18 + rec[11] / 4] = pass ? 0x00FF0000u : 0;    /* blue, green pixels (BGR) */
+            emr(&e, 81, rec, 18 + (int)rec[11] / 4 + (pass ? 2 : 1));
+        }
+    }
+    {   /* BITBLT with no source and a raster operation that leaves the page alone */
+        uint32_t b[23];
+
+        memset(b, 0, sizeof(b));
+        b[6] = 100; b[7] = 100;
+        b[8] = 0x00AA0029u;
+        emr(&e, 76, b, 23);
+    }
+    emr(&e, 14, hdr, 3);
+
+    pd_doc_new(&d);
+    CHECK(pd_metafile_kind((const unsigned char*)e.p, e.n) == 1);
+    CHECK(pd_doc_add_resource(d, "image/x-emf", e.p, e.n, &src) == PD_OK);
+    r = pd_metafile_drawing(d, (const unsigned char*)e.p, e.n, src);
+    CHECK(r != 0 && pd_doc_resource(d, r, &mime, &data, &len) == PD_OK);
+    js = (char*)malloc(len + 1);
+    memcpy(js, data, len);
+    js[len] = '\0';
+
+    {   /* 25 mm square; the red rectangle from device pixel 10 to 50 across, 10 to 30 down, of 100 */
+        double W = 25 / 25.4 * 72 * 65536;
+        char want[160];
+
+        snprintf(want, sizeof(want), "\"w\":%d,\"h\":%d", (int)W, (int)W);
+        CHECK(strstr(js, want) != NULL);
+        snprintf(want, sizeof(want), "{\"path\":[%d,%d,%d,%d,%d,%d,%d,%d]", (int)(W * 0.1), (int)(W * 0.1), (int)(W * 0.5),
+                 (int)(W * 0.1), (int)(W * 0.5), (int)(W * 0.3), (int)(W * 0.1), (int)(W * 0.3));
+        CHECK(strstr(js, want) != NULL || !printf("  %s\n  %.300s\n", want, js));
+    }
+    CHECK(strstr(js, "\"fill\":4294901760") != NULL);
+    {   /* the path's two rings: a break between them */
+        char want[64];
+
+        snprintf(want, sizeof(want), "%d,%d", (int)INT32_MIN, (int)INT32_MIN);
+        CHECK(strstr(js, want) != NULL);
+    }
+    CHECK(strstr(js, "\"label\":\"Hi\"") != NULL);
+    for (k = 0; js[k] && strncmp(js + k, "{\"img\":", 7); k++) {
+    }
+    CHECK(js[k] != 0 && strstr(js + k + 1, "{\"img\":") == NULL);  /* one picture: the mask left out */
+    CHECK(strstr(js, "\"src\":") != NULL);
+    CHECK(strstr(js, "4294967295") == NULL);    /* no white sheet over it all */
+    free(js);
+    pd_doc_free(d);
+
+    {   /* in a DOCX: a drawing on the way in, the metafile itself on the way out */
+        FILE* f = fopen("build/test_emf.emf", "wb");
+        int pass;
+
+        if (f) {
+            fwrite(e.p, 1, e.n, f);
+            fclose(f);
+        }
+
+        d = docx_doc("word/_rels/document.xml.rels",
+                     "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.emf\"/>"
+                     "</Relationships>",
+                     "word/media/image1.emf", "build/test_emf.emf",
+                     "word/document.xml",
+                     "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body>"
+                     "<w:p>" DRAWING("inline", "") "</w:p></w:body></w:document>", NULL);
+
+        for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+            pd_inline o;
+            buf_t b = { NULL, 0 };
+
+            CHECK(d != NULL);
+
+            if (!d) {
+                break;
+            }
+
+            CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+            CHECK(pd_doc_resource(d, o.resource, &mime, &data, &len) == PD_OK &&
+                  strcmp(mime, "application/vnd.parade.drawing+json") == 0);
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK && b.n > 0);
+            free(b.p);
+        }
+
+        pd_doc_free(d);
+    }
+
+    free(e.p);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -2742,6 +2918,8 @@ int main(void) {
     test_docx_header_logo();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();
+    printf("EMF pictures\n");
+    test_emf();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

@@ -484,7 +484,8 @@ static int dx_media(dxo* x, pd_res_id res, const char** rid_name) {
     x->media[x->nmedia].res = res;
     snprintf(x->media[x->nmedia].mime, sizeof(x->media[0].mime), "%s", mime);
     snprintf(x->media[x->nmedia].name, sizeof(x->media[0].name), "image%d.%s", x->nmedia + 1,
-             strstr(mime, "png") ? "png" : strstr(mime, "gif") ? "gif" : "jpeg");
+             strstr(mime, "png") ? "png" : strstr(mime, "gif") ? "gif" : strstr(mime, "emf") ? "emf" :
+             strstr(mime, "wmf") ? "wmf" : "jpeg");
     pb_printf(&x->rels, "<Relationship Id=\"rIdm%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
               "relationships/image\" Target=\"media/%s\"/>", x->nmedia + 1, x->media[x->nmedia].name);
     *rid_name = x->media[x->nmedia].name;
@@ -509,7 +510,22 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     size_t len = 0;
     int group = pd_doc_resource(x->d, ob->resource, &mime, &data, &len) == PD_OK &&
                 strcmp(mime, "application/vnd.parade.drawing+json") == 0;
-    int m = group ? 0 : dx_media(x, ob->resource, &name);
+    pd_res_id pic = ob->resource;
+    int m;
+
+    if (group) {    /* a metafile played into a drawing: the metafile itself goes back */
+        pj_doc* jd = pj_parse(data, len, 0, NULL);
+        pd_res_id src = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
+
+        pj_free(jd);
+
+        if (src) {
+            group = 0;
+            pic = src;
+        }
+    }
+
+    m = group ? 0 : dx_media(x, pic, &name);
     pd_sp iw, ih;
     long long cx, cy;
     size_t mark;
@@ -625,7 +641,20 @@ static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx,
 
         if (pj_get(it, "img")) {
             const char* name;
-            int m = dx_media(x, (pd_res_id)jnum(it, "img"), &name);
+            pd_res_id cr = (pd_res_id)jnum(it, "img");
+            const char* cm = "";
+            const void* cd = NULL;
+            size_t cn = 0;
+            int m;
+
+            if (pd_doc_resource(x->d, cr, &cm, &cd, &cn) == PD_OK && strcmp(cm, PD_DRAWING_MIME) == 0) {
+                pj_doc* jd = pj_parse(cd, cn, 0, NULL);    /* a metafile in the group: the metafile itself */
+
+                cr = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
+                pj_free(jd);
+            }
+
+            m = cr ? dx_media(x, cr, &name) : -1;
 
             if (m >= 0) {
                 pb_printf(o, "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr>"
@@ -2099,6 +2128,8 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "<Default Extension=\"png\" ContentType=\"image/png\"/>"
             "<Default Extension=\"jpeg\" ContentType=\"image/jpeg\"/>"
             "<Default Extension=\"gif\" ContentType=\"image/gif\"/>"
+            "<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>"
+            "<Default Extension=\"wmf\" ContentType=\"image/x-wmf\"/>"
             "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "wordprocessingml.document.main+xml\"/>"
             "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
@@ -3360,6 +3391,7 @@ typedef struct {
     int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
     int posh_page, posh_has_off;    /* its offset is from the page's edge; it has one */
     pd_res_id drawing_res;      /* a group or canvas made into a drawing resource */
+    int in_vml;                 /* inside w:object or w:pict: a VML picture */
     const char* tbx;            /* a floating text box's content, in the part being read */
     size_t tbn;
     long long posh_off, dist;
@@ -4021,12 +4053,20 @@ static pd_res_id dw_resource(dxi* X, const char* rid) {
 
     if ((data = zip_read(&X->z, path, &len)) != NULL) {
         const char* ext = strrchr(path, '.');
-        const char* mime = ext && (strcmp(ext, ".png") == 0 || strcmp(ext, ".PNG") == 0) ? "image/png" :
+        int meta = pd_metafile_kind(data, len);
+        const char* mime = meta == 1 ? "image/x-emf" : meta == 2 ? "image/x-wmf" :
+                           ext && (strcmp(ext, ".png") == 0 || strcmp(ext, ".PNG") == 0) ? "image/png" :
                            ext && (strcmp(ext, ".gif") == 0) ? "image/gif" : ext && (strcmp(ext, ".jpg") == 0 ||
                                    strcmp(ext, ".jpeg") == 0 || strcmp(ext, ".JPG") == 0) ? "image/jpeg" : "application/octet-stream";
 
         if (pd_doc_add_resource(X->b->d, mime, data, len, &res) != PD_OK) {
             res = 0;
+        }
+
+        if (res && meta) {  /* a metafile: drawn from its records, the original kept for writing back */
+            pd_res_id dr = pd_metafile_drawing(X->b->d, data, len, res);
+
+            res = dr ? dr : res;
         }
 
         free(data);
@@ -4426,6 +4466,30 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     pb_free(&text);
 }
 
+/* a VML style's length (width:228.6pt;height:32.4pt) in EMU; 0 if absent */
+static long long vml_length(const char* style, const char* prop) {
+    const char* p = style;
+    size_t n = strlen(prop);
+
+    while ((p = strstr(p, prop)) != NULL) {
+        if ((p == style || p[-1] == ';' || p[-1] == ' ') && p[n] == ':') {
+            double v = atof(p + n + 1);
+            const char* u = p + n + 1;
+
+            while (*u && (isdigit((unsigned char)*u) || *u == '.' || *u == ' ' || *u == '-')) {
+                u++;
+            }
+
+            return (long long)(v * (!strncmp(u, "in", 2) ? 914400 : !strncmp(u, "cm", 2) ? 360000 : !strncmp(u, "mm", 2) ?
+                                    36000 : !strncmp(u, "px", 2) ? 9525 : 12700));
+        }
+
+        p += n;
+    }
+
+    return 0;
+}
+
 /* the drawing's picture -- or the drawing itself, a group or canvas made into one -- inline or floating */
 static void dw_image(dw* w) {
     dxi* X = w->X;
@@ -4646,7 +4710,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         if (open) {
             /* elements whose content is ignored */
             if (strcmp(t, "del") == 0 || strcmp(t, "txbxContent") == 0 || strcmp(t, "Fallback") == 0 ||
-                    strcmp(t, "pict") == 0 || strcmp(t, "object") == 0 || strcmp(t, "moveFrom") == 0 ||
+                    strcmp(t, "moveFrom") == 0 ||
                     (w->in_ppr && strcmp(t, "rPr") == 0) || strcmp(t, "rPrChange") == 0 ||
                     strcmp(t, "pPrChange") == 0) {
                 if (m.type == MT_OPEN) {
@@ -4803,6 +4867,16 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->tbx = NULL;
                 w->tbn = 0;
                 w->dist = 0;
+            } else if ((strcmp(t, "object") == 0 || strcmp(t, "pict") == 0) && m.type == MT_OPEN && !w->in_drawing) {
+                /* VML: an OLE object's preview picture (an equation, a chart), or an old-style picture */
+                w->in_vml = 1;
+                w->blip[0] = '\0';
+                w->cx = w->cy = 0;
+            } else if (w->in_vml && strcmp(t, "shape") == 0 && w->cx == 0 && mu_attr(&m, "style", v, sizeof(v))) {
+                w->cx = vml_length(v, "width");
+                w->cy = vml_length(v, "height");
+            } else if (w->in_vml && strcmp(t, "imagedata") == 0 && !w->blip[0]) {
+                mu_attr(&m, "r:id", w->blip, sizeof(w->blip));
             } else if (w->in_drawing && m.type == MT_OPEN && (strcmp(t, "wpc") == 0 || strcmp(t, "wgp") == 0)) {
                 dw_drawing_group(w, &m, strcmp(t, "wpc") == 0);   /* reads the group to its end */
             } else if (w->in_drawing && strcmp(t, "anchor") == 0) {
@@ -5099,6 +5173,15 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             w->in_align = 0;
         } else if (strcmp(t, "posOffset") == 0) {
             w->in_offset = 0;
+        } else if ((strcmp(t, "object") == 0 || strcmp(t, "pict") == 0) && w->in_vml) {
+            if (w->blip[0] && w->cx > 0 && w->cy > 0) {
+                w->anchor = 0;      /* in the line, as Word shows an object */
+                w->drawing_res = 0;
+                dw_image(w);
+            }
+
+            w->in_vml = 0;
+            w->blip[0] = '\0';
         } else if (strcmp(t, "drawing") == 0) {
             if (w->wrap < 0) {      /* wrapped: which side it is on */
                 w->wrap = w->wrap == -9 ? (w->posh_align >= 0 ? w->posh_align :

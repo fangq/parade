@@ -306,6 +306,184 @@ begin
   end;
 end;
 
+type
+  TPtD = record
+    X, Y: Double;
+  end;
+  TPtDArray = array of TPtD;
+  TRings = array of TPtDArray;
+
+{ a polygon filled with a colour, non-zero winding, edges smoothed: four rows
+  of samples to a pixel, and each crossing counted to its fraction of a pixel }
+procedure FillRingsImg(Img: TLazIntfImage; const Rings: TRings; Col: UInt32);
+const
+  SUB = 4;
+var
+  N, I, J, K, PY, S, X0, X1, Cnt, Wind, PX, RI, Total: Integer;
+  P: TPtDArray;
+  MinY, MaxY, MinX, MaxX, Sy, Ax, Ay, Bx, By, Xa, Xb: Double;
+  Xs: array of Double;
+  Ds: array of Integer;
+  Cov: array of Single;
+  Pix: PPixel;
+  R, G, B, A: Integer;
+  T: Double;
+  Td: Integer;
+begin
+  Total := 0;
+  MinY := 1e30; MaxY := -1e30; MinX := 1e30; MaxX := -1e30;
+  for RI := 0 to High(Rings) do
+    for I := 0 to High(Rings[RI]) do
+    begin
+      Inc(Total);
+      if Rings[RI][I].Y < MinY then MinY := Rings[RI][I].Y;
+      if Rings[RI][I].Y > MaxY then MaxY := Rings[RI][I].Y;
+      if Rings[RI][I].X < MinX then MinX := Rings[RI][I].X;
+      if Rings[RI][I].X > MaxX then MaxX := Rings[RI][I].X;
+    end;
+  if Total < 3 then
+    Exit;
+  if MinY < 0 then MinY := 0;
+  if MaxY > Img.Height then MaxY := Img.Height;
+  if MinX < 0 then MinX := 0;
+  if MaxX > Img.Width then MaxX := Img.Width;
+  if (MaxY <= MinY) or (MaxX <= MinX) then
+    Exit;
+  X0 := Trunc(MinX);
+  X1 := Trunc(MaxX) + 1;
+  if X1 > Img.Width then X1 := Img.Width;
+  SetLength(Cov, X1 - X0 + 1);
+  SetLength(Xs, Total);
+  SetLength(Ds, Total);
+  R := (Col shr 16) and $FF;
+  G := (Col shr 8) and $FF;
+  B := Col and $FF;
+  for PY := Trunc(MinY) to Trunc(MaxY) do
+  begin
+    if (PY < 0) or (PY >= Img.Height) then
+      Continue;
+    FillChar(Cov[0], Length(Cov) * SizeOf(Single), 0);
+    for S := 0 to SUB - 1 do
+    begin
+      Sy := PY + (S + 0.5) / SUB;
+      Cnt := 0;
+      for RI := 0 to High(Rings) do
+      begin
+        P := Rings[RI];
+        N := Length(P);
+        for I := 0 to N - 1 do
+        begin
+          J := (I + 1) mod N;    { every ring closed for filling }
+          Ay := P[I].Y; By := P[J].Y;
+          if (Ay = By) or ((Sy < Ay) = (Sy < By)) then
+            Continue;
+          Ax := P[I].X; Bx := P[J].X;
+          Xs[Cnt] := Ax + (Sy - Ay) * (Bx - Ax) / (By - Ay);
+          if By > Ay then Ds[Cnt] := 1 else Ds[Cnt] := -1;
+          Inc(Cnt);
+        end;
+      end;
+      { in order across, a crossing at a time }
+      for I := 1 to Cnt - 1 do
+      begin
+        T := Xs[I];
+        Td := Ds[I];
+        K := I - 1;
+        while (K >= 0) and (Xs[K] > T) do
+        begin
+          Xs[K + 1] := Xs[K];
+          Ds[K + 1] := Ds[K];
+          Dec(K);
+        end;
+        Xs[K + 1] := T;
+        Ds[K + 1] := Td;
+      end;
+      Wind := 0;
+      for I := 0 to Cnt - 2 do
+      begin
+        Inc(Wind, Ds[I]);
+        if Wind = 0 then
+          Continue;
+        Xa := Xs[I] - X0;
+        Xb := Xs[I + 1] - X0;
+        if Xa < 0 then Xa := 0;
+        if Xb > X1 - X0 then Xb := X1 - X0;
+        if Xb <= Xa then
+          Continue;
+        if Trunc(Xa) = Trunc(Xb) then
+          Cov[Trunc(Xa)] := Cov[Trunc(Xa)] + (Xb - Xa) / SUB
+        else
+        begin
+          Cov[Trunc(Xa)] := Cov[Trunc(Xa)] + (Trunc(Xa) + 1 - Xa) / SUB;
+          for K := Trunc(Xa) + 1 to Trunc(Xb) - 1 do
+            Cov[K] := Cov[K] + 1 / SUB;
+          if Trunc(Xb) < Length(Cov) then
+            Cov[Trunc(Xb)] := Cov[Trunc(Xb)] + (Xb - Trunc(Xb)) / SUB;
+        end;
+      end;
+    end;
+    Pix := PPixel(Img.GetDataLineStart(PY));
+    Inc(Pix, X0);
+    for PX := 0 to X1 - X0 - 1 do
+    begin
+      A := Round(Cov[PX] * 255);
+      if A > 255 then A := 255;
+      if A > 0 then
+      begin
+        Pix^.R := (Pix^.R * (255 - A) + R * A) div 255;
+        Pix^.G := (Pix^.G * (255 - A) + G * A) div 255;
+        Pix^.B := (Pix^.B * (255 - A) + B * A) div 255;
+        Pix^.A := 255;
+      end;
+      Inc(Pix);
+    end;
+  end;
+end;
+
+procedure FillPolygonImg(Img: TLazIntfImage; const P: TPtDArray; Col: UInt32);
+var
+  R: TRings;
+begin
+  SetLength(R, 1);
+  R[0] := P;
+  FillRingsImg(Img, R, Col);
+end;
+
+{ a polyline stroked at a width: a filled quad along each segment }
+procedure StrokePolylineImg(Img: TLazIntfImage; const P: TPtDArray; Closed: Boolean; W: Double; Col: UInt32);
+var
+  I, J, N, Last: Integer;
+  Q: TPtDArray;
+  Dx, Dy, L, Nx, Ny: Double;
+begin
+  N := Length(P);
+  if N < 2 then
+    Exit;
+  if W < 0.75 then
+    W := 0.75;     { a hairline still shows }
+  SetLength(Q, 4);
+  if Closed then Last := N - 1 else Last := N - 2;
+  for I := 0 to Last do
+  begin
+    J := (I + 1) mod N;
+    Dx := P[J].X - P[I].X;
+    Dy := P[J].Y - P[I].Y;
+    L := Sqrt(Dx * Dx + Dy * Dy);
+    if L = 0 then
+      Continue;
+    Nx := -Dy / L * W / 2;
+    Ny := Dx / L * W / 2;
+    { a little past each end, so that the segments meet }
+    Dx := Dx / L * W / 2;
+    Dy := Dy / L * W / 2;
+    Q[0].X := P[I].X + Nx - Dx; Q[0].Y := P[I].Y + Ny - Dy;
+    Q[1].X := P[J].X + Nx + Dx; Q[1].Y := P[J].Y + Ny + Dy;
+    Q[2].X := P[J].X - Nx + Dx; Q[2].Y := P[J].Y - Ny + Dy;
+    Q[3].X := P[I].X - Nx - Dx; Q[3].Y := P[I].Y - Ny - Dy;
+    FillPolygonImg(Img, Q, Col);
+  end;
+end;
+
 function NewImage(W, H: Integer; Col: UInt32): TLazIntfImage;
 var
   Desc: TRawImageDescription;
@@ -1834,6 +2012,7 @@ procedure TParadeEdit.PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxSca
 var
   Bands: array of TSelBand;
   NB, K: Integer;
+  Rings: TRings;
   Info: pd_page_info;
   Items: array of pd_draw;
   N, I, PW, PH, IX, IY, Sub: Integer;
@@ -1944,6 +2123,31 @@ begin
         PD_DRAW_BOX:
           FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale),
             OY + Round((y + h) * PxScale), $00FBE3C0, 255);
+        PD_DRAW_PATH:
+          if (points <> nil) and (npoints >= 2) then
+          begin
+            { rings: split where the points say }
+            SetLength(Rings, 1);
+            Rings[0] := nil;
+            for K := 0 to npoints - 1 do
+              if points[2 * K] = PD_PATH_BREAK then
+              begin
+                SetLength(Rings, Length(Rings) + 1);
+                Rings[High(Rings)] := nil;
+              end
+              else
+              begin
+                SetLength(Rings[High(Rings)], Length(Rings[High(Rings)]) + 1);
+                Rings[High(Rings)][High(Rings[High(Rings)])].X := OX + points[2 * K] * PxScale;
+                Rings[High(Rings)][High(Rings[High(Rings)])].Y := OY + points[2 * K + 1] * PxScale;
+              end;
+            if fill <> 0 then
+              FillRingsImg(Img, Rings, fill and $FFFFFF);
+            if (line_width > 0) and (color <> 0) then
+              for K := 0 to High(Rings) do
+                StrokePolylineImg(Img, Rings[K], (path_flags and PD_PATH_CLOSED) <> 0, line_width * PxScale,
+                  color and $FFFFFF);
+          end;
         PD_DRAW_GLYPH:
           if font <> nil then
           begin

@@ -202,4 +202,16 @@ void mu_decode(const char* s, size_t n, pd_buf* out);
 /* local name of a tag without namespace prefix */
 const char* mu_local(const char* name);
 
+/* ------------------------------------------------------------------ */
+/* metafiles (pd_emf.c)                                               */
+/* ------------------------------------------------------------------ */
+
+#define PD_DRAWING_MIME "application/vnd.parade.drawing+json"
+
+/* 1 EMF, 2 WMF, 0 neither */
+int pd_metafile_kind(const unsigned char* p, size_t n);
+/* an EMF or WMF picture played into a drawing resource (its bitmaps added as PNG
+   resources), the original's resource src kept in it; 0 if there is nothing to draw */
+pd_res_id pd_metafile_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src);
+
 #endif /* PD_CONV_H */

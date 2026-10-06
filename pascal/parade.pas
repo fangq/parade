@@ -243,6 +243,9 @@ const
   PD_DRAW_BOX = 2;
   PD_DRAW_RULE = 3;
   PD_DRAW_LINK = 4;
+  PD_DRAW_PATH = 5;
+  PD_PATH_CLOSED = 1;
+  PD_PATH_BREAK = Low(Int32);
 
 type
   { ---- parade.h ---- }
@@ -527,6 +530,10 @@ type
     region: Int32;
     text: UInt32;
     scale: Int32;
+    points: Ppd_sp;          { paths: x, y pairs }
+    npoints, path_flags: Int32;
+    line_width: pd_sp;
+    fill: UInt32;
   end;
   Ppd_draw = ^pd_draw;
 

@@ -1160,6 +1160,41 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                     sb_num(&c, a->w);
                     sb_num(&c, a->h);
                     sb_fmt(&c, "re f\n");
+                } else if (a->kind == PD_DRAW_PATH && a->points && a->npoints >= 2) {
+                    int32_t q, first;
+                    int stroke = a->line_width > 0 && a->color, fill = a->fill != 0;
+
+                    if (fill) {
+                        sb_rgb(&c, a->fill, "rg");
+                    }
+
+                    if (stroke) {
+                        sb_rgb(&c, a->color, "RG");
+                        sb_num(&c, a->line_width);
+                        sb_fmt(&c, "w 1 j ");
+                    }
+
+                    for (q = 0, first = 1; q < a->npoints; q++) {   /* first: the next point starts a ring */
+                        if (a->points[2 * q] == PD_PATH_BREAK) {
+                            if ((a->path_flags & PD_PATH_CLOSED) && !first) {
+                                sb_fmt(&c, "h ");
+                            }
+
+                            first = 1;
+                            continue;
+                        }
+
+                        sb_num(&c, a->points[2 * q]);
+                        sb_num(&c, (int64_t)pi.height - a->points[2 * q + 1]);
+                        sb_fmt(&c, first ? "m " : "l ");
+                        first = 0;
+                    }
+
+                    if ((a->path_flags & PD_PATH_CLOSED) && !first) {
+                        sb_fmt(&c, "h ");
+                    }
+
+                    sb_fmt(&c, fill && stroke ? "B\n" : fill ? "f\n" : "S\n");
                 } else if (a->kind == PD_DRAW_IMAGE || a->kind == PD_DRAW_BOX) {
                     for (k = 0; k < nimages && (a->kind != PD_DRAW_IMAGE || images[k].res != a->resource); k++) {
                     }

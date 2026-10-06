@@ -69,8 +69,14 @@ typedef enum {
     PD_DRAW_IMAGE = 1,          /**< resource drawn into the rectangle x, y (top), w, h */
     PD_DRAW_BOX = 2,            /**< an inline object the host draws (equation, user object) */
     PD_DRAW_RULE = 3,           /**< filled rectangle: underline, strike, border, background */
-    PD_DRAW_LINK = 4            /**< link area (not drawn); source holds the URL */
+    PD_DRAW_LINK = 4,           /**< link area (not drawn); source holds the URL */
+    PD_DRAW_PATH = 5            /**< polygon or polyline through points: filled with fill, stroked in color at
+                                     line_width (0: not stroked); x, y, w, h bound it */
 } pd_draw_kind;
+
+#define PD_PATH_CLOSED 1        /**< the last point of each ring joins its first */
+#define PD_PATH_BREAK  INT32_MIN /**< a point (PD_PATH_BREAK, PD_PATH_BREAK) ends one ring and starts the next:
+                                      rings filled together, non-zero winding, so holes stay holes */
 
 typedef struct {
     int32_t kind;               /**< pd_draw_kind */
@@ -85,6 +91,11 @@ typedef struct {
     int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float, 4 footnote */
     uint32_t text;              /**< glyphs: the code point shown (also for generated text), 0 if none */
     int32_t scale;              /**< glyphs: horizontal scale, 65536 = 1 (font expansion) */
+    const pd_sp* points;        /**< paths: x, y pairs on the page; valid until the page is laid out or listed again */
+    int32_t npoints;            /**< paths: points (pairs) */
+    int32_t path_flags;         /**< paths: PD_PATH_* */
+    pd_sp line_width;           /**< paths: stroke width, 0 = no stroke */
+    uint32_t fill;              /**< paths: fill colour 0xAARRGGBB, 0 = not filled */
 } pd_draw;
 
 /** the display list of a page; same size-query convention as pd_para_get_glyphs */
