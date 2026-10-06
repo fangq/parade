@@ -216,6 +216,7 @@ typedef struct {
     int32_t page_start_item;    /* first item of the current page (balancing) */
     int32_t page_start_n, page_start_nrules;
     int resume;                 /* fill: continue on the current page */
+    pd_block_id prev_para;      /* building: the paragraph just before, for the space between */
 } filler;
 
 /* ------------------------------------------------------------------ */
@@ -607,6 +608,55 @@ static void collect_ids(const pd_doc* d, pd_block_id id, pd_block_id* out, int32
     collect_paras(d, id, out, n, cap);
 }
 
+/* the section a block is in; a story's (headers, notes): the first section */
+static const pd_section_props* section_of(const pd_doc* d, pd_block_id id) {
+    const blk* b = pd_doc_blk(d, id);
+    int32_t hops;
+
+    for (hops = 0; b && b->kind != PD_BLOCK_SECTION && b->parent && hops < 64; hops++) {
+        b = pd_doc_blk(d, b->parent);
+    }
+
+    if (!b || b->kind != PD_BLOCK_SECTION) {
+        const blk* root = pd_doc_blk(d, PD_ROOT_ID);
+
+        b = root && root->nkids > 0 ? pd_doc_blk(d, root->kids[0]) : NULL;
+    }
+
+    return b && b->kind == PD_BLOCK_SECTION ? &b->st.sp : NULL;
+}
+
+/* The space between a paragraph and the one before it: the larger of the
+   one's space after and the other's before, or both (a word processor's
+   way, the section says which); none of either's that it leaves out next to
+   a paragraph of its own style (contextual spacing). */
+static pd_sp para_gap(const pd_doc* d, pd_block_id prev, pd_sp prev_after, pd_block_id cur, const pd_para_props* pp) {
+    const blk* a = prev ? pd_doc_blk(d, prev) : NULL, *b = pd_doc_blk(d, cur);
+    const pd_section_props* sp = section_of(d, cur);
+    pd_sp before = pp->space_before;
+
+    if (a && b && a->kind == PD_BLOCK_PARAGRAPH) {
+        pd_style_id normal = pd_doc_style_find(d, "Normal");
+        pd_style_id sa = a->st.style ? a->st.style : normal, sb = b->st.style ? b->st.style : normal;
+
+        if (sa == sb) {
+            pd_para_props ap;
+
+            if (pp->contextual) {
+                before = 0;
+            }
+
+            pd_doc_effective_pp(d, a, &ap, NULL);
+
+            if (ap.contextual) {
+                prev_after = 0;
+            }
+        }
+    }
+
+    return sp && sp->add_spacing ? before + prev_after : before > prev_after ? before : prev_after;
+}
+
 /* lay out the paragraphs of a block stack at a width; returns total height */
 static pd_sp stack_height(pd_layout* L, pd_block_id container, pd_sp width, pd_status* st) {
     pd_block_id ids[512];
@@ -623,7 +673,7 @@ static pd_sp stack_height(pd_layout* L, pd_block_id container, pd_sp width, pd_s
         }
 
         if (i > 0) {
-            h += c->pp.space_before > prev_after ? c->pp.space_before : prev_after;
+            h += para_gap(L->doc, ids[i - 1], prev_after, ids[i], &c->pp);
         }
 
         h += c->height;
@@ -651,7 +701,7 @@ static void place_stack(pd_layout* L, pd_block_id container, pd_sp width, int32_
         }
 
         if (i > 0) {
-            y += c->pp.space_before > prev_after ? c->pp.space_before : prev_after;
+            y += para_gap(L->doc, ids[i - 1], prev_after, ids[i], &c->pp);
         }
 
         for (k = 0; k < c->nlines; k++) {
@@ -1193,6 +1243,7 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
     }
 
     *prev_after = 0;
+    F->prev_para = 0;
     *prev_keep = 0;
     *first = 0;
     return PD_OK;
@@ -1218,7 +1269,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             }
 
             pp = &pc->pp;
-            gl = *first ? 0 : (pp->space_before > *prev_after ? pp->space_before : *prev_after);
+            gl = *first ? 0 : para_gap(d, F->prev_para, *prev_after, b->id, pp);
             rem = F->wrap_rem - gl;
 
             if (F->wrap_rem > 0 && rem > 0) {   /* beside a float: narrower lines while it lasts */
@@ -1286,6 +1337,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             *prev_after = pp->space_after;
             *prev_keep = pp->keep_with_next;
             *first = 0;
+            F->prev_para = b->id;
         } else if (b->kind == PD_BLOCK_FLOAT) {
             pfloat* f;
 
@@ -1333,6 +1385,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
 
             push(F, VI_RULE, RULE_H, 0, NULL, 0, b->id);
             *prev_after = 0;
+            F->prev_para = 0;
             *prev_keep = 0;
             *first = 0;
         } else if (b->kind == PD_BLOCK_BREAK) {
@@ -1362,6 +1415,7 @@ static pd_status rebuild_flow(filler* F) {
 
     F->n = F->nfl = F->nnotes = F->ntb = 0;
     F->wrap_rem = 0;
+    F->prev_para = 0;
     st = build_flow(F, F->sec->id, &prev_after, &prev_keep, &first);
 
     /* after the last section's text, the endnotes */
@@ -1372,6 +1426,7 @@ static pd_status rebuild_flow(filler* F) {
                 root->kids[root->nkids - 1] == F->sec->id) {
             clear_wrap(F);
             prev_after = prev_after > PD_PT(18) ? prev_after : PD_PT(18);
+            F->prev_para = 0;
 
             for (i = 0; i < F->L->nendnotes && st == PD_OK; i++) {
                 if (pd_doc_blk(F->L->doc, F->L->endnotes[i])) {
@@ -2398,7 +2453,7 @@ static void place_story(pd_layout* L, int32_t page, pd_block_id story, int foote
             return;
         }
 
-        h += (i > 0 ? (c->pp.space_before > prev_after ? c->pp.space_before : prev_after) : 0) + c->height;
+        h += (i > 0 ? para_gap(L->doc, ids[i - 1], prev_after, ids[i], &c->pp) : 0) + c->height;
         prev_after = c->pp.space_after;
     }
 
@@ -2409,7 +2464,7 @@ static void place_story(pd_layout* L, int32_t page, pd_block_id story, int foote
         pcache* c = p->owned[i];
 
         if (i > first) {
-            y += c->pp.space_before > prev_after ? c->pp.space_before : prev_after;
+            y += para_gap(L->doc, p->owned[i - 1]->block, prev_after, c->block, &c->pp);
         }
 
         for (k = 0; k < c->nlines; k++) {

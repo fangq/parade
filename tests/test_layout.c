@@ -1611,6 +1611,70 @@ static void test_char_effects(void) {
     pd_doc_free(d);
 }
 
+/* the baseline of a paragraph's first line on page 0 */
+static pd_sp para_top(const pd_layout* L, pd_block_id b) {
+    pd_sp y = -1;
+
+    page_of(L, b, 0, &y);
+    return y;
+}
+
+/* Contextual spacing: no space between paragraphs of one style that ask
+   for it, the usual space next to another style; and a section that adds a
+   paragraph's space after to the next one's before, as word processors do. */
+static void test_contextual(void) {
+    pd_block_id sec, p[5];
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_para_props pp;
+    pd_section_props sp;
+    pd_style_id item = 0;
+    pd_sp line, g01, g12, g23, g34;
+    int i;
+
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_CONTEXTUAL;
+    pp.space_before = PD_PT(6);
+    pp.space_after = PD_PT(10);
+    pp.contextual = 1;
+    pd_doc_style_define(d, "Item", PD_STYLE_PARAGRAPH, pd_doc_style_find(d, "Normal"), &pp, NULL, &item);
+
+    p[0] = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p[0], 0), "body", 4, PD_FORMAT_INHERIT, NULL);
+    for (i = 1; i < 5; i++) {
+        p[i] = add_para(d, sec, "x");
+    }
+
+    pd_doc_set_para_style(d, p[1], item);
+    pd_doc_set_para_style(d, p[2], item);
+    pd_doc_set_para_style(d, p[3], item);
+    /* p[4] body again */
+
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    line = para_top(L, p[1]) - para_top(L, p[0]);   /* a line and the 6pt before the first item */
+    g12 = para_top(L, p[2]) - para_top(L, p[1]);
+    g23 = para_top(L, p[3]) - para_top(L, p[2]);
+    g34 = para_top(L, p[4]) - para_top(L, p[3]);
+    CHECK(g12 == g23 && line - g12 == PD_PT(6));    /* none between the items */
+    CHECK(g34 - g12 == PD_PT(10));                  /* the last item's after, before the body */
+
+    /* a word processor's section: the body's after (none) and the item's before add; between the items still none */
+    pd_doc_section_props(d, sec, &sp);
+    sp.add_spacing = 1;
+    pd_doc_set_section_props(d, sec, &sp);
+    pp.mask = PD_PP_SPACE_AFTER;
+    pp.space_after = PD_PT(4);
+    pd_doc_set_para_props(d, p[0], &pp);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    g01 = para_top(L, p[1]) - para_top(L, p[0]);
+    CHECK(g01 - g12 == PD_PT(10));      /* 4 after + 6 before */
+    CHECK(para_top(L, p[2]) - para_top(L, p[1]) == g12);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -1655,6 +1719,8 @@ int main(void) {
     test_tabs();
     printf("character effects\n");
     test_char_effects();
+    printf("contextual spacing\n");
+    test_contextual();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

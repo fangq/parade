@@ -78,6 +78,7 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
     OVER(PD_PP_HYPHENATE, hyphenate);
     OVER(PD_PP_BREAK_MODE, break_mode);
     OVER(PD_PP_DIRECTION, direction);
+    OVER(PD_PP_CONTEXTUAL, contextual);
 
     if (s->pp.mask & PD_PP_TABS) {
         pp->ntabs = s->pp.ntabs;

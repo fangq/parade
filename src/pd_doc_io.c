@@ -167,6 +167,10 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
         put_str(w, "Direction", name_of(NAMES(dir_names), p->direction));
     }
 
+    if (m & PD_PP_CONTEXTUAL) {
+        put_bool(w, "Contextual", p->contextual);
+    }
+
     if (m & PD_PP_TABS) {   /* [[position, align, leader], ...] */
         int32_t i;
 
@@ -477,6 +481,11 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
             }
 
             put_int(w, "FootnoteSkip", p->footnote_skip);
+
+            if (p->add_spacing) {
+                put_bool(w, "AddSpacing", p->add_spacing);
+            }
+
             pj_obj_end(w);
             break;
         }
@@ -845,6 +854,11 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
         REQUIRE(p->direction >= 0);
     }
 
+    if ((x = pj_get(o, "Contextual"))) {
+        p->mask |= PD_PP_CONTEXTUAL;
+        p->contextual = (int32_t)int_or(x, 0, 0, 1, L);
+    }
+
     if ((x = pj_get(o, "Tabs"))) {
         int32_t i;
 
@@ -1113,6 +1127,7 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->footer_even = (pd_block_id)int_or(pj_get(x, "FooterEven"), 0, 0, PD_MAX_BLOCKS, L);
     p->continuous = (int32_t)int_or(pj_get(x, "Continuous"), 0, 0, 1, L);
     p->footnote_skip = (pd_sp)int_or(pj_get(x, "FootnoteSkip"), p->footnote_skip, 0, SP_MAX, L);
+    p->add_spacing = (int32_t)int_or(pj_get(x, "AddSpacing"), 0, 0, 1, L);
 
     if (pj_get(x, "PageBreaking")) {
         static const char* const pb_names[] = { "greedy", "optimal" };

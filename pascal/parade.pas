@@ -208,6 +208,7 @@ const
   PD_LEADER_HYPHEN = 2;
   PD_LEADER_UNDERSCORE = 3;
   PD_PP_TABS = 1 shl 18;
+  PD_PP_CONTEXTUAL = 1 shl 19;
 
   PD_GRAVITY_LEFT = 0;
   PD_GRAVITY_RIGHT = 1;
@@ -366,6 +367,7 @@ type
     ntabs: Int32;
     tabs: array[0..PD_MAX_TABS - 1] of pd_tab_stop;
     tab_interval: pd_sp;
+    contextual: Int32;
   end;
   Ppd_para_props = ^pd_para_props;
 
@@ -428,6 +430,7 @@ type
     footer, footer_first, footer_even: pd_block_id;
     continuous, page_breaking: Int32;
     footnote_skip: pd_sp;
+    add_spacing: Int32;
   end;
   Ppd_section_props = ^pd_section_props;
 

@@ -23,7 +23,7 @@ STRUCTS = {
                      "lang small_caps link_target caps hidden position",
     "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
-                     "border_color border_width shading direction ntabs tabs tab_interval",
+                     "border_color border_width shading direction ntabs tabs tab_interval contextual",
     "pd_tab_stop": "position align leader",
     "pd_list_level": "format start text indent hanging",
     "pd_run": "start end format",
@@ -34,7 +34,7 @@ STRUCTS = {
     "pd_section_props": "page_width page_height margin_top margin_bottom margin_left margin_right header_distance "
                         "footer_distance columns column_gap first_page_number page_number_format title_page "
                         "facing_pages header header_first header_even footer footer_first footer_even continuous page_breaking "
-                        "footnote_skip",
+                        "footnote_skip add_spacing",
     "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width",
     "pd_cell_props": "col_span valign background merge_up",
     "pd_change": "kind block style revision",

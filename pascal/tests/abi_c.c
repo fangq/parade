@@ -149,6 +149,7 @@ int main(void) {
     printf("pd_para_props.ntabs %zu\n", offsetof(pd_para_props, ntabs));
     printf("pd_para_props.tabs %zu\n", offsetof(pd_para_props, tabs));
     printf("pd_para_props.tab_interval %zu\n", offsetof(pd_para_props, tab_interval));
+    printf("pd_para_props.contextual %zu\n", offsetof(pd_para_props, contextual));
     printf("pd_tab_stop %zu\n", sizeof(pd_tab_stop));
     printf("pd_tab_stop.position %zu\n", offsetof(pd_tab_stop, position));
     printf("pd_tab_stop.align %zu\n", offsetof(pd_tab_stop, align));
@@ -219,6 +220,7 @@ int main(void) {
     printf("pd_section_props.continuous %zu\n", offsetof(pd_section_props, continuous));
     printf("pd_section_props.page_breaking %zu\n", offsetof(pd_section_props, page_breaking));
     printf("pd_section_props.footnote_skip %zu\n", offsetof(pd_section_props, footnote_skip));
+    printf("pd_section_props.add_spacing %zu\n", offsetof(pd_section_props, add_spacing));
     printf("pd_table_props %zu\n", sizeof(pd_table_props));
     printf("pd_table_props.width %zu\n", offsetof(pd_table_props, width));
     printf("pd_table_props.align %zu\n", offsetof(pd_table_props, align));

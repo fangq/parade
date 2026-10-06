@@ -491,7 +491,7 @@ static void dx_block(dxo* x, pd_block_id id);
 static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr);
 static void dx_sid(const pd_doc* d, pd_style_id sid, char* out, size_t cap);
 static void dx_ppr_head(pd_buf* o, const pd_para_props* pp, uint32_t m);
-static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto);
+static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto, const pd_para_props* base);
 
 /* a picture as a run: inline, or anchored where a float is (fp) -- beside the text on the side the float
    wraps on, or across the column */
@@ -863,7 +863,12 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
         dp.indent_left = PD_PT(18) * (clevel + 1);
     }
 
-    dx_ppr_tail(o, &dp, dp.mask, x->hyph_auto);
+    {
+        pd_para_props sp;   /* the style's own, for the stops it has and the paragraph not */
+
+        pd_doc_style_resolve(x->d, bi.style, &sp, NULL);
+        dx_ppr_tail(o, &dp, dp.mask, x->hyph_auto, &sp);
+    }
 
     if (extra_ppr) {
         pb_puts(o, extra_ppr);
@@ -1227,6 +1232,15 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
 
 static const char* XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
 
+static int same_ci(const char* a, const char* b) {
+    while (*a && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+        a++;
+        b++;
+    }
+
+    return tolower((unsigned char)*a) == tolower((unsigned char)*b);
+}
+
 /* the styleId a Parade style is written under: its name's letters and digits */
 static void dx_sid(const pd_doc* d, pd_style_id sid, char* out, size_t cap) {
     const char* n = sid ? pd_doc_style_name(d, sid) : NULL;
@@ -1240,8 +1254,10 @@ static void dx_sid(const pd_doc* d, pd_style_id sid, char* out, size_t cap) {
 
     out[k] = '\0';
 
-    if (!out[0] || !strcmp(out, "FootnoteText") || !strcmp(out, "FootnoteReference") || !strcmp(out, "Hyperlink") ||
-            !strcmp(out, "TableGrid") || !strcmp(out, "ListParagraph")) {
+    if (n && same_ci(pd_doc_style_name(d, sid), "footnote text")) {
+        snprintf(out, cap, "FootnoteText");     /* Word's, read in: written in place of the writer's own */
+    } else if (!out[0] || !strcmp(out, "FootnoteText") || !strcmp(out, "FootnoteReference") ||
+               !strcmp(out, "Hyperlink") || !strcmp(out, "TableGrid")) {
         snprintf(out, cap, "PStyle%u", (unsigned)sid);  /* one of the writer's own, or no name to make one of */
     }
 }
@@ -1290,7 +1306,7 @@ static void dx_ppr_head(pd_buf* o, const pd_para_props* pp, uint32_t m) {
 }
 
 /* ... and those after it, in the schema's order; hyph_auto: the document hyphenates (settings.xml) */
-static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto) {
+static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto, const pd_para_props* base) {
     if ((m & PD_PP_BORDER) && pp->border_color && pp->border_width > 0) {
         int sz = (int)SCALE(pp->border_width, 8, 65536), side;
         static const char* sides[] = { "top", "left", "bottom", "right" };
@@ -1310,12 +1326,24 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
         pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(pp->shading & 0xFFFFFF));
     }
 
-    if ((m & PD_PP_TABS) && pp->ntabs > 0) {
+    if ((m & PD_PP_TABS) && (pp->ntabs > 0 || (base && base->ntabs > 0))) {
         static const char* al[] = { "left", "center", "right", "decimal" };
         static const char* ld[] = { "none", "dot", "hyphen", "underscore" };
         int32_t k;
 
         pb_puts(o, "<w:tabs>");
+
+        /* Word adds a paragraph's stops to its style's: those of the style's it has not are cleared */
+        for (k = 0; base && k < base->ntabs && k < PD_MAX_TABS; k++) {
+            int32_t j;
+
+            for (j = 0; j < pp->ntabs && TW(pp->tabs[j].position) != TW(base->tabs[k].position); j++) {
+            }
+
+            if (j == pp->ntabs) {
+                pb_printf(o, "<w:tab w:val=\"clear\" w:pos=\"%d\"/>", TW(base->tabs[k].position));
+            }
+        }
 
         for (k = 0; k < pp->ntabs && k < PD_MAX_TABS; k++) {
             pb_printf(o, "<w:tab w:val=\"%s\" w:leader=\"%s\" w:pos=\"%d\"/>", al[pp->tabs[k].align & 3],
@@ -1368,6 +1396,10 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
         }
 
         pb_puts(o, "/>");
+    }
+
+    if (m & PD_PP_CONTEXTUAL) {
+        pb_puts(o, pp->contextual ? "<w:contextualSpacing/>" : "<w:contextualSpacing w:val=\"0\"/>");
     }
 
     if (m & PD_PP_ALIGN) {
@@ -1468,7 +1500,7 @@ static void dx_styles(dxo* x, pd_buf* o) {
               dc.lang[0] ? dc.lang : "en-US");
     pb_puts(o, "<w:pPrDefault><w:pPr>");
     dx_ppr_head(o, &dp, PD_PP_WIDOWS);
-    dx_ppr_tail(o, &dp, PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_LINE_SPACING, x->hyph_auto);
+    dx_ppr_tail(o, &dp, PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_LINE_SPACING, x->hyph_auto, NULL);
     pb_puts(o, "</w:pPr></w:pPrDefault></w:docDefaults>");
 
     for (i = 0; i < n; i++) {
@@ -1505,7 +1537,12 @@ static void dx_styles(dxo* x, pd_buf* o) {
                                            name[8] <= '9'))) {
             pb_puts(o, "<w:pPr>");
             dx_ppr_head(o, &pp, pp.mask);
-            dx_ppr_tail(o, &pp, pp.mask, x->hyph_auto);
+            {
+                pd_para_props bp;
+
+                pd_doc_style_resolve(d, parent, &bp, NULL);
+                dx_ppr_tail(o, &pp, pp.mask, x->hyph_auto, parent ? &bp : NULL);
+            }
 
             if (!strncmp(name, "Heading ", 8) && name[8] >= '1' && name[8] <= '9' && !name[9]) {
                 pb_printf(o, "<w:outlineLvl w:val=\"%c\"/>", name[8] - 1);
@@ -1523,11 +1560,15 @@ static void dx_styles(dxo* x, pd_buf* o) {
         pb_puts(o, "</w:style>");
     }
 
-    pb_printf(o, "<w:style w:type=\"paragraph\" w:styleId=\"ListParagraph\"><w:name w:val=\"List Paragraph\"/>"
-              "<w:basedOn w:val=\"%s\"/><w:qFormat/></w:style>", normal ? "Normal" : "");
-    pb_puts(o, "<w:style w:type=\"paragraph\" w:styleId=\"FootnoteText\"><w:name w:val=\"footnote text\"/>"
-            "<w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:after=\"0\"/></w:pPr><w:rPr><w:sz w:val=\"18\"/></w:rPr>"
-            "</w:style>");
+    for (i = 0; i < n && !same_ci(pd_doc_style_name(d, pd_doc_style_at(d, i)), "footnote text"); i++) {
+    }
+
+    if (i == n) {
+        pb_puts(o, "<w:style w:type=\"paragraph\" w:styleId=\"FootnoteText\"><w:name w:val=\"footnote text\"/>"
+                "<w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:after=\"0\"/></w:pPr><w:rPr><w:sz w:val=\"18\"/>"
+                "</w:rPr></w:style>");
+    }
+
     pb_puts(o, "<w:style w:type=\"character\" w:styleId=\"FootnoteReference\"><w:name w:val=\"footnote reference\"/>"
             "<w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr></w:style>");
     pb_puts(o, "<w:style w:type=\"character\" w:styleId=\"Hyperlink\"><w:name w:val=\"Hyperlink\"/>"
@@ -2106,6 +2147,9 @@ static void ppr_elem(const pd_markup* m, const char* t, dprops* pr) {
             pp->mask |= PD_PP_INDENT_FIRST;
             pp->indent_first = twips(atoi(v));
         }
+    } else if (strcmp(t, "contextualSpacing") == 0) {
+        pp->mask |= PD_PP_CONTEXTUAL;
+        pp->contextual = attr_on(m);
     } else if (strcmp(t, "keepNext") == 0) {
         pp->mask |= PD_PP_KEEP_NEXT;
         pp->keep_with_next = attr_on(m);
@@ -2156,6 +2200,7 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sp->mask & PD_PP_KEEP_LINES) dp->keep_lines = sp->keep_lines;
     if (sp->mask & PD_PP_BREAK_BEFORE) dp->page_break_before = sp->page_break_before;
     if (sp->mask & PD_PP_HYPHENATE) dp->hyphenate = sp->hyphenate;
+    if (sp->mask & PD_PP_CONTEXTUAL) dp->contextual = sp->contextual;
 
     if (sp->mask & PD_PP_LINE_SPACING) {
         dp->line_spacing = sp->line_spacing;
@@ -2624,15 +2669,6 @@ typedef struct {
     int after_ref;              /* just after the note's own number: drop the space that follows it */
 } dw;
 
-static int same_ci(const char* a, const char* b) {
-    while (*a && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
-        a++;
-        b++;
-    }
-
-    return tolower((unsigned char)*a) == tolower((unsigned char)*b);
-}
-
 /* the run's format: what the document says about its characters, less what
    the paragraph's Parade style already says */
 static void dw_apply_run(dw* w) {
@@ -2779,6 +2815,89 @@ static void dw_table_props(dw* w) {
     pd_doc_set_table_props(b->d, b->table[b->ntables - 1], &tp);
 }
 
+/* A paragraph style of the document's own, made a Parade style of the same
+   name, based on Normal, holding what the style and those it is based on
+   say: the paragraph then carries only what it sets itself, and keeps its
+   style's name (and contextual spacing knows its neighbours' styles). */
+static void dw_custom_style(dw* w, pd_bld* b) {
+    const dstyle_x* st = find_style(w->X, w->pstyle);
+    const char* name = st && st->name[0] ? st->name : w->pstyle;
+    pd_style_id normal = pd_doc_style_find(b->d, "Normal"), sid = pd_doc_style_find(b->d, name);
+
+    if (!st || st->type != 1 || !name[0] || strcmp(name, "Normal") == 0) {
+        return;
+    }
+
+    if (!sid) {
+        dprops sty;
+        pd_para_props rp;
+        pd_char_props rc;
+
+        memset(&sty, 0, sizeof(sty));
+        style_chain(w->X, w->pstyle, &sty, 0);
+        pd_doc_style_resolve(b->d, normal, &rp, &rc);
+        line_finish(&sty, (sty.cp.mask & PD_CP_SIZE) ? sty.cp.size : rc.size);
+        sty.pp.mask &= ~PD_PP_NEXT_STYLE;
+
+        /* only what differs from Normal: the same style read again says the same */
+#define SAME_P(bit, f) if ((sty.pp.mask & (bit)) && sty.pp.f == rp.f) { sty.pp.mask &= ~(bit); }
+#define SAME_C(bit, f) if ((sty.cp.mask & (bit)) && sty.cp.f == rc.f) { sty.cp.mask &= ~(bit); }
+        SAME_P(PD_PP_ALIGN, align)
+        SAME_P(PD_PP_INDENT_LEFT, indent_left)
+        SAME_P(PD_PP_INDENT_RIGHT, indent_right)
+        SAME_P(PD_PP_INDENT_FIRST, indent_first)
+        SAME_P(PD_PP_SPACE_BEFORE, space_before)
+        SAME_P(PD_PP_SPACE_AFTER, space_after)
+        SAME_P(PD_PP_LINE_SPACING, line_spacing)
+        SAME_P(PD_PP_KEEP_NEXT, keep_with_next)
+        SAME_P(PD_PP_KEEP_LINES, keep_lines)
+        SAME_P(PD_PP_BREAK_BEFORE, page_break_before)
+        SAME_P(PD_PP_HYPHENATE, hyphenate)
+        SAME_P(PD_PP_CONTEXTUAL, contextual)
+        SAME_P(PD_PP_SHADING, shading)
+        SAME_C(PD_CP_SIZE, size)
+        SAME_C(PD_CP_WEIGHT, weight)
+        SAME_C(PD_CP_ITALIC, italic)
+        SAME_C(PD_CP_COLOR, color)
+        SAME_C(PD_CP_BACKGROUND, background)
+        SAME_C(PD_CP_UNDERLINE, underline)
+        SAME_C(PD_CP_STRIKE, strike)
+        SAME_C(PD_CP_SHIFT, shift)
+        SAME_C(PD_CP_SMALLCAPS, small_caps)
+        SAME_C(PD_CP_CAPS, caps)
+        SAME_C(PD_CP_HIDDEN, hidden)
+        SAME_C(PD_CP_LETTERSPACE, letter_space)
+        SAME_C(PD_CP_POSITION, position)
+        SAME_C(PD_CP_KERNING, kerning)
+#undef SAME_P
+#undef SAME_C
+
+        if ((sty.cp.mask & PD_CP_FAMILY) && same_ci(sty.cp.family, rc.family)) {
+            sty.cp.mask &= ~PD_CP_FAMILY;
+        }
+
+        if ((sty.cp.mask & PD_CP_LANG) && same_ci(sty.cp.lang, rc.lang)) {
+            sty.cp.mask &= ~PD_CP_LANG;
+        }
+
+        if ((sty.pp.mask & PD_PP_TABS) && sty.pp.ntabs == rp.ntabs && sty.pp.tab_interval == rp.tab_interval &&
+                memcmp(sty.pp.tabs, rp.tabs, (size_t)sty.pp.ntabs * sizeof(pd_tab_stop)) == 0) {
+            sty.pp.mask &= ~PD_PP_TABS;
+        }
+
+        if ((sty.pp.mask & PD_PP_BORDER) && sty.pp.border_color == rp.border_color &&
+                sty.pp.border_width == rp.border_width) {
+            sty.pp.mask &= ~PD_PP_BORDER;
+        }
+
+        if (pd_doc_style_define(b->d, name, PD_STYLE_PARAGRAPH, normal, &sty.pp, &sty.cp, &sid) != PD_OK) {
+            return;
+        }
+    }
+
+    bld_para_style(b, name, PD_ROLE_BODY, 0);
+}
+
 static void dw_begin_para(dw* w) {
     pd_bld* b = w->X->b;
     const char* name = "";
@@ -2833,6 +2952,8 @@ static void dw_begin_para(dw* w) {
         bld_para_style(b, "Code", PD_ROLE_CODE, 0);
     } else if (strcmp(low, "caption") == 0) {
         bld_para_style(b, "Caption", PD_ROLE_CAPTION, 0);
+    } else if (w->pstyle[0] && strcmp(w->pstyle, w->X->def_pstyle) != 0) {
+        dw_custom_style(w, b);  /* one of the document's own */
     }
 
     if (num_id > 0) {
@@ -3727,6 +3848,26 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
                 si.child_count == 1 && pd_doc_block_info(d, pd_doc_child(d, last, 0), &pi) == PD_OK &&
                 pi.kind == PD_BLOCK_PARAGRAPH && pi.text_length == 0) {
             pd_doc_remove_block(d, last);
+            pd_doc_clear_undo(d);
+        }
+    }
+
+    /* Word adds a paragraph's space after to the next one's before */
+    {
+        pd_block_info ri;
+        pd_section_props sp;
+        int32_t i;
+
+        if (pd_doc_block_info(d, pd_doc_root(d), &ri) == PD_OK) {
+            for (i = 0; i < ri.child_count; i++) {
+                pd_block_id sec = pd_doc_child(d, pd_doc_root(d), i);
+
+                if (pd_doc_section_props(d, sec, &sp) == PD_OK && !sp.add_spacing) {
+                    sp.add_spacing = 1;
+                    pd_doc_set_section_props(d, sec, &sp);
+                }
+            }
+
             pd_doc_clear_undo(d);
         }
     }

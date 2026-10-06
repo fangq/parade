@@ -260,6 +260,7 @@ typedef struct {
 #define PD_PP_SHADING      (1u << 16)
 #define PD_PP_DIRECTION    (1u << 17)
 #define PD_PP_TABS         (1u << 18) /**< tab stops and the default interval, together */
+#define PD_PP_CONTEXTUAL   (1u << 19) /**< no space between this and a neighbour of the same style */
 
 typedef struct {
     uint32_t mask;              /**< PD_PP_* bits that are set */
@@ -285,6 +286,7 @@ typedef struct {
     int32_t ntabs;              /**< tab stops set, in order of position, from the left margin */
     pd_tab_stop tabs[PD_MAX_TABS];
     pd_sp tab_interval;         /**< default stops past the last set one, 0 = every 36pt */
+    int32_t contextual;         /**< its space before and after left out next to a paragraph of the same style */
 } pd_para_props;
 
 /**
@@ -470,6 +472,8 @@ typedef struct {
     int32_t continuous;         /**< 1 = starts on the current page below the previous section (same page size) */
     int32_t page_breaking;      /**< pd_page_breaking */
     pd_sp footnote_skip;        /**< space between the text and the footnotes (a rule sits in it) */
+    int32_t add_spacing;        /**< 1: a paragraph's space after and the next one's before add up (word
+                                     processors); 0: the larger of the two (CSS, TeX) */
 } pd_section_props;
 
 typedef enum {

@@ -195,6 +195,7 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
 
     KEEP(PD_PP_SHADING, shading);
     KEEP(PD_PP_DIRECTION, direction);
+    KEEP(PD_PP_CONTEXTUAL, contextual);
 
     if (m & PD_PP_TABS) {
         int32_t i;
@@ -310,6 +311,7 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
 
     SET(PD_PP_SHADING, shading);
     SET(PD_PP_DIRECTION, direction);
+    SET(PD_PP_CONTEXTUAL, contextual);
 
     if (m & PD_PP_TABS) {
         dst->ntabs = src->ntabs;

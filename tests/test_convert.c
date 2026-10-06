@@ -1007,7 +1007,11 @@ static void check_docx_styles(const pd_doc* d) {
     pp = para_resolved(d, p[0]);
     CHECK(pp.align == PD_ALIGN_LEFT && pp.hyphenate == 0);
 
-    /* a custom style: justified Arial 11, its paragraph mark's size ignored */
+    /* a custom style, a Parade style of its name: justified Arial 11, its paragraph mark's size ignored */
+    pd_doc_block_info(d, p[1], &bi);
+    CHECK(bi.style != 0 && strcmp(pd_doc_style_name(d, bi.style), "LeadingPara") == 0);
+    pd_doc_block_info(d, p[2], &bi);
+    CHECK(bi.style != 0 && strcmp(pd_doc_style_name(d, bi.style), "Body2") == 0);
     pp = para_resolved(d, p[1]);
     CHECK(pp.align == PD_ALIGN_JUSTIFY && pp.hyphenate == 0);
     cp = chars_at(d, p[1], 0);
@@ -1532,12 +1536,18 @@ static void test_docx_writer(void) {
             k[i] = pd_doc_child(d, sec, i);
         }
 
-        /* Normal as the document has it, and the look of the style built on it
-           (read back as the paragraph's own properties) */
+        /* Normal as the document has it, and the style built on it, by name */
         cp = chars_at(d, k[0], 0);
         pp = para_resolved(d, k[0]);
         CHECK(strcmp(cp.family, "Arial") == 0 && cp.size == PD_PT(11) && !cp.italic);
         CHECK(pp.align == PD_ALIGN_JUSTIFY && pp.space_after == PD_PT(4));
+        {
+            pd_block_info bi;
+
+            CHECK(pd_doc_block_info(d, k[1], &bi) == PD_OK && bi.style == pd_doc_style_find(d, "Lead Para") &&
+                  bi.style != 0);
+        }
+
         cp = chars_at(d, k[1], 0);
         pp = para_resolved(d, k[1]);
         CHECK(strcmp(cp.family, "Arial") == 0 && cp.italic && pp.indent_left == PD_PT(18));
@@ -1652,6 +1662,51 @@ static void test_docx_effects(void) {
         }
 
         free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
+/* contextual spacing read from Word's styles and kept; Word's sections add
+   the space after to the space before */
+static void test_docx_contextual(void) {
+    pd_doc* d = docx_doc(
+        "word/styles.xml",
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">"
+        "<w:name w:val=\"Normal\"/><w:pPr><w:spacing w:after=\"160\"/></w:pPr></w:style>"
+        "<w:style w:type=\"paragraph\" w:styleId=\"ListParagraph\"><w:name w:val=\"List Paragraph\"/>"
+        "<w:basedOn w:val=\"Normal\"/><w:pPr><w:ind w:left=\"720\"/><w:contextualSpacing/></w:pPr></w:style>"
+        "</w:styles>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:pPr><w:pStyle w:val=\"ListParagraph\"/></w:pPr><w:r><w:t>one</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pStyle w:val=\"ListParagraph\"/></w:pPr><w:r><w:t>two</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>body</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec;
+        pd_block_info bi;
+        pd_para_props pp;
+        pd_section_props sp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        CHECK(pd_doc_section_props(d, sec, &sp) == PD_OK && sp.add_spacing == 1);
+        pd_doc_block_info(d, pd_doc_child(d, sec, 1), &bi);
+        CHECK(bi.style != 0 && strcmp(pd_doc_style_name(d, bi.style), "List Paragraph") == 0);
+        pd_doc_style_resolve(d, bi.style, &pp, NULL);
+        CHECK(pp.contextual == 1 && pp.indent_left == PD_PT(36) && pp.space_after == PD_PT(8));
+        pd_doc_block_info(d, pd_doc_child(d, sec, 2), &bi);
+        pd_doc_style_resolve(d, bi.style, &pp, NULL);
+        CHECK(pp.contextual == 0);
     }
 
     pd_doc_free(d);
@@ -2281,6 +2336,8 @@ int main(void) {
     test_docx_writer();
     printf("docx character effects\n");
     test_docx_effects();
+    printf("docx contextual spacing\n");
+    test_docx_contextual();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");
