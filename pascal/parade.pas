@@ -727,7 +727,7 @@ procedure pd_doc_marker_free(doc: Ppd_doc; marker: pd_marker_id); cdecl; PDEXT;
 function pd_doc_marker_get(doc: Ppd_doc; marker: pd_marker_id; out pos: pd_pos): pd_status; cdecl; PDEXT;
 function pd_doc_marker_set(doc: Ppd_doc; marker: pd_marker_id; pos: pd_pos): pd_status; cdecl; PDEXT;
 
-function pd_doc_revision_add(doc: Ppd_doc; const rev: pd_revision; out id: pd_rev_id): pd_status; cdecl; PDEXT;
+function pd_doc_revision_add(doc: Ppd_doc; constref rev: pd_revision; out id: pd_rev_id): pd_status; cdecl; PDEXT;
 function pd_doc_revision_get(doc: Ppd_doc; rev: pd_rev_id; out info: pd_revision): pd_status; cdecl; PDEXT;
 function pd_doc_revision_count(doc: Ppd_doc): Int32; cdecl; PDEXT;
 function pd_doc_author_index(doc: Ppd_doc; author: PAnsiChar): Int32; cdecl; PDEXT;
@@ -739,9 +739,9 @@ function pd_doc_markup(doc: Ppd_doc): Int32; cdecl; PDEXT;
 function pd_doc_revision_resolve(doc: Ppd_doc; range: pd_range; accept: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_revision_find(doc: Ppd_doc; from: pd_pos; dir: Int32; out range: pd_range; rev: PUInt32): pd_status;
   cdecl; PDEXT;
-function pd_doc_comment_add(doc: Ppd_doc; const comment: pd_comment; out id: pd_comment_id): pd_status; cdecl; PDEXT;
+function pd_doc_comment_add(doc: Ppd_doc; constref comment: pd_comment; out id: pd_comment_id): pd_status; cdecl; PDEXT;
 function pd_doc_comment_get(doc: Ppd_doc; id: pd_comment_id; out comment: pd_comment): pd_status; cdecl; PDEXT;
-function pd_doc_comment_set(doc: Ppd_doc; id: pd_comment_id; const comment: pd_comment): pd_status; cdecl; PDEXT;
+function pd_doc_comment_set(doc: Ppd_doc; id: pd_comment_id; constref comment: pd_comment): pd_status; cdecl; PDEXT;
 function pd_doc_comment_remove(doc: Ppd_doc; id: pd_comment_id): pd_status; cdecl; PDEXT;
 function pd_doc_comment_count(doc: Ppd_doc): Int32; cdecl; PDEXT;
 

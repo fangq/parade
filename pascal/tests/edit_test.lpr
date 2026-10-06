@@ -79,6 +79,7 @@ var
   Pic: Integer;
   Bmp: TBitmap;
   PX: TColor;
+  Cm: pd_comment;
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -291,6 +292,89 @@ begin
         Bmp.Free;
       end;
     end;
+  end;
+
+
+  { 9. review: tracked changes and comments }
+  Step('review');
+  E.NewDocument;
+  E.InsertText('The quick fox');
+  E.Author := 'Ann';
+  E.TrackChanges := True;
+  E.ProcessKey(VK_HOME, []);
+  for I := 1 to 10 do
+    E.ProcessKey(VK_RIGHT, []);
+  E.InsertText('brown ');
+  Check(E.DocumentText = 'The quick brown fox', 'tracked typing: ' + E.DocumentText);
+  Check((pd_layout_page_markup(E.Layout, 0, nil, 0, N) = PD_OK) and (N = 1), 'an insertion on the page');
+  E.InsertText('XY');
+  E.ProcessKey(VK_BACK, []);
+  E.ProcessKey(VK_BACK, []);
+  Check(E.DocumentText = 'The quick brown fox', 'own insertion really goes: ' + E.DocumentText);
+  E.ProcessKey(VK_HOME, []);
+  for I := 1 to 4 do
+    E.ProcessKey(VK_DELETE, []);
+  Check(E.DocumentText = 'The quick brown fox', 'deleted text stays, marked: ' + E.DocumentText);
+  Check((pd_layout_page_markup(E.Layout, 0, nil, 0, N) = PD_OK) and (N = 2), 'a deletion and an insertion');
+  { the caret steps over the hidden deletion }
+  E.ProcessKey(VK_HOME, []);
+  E.ProcessKey(VK_RIGHT, []);
+  Check(E.CaretPos.offset = 5, 'right skips the deletion: ' + IntToStr(E.CaretPos.offset));
+  E.ProcessKey(VK_LEFT, []);
+  E.ProcessKey(VK_BACK, []);
+  Check(E.DocumentText = 'The quick brown fox', 'backspace over a deletion leaves it');
+  E.TrackChanges := False;
+  { a comment on "fox" }
+  E.ProcessKey(VK_END, []);
+  E.ProcessKey(VK_LEFT, [ssShift]);
+  E.ProcessKey(VK_LEFT, [ssShift]);
+  E.ProcessKey(VK_LEFT, [ssShift]);
+  Check(E.SelectedText = 'fox', 'select fox: ' + E.SelectedText);
+  Check(E.AddComment('Which fox?') = 1, 'comment added');
+  Check(E.ReplyToComment(1, 'The red one.') = 2, 'reply added');
+  Check(E.CommentAt(PdPos(E.CaretPos.block, 17)) = 1, 'comment at a position');
+  Check((pd_layout_page_markup(E.Layout, 0, nil, 0, N) = PD_OK) and (N = 3), 'two changes and a comment');
+  E.SaveToFile(Dir + 'edit_review.docx');
+  E.LoadFromFile(Dir + 'edit_review.docx');
+  Check(E.DocumentText = 'The quick brown fox', 'review docx round trip: ' + E.DocumentText);
+  Check((pd_doc_revision_count(E.Doc) = 2) and (pd_doc_comment_count(E.Doc) = 2), 'changes and comments come back');
+  { next change from the start: the deletion; accept it, and the insertion is selected next }
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  Check(E.NextChange(1) and (E.SelectedText = 'The '), 'next change: ' + E.SelectedText);
+  E.AcceptChange;
+  Check(E.DocumentText = 'quick brown fox', 'accepted deletion: ' + E.DocumentText);
+  Check(E.SelectedText = 'brown ', 'then the next change: ' + E.SelectedText);
+  E.RejectChange;
+  Check(E.DocumentText = 'quick fox', 'rejected insertion: ' + E.DocumentText);
+  E.Undo;
+  E.Undo;
+  Check(E.DocumentText = 'The quick brown fox', 'undo review: ' + E.DocumentText);
+  E.AcceptAllChanges;
+  Check(E.DocumentText = 'quick brown fox', 'accept all: ' + E.DocumentText);
+  E.DeleteComment(1);
+  Check(pd_doc_comment_get(E.Doc, 2, Cm) <> PD_OK, 'comment and reply deleted');
+
+  { a real reviewed document, with the balloons in view }
+  if FileExists(ParamStr(2)) then
+  begin
+    Step('reviewed document');
+    E.LoadFromFile(ParamStr(2));
+    Form.SetBounds(0, 0, 1260, 1000);
+    for I := 1 to 20 do
+    begin
+      Application.ProcessMessages;
+      Sleep(20);
+    end;
+    E.Invalidate;
+    E.Update;
+    Application.ProcessMessages;
+    Check((pd_layout_page_markup(E.Layout, 0, nil, 0, N) = PD_OK) and (N > 5), 'markup on the first page');
+    ExecuteProcess('/usr/bin/import', ['-window', 'root', Dir + 'edit_review.png']);
+    E.MarkupMode := PD_MARKUP_INLINE;
+    E.Update;
+    Application.ProcessMessages;
+    ExecuteProcess('/usr/bin/import', ['-window', 'root', Dir + 'edit_review_inline.png']);
+    E.MarkupMode := PD_MARKUP_BALLOONS;
   end;
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');

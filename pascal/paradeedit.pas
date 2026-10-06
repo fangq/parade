@@ -37,6 +37,14 @@ type
   end;
   PGlyphBmp = ^TGlyphBmp;
 
+  { a margin balloon as last drawn: where a click on it selects the text it is about }
+  TBalloonHit = record
+    R: TRect;
+    Range: pd_range;
+    Kind: Int32;                { PD_MARK_* }
+    Id: UInt32;                 { revision or comment }
+  end;
+
   { TParadeEdit }
 
   TParadeEdit = class(TCustomControl)
@@ -69,7 +77,25 @@ type
     FBackImg: TLazIntfImage;       { ... and the same pixels here, to find what a redraw changes }
     FBackSig: string;              { what they were drawn for: size, zoom, scroll, layout, selection }
     FLayoutEpoch: Integer;         { counts layout updates }
+    FAuthor: string;               { who tracked changes and comments are by }
+    FTrack: Boolean;
+    FHasMarkup: Boolean;           { some page has changes or comments: the balloon column shows }
+    FBalloons: array of TBalloonHit;
     function GetPageCount: Integer;
+    function MarkupWidth: Integer;
+    function HiddenAt(const P: pd_pos): Boolean;
+    function RevisionAt(const P: pd_pos; out Rev: pd_revision): Boolean;
+    function StripRevision(Fmt: pd_format_id): pd_format_id;
+    procedure SetTrackChanges(AValue: Boolean);
+    procedure SetMarkupMode(AValue: Integer);
+    function GetMarkupMode: Integer;
+    procedure SelectRange(const R: pd_range);
+    function ChangeAt(const P: pd_pos; out R: pd_range): Boolean;
+    function BalloonHeight(const Segs: array of string; W: Integer; PxScale: Double; Draw: TLazIntfImage;
+      X, Y: Integer; Col: UInt32): Integer;
+    procedure PaintMarkup(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double);
+    procedure ResolveChange(Accept: Boolean);
+    procedure SetAuthor(const AValue: string);
     procedure SetZoom(AValue: Double);
     procedure BlinkTimer(Sender: TObject);
     procedure ScrollBarChange(Sender: TObject);
@@ -167,6 +193,19 @@ type
     { draw a page into a bitmap at a scale, without the caret (tests, previews, printing) }
     procedure RenderPage(Page: Integer; Bmp: TBitmap; Scale: Double);
 
+    { review: tracked changes and comments }
+    procedure AcceptChange;             { the selection's changes, or the one at the caret; then the next }
+    procedure RejectChange;
+    procedure AcceptAllChanges;
+    procedure RejectAllChanges;
+    function NextChange(Dir: Integer = 1): Boolean;   { select the next (previous) change or comment }
+    { a comment by Author on the selection (the word at the caret without one); 0 if none could be made }
+    function AddComment(const AText: string): pd_comment_id;
+    function ReplyToComment(Id: pd_comment_id; const AText: string): pd_comment_id;
+    function CommentAt(const P: pd_pos): pd_comment_id;   { the innermost comment over a position, 0 if none }
+    procedure DeleteComment(Id: pd_comment_id);
+    procedure ResolveComment(Id: pd_comment_id; Resolved: Boolean = True);
+
     property Doc: Ppd_doc read FDoc;
     property Layout: Ppd_layout read FLayout;
     property CaretPos: pd_pos read GetCaretPos;
@@ -174,6 +213,11 @@ type
     property PageCount: Integer read GetPageCount;
     property Modified: Boolean read FModified write FModified;
     property FileName: string read FFileName;
+    { edits are recorded as tracked changes by Author }
+    property TrackChanges: Boolean read FTrack write SetTrackChanges;
+    property Author: string read FAuthor write SetAuthor;
+    { PD_MARKUP_*: balloons, inline, final or original }
+    property MarkupMode: Integer read GetMarkupMode write SetMarkupMode;
   published
     property Align;
     property Anchors;
@@ -692,6 +736,11 @@ begin
   Cursor := crIBeam;       { a text editor's: the scroll bar keeps its own }
   FZoom := 1.0;
   FPageGap := 16;
+  FAuthor := GetEnvironmentVariable('USER');
+  if FAuthor = '' then
+    FAuthor := GetEnvironmentVariable('USERNAME');
+  if FAuthor = '' then
+    FAuthor := 'Author';
   FScrollBar := TScrollBar.Create(Self);
   FScrollBar.Kind := sbVertical;
   FScrollBar.Align := alRight;
@@ -829,6 +878,8 @@ begin
   FDoc := D;
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
   pd_doc_set_math_font(FDoc, FMathFont);
+  if FTrack then
+    pd_doc_set_tracking(FDoc, PAnsiChar(FAuthor));
   ParadeCheck(pd_layout_new(FDoc, FLayout), 'layout');
   ParadeCheck(pd_doc_marker_new(FDoc, PdPos(FirstPara, 0), PD_GRAVITY_RIGHT, FCaret), 'caret');
   ParadeCheck(pd_doc_marker_new(FDoc, PdPos(FirstPara, 0), PD_GRAVITY_LEFT, FAnchor), 'anchor');
@@ -883,6 +934,8 @@ begin
   pd_doc_load_images(FDoc, @FetchFile, @Base);
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
   pd_doc_set_math_font(FDoc, FMathFont);
+  if FTrack then
+    pd_doc_set_tracking(FDoc, PAnsiChar(FAuthor));
   ParadeCheck(pd_layout_new(FDoc, FLayout), 'layout');
   ParadeCheck(pd_doc_marker_new(FDoc, PdPos(FirstPara, 0), PD_GRAVITY_RIGHT, FCaret), 'caret');
   ParadeCheck(pd_doc_marker_new(FDoc, PdPos(FirstPara, 0), PD_GRAVITY_LEFT, FAnchor), 'anchor');
@@ -977,9 +1030,28 @@ var
   Info: pd_page_info;
 begin
   pd_layout_page_info(FLayout, Page, Info);
-  Result := (ClientWidth - FScrollBar.Width - Round(Info.width * PxPerSp)) div 2;
+  Result := (ClientWidth - FScrollBar.Width - Round(Info.width * PxPerSp) - MarkupWidth) div 2;
   if Result < FPageGap then
     Result := FPageGap;
+end;
+
+{ the column right of the pages that holds the balloons, 0 when nothing needs one }
+function TParadeEdit.MarkupWidth: Integer;
+var
+  Info: pd_page_info;
+  Room: Integer;
+begin
+  Result := 0;
+  if not FHasMarkup or (PageCount = 0) then
+    Exit;
+  { as wide as the zoom makes it, narrower when the window has less room beside the page }
+  pd_layout_page_info(FLayout, 0, Info);
+  Room := ClientWidth - FScrollBar.Width - Round(Info.width * PxPerSp) - 2 * FPageGap;
+  Result := Round(250 * FZoom);
+  if Room < Result then
+    Result := Room;
+  if Result < 150 then
+    Result := 150;
 end;
 
 function TParadeEdit.TotalHeight: Integer;
@@ -1032,11 +1104,25 @@ begin
 end;
 
 procedure TParadeEdit.Relayout;
+var
+  I: Integer;
+  N: Int32;
 begin
   { without fonts there is nothing to lay out yet: show no pages rather than fail }
   if Length(FFonts) > 0 then
     ParadeCheck(pd_layout_update(FLayout, nil), 'layout update');
   Inc(FLayoutEpoch);
+  { a balloon column while any page has something to show in it }
+  FHasMarkup := False;
+  if (pd_doc_revision_count(FDoc) > 0) or (pd_doc_comment_count(FDoc) > 0) then
+  begin
+    I := 0;
+    while (I < PageCount) and not FHasMarkup do
+    begin
+      FHasMarkup := (pd_layout_page_markup(FLayout, I, nil, 0, N) = PD_OK) and (N > 0);
+      Inc(I);
+    end;
+  end;
   UpdateScrollBar;
   Invalidate;
 end;
@@ -1335,7 +1421,13 @@ begin
   Result := P;
   S := ParaText(P.block);
   if P.offset < UInt32(Length(S)) then
-    Result.offset := pd_text_next_grapheme(PAnsiChar(S), Length(S), P.offset)   { a whole grapheme cluster }
+  begin
+    { over text the markup hides (deleted text out of the line) as if it were not there }
+    while (Result.offset < UInt32(Length(S))) and HiddenAt(Result) do
+      Result.offset := pd_text_next_grapheme(PAnsiChar(S), Length(S), Result.offset);
+    if Result.offset < UInt32(Length(S)) then
+      Result.offset := pd_text_next_grapheme(PAnsiChar(S), Length(S), Result.offset)   { a whole grapheme cluster }
+  end
   else
   begin
     N := pd_doc_next_paragraph(FDoc, P.block);
@@ -1354,6 +1446,8 @@ begin
   begin
     S := ParaText(P.block);
     Result.offset := pd_text_prev_grapheme(PAnsiChar(S), Length(S), P.offset);
+    while (Result.offset > 0) and HiddenAt(Result) do
+      Result.offset := pd_text_prev_grapheme(PAnsiChar(S), Length(S), Result.offset);
   end
   else
   begin
@@ -1563,7 +1657,7 @@ begin
   { text typed over a selection takes the format of the selection's first character }
   Fmt := PD_FORMAT_INHERIT;
   if HasSelection then
-    Fmt := FormatAt(SelStart);
+    Fmt := StripRevision(FormatAt(SelStart));
   if Grouped then
     pd_doc_begin_group(FDoc, 'Insert');
   DeleteSelection;
@@ -1897,7 +1991,11 @@ begin
               pd_doc_block_info(FDoc, P.block, BI);
               pd_doc_block_info(FDoc, CaretPos.block, BJ);
               if (P.block = CaretPos.block) or (BI.parent = BJ.parent) then
+              begin
                 pd_doc_delete(FDoc, PdRange(P, CaretPos), nil);
+                if FTrack then      { the text stays, marked: the caret goes before it }
+                  pd_doc_marker_set(FDoc, FCaret, P);
+              end;
             end;
           end
           else
@@ -1908,7 +2006,11 @@ begin
               pd_doc_block_info(FDoc, P.block, BI);
               pd_doc_block_info(FDoc, CaretPos.block, BJ);
               if (P.block = CaretPos.block) or (BI.parent = BJ.parent) then
+              begin
                 pd_doc_delete(FDoc, PdRange(CaretPos, P), nil);
+                if FTrack and not HiddenAt(CaretPos) then   { struck through in place: after it }
+                  pd_doc_marker_set(FDoc, FCaret, P);
+              end;
             end;
           end;
         end;
@@ -1949,9 +2051,17 @@ end;
 procedure TParadeEdit.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   P: pd_pos;
+  I: Integer;
 begin
   inherited MouseDown(Button, Shift, X, Y);
   SetFocus;
+  if Button = mbLeft then
+    for I := 0 to High(FBalloons) do
+      if PtInRect(FBalloons[I].R, Point(X, Y)) then
+      begin
+        SelectRange(FBalloons[I].Range);
+        Exit;
+      end;
   if (Button = mbLeft) and PointToPos(X, Y, P) then
   begin
     FHasDesiredX := False;
@@ -2065,33 +2175,21 @@ var
   Items: array of pd_draw;
   N, I, PW, PH, IX, IY, Sub: Integer;
   PX: Double;
-  Sel: Boolean;
-  A, B, Q: pd_pos;
+  Q: pd_pos;
   G: PGlyphBmp;
   Pic: TLazIntfImage;
   CPage: Int32;
   CX, CBase, CAsc, CDesc: pd_sp;
-begin
-  { PxScale, not Scale: pd_draw has a field named scale, and the WITH below
-    would read that one -- 65536, font expansion -- in place of this }
-  pd_layout_page_info(FLayout, Page, Info);
-  PW := Round(Info.width * PxScale);
-  PH := Round(Info.height * PxScale);
-  FillRectImg(Img, OX - 1, OY - 1, OX + PW + 1, OY + PH + 1, $00909090, 255);   { frame }
-  FillRectImg(Img, OX, OY, OX + PW, OY + PH, $00FFFFFF, 255);
-  if pd_layout_page_items(FLayout, Page, nil, 0, N) <> PD_OK then
-    Exit;
-  SetLength(Items, N + 1);
-  pd_layout_page_items(FLayout, Page, @Items[0], N, N);
+  CI: Int32;
+  Cm: pd_comment;
 
-  { selection behind the text: one band per line, the line's full height, from
-    the first selected character to the last -- the spaces between them too --
-    and on to the end of the line's text where the selection goes on past it }
-  Sel := HasSelection;
-  if Sel then
+  { a range behind the text: one band per line, the line's full height, from
+    the first character in it to the last -- the spaces between them too --
+    and for a selection on to the end of the line's text where it goes on past it }
+  procedure Highlight(const A, B: pd_pos; Col: UInt32; Alpha: Integer; ThroughEnd: Boolean);
+  var
+    I, K: Integer;
   begin
-    A := SelStart;
-    B := SelEnd;
     NB := 0;
     SetLength(Bands, 0);
     for I := 0 to N - 1 do
@@ -2141,12 +2239,34 @@ begin
             CAsc := 0;
             CDesc := 0;
           end;
-          if LastSel then   { its last character is selected: the selection goes on, through the line's end }
+          if LastSel and ThroughEnd then   { its last character is selected: the selection goes on, through the line's end }
             X1 := LineEnd + Round(4 / PxScale);
           FillRectImg(Img, OX + Floor0(X0 * PxScale), OY + Round((Y - CAsc) * PxScale), OX + Round(X1 * PxScale),
-            OY + Round((Y + CDesc) * PxScale), $003390FF, 80);
+            OY + Round((Y + CDesc) * PxScale), Col, Alpha);
         end;
   end;
+
+begin
+  { PxScale, not Scale: pd_draw has a field named scale, and the WITH below
+    would read that one -- 65536, font expansion -- in place of this }
+  pd_layout_page_info(FLayout, Page, Info);
+  PW := Round(Info.width * PxScale);
+  PH := Round(Info.height * PxScale);
+  FillRectImg(Img, OX - 1, OY - 1, OX + PW + 1, OY + PH + 1, $00909090, 255);   { frame }
+  FillRectImg(Img, OX, OY, OX + PW, OY + PH, $00FFFFFF, 255);
+  if pd_layout_page_items(FLayout, Page, nil, 0, N) <> PD_OK then
+    Exit;
+  SetLength(Items, N + 1);
+  pd_layout_page_items(FLayout, Page, @Items[0], N, N);
+
+  { comments' ranges, lightly in their authors' colours; the selection over them }
+  if pd_doc_comment_count(FDoc) > 0 then
+    for CI := 1 to pd_doc_comment_count(FDoc) do
+      if (pd_doc_comment_get(FDoc, CI, Cm) = PD_OK) and (Cm.parent = 0) and (Cm.resolved = 0) and
+         (Compare(Cm.range.start, Cm.range.finish) < 0) then
+        Highlight(Cm.range.start, Cm.range.finish, pd_doc_author_color(FDoc, Cm.author) and $FFFFFF, 40, False);
+  if HasSelection then
+    Highlight(SelStart, SelEnd, $003390FF, 80, True);
 
   for I := 0 to N - 1 do
     with Items[I] do
@@ -2269,6 +2389,7 @@ begin
   if (W <= 0) or (H <= 0) then
     Exit;
   Img := NewImage(W, H, TColorToRGB(Color));
+  SetLength(FBalloons, 0);
   for Page := 0 to PageCount - 1 do
   begin
     PTop := PageTop(Page);
@@ -2278,6 +2399,8 @@ begin
     if PTop > H then
       Break;
     PaintPage(Img, Page, PageLeft(Page), PTop, PxPerSp, False);
+    if FHasMarkup then
+      PaintMarkup(Img, Page, PageLeft(Page), PTop, PxPerSp);
   end;
 
   Full := (FBack = nil) or (FBackImg = nil) or (FBackImg.Width <> W) or (FBackImg.Height <> H);
@@ -2378,6 +2501,452 @@ begin
     Img.Free;
   end;
   FZoom := OldZoom;
+end;
+
+
+{ ---------------- review: tracked changes and comments ---------------- }
+
+function TParadeEdit.RevisionAt(const P: pd_pos; out Rev: pd_revision): Boolean;
+var
+  F: pd_format_id;
+  St: UInt32;
+  Cp: pd_char_props;
+begin
+  Result := False;
+  F := FormatAt(P);
+  if (F = PD_FORMAT_INHERIT) or (pd_doc_format_info(FDoc, F, @St, @Cp) <> PD_OK) or
+     ((Cp.mask and PD_CP_REVISION) = 0) then
+    Exit;
+  Result := pd_doc_revision_get(FDoc, Cp.revision, Rev) = PD_OK;
+end;
+
+{ the character at a position is tracked text the markup leaves out of the line }
+function TParadeEdit.HiddenAt(const P: pd_pos): Boolean;
+var
+  Rv: pd_revision;
+begin
+  Result := False;
+  if (pd_doc_revision_count(FDoc) = 0) or not RevisionAt(P, Rv) then
+    Exit;
+  case pd_doc_markup(FDoc) of
+    PD_MARKUP_BALLOONS, PD_MARKUP_FINAL: Result := Rv.kind = PD_REV_DELETE;
+    PD_MARKUP_ORIGINAL: Result := Rv.kind = PD_REV_INSERT;
+  end;
+end;
+
+function TParadeEdit.StripRevision(Fmt: pd_format_id): pd_format_id;
+var
+  St: UInt32;
+  Cp: pd_char_props;
+begin
+  Result := Fmt;
+  if (Fmt = PD_FORMAT_INHERIT) or (pd_doc_format_info(FDoc, Fmt, @St, @Cp) <> PD_OK) or
+     ((Cp.mask and PD_CP_REVISION) = 0) then
+    Exit;
+  Cp.mask := Cp.mask and not PD_CP_REVISION;
+  Cp.revision := 0;
+  Result := pd_doc_format(FDoc, St, @Cp);
+end;
+
+procedure TParadeEdit.SetTrackChanges(AValue: Boolean);
+begin
+  FTrack := AValue;
+  if AValue then
+    pd_doc_set_tracking(FDoc, PAnsiChar(FAuthor))
+  else
+    pd_doc_set_tracking(FDoc, nil);
+end;
+
+procedure TParadeEdit.SetAuthor(const AValue: string);
+begin
+  FAuthor := Copy(AValue, 1, 63);
+  if FTrack then
+    pd_doc_set_tracking(FDoc, PAnsiChar(FAuthor));
+end;
+
+function TParadeEdit.GetMarkupMode: Integer;
+begin
+  Result := pd_doc_markup(FDoc);
+end;
+
+procedure TParadeEdit.SetMarkupMode(AValue: Integer);
+begin
+  if AValue = pd_doc_markup(FDoc) then
+    Exit;
+  pd_doc_set_markup(FDoc, AValue);
+  Relayout;
+end;
+
+procedure TParadeEdit.SelectRange(const R: pd_range);
+begin
+  pd_doc_marker_set(FDoc, FAnchor, R.start);
+  pd_doc_marker_set(FDoc, FCaret, R.finish);
+  FHasDesiredX := False;
+  EnsureCaretVisible;
+  Invalidate;
+end;
+
+{ the change the position is in or at an end of }
+function TParadeEdit.ChangeAt(const P: pd_pos; out R: pd_range): Boolean;
+var
+  From: pd_pos;
+begin
+  Result := False;
+  From := PdPos(P.block, 0);
+  while pd_doc_revision_find(FDoc, From, 1, R, nil) = PD_OK do
+  begin
+    if (R.start.block <> P.block) or (R.start.offset > P.offset) then
+      Exit;
+    if R.finish.offset >= P.offset then
+      Exit(True);
+    From := R.finish;
+  end;
+end;
+
+procedure TParadeEdit.ResolveChange(Accept: Boolean);
+var
+  R: pd_range;
+begin
+  if HasSelection then
+    R := PdRange(SelStart, SelEnd)
+  else if not ChangeAt(CaretPos, R) then
+  begin
+    NextChange(1);      { nothing here: go to the next one first }
+    Exit;
+  end;
+  if pd_doc_revision_resolve(FDoc, R, Ord(Accept)) <> PD_OK then
+    Exit;
+  pd_doc_marker_set(FDoc, FAnchor, CaretPos);
+  Changed;
+  NextChange(1);
+end;
+
+procedure TParadeEdit.AcceptChange;
+begin
+  ResolveChange(True);
+end;
+
+procedure TParadeEdit.RejectChange;
+begin
+  ResolveChange(False);
+end;
+
+procedure TParadeEdit.AcceptAllChanges;
+begin
+  if pd_doc_revision_resolve(FDoc, PdRange(PdPos(FirstPara, 0), LastPos), 1) = PD_OK then
+    Changed;
+end;
+
+procedure TParadeEdit.RejectAllChanges;
+begin
+  if pd_doc_revision_resolve(FDoc, PdRange(PdPos(FirstPara, 0), LastPos), 0) = PD_OK then
+    Changed;
+end;
+
+function TParadeEdit.NextChange(Dir: Integer): Boolean;
+var
+  From: pd_pos;
+  R, Best: pd_range;
+  C: pd_comment;
+  I: Int32;
+  Found: Boolean;
+begin
+  if Dir >= 0 then
+    From := SelEnd
+  else
+    From := SelStart;
+  Found := pd_doc_revision_find(FDoc, From, Dir, R, nil) = PD_OK;
+  if Found then
+    Best := R;
+  { or a comment, when one comes first }
+  for I := 1 to pd_doc_comment_count(FDoc) do
+    if (pd_doc_comment_get(FDoc, I, C) = PD_OK) and (C.parent = 0) then
+      if ((Dir >= 0) and (Compare(C.range.start, From) >= 0) and (not Found or (Compare(C.range.start, Best.start) < 0)) and
+          not ((Compare(C.range.start, From) = 0) and HasSelection)) or
+         ((Dir < 0) and (Compare(C.range.finish, From) <= 0) and (not Found or (Compare(C.range.start, Best.start) > 0)) and
+          not ((Compare(C.range.finish, From) = 0) and HasSelection)) then
+      begin
+        Best := C.range;
+        Found := True;
+      end;
+  Result := Found;
+  if Found then
+    SelectRange(Best);
+end;
+
+function TParadeEdit.AddComment(const AText: string): pd_comment_id;
+var
+  C: pd_comment;
+  S: string;
+  A, B: UInt32;
+begin
+  Result := 0;
+  FillChar(C, SizeOf(C), 0);
+  if HasSelection then
+    C.range := PdRange(SelStart, SelEnd)
+  else
+  begin   { the word at the caret }
+    S := ParaText(CaretPos.block);
+    A := CaretPos.offset;
+    B := A;
+    while (A > 0) and ((S[A] in ['0'..'9', 'A'..'Z', 'a'..'z', '_']) or (Ord(S[A]) >= $80)) do
+      Dec(A);
+    while (B < UInt32(Length(S))) and ((S[B + 1] in ['0'..'9', 'A'..'Z', 'a'..'z', '_']) or (Ord(S[B + 1]) >= $80)) do
+      Inc(B);
+    C.range := PdRange(PdPos(CaretPos.block, A), PdPos(CaretPos.block, B));
+  end;
+  StrPLCopy(C.author, FAuthor, 63);
+  StrPLCopy(C.date, FormatDateTime('yyyy-mm-dd"T"hh:nn:ss', Now), 31);
+  C.text := PAnsiChar(AText);
+  C.text_len := Length(AText);
+  if pd_doc_comment_add(FDoc, C, Result) <> PD_OK then
+    Result := 0
+  else
+    Changed;
+end;
+
+function TParadeEdit.ReplyToComment(Id: pd_comment_id; const AText: string): pd_comment_id;
+var
+  C: pd_comment;
+begin
+  Result := 0;
+  FillChar(C, SizeOf(C), 0);
+  StrPLCopy(C.author, FAuthor, 63);
+  StrPLCopy(C.date, FormatDateTime('yyyy-mm-dd"T"hh:nn:ss', Now), 31);
+  C.text := PAnsiChar(AText);
+  C.text_len := Length(AText);
+  C.parent := Id;
+  if pd_doc_comment_add(FDoc, C, Result) <> PD_OK then
+    Result := 0
+  else
+    Changed;
+end;
+
+function TParadeEdit.CommentAt(const P: pd_pos): pd_comment_id;
+var
+  I: Int32;
+  C: pd_comment;
+  Start: pd_pos;
+begin
+  Result := 0;
+  Start := PdPos(0, 0);
+  for I := 1 to pd_doc_comment_count(FDoc) do
+    if (pd_doc_comment_get(FDoc, I, C) = PD_OK) and (C.parent = 0) and (Compare(C.range.start, P) <= 0) and
+       (Compare(P, C.range.finish) <= 0) and ((Result = 0) or (Compare(C.range.start, Start) > 0)) then
+    begin
+      Result := I;
+      Start := C.range.start;
+    end;
+end;
+
+procedure TParadeEdit.DeleteComment(Id: pd_comment_id);
+begin
+  if pd_doc_comment_remove(FDoc, Id) = PD_OK then
+    Changed;
+end;
+
+procedure TParadeEdit.ResolveComment(Id: pd_comment_id; Resolved: Boolean);
+var
+  C: pd_comment;
+begin
+  if pd_doc_comment_get(FDoc, Id, C) <> PD_OK then
+    Exit;
+  C.resolved := Ord(Resolved);
+  if pd_doc_comment_set(FDoc, Id, C) = PD_OK then
+    Changed;
+end;
+
+{ Lay out a balloon's text -- runs alternating: a heading in the author's
+  colour, bold, then plain text -- in W pixels; draw it at X, Y when Draw is
+  given. Returns its height in pixels, padding included. }
+function TParadeEdit.BalloonHeight(const Segs: array of string; W: Integer; PxScale: Double; Draw: TLazIntfImage;
+  X, Y: Integer; Col: UInt32): Integer;
+var
+  Para: Ppd_para;
+  Prm: pd_params;
+  SH, SB, St: pd_style;
+  FH, FB: Ppd_font;
+  NL, L, K, IX, IY, Sub, Pad: Integer;
+  NG: Int32;
+  Ln: pd_line;
+  Gs: array of pd_glyph;
+  G: PGlyphBmp;
+  PX: Double;
+begin
+  Pad := Round(5 * FZoom);
+  Result := 2 * Pad;
+  FB := ResolveFont(Self, 'sans-serif', 400, 0);
+  FH := ResolveFont(Self, 'sans-serif', 700, 0);
+  if (FB = nil) or (W <= 2 * Pad + 8) or (pd_para_new(Para) <> PD_OK) then
+    Exit;
+  if FH = nil then
+    FH := FB;
+  try
+    pd_style_init(SH, FH, PD_SP_PER_PT * 8);
+    SH.color := Col;
+    pd_style_init(SB, FB, PD_SP_PER_PT * 8);
+    SB.color := $00303030;
+    for K := 0 to High(Segs) do
+      if Segs[K] <> '' then
+        if K mod 2 = 0 then
+          pd_para_add_text(Para, PAnsiChar(Segs[K]), Length(Segs[K]), SH)
+        else
+          pd_para_add_text(Para, PAnsiChar(Segs[K]), Length(Segs[K]), SB);
+    pd_params_init(Prm);
+    Prm.width := Round((W - 2 * Pad) / PxScale);
+    Prm.align := PD_ALIGN_LEFT;
+    Prm.mode := PD_BREAK_GREEDY;    { fill each line: an optimal ragged edge evens the lines out, short }
+    if pd_para_break(Para, @Prm, nil) <> PD_OK then
+      Exit;
+    NL := pd_para_line_count(Para);
+    if NL = 0 then
+      Exit;
+    pd_para_get_line(Para, NL - 1, Ln);
+    Result := 2 * Pad + Round((Ln.baseline + Ln.descent) * PxScale);
+    if Draw = nil then
+      Exit;
+    for L := 0 to NL - 1 do
+    begin
+      pd_para_get_glyphs(Para, L, nil, 0, NG);
+      if NG <= 0 then
+        Continue;
+      SetLength(Gs, NG);
+      pd_para_get_glyphs(Para, L, @Gs[0], NG, NG);
+      for K := 0 to NG - 1 do
+        if (Gs[K].kind = PD_KIND_GLYPH) and (pd_para_get_style(Para, Gs[K].style, St) = PD_OK) and (St.font <> nil) then
+        begin
+          PX := X + Pad + Gs[K].x * PxScale;
+          IX := Floor0(PX);
+          Sub := Round((PX - IX) * 4) * 64;
+          if Sub >= 256 then
+          begin
+            Inc(IX);
+            Sub := 0;
+          end;
+          IY := Y + Pad + Round(Gs[K].y * PxScale);
+          G := GetGlyphBmp(St.font, Gs[K].glyph, Round(St.size * PxScale * PD_SP_PER_PT), Sub);
+          if G^.W > 0 then
+            BlendGlyph(Draw, G, IX, IY, St.color and $FFFFFF);
+        end;
+    end;
+  finally
+    pd_para_free(Para);
+  end;
+end;
+
+{ A page's tracked changes and comments: a change bar in the left margin by
+  each change, and in the column on the right a balloon for each deletion
+  (when they are out of the text) and each comment with its replies, as near
+  its line as the balloons above it allow, tied to its place by a line. }
+procedure TParadeEdit.PaintMarkup(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double);
+var
+  Items: array of pd_markup_item;
+  N, CI: Int32;
+  I, J, PW, BX, BW, Y, NextY, AX, AY, H, BarX, Gap: Integer;
+  Segs: array of string;
+  S: string;
+  C, R: pd_comment;
+  Rv: pd_revision;
+  Col: UInt32;
+  Line: TPtDArray;
+  Info0: pd_page_info;
+
+  procedure Add(const T: string);
+  begin
+    SetLength(Segs, Length(Segs) + 1);
+    Segs[High(Segs)] := T;
+  end;
+
+begin
+  if (pd_layout_page_markup(FLayout, Page, nil, 0, N) <> PD_OK) or (N = 0) then
+    Exit;
+  SetLength(Items, N);
+  if pd_layout_page_markup(FLayout, Page, @Items[0], N, N) <> PD_OK then
+    Exit;
+  pd_layout_page_info(FLayout, Page, Info0);
+  PW := Round(Info0.width * PxScale);
+  Gap := Round(12 * FZoom);
+  BX := OX + PW + Gap;
+  BW := MarkupWidth - 2 * Gap;
+  BarX := OX + Round(PD_SP_PER_PT * 24 * PxScale);
+  NextY := OY + Gap;
+  for I := 0 to N - 1 do
+    with Items[I] do
+    begin
+      Col := color and $FFFFFF;
+      if kind <> PD_MARK_COMMENT then
+        FillRectImg(Img, BarX, OY + Round(top * PxScale), BarX + 2, OY + Round(bottom * PxScale), Col, 255);
+      if (kind = PD_MARK_INSERTION) or ((kind = PD_MARK_DELETION) and (pd_doc_markup(FDoc) <> PD_MARKUP_BALLOONS)) then
+        Continue;
+      SetLength(Segs, 0);
+      if kind = PD_MARK_DELETION then
+      begin
+        S := Copy(ParaText(range.start.block), range.start.offset + 1, range.finish.offset - range.start.offset);
+        S := StringReplace(S, #$EF#$BF#$BC, '', [rfReplaceAll]);
+        if Length(S) > 400 then
+          S := Copy(S, 1, 400) + '...';
+        if pd_doc_revision_get(FDoc, id, Rv) = PD_OK then
+          Add(PAnsiChar(@Rv.author[0]) + ' deleted: ')
+        else
+          Add('Deleted: ');
+        Add(S);
+      end
+      else if pd_doc_comment_get(FDoc, id, C) = PD_OK then
+      begin
+        SetString(S, C.text, C.text_len);
+        if C.resolved <> 0 then
+        begin
+          Add(PAnsiChar(@C.author[0]) + ' (resolved): ');
+          Col := $00909090;
+        end
+        else
+          Add(PAnsiChar(@C.author[0]) + ': ');
+        Add(S);
+        for CI := 1 to pd_doc_comment_count(FDoc) do
+          if (pd_doc_comment_get(FDoc, CI, R) = PD_OK) and (R.parent = id) then
+          begin
+            SetString(S, R.text, R.text_len);
+            Add(#10 + PAnsiChar(@R.author[0]) + ': ');
+            Add(S);
+          end;
+      end
+      else
+        Continue;
+
+      AX := OX + Round(x * PxScale);
+      AY := OY + Round(y * PxScale);
+      Y := AY - Round(12 * FZoom);
+      if Y < NextY then
+        Y := NextY;
+      H := BalloonHeight(Segs, BW, PxScale, nil, 0, 0, Col);
+      { the balloon: white, tinted, framed, with a bar of the colour down its left }
+      FillRectImg(Img, BX, Y, BX + BW, Y + H, $00FFFFFF, 255);
+      FillRectImg(Img, BX, Y, BX + BW, Y + H, Col, 28);
+      FillRectImg(Img, BX, Y, BX + BW, Y + 1, Col, 255);
+      FillRectImg(Img, BX, Y + H - 1, BX + BW, Y + H, Col, 255);
+      FillRectImg(Img, BX + BW - 1, Y, BX + BW, Y + H, Col, 255);
+      FillRectImg(Img, BX, Y, BX + 3, Y + H, Col, 255);
+      BalloonHeight(Segs, BW, PxScale, Img, BX + 2, Y, Col);
+      { its place: a dotted line under the line, on to the page's edge, then to the balloon }
+      J := AX;
+      while J < OX + PW do
+      begin
+        FillRectImg(Img, J, AY + 2, J + 2, AY + 3, Col, 130);
+        Inc(J, 4);
+      end;
+      SetLength(Line, 2);
+      Line[0].X := OX + PW;
+      Line[0].Y := AY + 2.5;
+      Line[1].X := BX;
+      Line[1].Y := Y + Round(8 * FZoom);
+      StrokePolylineImg(Img, Line, False, 1, Col);
+      SetLength(FBalloons, Length(FBalloons) + 1);
+      FBalloons[High(FBalloons)].R := Rect(BX, Y, BX + BW, Y + H);
+      FBalloons[High(FBalloons)].Range := range;
+      FBalloons[High(FBalloons)].Kind := kind;
+      FBalloons[High(FBalloons)].Id := id;
+      NextY := Y + H + Round(6 * FZoom);
+    end;
 end;
 
 end.

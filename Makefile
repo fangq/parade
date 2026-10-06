@@ -98,6 +98,7 @@ LAZBUILD = $(if $(LAZDIR),$(LAZDIR)lazbuild --lazarusdir=$(LAZDIR) $(LAZPCP),laz
 LAZPCP ?=
 FPC ?= fpc
 XVFB_DISPLAY ?= :97
+REVIEW_DOC ?=
 
 $(BUILD)/pascal/lib/libparade.a: $(LIB)
 	mkdir -p $(BUILD)/pascal/lib $(BUILD)/pascal/units
@@ -119,7 +120,7 @@ pascal-edit: $(BUILD)/pascal/lib/libparade.a $(BUILD)/pd_dump
 	$(ulimit_cmd) && ./$(BUILD)/pd_dump > $(BUILD)/pages.json
 	$(LAZBUILD) pascal/tests/edit_test.lpi
 	Xvfb $(XVFB_DISPLAY) -screen 0 1280x1024x24 >/dev/null 2>&1 & echo $$! > $(BUILD)/pascal/xvfb.pid; sleep 2; \
-	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./$(BUILD)/pascal/edit_test $(BUILD)/sample.pdoc \
+	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./$(BUILD)/pascal/edit_test $(BUILD)/sample.pdoc $(REVIEW_DOC) \
 	    < /dev/null); rc=$$?; kill `cat $(BUILD)/pascal/xvfb.pid`; exit $$rc
 
 pascal-demo: $(BUILD)/pascal/lib/libparade.a
