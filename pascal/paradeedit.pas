@@ -24,6 +24,7 @@ type
     Family: string;
     Weight, Italic: Integer;
     Font: Ppd_font;
+    FromDoc: Boolean;           { carried by the document (a DOCX's embedded font): dropped with it }
   end;
 
   TGlyphBmp = record
@@ -105,6 +106,7 @@ type
     function PropsAt(const P: pd_pos): pd_char_props;
     function FormatAt(const P: pd_pos): pd_format_id;
     procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
+    procedure UseDocumentFonts;
     function BackSignature: string;
     procedure RebuildBack;
     function CaretRect(out R: TRect): Boolean;
@@ -731,11 +733,56 @@ begin
   FFonts[High(FFonts)].Weight := Weight;
   FFonts[High(FFonts)].Italic := Ord(Italic);
   FFonts[High(FFonts)].Font := F;
+  FFonts[High(FFonts)].FromDoc := False;
   if FLayout <> nil then
   begin
     pd_layout_invalidate(FLayout);
     Relayout;
   end;
+end;
+
+{ the fonts the document carries, ahead of the registered ones of the same family; the last document's go }
+procedure TParadeEdit.UseDocumentFonts;
+var
+  I, K: Integer;
+  R: pd_res_id;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  M, Fam: string;
+  F: Ppd_font;
+  Kept: array of TParadeFontEntry;
+begin
+  Kept := nil;
+  for I := 0 to High(FFonts) do
+    if FFonts[I].FromDoc then
+      pd_font_free(FFonts[I].Font)
+    else
+    begin
+      SetLength(Kept, Length(Kept) + 1);
+      Kept[High(Kept)] := FFonts[I];
+    end;
+  FFonts := Kept;
+  R := 1;
+  while pd_doc_resource(FDoc, R, @Mime, @Data, @Len) = PD_OK do
+  begin
+    M := StrPas(Mime);
+    K := Pos('family="', M);
+    if (Copy(M, 1, 5) = 'font/') and (K > 0) and (pd_font_load_memory(Data, Len, 0, F) = PD_OK) then
+    begin
+      Fam := Copy(M, K + 8, MaxInt);
+      Fam := Copy(Fam, 1, Pos('"', Fam) - 1);
+      { after the registered ones: the first stays the default face for text that names none }
+      SetLength(FFonts, Length(FFonts) + 1);
+      FFonts[High(FFonts)].Family := Fam;
+      FFonts[High(FFonts)].Weight := 400 + 300 * Ord(Pos('weight=700', M) > 0);
+      FFonts[High(FFonts)].Italic := Ord(Pos('italic=1', M) > 0);
+      FFonts[High(FFonts)].Font := F;
+      FFonts[High(FFonts)].FromDoc := True;
+    end;
+    Inc(R);
+  end;
+  ClearGlyphCache;
 end;
 
 procedure TParadeEdit.AddDefaultFonts;
@@ -828,6 +875,7 @@ begin
   if FDoc <> nil then
     pd_doc_free(FDoc);
   FDoc := D;
+  UseDocumentFonts;
   { pictures the document only names (Markdown, HTML), from beside the file }
   Base := ExtractFilePath(ExpandFileName(FileName));
   if FileName = '' then

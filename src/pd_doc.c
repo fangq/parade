@@ -2850,7 +2850,10 @@ pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_p
              (sp->continuous == 0 || sp->continuous == 1) && sp->page_breaking >= PD_PAGES_GREEDY &&
              sp->page_breaking <= PD_PAGES_OPTIMAL && sp->footnote_skip >= 0 && sp->line_numbers >= 0 &&
              sp->line_numbers <= 100 && sp->line_number_start >= 0 && sp->line_number_distance >= 0 &&
-             sp->line_number_restart >= PD_LINENUM_PAGE && sp->line_number_restart <= PD_LINENUM_CONTINUOUS,
+             sp->line_number_restart >= PD_LINENUM_PAGE && sp->line_number_restart <= PD_LINENUM_CONTINUOUS &&
+             sp->mirror_margins >= -1 && sp->mirror_margins <= 1 && sp->gutter >= 0 &&
+             (int64_t)sp->margin_left + sp->margin_right + sp->gutter < sp->page_width && sp->page_valign >= 0 &&
+             sp->page_valign <= 2,
              b->st.sp = *sp);
 }
 

@@ -21,11 +21,59 @@
 static pd_font* fonts[NFONTS];
 static pd_font* mathf;
 
+/* the fonts the document carries (a DOCX's embedded ones): family, weight, italic */
+static struct {
+    char family[64];
+    int weight, italic;
+    pd_font* font;
+} embedded[64];
+static int nembedded;
+
+static void load_embedded(const pd_doc* d) {
+    pd_res_id r;
+
+    for (r = 1; nembedded < 64; r++) {
+        const char* mime;
+        const void* data;
+        size_t len;
+        const char* f;
+
+        if (pd_doc_resource(d, r, &mime, &data, &len) != PD_OK) {
+            break;
+        }
+
+        if (strncmp(mime, "font/", 5) != 0 || (f = strstr(mime, "family=\"")) == NULL ||
+                pd_font_load_memory(data, len, 0, &embedded[nembedded].font) != PD_OK) {
+            continue;
+        }
+
+        snprintf(embedded[nembedded].family, sizeof(embedded[0].family), "%.*s", (int)strcspn(f + 8, "\""), f + 8);
+        embedded[nembedded].weight = strstr(mime, "weight=700") ? 700 : 400;
+        embedded[nembedded].italic = strstr(mime, "italic=1") != NULL;
+        nembedded++;
+    }
+}
+
 static const pd_font* resolve(void* user, const char* family, int32_t weight, int32_t italic) {
     int32_t cls = pd_font_family_class(family);
-    int face = (weight >= 600 ? 1 : 0) + (italic ? 2 : 0);
+    int face = (weight >= 600 ? 1 : 0) + (italic ? 2 : 0), i, best = -1, bscore = -1;
 
     (void)user;
+
+    for (i = 0; family && i < nembedded; i++) {     /* the document's own font, the closest face */
+        if (!strcmp(embedded[i].family, family)) {
+            int score = ((weight >= 600) == (embedded[i].weight >= 600)) * 2 + (!italic == !embedded[i].italic);
+
+            if (score > bscore) {
+                bscore = score;
+                best = i;
+            }
+        }
+    }
+
+    if (best >= 0) {
+        return embedded[best].font;
+    }
 
     if (cls == PD_FAMILY_MONO) {
         return fonts[8];
@@ -211,6 +259,7 @@ int main(int argc, char** argv) {
             }
         }
 
+        load_embedded(d);
         pd_doc_set_font_resolver(d, resolve, NULL);
 
         if (pd_font_load_file("/usr/share/texmf/fonts/opentype/public/lm-math/latinmodern-math.otf", 0, &mathf) == PD_OK) {
@@ -244,6 +293,10 @@ int main(int argc, char** argv) {
 
     for (i = 0; i < NFONTS; i++) {
         pd_font_free(fonts[i]);
+    }
+
+    for (i = 0; i < nembedded; i++) {
+        pd_font_free(embedded[i].font);
     }
 
     pd_font_free(mathf);

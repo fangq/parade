@@ -461,6 +461,9 @@ type
     line_numbers, line_number_start: Int32;
     line_number_distance: pd_sp;
     line_number_restart: Int32;
+    mirror_margins: Int32;
+    gutter: pd_sp;
+    page_valign: Int32;
   end;
   Ppd_section_props = ^pd_section_props;
 

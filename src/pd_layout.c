@@ -515,9 +515,10 @@ static ppage* new_page(pd_layout* L, const blk* sec, int32_t number, int32_t sec
     p->section_index = section_index;
     p->sp = sp;
     pd_doc_format_number(number, sp->page_number_format, p->label, sizeof(p->label));
-    even = sp->facing_pages && number % 2 == 0;
-    p->text_x = even ? sp->margin_right : sp->margin_left;
-    p->text_w = sp->page_width - sp->margin_left - sp->margin_right;
+    /* margins: mirrored on even pages of a two-sided document; the gutter on the inside */
+    even = (sp->mirror_margins > 0 || (sp->mirror_margins == 0 && sp->facing_pages)) && number % 2 == 0;
+    p->text_x = even ? sp->margin_right : sp->margin_left + sp->gutter;
+    p->text_w = sp->page_width - sp->margin_left - sp->margin_right - sp->gutter;
 
     if (L->npages > 1) {
         memcpy(p->heading, L->pages[L->npages - 2].heading, sizeof(p->heading));
@@ -1714,6 +1715,11 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
     pd_sp avail = F->colh - F->top_used, bottom = avail - fn_area(F, fn_at_cut);
     int32_t i, k;
 
+    /* a section whose pages hold their text centred or at the bottom (a title page) */
+    if (F->sp->page_valign && F->ncols == 1 && F->page != F->floor_page && used_at_cut < bottom) {
+        y0 += F->sp->page_valign == 1 ? (bottom - used_at_cut) / 2 : bottom - used_at_cut;
+    }
+
     for (i = 0; i < nr && r[i].item < cut; i++) {
         const vitem* v = &F->it[r[i].item];
 
@@ -2846,7 +2852,8 @@ static pd_status paginate(pd_layout* L) {
         F.ncols = F.sp->columns < 1 ? 1 : F.sp->columns;
         F.gap = F.sp->column_gap;
         body_area(L, F.sp, &F.top, &F.colh);
-        F.colw = (F.sp->page_width - F.sp->margin_left - F.sp->margin_right - (F.ncols - 1) * F.gap) / F.ncols;
+        F.colw = (F.sp->page_width - F.sp->margin_left - F.sp->margin_right - F.sp->gutter - (F.ncols - 1) * F.gap) /
+                 F.ncols;
         F.number = F.sp->first_page_number > 0 && !F.sp->continuous ? F.sp->first_page_number : number;
         F.floor_page = -1;
 

@@ -498,6 +498,9 @@ typedef struct {
     int32_t line_number_start;  /**< the first number (0 = 1) */
     pd_sp line_number_distance; /**< from the numbers to the text (0 = 18pt) */
     int32_t line_number_restart;    /**< PD_LINENUM_* */
+    int32_t mirror_margins;     /**< 1: left and right margins swap on even pages; -1: never; 0: as facing_pages */
+    pd_sp gutter;               /**< room for the binding, on the inside of the page */
+    int32_t page_valign;        /**< text on the page: 0 at the top, 1 centred, 2 at the bottom */
 } pd_section_props;
 
 typedef enum {

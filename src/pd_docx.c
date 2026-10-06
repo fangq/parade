@@ -325,6 +325,7 @@ typedef struct {
     pd_block_id reft[1024];     /* paragraphs referred to that have no bookmark: given _RefPd<id> */
     int nreft;
     int even_odd;               /* some section has even-page headers */
+    int mirror;                 /* some section mirrors its margins */
     int nbookmarks;
     pd_buf* hf_rels[8];
 } dxo;
@@ -1730,8 +1731,10 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
 
     pb_printf(o, "<w:pgSz w:w=\"%d\" w:h=\"%d\"/>", TW(sp->page_width), TW(sp->page_height));
     pb_printf(o, "<w:pgMar w:top=\"%d\" w:right=\"%d\" w:bottom=\"%d\" w:left=\"%d\" w:header=\"%d\" w:footer=\"%d\" "
-              "w:gutter=\"0\"/>", TW(sp->margin_top), TW(sp->margin_right), TW(sp->margin_bottom), TW(sp->margin_left),
-              TW(sp->header_distance), TW(sp->footer_distance));
+              "w:gutter=\"%d\"/>", TW(sp->margin_top), TW(sp->margin_right), TW(sp->margin_bottom), TW(sp->margin_left),
+              TW(sp->header_distance), TW(sp->footer_distance), TW(sp->gutter));
+
+    x->mirror |= sp->mirror_margins > 0;
 
     if (sp->line_numbers > 0) {     /* Word's start is one less than the first number */
         pb_printf(o, "<w:lnNumType w:countBy=\"%d\" w:start=\"%d\" w:distance=\"%d\" w:restart=\"%s\"/>",
@@ -1761,6 +1764,10 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
 
     if (sp->columns > 1) {
         pb_printf(o, "<w:cols w:num=\"%d\" w:space=\"%d\"/>", (int)sp->columns, TW(sp->column_gap));
+    }
+
+    if (sp->page_valign) {
+        pb_puts(o, sp->page_valign == 1 ? "<w:vAlign w:val=\"center\"/>" : "<w:vAlign w:val=\"bottom\"/>");
     }
 
     if (sp->title_page) {
@@ -2206,6 +2213,91 @@ static void dx_numbering(dxo* x, pd_buf* o) {
     pb_puts(o, "</w:numbering>");
 }
 
+/* the core properties Word shows (title, author, ...) from the document's metadata, YAML lines of key: value */
+static const struct {
+    const char* key;            /* the metadata's */
+    const char* el;             /* core.xml's */
+} CORE_PROPS[] = {
+    { "title", "dc:title" }, { "author", "dc:creator" }, { "subject", "dc:subject" }, { "keywords", "cp:keywords" },
+    { "description", "dc:description" }, { "lastModifiedBy", "cp:lastModifiedBy" }, { "created", "dcterms:created" },
+    { "modified", "dcterms:modified" }
+};
+
+/* the value of a top-level key in YAML text: the rest of its line, quotes taken off */
+static int yaml_value(const char* y, size_t n, const char* key, char* out, size_t cap) {
+    size_t i = 0, kl = strlen(key);
+
+    while (i < n) {
+        size_t e = i;
+
+        while (e < n && y[e] != '\n') {
+            e++;
+        }
+
+        if (e - i > kl && !strncmp(y + i, key, kl) && y[i + kl] == ':') {
+            size_t a = i + kl + 1, b = e, k;
+
+            while (a < b && (y[a] == ' ' || y[a] == '\t')) {
+                a++;
+            }
+
+            while (b > a && (y[b - 1] == ' ' || y[b - 1] == '\r')) {
+                b--;
+            }
+
+            if (b - a >= 2 && (y[a] == '"' || y[a] == '\'') && y[b - 1] == y[a]) {
+                int dq = y[a] == '"';   /* in double quotes, \" and \\ stand for themselves */
+
+                a++;
+                b--;
+
+                for (k = 0; a < b && k + 1 < cap; a++) {
+                    if (dq && y[a] == '\\' && a + 1 < b) {
+                        a++;
+                    }
+
+                    out[k++] = y[a];
+                }
+
+                out[k] = '\0';
+                return k > 0;
+            }
+
+            k = b - a < cap - 1 ? b - a : cap - 1;
+            memcpy(out, y + a, k);
+            out[k] = '\0';
+            return k > 0;
+        }
+
+        i = e + 1;
+    }
+
+    return 0;
+}
+
+static void dx_core(const pd_doc* d, pd_buf* o) {
+    size_t n = 0, k;
+    const char* y = pd_doc_metadata(d, &n);
+    char v[1024];
+
+    pb_puts(o, XML_DECL);
+    pb_puts(o, "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" "
+            "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" "
+            "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">");
+
+    for (k = 0; y && k < sizeof(CORE_PROPS) / sizeof(CORE_PROPS[0]); k++) {
+        if (yaml_value(y, n, CORE_PROPS[k].key, v, sizeof(v))) {
+            int date = CORE_PROPS[k].el[0] == 'd' && CORE_PROPS[k].el[2] == 't';
+
+            pb_printf(o, "<%s%s>", CORE_PROPS[k].el, date ? " xsi:type=\"dcterms:W3CDTF\"" : "");
+            xesc(o, v, strlen(v));
+            pb_printf(o, "</%s>", CORE_PROPS[k].el);
+        }
+    }
+
+    pb_puts(o, "</cp:coreProperties>");
+}
+
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     dxo* x = (dxo*)calloc(1, sizeof(dxo));
     pd_buf doc, part;
@@ -2339,14 +2431,21 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
                   "officedocument.wordprocessingml.%s+xml\"/>", (int)i + 1, x->hf_footer[i] ? "footer" : "header");
     }
 
+    pb_puts(&part, "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package."
+            "core-properties+xml\"/>");
     pb_puts(&part, "</Types>");
     zip_add(&z, "[Content_Types].xml", part.p, part.n);
     part.n = 0;
     pb_puts(&part, XML_DECL);
     pb_puts(&part, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
             "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
-            "officeDocument\" Target=\"word/document.xml\"/></Relationships>");
+            "officeDocument\" Target=\"word/document.xml\"/>"
+            "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/"
+            "core-properties\" Target=\"docProps/core.xml\"/></Relationships>");
     zip_add(&z, "_rels/.rels", part.p, part.n);
+    part.n = 0;
+    dx_core(d, &part);
+    zip_add(&z, "docProps/core.xml", part.p, part.n);
     zip_add(&z, "word/document.xml", doc.p, doc.n);
 
     part.n = 0;
@@ -2382,6 +2481,10 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
         pd_para_props np;
 
         pd_doc_style_resolve(d, pd_doc_style_find(d, "Normal"), &np, NULL);
+
+        if (x->mirror) {
+            pb_puts(&part, "<w:mirrorMargins/>");
+        }
 
         pb_printf(&part, "<w:defaultTabStop w:val=\"%d\"/>", TW(np.tab_interval > 0 ? np.tab_interval : PD_PT(36)));
 
@@ -2591,6 +2694,7 @@ typedef struct {
     int depth;                  /* footnote recursion */
     dprops defaults;            /* w:docDefaults and settings.xml */
     int even_odd;               /* settings.xml: even pages have headers of their own */
+    int mirror;                 /* settings.xml: margins mirror on even pages */
     char hf_rid[16][64];        /* header/footer parts already read, and their stories */
     pd_block_id hf_story[16];
     int nhf;
@@ -2798,6 +2902,9 @@ static void ppr_elem(const pd_markup* m, const char* t, dprops* pr) {
             pp->mask |= PD_PP_INDENT_FIRST;
             pp->indent_first = twips(atoi(v));
         }
+    } else if (strcmp(t, "bidi") == 0) {  /* a right-to-left paragraph */
+        pp->mask |= PD_PP_DIRECTION;
+        pp->direction = attr_on(m) ? PD_DIR_RTL : PD_DIR_LTR;
     } else if (strcmp(t, "contextualSpacing") == 0) {
         pp->mask |= PD_PP_CONTEXTUAL;
         pp->contextual = attr_on(m);
@@ -2888,6 +2995,7 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sp->mask & PD_PP_BREAK_BEFORE) dp->page_break_before = sp->page_break_before;
     if (sp->mask & PD_PP_HYPHENATE) dp->hyphenate = sp->hyphenate;
     if (sp->mask & PD_PP_CONTEXTUAL) dp->contextual = sp->contextual;
+    if (sp->mask & PD_PP_DIRECTION) dp->direction = sp->direction;
     if (sp->mask & PD_PP_SHADING) dp->shading = sp->shading;
 
     if (sp->mask & PD_PP_BORDER) {
@@ -3290,6 +3398,8 @@ static void read_settings(dxi* X, const char* xml, size_t n) {
             X->defaults.pp.hyphenate = attr_on(&m);
         } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "evenAndOddHeaders") == 0) {
             X->even_odd = attr_on(&m);
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "mirrorMargins") == 0) {
+            X->mirror = attr_on(&m);
         } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "defaultTabStop") == 0 &&
                    attr_int(&m, "w:val", 0) > 0) {
             X->defaults.pp.mask |= PD_PP_TABS;
@@ -4065,6 +4175,7 @@ static void dw_begin_para(dw* w) {
         DW_DIFF(PD_PP_BREAK_BEFORE, page_break_before)
         DW_DIFF(PD_PP_HYPHENATE, hyphenate)
         DW_DIFF(PD_PP_CONTEXTUAL, contextual)
+        DW_DIFF(PD_PP_DIRECTION, direction)
         DW_DIFF(PD_PP_SHADING, shading)
 #undef DW_DIFF
 
@@ -4957,6 +5068,76 @@ static void dw_field(dw* w, int kind, const char* instr) {
 }
 
 /* the story of a header or footer part, read once however many sections use it */
+/* The fonts a document carries (fontTable.xml's embedRegular and the
+   rest): each de-obfuscated -- its first 32 bytes XORed with the key its
+   GUID gives, as ECMA-376 has Word do -- and kept as a resource whose type
+   names it: font/ttf; family="Name"; weight=700; italic=1. Hosts load them
+   ahead of their own. */
+static void read_fonts(dxi* X) {
+    char* xml;
+    size_t len = 0;
+    pd_markup m;
+    char family[64] = "";
+    int saved_n = 0, swapped;
+    drel* saved = NULL;
+
+    if ((xml = (char*)zip_read(&X->z, "word/fontTable.xml", &len)) == NULL) {
+        return;
+    }
+
+    swapped = part_rels_begin(X, "word/fontTable.xml", &saved, &saved_n);
+    mu_init(&m, xml, len, 0);
+
+    while (mu_next(&m) != MT_END) {
+        const char* t = mu_local(m.name);
+        char rid[64], key[64];
+
+        if ((m.type == MT_OPEN || m.type == MT_EMPTY) && !strcmp(t, "font")) {
+            if (!mu_attr(&m, "w:name", family, sizeof(family))) {
+                family[0] = '\0';
+            }
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && !strncmp(t, "embed", 5) && family[0] &&
+                   mu_attr(&m, "r:id", rid, sizeof(rid)) && mu_attr(&m, "w:fontKey", key, sizeof(key)) && strlen(key) == 38) {
+            static const int pos[16] = { 35, 33, 31, 29, 27, 25, 22, 20, 17, 15, 12, 10, 7, 5, 3, 1 };
+            const char* target = rel_target(X, rid, NULL);
+            char path[300];
+            unsigned char* data, k[16];
+            size_t n = 0;
+            int i, bold = strstr(t, "Bold") != NULL, italic = strstr(t, "Italic") != NULL;
+
+            if (!target) {
+                continue;
+            }
+
+            for (i = 0; i < 16; i++) {
+                char h[3] = { key[pos[i]], key[pos[i] + 1], 0 };
+
+                k[i] = (unsigned char)strtoul(h, NULL, 16);
+            }
+
+            snprintf(path, sizeof(path), "%s%s", target[0] == '/' ? "" : "word/", target[0] == '/' ? target + 1 : target);
+
+            if ((data = zip_read(&X->z, path, &n)) != NULL && n > 32) {
+                char mime[160];
+                pd_res_id res;
+
+                for (i = 0; i < 16; i++) {
+                    data[i] ^= k[i];
+                    data[i + 16] ^= k[i];
+                }
+
+                snprintf(mime, sizeof(mime), "font/ttf; family=\"%s\"; weight=%d; italic=%d", family, bold ? 700 : 400, italic);
+                pd_doc_add_resource(X->b->d, mime, data, n, &res);
+            }
+
+            free(data);
+        }
+    }
+
+    part_rels_end(X, swapped, saved, saved_n);
+    free(xml);
+}
+
 static pd_block_id hf_story(dxi* X, const char* rid) {
     const char* target = rel_target(X, rid, NULL);
     char path[300];
@@ -5180,6 +5361,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (strcmp(t, "sectPr") == 0) {
                 w->in_sect = m.type == MT_OPEN;
                 pd_section_props_init(&w->sp);
+                w->sp.mirror_margins = X->mirror ? 1 : -1;  /* Word mirrors only when its settings say so */
                 memset(w->hf_ref, 0, sizeof(w->hf_ref));
 
                 if (w->in_ppr) {
@@ -5193,6 +5375,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->sp.margin_top = abs(attr_int(&m, "w:top", 1440)) * 65536 / 20;
                     w->sp.margin_bottom = abs(attr_int(&m, "w:bottom", 1440)) * 65536 / 20;
                     w->sp.margin_left = attr_int(&m, "w:left", 1440) * 65536 / 20;
+                    w->sp.gutter = twips(attr_int(&m, "w:gutter", 0));
+                    w->sp.gutter = w->sp.gutter < 0 ? 0 : w->sp.gutter;
                     w->X->margin_left = w->sp.margin_left;  /* for the pictures of its headers, read next */
                     w->sp.margin_right = attr_int(&m, "w:right", 1440) * 65536 / 20;
                     w->sp.header_distance = attr_int(&m, "w:header", 720) * 65536 / 20;
@@ -5206,6 +5390,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     mu_attr(&m, "r:id", w->hf_ref[k], sizeof(w->hf_ref[0]));
                 } else if (strcmp(t, "titlePg") == 0) {
                     w->sp.title_page = attr_on(&m);
+                } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
+                    w->sp.page_valign = !strcmp(v, "center") ? 1 : !strcmp(v, "bottom") ? 2 : 0;
                 } else if (strcmp(t, "lnNumType") == 0) {
                     int by = attr_int(&m, "w:countBy", 0);
                     char rs[16] = "";
@@ -5739,6 +5925,61 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     X.defaults.cp.mask |= PD_CP_KERNING;    /* nor kerns, unless w:kern says so */
     X.defaults.cp.kerning = 0;
 
+    if ((xml = (char*)zip_read(&X.z, "docProps/core.xml", &len)) != NULL) {
+        /* the document's properties, as the YAML a Markdown file's front matter is */
+        pd_markup m;
+        pd_buf y, val;
+        int cur = -1;
+        size_t k;
+
+        memset(&y, 0, sizeof(y));
+        memset(&val, 0, sizeof(val));
+        mu_init(&m, xml, len, 0);
+
+        while (mu_next(&m) != MT_END) {
+            if (m.type == MT_OPEN) {
+                cur = -1;
+
+                for (k = 0; k < sizeof(CORE_PROPS) / sizeof(CORE_PROPS[0]); k++) {
+                    if (!strcmp(mu_local(m.name), mu_local(CORE_PROPS[k].el))) {
+                        cur = (int)k;
+                        val.n = 0;
+                    }
+                }
+            } else if (m.type == MT_TEXT && cur >= 0) {
+                mu_decode(m.text, m.tlen, &val);
+            } else if (m.type == MT_CLOSE && cur >= 0) {
+                if (val.n) {
+                    size_t q;
+
+                    pb_printf(&y, "%s: \"", CORE_PROPS[cur].key);
+
+                    for (q = 0; q < val.n; q++) {   /* one line, quotes escaped */
+                        char c = val.p[q] == '\n' || val.p[q] == '\r' ? ' ' : val.p[q];
+
+                        if (c == '"' || c == '\\') {
+                            pb_putc(&y, '\\');
+                        }
+
+                        pb_putc(&y, c);
+                    }
+
+                    pb_puts(&y, "\"\n");
+                }
+
+                cur = -1;
+            }
+        }
+
+        if (y.n) {
+            pd_doc_set_metadata(d, y.p, y.n - 1);
+        }
+
+        pb_free(&y);
+        pb_free(&val);
+        free(xml);
+    }
+
     if ((xml = (char*)zip_read(&X.z, "word/settings.xml", &len)) != NULL) {
         read_settings(&X, xml, len);
         free(xml);
@@ -5805,6 +6046,7 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
     bld_init(&b, d);
     X.b = &b;
+    read_fonts(&X);
     dw_parse(&X, xml, len, 0);
 
     while (b.ntables > 0) {

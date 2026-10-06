@@ -494,6 +494,18 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
                 put_bool(w, "AddSpacing", p->add_spacing);
             }
 
+            if (p->mirror_margins) {
+                put_int(w, "MirrorMargins", p->mirror_margins);
+            }
+
+            if (p->gutter) {
+                put_int(w, "Gutter", p->gutter);
+            }
+
+            if (p->page_valign) {
+                put_int(w, "PageVAlign", p->page_valign);
+            }
+
             if (p->line_numbers) {
                 put_int(w, "LineNumbers", p->line_numbers);
                 put_int(w, "LineNumberStart", p->line_number_start);
@@ -1203,6 +1215,9 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->footnote_skip = (pd_sp)int_or(pj_get(x, "FootnoteSkip"), p->footnote_skip, 0, SP_MAX, L);
     p->add_spacing = (int32_t)int_or(pj_get(x, "AddSpacing"), 0, 0, 1, L);
     p->line_numbers = (int32_t)int_or(pj_get(x, "LineNumbers"), 0, 0, 100, L);
+    p->mirror_margins = (int32_t)int_or(pj_get(x, "MirrorMargins"), 0, -1, 1, L);
+    p->gutter = (pd_sp)int_or(pj_get(x, "Gutter"), 0, 0, PD_PT(1000), L);
+    p->page_valign = (int32_t)int_or(pj_get(x, "PageVAlign"), 0, 0, 2, L);
     p->line_number_start = (int32_t)int_or(pj_get(x, "LineNumberStart"), 0, 0, 1000000, L);
     p->line_number_distance = (pd_sp)int_or(pj_get(x, "LineNumberDistance"), 0, 0, PD_PT(1000), L);
     p->line_number_restart = (int32_t)int_or(pj_get(x, "LineNumberRestart"), 0, 0, 2, L);

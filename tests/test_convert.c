@@ -1070,7 +1070,7 @@ static pd_doc* docx_doc(const char* first, ...) {
         lens[n] = strlen(texts[n]);
         files[n] = NULL;
 
-        if (strncmp(nm, "word/media/", 11) == 0) {
+        if (strncmp(nm, "word/media/", 11) == 0 || strncmp(nm, "word/fonts/", 11) == 0) {
             FILE* f = fopen(texts[n], "rb");
             long sz;
 
@@ -2450,6 +2450,124 @@ static void test_docx_fields(void) {
     pd_doc_free(d);
 }
 
+/* A font the document carries: obfuscated as Word does (the first 32
+   bytes XORed with the key its GUID gives), read back as the original,
+   named by family, weight and italic in its resource type. */
+static void test_docx_embedded_font(void) {
+    static const char* path = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf";
+    static const char* key = "{01234567-89AB-CDEF-0123-456789ABCDEF}";
+    static const int pos[16] = { 35, 33, 31, 29, 27, 25, 22, 20, 17, 15, 12, 10, 7, 5, 3, 1 };
+    FILE* f = fopen(path, "rb");
+    unsigned char* font, k[16];
+    long n;
+    int i;
+    pd_doc* d;
+    pd_res_id r;
+    int found = 0;
+
+    if (!f) {
+        printf("  (no %s: skipped)\n", path);
+        return;
+    }
+
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    font = (unsigned char*)malloc((size_t)n);
+    CHECK(fread(font, 1, (size_t)n, f) == (size_t)n);
+    fclose(f);
+
+    for (i = 0; i < 16; i++) {
+        char h[3] = { key[pos[i]], key[pos[i] + 1], 0 };
+
+        k[i] = (unsigned char)strtoul(h, NULL, 16);
+    }
+
+    for (i = 0; i < 16; i++) {      /* obfuscated, as Word stores it */
+        font[i] ^= k[i];
+        font[i + 16] ^= k[i];
+    }
+
+    f = fopen("build/test_font.odttf", "wb");
+    fwrite(font, 1, (size_t)n, f);
+    fclose(f);
+
+    for (i = 0; i < 16; i++) {
+        font[i] ^= k[i];
+        font[i + 16] ^= k[i];
+    }
+
+    d = docx_doc("word/fontTable.xml",
+                 "<w:fonts xmlns:w=\"w\" xmlns:r=\"r\"><w:font w:name=\"Liberation Sans\">"
+                 "<w:embedBold r:id=\"rId1\" w:fontKey=\"{01234567-89AB-CDEF-0123-456789ABCDEF}\"/></w:font></w:fonts>",
+                 "word/_rels/fontTable.xml.rels",
+                 "<Relationships xmlns=\"r\"><Relationship Id=\"rId1\" Type=\"t/font\" Target=\"fonts/font1.odttf\"/></Relationships>",
+                 "word/fonts/font1.odttf", "build/test_font.odttf",
+                 "word/document.xml", "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>Hi</w:t></w:r></w:p></w:body></w:document>",
+                 NULL);
+    CHECK(d != NULL);
+
+    for (r = 1; d; r++) {
+        const char* mime;
+        const void* data;
+        size_t len;
+
+        if (pd_doc_resource(d, r, &mime, &data, &len) != PD_OK) {
+            break;
+        }
+
+        if (!strncmp(mime, "font/ttf", 8)) {
+            found = 1;
+            CHECK(strstr(mime, "family=\"Liberation Sans\"") && strstr(mime, "weight=700") && strstr(mime, "italic=0"));
+            CHECK(len == (size_t)n && !memcmp(data, font, len));    /* the original font again */
+        }
+    }
+
+    CHECK(found);
+    pd_doc_free(d);
+    free(font);
+}
+
+/* Word's document properties as the document's metadata (YAML), and the
+   page: a gutter, mirrored margins, text centred down the page, a
+   right-to-left paragraph -- all kept through DOCX */
+static void test_docx_page_meta(void) {
+    pd_doc* d = docx_doc(
+        "docProps/core.xml",
+        "<cp:coreProperties xmlns:cp=\"cp\" xmlns:dc=\"dc\"><dc:title>A \"quoted\" title</dc:title>"
+        "<dc:creator>Q. Fang</dc:creator><cp:keywords>DOT, MCX</cp:keywords></cp:coreProperties>",
+        "word/settings.xml", "<w:settings xmlns:w=\"w\"><w:mirrorMargins/></w:settings>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:bidi/></w:pPr><w:r><w:t>Title page</w:t></w:r></w:p>"
+        "<w:sectPr><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" "
+        "w:footer=\"720\" w:gutter=\"720\"/><w:vAlign w:val=\"center\"/></w:sectPr></w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        size_t n = 0;
+        const char* y;
+        pd_section_props sp;
+        pd_para_props pp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        y = pd_doc_metadata(d, &n);
+        CHECK(y && has_bytes(y, (uint32_t)n, "title: \"A \\\"quoted\\\" title\"") && has_bytes(y, (uint32_t)n, "author: \"Q. Fang\"") &&
+              has_bytes(y, (uint32_t)n, "keywords: \"DOT, MCX\""));
+        CHECK(pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp) == PD_OK);
+        CHECK(sp.gutter == PD_PT(36) && sp.mirror_margins == 1 && sp.page_valign == 1);
+        pd_doc_para_props(d, pd_doc_next_paragraph(d, 0), &pp);
+        CHECK((pp.mask & PD_PP_DIRECTION) && pp.direction == PD_DIR_RTL);
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -3094,6 +3212,10 @@ int main(void) {
     test_docx_omml();
     printf("docx fields and references\n");
     test_docx_fields();
+    printf("docx embedded fonts\n");
+    test_docx_embedded_font();
+    printf("docx properties and page\n");
+    test_docx_page_meta();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");
