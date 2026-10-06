@@ -16,8 +16,11 @@
 #include <string.h>
 #include "pd_conv.h"
 
-#define TW(sp) ((int)((int64_t)(sp) * 20 / 65536))         /* sp -> twips */
-#define EMU(sp) ((long long)((int64_t)(sp) * 12700 / 65536)) /* sp -> EMU */
+/* v * m / d, to the nearest: what is read back converts to the same again */
+#define SCALE(v, m, d) ((int64_t)(v) * (m) >= 0 ? ((int64_t)(v) * (m) + (d) / 2) / (d) : \
+                        ((int64_t)(v) * (m) - (d) / 2) / (d))
+#define TW(sp) ((int)SCALE(sp, 20, 65536))          /* sp -> twips */
+#define EMU(sp) ((long long)SCALE(sp, 12700, 65536)) /* sp -> EMU */
 #define ZIP_MAX_ENTRY ((size_t)256 << 20)
 
 /* ------------------------------------------------------------------ */
@@ -307,7 +310,14 @@ typedef struct {
     int nlistmap;
     int listkind[64];
     pd_block_id hf[8];          /* header/footer stories written as parts */
+    int hf_footer[8];
     int nhf;
+    int hyph_auto;              /* the document hyphenates: settings.xml autoHyphenation */
+    pd_block_id pending[8];     /* picture floats to anchor in the next paragraph */
+    int npending;
+    int page_break;             /* a page break opens the next paragraph */
+    int even_odd;               /* some section has even-page headers */
+    int nbookmarks;
     pd_buf* hf_rels[8];
 } dxo;
 
@@ -375,7 +385,7 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
     }
 
     if (c->size != b->size) {
-        pb_printf(o, "<w:sz w:val=\"%d\"/>", (int)((int64_t)c->size * 2 / 65536));
+        pb_printf(o, "<w:sz w:val=\"%d\"/>", (int)SCALE(c->size, 2, 65536));
     }
 
     if (c->underline && !b->underline) {
@@ -449,6 +459,102 @@ static int dx_media(dxo* x, pd_res_id res, const char** rid_name) {
 
 static void dx_block(dxo* x, pd_block_id id);
 static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr);
+static void dx_sid(const pd_doc* d, pd_style_id sid, char* out, size_t cap);
+static void dx_ppr_head(pd_buf* o, const pd_para_props* pp, uint32_t m);
+static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto);
+
+/* a picture as a run: inline, or anchored where a float is (fp) -- beside the text on the side the float
+   wraps on, or across the column */
+static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
+    pd_buf* o = x->o;
+    const char* name;
+    int m = dx_media(x, ob->resource, &name);
+    pd_sp iw, ih;
+    long long cx, cy;
+
+    if (m < 0) {
+        return;
+    }
+
+    pd_doc_image_display_size(x->d, ob, &iw, &ih);
+    cx = EMU(iw);
+    cy = EMU(ih);
+    x->docpr++;
+
+    if (!fp) {
+        pb_printf(o, "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">"
+                  "<wp:extent cx=\"%lld\" cy=\"%lld\"/>", cx, cy);
+    } else {
+        long long gap = EMU(fp->gap);
+
+        pb_printf(o, "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"%lld\" distR=\"%lld\" "
+                  "simplePos=\"0\" relativeHeight=\"%d\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" "
+                  "allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\"><wp:align>%s"
+                  "</wp:align></wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset>"
+                  "</wp:positionV><wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s",
+                  gap, gap, x->docpr, fp->wrap == PD_WRAP_LEFT ? "left" : fp->wrap == PD_WRAP_RIGHT ? "right" : "center",
+                  cx, cy, fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : "<wp:wrapSquare wrapText=\"bothSides\"/>");
+    }
+
+    pb_printf(o, "<wp:docPr id=\"%d\" name=\"Picture %d\"", x->docpr, x->docpr);
+
+    if (ob->alt_len > 0) {
+        pb_puts(o, " descr=\"");
+        xesc(o, ob->alt, (size_t)ob->alt_len);
+        pb_putc(o, '"');
+    }
+
+    pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
+              "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr>"
+              "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
+              "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
+              "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData>"
+              "</a:graphic>%s</w:drawing></w:r>", fp ? "<wp:cNvGraphicFramePr/>" : "", x->docpr, name, m + 1, cx, cy,
+              fp ? "</wp:anchor>" : "</wp:inline>");
+}
+
+/* a float that is only a picture: Word anchors it in the paragraph that follows */
+static int dx_float_picture(const dxo* x, pd_block_id fl, pd_inline* ob) {
+    pd_block_info fi, pi;
+    const char* t;
+    uint32_t n;
+    pd_pos at;
+
+    if (pd_doc_block_info(x->d, fl, &fi) != PD_OK || fi.child_count != 1 ||
+            pd_doc_block_info(x->d, pd_doc_child(x->d, fl, 0), &pi) != PD_OK || pi.kind != PD_BLOCK_PARAGRAPH ||
+            pd_doc_para_text(x->d, pi.id, &t, &n) != PD_OK || n != 3 || memcmp(t, "\xEF\xBF\xBC", 3) != 0) {
+        return 0;
+    }
+
+    at.block = pi.id;
+    at.offset = 0;
+    return pd_doc_inline_at(x->d, at, ob) == PD_OK && ob->kind == PD_INLINE_IMAGE;
+}
+
+/* the anchored pictures waiting for a paragraph */
+static void dx_anchors(dxo* x) {
+    int i;
+
+    for (i = 0; i < x->npending; i++) {
+        pd_inline ob;
+        pd_float_props fp;
+
+        if (dx_float_picture(x, x->pending[i], &ob) && pd_doc_float_props(x->d, x->pending[i], &fp) == PD_OK) {
+            dx_picture(x, &ob, &fp);
+        }
+    }
+
+    x->npending = 0;
+}
+
+/* ... and when none comes, in a paragraph of their own */
+static void dx_flush_anchors(dxo* x) {
+    if (x->npending > 0) {
+        pb_puts(x->o, "<w:p>");
+        dx_anchors(x);
+        pb_puts(x->o, "</w:p>");
+    }
+}
 
 static int dx_span(void* user, const pd_span* sp) {
     dxo* x = (dxo*)user;
@@ -458,32 +564,9 @@ static int dx_span(void* user, const pd_span* sp) {
         const pd_inline* ob = &sp->obj;
 
         switch (ob->kind) {
-            case PD_INLINE_IMAGE: {
-                const char* name;
-                int m = dx_media(x, ob->resource, &name);
-
-                if (m >= 0) {
-                    pd_sp iw, ih;
-                    long long cx, cy;
-
-                    pd_doc_image_display_size(x->d, ob, &iw, &ih);
-                    cx = EMU(iw);
-                    cy = EMU(ih);
-
-                    x->docpr++;
-                    pb_printf(o, "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">"
-                              "<wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:docPr id=\"%d\" name=\"Picture %d\"/>"
-                              "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
-                              "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr>"
-                              "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
-                              "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
-                              "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData>"
-                              "</a:graphic></wp:inline></w:drawing></w:r>", cx, cy, x->docpr, x->docpr, x->docpr, name, m + 1,
-                              cx, cy);
-                }
-
+            case PD_INLINE_IMAGE:
+                dx_picture(x, ob, NULL);
                 break;
-            }
 
             case PD_INLINE_EQUATION:
                 pb_puts(o, "<w:r><w:rPr><w:i/></w:rPr>");
@@ -608,6 +691,17 @@ static int dx_span(void* user, const pd_span* sp) {
 
                 break;
 
+            case PD_INLINE_BOOKMARK:    /* a named point: start and end together */
+                if (ob->name[0]) {
+                    int id = x->nbookmarks++;
+
+                    pb_printf(o, "<w:bookmarkStart w:id=\"%d\" w:name=\"", id);
+                    xesc(o, ob->name, strlen(ob->name));
+                    pb_printf(o, "\"/><w:bookmarkEnd w:id=\"%d\"/>", id);
+                }
+
+                break;
+
             case PD_INLINE_TAB:
                 pb_puts(o, "<w:r><w:tab/></w:r>");
                 break;
@@ -671,68 +765,87 @@ static int dx_num_id(dxo* x, pd_block_id p, int32_t* level) {
 
 static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
     pd_block_info bi;
-    pd_para_props pp, dp;
-    const char* sid;
-    int32_t level = 0;
+    pd_para_props dp;
+    const char* sid = NULL;
+    char id[64];
+    int32_t level = 0, clevel;
     int num;
     pd_buf* o = x->o;
+    pd_style_id normal = pd_doc_style_find(x->d, "Normal");
 
     pd_doc_block_info(x->d, p, &bi);
-    pd_doc_style_resolve(x->d, bi.style, &pp, NULL);
-
     memset(&dp, 0, sizeof(dp));
+    pd_doc_para_props(x->d, p, &dp);
 
-    if (pd_doc_para_props(x->d, p, &dp) == PD_OK && (dp.mask & PD_PP_ALIGN)) {
-        pp.align = dp.align;
+    /* its style: its own, else the one its role has */
+    if (x->in_note && bi.role == PD_ROLE_BODY && (!bi.style || bi.style == normal)) {
+        sid = "FootnoteText";
+    } else if (bi.style && bi.style != normal) {
+        dx_sid(x->d, bi.style, id, sizeof(id));
+        sid = id;
+    } else if (dx_style_id(&bi)) {
+        char nm[16];
+        pd_style_id rs;
+
+        snprintf(nm, sizeof(nm), "Heading %d", (int)(bi.level >= 1 && bi.level <= 6 ? bi.level : 1));
+        rs = pd_doc_style_find(x->d, bi.role == PD_ROLE_HEADING ? nm : bi.role == PD_ROLE_TITLE ? "Title" :
+                               bi.role == PD_ROLE_QUOTE ? "Quote" : bi.role == PD_ROLE_CODE ? "Code" : "Caption");
+
+        if (rs) {
+            dx_sid(x->d, rs, id, sizeof(id));
+            sid = id;
+        }
     }
 
-    sid = x->in_note && bi.role == PD_ROLE_BODY ? "FootnoteText" : dx_style_id(&bi);
     num = x->in_note ? 0 : dx_num_id(x, p, &level);
     pb_puts(o, "<w:p><w:pPr>");
 
     if (sid) {
         pb_printf(o, "<w:pStyle w:val=\"%s\"/>", sid);
-    } else if (num) {
-        pb_puts(o, "<w:pStyle w:val=\"ListParagraph\"/>");
     }
+
+    dx_ppr_head(o, &dp, dp.mask);
 
     if (num) {
+        pd_list_level lv[9];
+        int32_t nlv = 0;
+
         pb_printf(o, "<w:numPr><w:ilvl w:val=\"%d\"/><w:numId w:val=\"%d\"/></w:numPr>", (int)level, num);
-    }
 
-    if ((dp.mask & PD_PP_TABS) && dp.ntabs > 0) {     /* after numPr, before jc, as the schema orders them */
-        static const char* al[] = { "left", "center", "right", "decimal" };
-        static const char* ld[] = { "none", "dot", "hyphen", "underscore" };
-        int32_t k;
+        /* Parade adds the paragraph's indent to the level's; Word's w:ind
+           replaces the level's, measured from the margin -- and none keeps it */
+        if (pd_doc_list_info(x->d, bi.list, &nlv, lv) == PD_OK && level >= 0 && level < nlv && level < 9) {
+            if ((dp.mask & PD_PP_INDENT_LEFT) && dp.indent_left != 0) {
+                dp.indent_left += lv[level].indent;
+            } else {
+                dp.mask &= ~PD_PP_INDENT_LEFT;
+            }
 
-        pb_puts(o, "<w:tabs>");
-
-        for (k = 0; k < dp.ntabs && k < PD_MAX_TABS; k++) {
-            pb_printf(o, "<w:tab w:val=\"%s\" w:leader=\"%s\" w:pos=\"%d\"/>", al[dp.tabs[k].align & 3],
-                      ld[dp.tabs[k].leader & 3], TW(dp.tabs[k].position));
-        }
-
-        pb_puts(o, "</w:tabs>");
-    }
-
-    {
-        int32_t clevel;
-
-        if (!x->in_note && pd_conv_item_level(x->d, p, &clevel)) {  /* a later block of a list item: under its text */
-            pb_printf(o, "<w:ind w:left=\"%d\"/>", 360 * (int)(clevel + 1));
+            if ((dp.mask & PD_PP_INDENT_FIRST) && dp.indent_first == 0) {
+                dp.mask &= ~PD_PP_INDENT_FIRST;
+            }
         }
     }
 
-    if (pp.align == PD_ALIGN_CENTER || pp.align == PD_ALIGN_RIGHT || (pp.align == PD_ALIGN_JUSTIFY && !sid && !num)) {
-        pb_printf(o, "<w:jc w:val=\"%s\"/>", pp.align == PD_ALIGN_CENTER ? "center" : pp.align == PD_ALIGN_RIGHT ? "right" :
-                  "both");
+    /* a later block of a list item: under its text */
+    if (!x->in_note && pd_conv_item_level(x->d, p, &clevel) && !(dp.mask & PD_PP_INDENT_LEFT)) {
+        dp.mask |= PD_PP_INDENT_LEFT;
+        dp.indent_left = PD_PT(18) * (clevel + 1);
     }
+
+    dx_ppr_tail(o, &dp, dp.mask, x->hyph_auto);
 
     if (extra_ppr) {
         pb_puts(o, extra_ppr);
     }
 
     pb_puts(o, "</w:pPr>");
+    dx_anchors(x);
+
+    if (x->page_break) {
+        pb_puts(o, "<w:r><w:br w:type=\"page\"/></w:r>");
+        x->page_break = 0;
+    }
 
     if (x->in_note == 2 && bi.index == 0) {     /* the note's number opens its first paragraph */
         pb_puts(o, "<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:endnoteRef/></w:r>"
@@ -831,7 +944,7 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
     }
 
     if (tp.border) {
-        int sz = (int)((int64_t)tp.border * 8 / 65536);     /* eighths of a point */
+        int sz = (int)SCALE(tp.border, 8, 65536);     /* eighths of a point */
 
         sz = sz < 2 ? 2 : sz;
         pb_puts(o, "<w:tblBorders>");
@@ -908,6 +1021,11 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 }
             }
 
+            if (x->npending > 0) {  /* picture floats at the cell's end: a paragraph to anchor in */
+                dx_flush_anchors(x);
+                last_para = 1;
+            }
+
             if (!last_para) {   /* a cell ends with a paragraph */
                 pb_puts(o, "<w:p/>");
             }
@@ -943,14 +1061,44 @@ static void dx_block(dxo* x, pd_block_id id) {
             break;
 
         case PD_BLOCK_TABLE:
+            dx_flush_anchors(x);
             dx_table(x, id, dx_text_width(x));
             break;
 
+        case PD_BLOCK_FLOAT: {
+            pd_inline ob;
+
+            if (dx_float_picture(x, id, &ob) && x->npending < 8) {
+                x->pending[x->npending++] = id;     /* anchored in the paragraph after it */
+                break;
+            }
+
+            for (i = 0; i < bi.child_count; i++) {
+                dx_block(x, pd_doc_child(x->d, id, i));
+            }
+
+            break;
+        }
+
         case PD_BLOCK_BREAK:
+            dx_flush_anchors(x);
+
             if (bi.break_kind == PD_BREAK_RULE) {   /* an empty paragraph ruled underneath */
                 pb_puts(x->o, "<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:space=\"1\" "
                         "w:color=\"808080\"/></w:pBdr></w:pPr></w:p>");
                 break;
+            }
+
+            /* in the paragraph that follows, as Word has it: a paragraph of
+               its own would leave an empty line at the top of the new page */
+            if (bi.break_kind == PD_BREAK_PAGE) {
+                pd_block_info ni;
+
+                if (pd_doc_block_info(x->d, pd_doc_child(x->d, bi.parent, bi.index + 1), &ni) == PD_OK &&
+                        ni.kind == PD_BLOCK_PARAGRAPH) {
+                    x->page_break = 1;
+                    break;
+                }
             }
 
             pb_printf(x->o, "<w:p><w:r><w:br w:type=\"%s\"/></w:r></w:p>", bi.break_kind == PD_BREAK_COLUMN ? "column" :
@@ -964,8 +1112,8 @@ static void dx_block(dxo* x, pd_block_id id) {
     }
 }
 
-/* a header or footer part for a story; returns its index in hf (part names header<i>.xml / footer<i>.xml) */
-static int dx_story_part(dxo* x, pd_block_id story) {
+/* a header or footer part for a story; returns its index in hf (part names hf<i>.xml) */
+static int dx_story_part(dxo* x, pd_block_id story, int footer) {
     int i;
 
     for (i = 0; i < x->nhf; i++) {
@@ -979,20 +1127,34 @@ static int dx_story_part(dxo* x, pd_block_id story) {
     }
 
     x->hf[x->nhf] = story;
+    x->hf_footer[x->nhf] = footer;
     return x->nhf++;
 }
 
 static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
-    int h = sp->header ? dx_story_part(x, sp->header) : -1, f = sp->footer ? dx_story_part(x, sp->footer) : -1;
+    static const char* types[3] = { "default", "first", "even" };
+    pd_block_id hs[3], fs[3];
+    int k, part;
 
+    hs[0] = sp->header;
+    hs[1] = sp->title_page ? sp->header_first : 0;
+    hs[2] = sp->facing_pages ? sp->header_even : 0;
+    fs[0] = sp->footer;
+    fs[1] = sp->title_page ? sp->footer_first : 0;
+    fs[2] = sp->facing_pages ? sp->footer_even : 0;
+    x->even_odd |= sp->facing_pages && (hs[2] || fs[2]);
     pb_puts(o, "<w:sectPr>");
 
-    if (h >= 0) {
-        pb_printf(o, "<w:headerReference w:type=\"default\" r:id=\"rIdh%d\"/>", h + 1);
+    for (k = 0; k < 3; k++) {   /* headers, then footers, as the schema has them */
+        if (hs[k] && (part = dx_story_part(x, hs[k], 0)) >= 0) {
+            pb_printf(o, "<w:headerReference w:type=\"%s\" r:id=\"rIdh%d\"/>", types[k], part + 1);
+        }
     }
 
-    if (f >= 0) {
-        pb_printf(o, "<w:footerReference w:type=\"default\" r:id=\"rIdh%d\"/>", f + 1);
+    for (k = 0; k < 3; k++) {
+        if (fs[k] && (part = dx_story_part(x, fs[k], 1)) >= 0) {
+            pb_printf(o, "<w:footerReference w:type=\"%s\" r:id=\"rIdh%d\"/>", types[k], part + 1);
+        }
     }
 
     if (sp->continuous) {
@@ -1004,12 +1166,30 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
               "w:gutter=\"0\"/>", TW(sp->margin_top), TW(sp->margin_right), TW(sp->margin_bottom), TW(sp->margin_left),
               TW(sp->header_distance), TW(sp->footer_distance));
 
+    if (sp->first_page_number > 0 || sp->page_number_format != PD_NUM_DECIMAL) {
+        static const char* fmts[] = { "decimal", "decimal", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman",
+                                      "decimal"
+                                    };
+
+        pb_puts(o, "<w:pgNumType");
+
+        if (sp->page_number_format != PD_NUM_DECIMAL && sp->page_number_format >= 0 && sp->page_number_format <= 6) {
+            pb_printf(o, " w:fmt=\"%s\"", fmts[sp->page_number_format]);
+        }
+
+        if (sp->first_page_number > 0) {
+            pb_printf(o, " w:start=\"%d\"", (int)sp->first_page_number);
+        }
+
+        pb_puts(o, "/>");
+    }
+
     if (sp->columns > 1) {
         pb_printf(o, "<w:cols w:num=\"%d\" w:space=\"%d\"/>", (int)sp->columns, TW(sp->column_gap));
     }
 
-    if (sp->first_page_number > 1) {
-        pb_printf(o, "<w:pgNumType w:start=\"%d\"/>", (int)sp->first_page_number);
+    if (sp->title_page) {
+        pb_puts(o, "<w:titlePg/>");
     }
 
     pb_puts(o, "</w:sectPr>");
@@ -1017,41 +1197,284 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
 
 static const char* XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
 
-static void dx_styles(pd_buf* o) {
-    int i;
+/* the styleId a Parade style is written under: its name's letters and digits */
+static void dx_sid(const pd_doc* d, pd_style_id sid, char* out, size_t cap) {
+    const char* n = sid ? pd_doc_style_name(d, sid) : NULL;
+    size_t k = 0;
 
-    pb_puts(o, XML_DECL);
-    pb_printf(o, "<w:styles %s>", W_NS);
-    pb_puts(o, "<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Times New Roman\" w:hAnsi=\"Times New Roman\" "
-            "w:eastAsia=\"Times New Roman\" w:cs=\"Times New Roman\"/><w:sz w:val=\"22\"/><w:lang w:val=\"en-US\"/>"
-            "</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after=\"120\"/></w:pPr></w:pPrDefault>"
-            "</w:docDefaults>");
-    pb_puts(o, "<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/>"
-            "<w:qFormat/></w:style>");
-    pb_puts(o, "<w:style w:type=\"paragraph\" w:styleId=\"Title\"><w:name w:val=\"Title\"/><w:basedOn w:val=\"Normal\"/>"
-            "<w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:jc w:val=\"center\"/><w:spacing w:after=\"240\"/></w:pPr>"
-            "<w:rPr><w:sz w:val=\"48\"/></w:rPr></w:style>");
-
-    for (i = 1; i <= 6; i++) {
-        static const int sz[] = { 0, 36, 30, 26, 24, 22, 22 };
-
-        pb_printf(o, "<w:style w:type=\"paragraph\" w:styleId=\"Heading%d\"><w:name w:val=\"heading %d\"/>"
-                  "<w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/><w:pPr><w:keepNext/>"
-                  "<w:spacing w:before=\"240\" w:after=\"120\"/><w:outlineLvl w:val=\"%d\"/></w:pPr>"
-                  "<w:rPr><w:b/><w:sz w:val=\"%d\"/></w:rPr></w:style>", i, i, i - 1, sz[i]);
+    for (; n && *n && k + 1 < cap; n++) {
+        if (isalnum((unsigned char)*n)) {
+            out[k++] = *n;
+        }
     }
 
-    pb_puts(o, "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/>"
-            "<w:qFormat/><w:pPr><w:ind w:left=\"720\" w:right=\"720\"/></w:pPr><w:rPr><w:i/></w:rPr></w:style>");
-    pb_puts(o, "<w:style w:type=\"paragraph\" w:styleId=\"SourceCode\"><w:name w:val=\"Source Code\"/>"
-            "<w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:after=\"0\"/></w:pPr><w:rPr><w:rFonts w:ascii=\"Courier New\" "
-            "w:hAnsi=\"Courier New\" w:cs=\"Courier New\"/><w:sz w:val=\"20\"/></w:rPr></w:style>");
-    pb_puts(o, "<w:style w:type=\"paragraph\" w:styleId=\"Caption\"><w:name w:val=\"caption\"/>"
-            "<w:basedOn w:val=\"Normal\"/><w:qFormat/><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:rPr><w:i/>"
-            "<w:sz w:val=\"20\"/></w:rPr></w:style>");
-    pb_puts(o, "<w:style w:type=\"paragraph\" w:styleId=\"ListParagraph\"><w:name w:val=\"List Paragraph\"/>"
-            "<w:basedOn w:val=\"Normal\"/><w:qFormat/><w:pPr><w:spacing w:after=\"0\"/><w:ind w:left=\"720\"/></w:pPr>"
-            "</w:style>");
+    out[k] = '\0';
+
+    if (!out[0] || !strcmp(out, "FootnoteText") || !strcmp(out, "FootnoteReference") || !strcmp(out, "Hyperlink") ||
+            !strcmp(out, "TableGrid") || !strcmp(out, "ListParagraph")) {
+        snprintf(out, cap, "PStyle%u", (unsigned)sid);  /* one of the writer's own, or no name to make one of */
+    }
+}
+
+/* the w:name Word knows a built-in style by: heading 1 .. heading 9, caption */
+static void dx_style_name(pd_buf* o, const char* n) {
+    if (!strncmp(n, "Heading ", 8) && n[8] >= '1' && n[8] <= '9' && !n[9]) {
+        pb_printf(o, "heading %c", n[8]);
+    } else if (!strcmp(n, "Caption")) {
+        pb_puts(o, "caption");
+    } else {
+        xesc(o, n, strlen(n));
+    }
+}
+
+/* a family for Word: the generic monospace one as a face it has */
+static void dx_fonts(pd_buf* o, const char* family) {
+    const char* f = !strcmp(family, "monospace") ? "Courier New" : family;
+
+    pb_puts(o, "<w:rFonts w:ascii=\"");
+    xesc(o, f, strlen(f));
+    pb_puts(o, "\" w:hAnsi=\"");
+    xesc(o, f, strlen(f));
+    pb_puts(o, "\" w:cs=\"");
+    xesc(o, f, strlen(f));
+    pb_puts(o, "\"/>");
+}
+
+/* the paragraph properties before w:numPr in a w:pPr, of those mask sets */
+static void dx_ppr_head(pd_buf* o, const pd_para_props* pp, uint32_t m) {
+    if (m & PD_PP_KEEP_NEXT) {
+        pb_puts(o, pp->keep_with_next ? "<w:keepNext/>" : "<w:keepNext w:val=\"0\"/>");
+    }
+
+    if (m & PD_PP_KEEP_LINES) {
+        pb_puts(o, pp->keep_lines ? "<w:keepLines/>" : "<w:keepLines w:val=\"0\"/>");
+    }
+
+    if (m & PD_PP_BREAK_BEFORE) {
+        pb_puts(o, pp->page_break_before ? "<w:pageBreakBefore/>" : "<w:pageBreakBefore w:val=\"0\"/>");
+    }
+
+    if (m & (PD_PP_WIDOWS | PD_PP_ORPHANS)) {
+        pb_puts(o, pp->widows > 1 || pp->orphans > 1 ? "<w:widowControl/>" : "<w:widowControl w:val=\"0\"/>");
+    }
+}
+
+/* ... and those after it, in the schema's order; hyph_auto: the document hyphenates (settings.xml) */
+static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto) {
+    if ((m & PD_PP_BORDER) && pp->border_color && pp->border_width > 0) {
+        int sz = (int)SCALE(pp->border_width, 8, 65536), side;
+        static const char* sides[] = { "top", "left", "bottom", "right" };
+
+        sz = sz < 2 ? 2 : sz;
+        pb_puts(o, "<w:pBdr>");
+
+        for (side = 0; side < 4; side++) {
+            pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"1\" w:color=\"%06X\"/>", sides[side], sz,
+                      (unsigned)(pp->border_color & 0xFFFFFF));
+        }
+
+        pb_puts(o, "</w:pBdr>");
+    }
+
+    if ((m & PD_PP_SHADING) && pp->shading) {
+        pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(pp->shading & 0xFFFFFF));
+    }
+
+    if ((m & PD_PP_TABS) && pp->ntabs > 0) {
+        static const char* al[] = { "left", "center", "right", "decimal" };
+        static const char* ld[] = { "none", "dot", "hyphen", "underscore" };
+        int32_t k;
+
+        pb_puts(o, "<w:tabs>");
+
+        for (k = 0; k < pp->ntabs && k < PD_MAX_TABS; k++) {
+            pb_printf(o, "<w:tab w:val=\"%s\" w:leader=\"%s\" w:pos=\"%d\"/>", al[pp->tabs[k].align & 3],
+                      ld[pp->tabs[k].leader & 3], TW(pp->tabs[k].position));
+        }
+
+        pb_puts(o, "</w:tabs>");
+    }
+
+    if ((m & PD_PP_HYPHENATE) && (!pp->hyphenate) != (!hyph_auto)) {
+        pb_puts(o, pp->hyphenate ? "<w:suppressAutoHyphens w:val=\"0\"/>" : "<w:suppressAutoHyphens/>");
+    }
+
+    if (m & PD_PP_DIRECTION) {
+        pb_puts(o, pp->direction == PD_DIR_RTL ? "<w:bidi/>" : "<w:bidi w:val=\"0\"/>");
+    }
+
+    if (m & (PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_LINE_SPACING)) {
+        pb_puts(o, "<w:spacing");
+
+        if (m & PD_PP_SPACE_BEFORE) {
+            pb_printf(o, " w:before=\"%d\"", TW(pp->space_before));
+        }
+
+        if (m & PD_PP_SPACE_AFTER) {
+            pb_printf(o, " w:after=\"%d\"", TW(pp->space_after));
+        }
+
+        if (m & PD_PP_LINE_SPACING) {   /* Parade's multiple of the font's line height is Word's auto rule */
+            pb_printf(o, " w:line=\"%d\" w:lineRule=\"auto\"", (int)SCALE(pp->line_spacing, 240, 1000));
+        }
+
+        pb_puts(o, "/>");
+    }
+
+    if (m & (PD_PP_INDENT_LEFT | PD_PP_INDENT_RIGHT | PD_PP_INDENT_FIRST)) {
+        pb_puts(o, "<w:ind");
+
+        if (m & PD_PP_INDENT_LEFT) {
+            pb_printf(o, " w:left=\"%d\"", TW(pp->indent_left));
+        }
+
+        if (m & PD_PP_INDENT_RIGHT) {
+            pb_printf(o, " w:right=\"%d\"", TW(pp->indent_right));
+        }
+
+        if (m & PD_PP_INDENT_FIRST) {
+            pb_printf(o, pp->indent_first < 0 ? " w:hanging=\"%d\"" : " w:firstLine=\"%d\"",
+                      TW(pp->indent_first < 0 ? -pp->indent_first : pp->indent_first));
+        }
+
+        pb_puts(o, "/>");
+    }
+
+    if (m & PD_PP_ALIGN) {
+        pb_printf(o, "<w:jc w:val=\"%s\"/>", pp->align == PD_ALIGN_JUSTIFY ? "both" : pp->align == PD_ALIGN_CENTER ?
+                  "center" : pp->align == PD_ALIGN_RIGHT ? "right" : "left");
+    }
+}
+
+/* the character properties a style sets, in the schema's order */
+static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
+    uint32_t m = c->mask;
+
+    if ((m & PD_CP_FAMILY) && c->family[0]) {
+        dx_fonts(o, c->family);
+    }
+
+    if (m & PD_CP_WEIGHT) {
+        pb_puts(o, c->weight >= 600 ? "<w:b/>" : "<w:b w:val=\"0\"/>");
+    }
+
+    if (m & PD_CP_ITALIC) {
+        pb_puts(o, c->italic ? "<w:i/>" : "<w:i w:val=\"0\"/>");
+    }
+
+    if (m & PD_CP_SMALLCAPS) {
+        pb_puts(o, c->small_caps ? "<w:smallCaps/>" : "<w:smallCaps w:val=\"0\"/>");
+    }
+
+    if (m & PD_CP_STRIKE) {
+        pb_puts(o, c->strike ? "<w:strike/>" : "<w:strike w:val=\"0\"/>");
+    }
+
+    if (m & PD_CP_COLOR) {
+        pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(c->color & 0xFFFFFF));
+    }
+
+    if (m & PD_CP_SIZE) {
+        pb_printf(o, "<w:sz w:val=\"%d\"/><w:szCs w:val=\"%d\"/>", (int)SCALE(c->size, 2, 65536),
+                  (int)SCALE(c->size, 2, 65536));
+    }
+
+    if (m & PD_CP_UNDERLINE) {
+        pb_puts(o, c->underline == 2 ? "<w:u w:val=\"double\"/>" : c->underline ? "<w:u w:val=\"single\"/>" :
+                "<w:u w:val=\"none\"/>");
+    }
+
+    if ((m & PD_CP_BACKGROUND) && c->background) {
+        pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(c->background & 0xFFFFFF));
+    }
+
+    if (m & PD_CP_SHIFT) {
+        pb_puts(o, c->shift == PD_SHIFT_SUPER ? "<w:vertAlign w:val=\"superscript\"/>" : c->shift == PD_SHIFT_SUB ?
+                "<w:vertAlign w:val=\"subscript\"/>" : "<w:vertAlign w:val=\"baseline\"/>");
+    }
+
+    if ((m & PD_CP_LANG) && c->lang[0]) {
+        pb_puts(o, "<w:lang w:val=\"");
+        xesc(o, c->lang, strlen(c->lang));
+        pb_puts(o, "\"/>");
+    }
+}
+
+/* the document's own styles. docDefaults are Parade's defaults, so each style says only what it sets,
+   based on its parent, and Word works out what Parade does; then the few the writer uses itself */
+static void dx_styles(dxo* x, pd_buf* o) {
+    const pd_doc* d = x->d;
+    pd_para_props dp;
+    pd_char_props dc;
+    int32_t i, n = pd_doc_style_count(d);
+    pd_style_id normal = pd_doc_style_find(d, "Normal");
+
+    pd_doc_style_resolve(d, 0, &dp, &dc);
+    pb_puts(o, XML_DECL);
+    pb_printf(o, "<w:styles %s>", W_NS);
+    pb_puts(o, "<w:docDefaults><w:rPrDefault><w:rPr>");
+    dx_fonts(o, "Times New Roman");     /* what a family-less Parade document is set in: a serif */
+    pb_printf(o, "<w:sz w:val=\"%d\"/><w:szCs w:val=\"%d\"/><w:lang w:val=\"%s\"/></w:rPr></w:rPrDefault>",
+              (int)SCALE(dc.size, 2, 65536), (int)SCALE(dc.size, 2, 65536), dc.lang[0] ? dc.lang : "en-US");
+    pb_puts(o, "<w:pPrDefault><w:pPr>");
+    dx_ppr_head(o, &dp, PD_PP_WIDOWS);
+    dx_ppr_tail(o, &dp, PD_PP_SPACE_BEFORE | PD_PP_SPACE_AFTER | PD_PP_LINE_SPACING, x->hyph_auto);
+    pb_puts(o, "</w:pPr></w:pPrDefault></w:docDefaults>");
+
+    for (i = 0; i < n; i++) {
+        pd_style_id sid = pd_doc_style_at(d, i), parent = 0;
+        int32_t kind = 0;
+        pd_para_props pp;
+        pd_char_props cp;
+        const char* name = pd_doc_style_name(d, sid);
+        char id[64], pid[64];
+
+        if (!name || pd_doc_style_info(d, sid, &kind, &parent, &pp, &cp) != PD_OK) {
+            continue;
+        }
+
+        dx_sid(d, sid, id, sizeof(id));
+        pb_printf(o, "<w:style w:type=\"%s\"%s w:styleId=\"%s\"><w:name w:val=\"", kind == PD_STYLE_CHARACTER ?
+                  "character" : "paragraph", sid == normal ? " w:default=\"1\"" : "", id);
+        dx_style_name(o, name);
+        pb_puts(o, "\"/>");
+
+        if (parent) {
+            dx_sid(d, parent, pid, sizeof(pid));
+            pb_printf(o, "<w:basedOn w:val=\"%s\"/>", pid);
+        }
+
+        if ((pp.mask & PD_PP_NEXT_STYLE) && pp.next_style && kind == PD_STYLE_PARAGRAPH) {
+            dx_sid(d, pp.next_style, pid, sizeof(pid));
+            pb_printf(o, "<w:next w:val=\"%s\"/>", pid);
+        }
+
+        pb_puts(o, "<w:qFormat/>");
+
+        if (kind == PD_STYLE_PARAGRAPH && (pp.mask || (!strncmp(name, "Heading ", 8) && name[8] >= '1' &&
+                                           name[8] <= '9'))) {
+            pb_puts(o, "<w:pPr>");
+            dx_ppr_head(o, &pp, pp.mask);
+            dx_ppr_tail(o, &pp, pp.mask, x->hyph_auto);
+
+            if (!strncmp(name, "Heading ", 8) && name[8] >= '1' && name[8] <= '9' && !name[9]) {
+                pb_printf(o, "<w:outlineLvl w:val=\"%c\"/>", name[8] - 1);
+            }
+
+            pb_puts(o, "</w:pPr>");
+        }
+
+        if (cp.mask) {
+            pb_puts(o, "<w:rPr>");
+            dx_rpr_set(o, &cp);
+            pb_puts(o, "</w:rPr>");
+        }
+
+        pb_puts(o, "</w:style>");
+    }
+
+    pb_printf(o, "<w:style w:type=\"paragraph\" w:styleId=\"ListParagraph\"><w:name w:val=\"List Paragraph\"/>"
+              "<w:basedOn w:val=\"%s\"/><w:qFormat/></w:style>", normal ? "Normal" : "");
     pb_puts(o, "<w:style w:type=\"paragraph\" w:styleId=\"FootnoteText\"><w:name w:val=\"footnote text\"/>"
             "<w:basedOn w:val=\"Normal\"/><w:pPr><w:spacing w:after=\"0\"/></w:pPr><w:rPr><w:sz w:val=\"18\"/></w:rPr>"
             "</w:style>");
@@ -1065,41 +1488,52 @@ static void dx_styles(pd_buf* o) {
     pb_puts(o, "</w:styles>");
 }
 
+/* one abstract numbering per list, from its own levels; one instance of it
+   per list, so each counts on its own */
 static void dx_numbering(dxo* x, pd_buf* o) {
-    int a, lv, i;
-    static const char* bullets[] = { "\xE2\x80\xA2", "\xE2\x97\xA6", "\xE2\x96\xAA" };
+    static const char* fmts[] = { "bullet", "decimal", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman",
+                                  "none"
+                                };
+    pd_list_level lv[9];
+    int32_t nlv;
+    int i, k;
 
     pb_puts(o, XML_DECL);
     pb_printf(o, "<w:numbering %s>", W_NS);
 
-    for (a = 0; a < 2; a++) {
-        pb_printf(o, "<w:abstractNum w:abstractNumId=\"%d\"><w:multiLevelType w:val=\"hybridMultilevel\"/>", a);
+    for (i = 0; i < x->nlistmap; i++) {
+        memset(lv, 0, sizeof(lv));
 
-        for (lv = 0; lv < 9; lv++) {
-            pb_printf(o, "<w:lvl w:ilvl=\"%d\"><w:start w:val=\"1\"/><w:numFmt w:val=\"%s\"/>", lv, a == 0 ? "bullet" :
-                      lv % 3 == 0 ? "decimal" : lv % 3 == 1 ? "lowerLetter" : "lowerRoman");
+        if (pd_doc_list_info(x->d, x->listmap[i], &nlv, lv) != PD_OK) {
+            nlv = 0;
+        }
 
-            if (a == 0) {
-                pb_printf(o, "<w:lvlText w:val=\"%s\"/>", bullets[lv % 3]);
-            } else {
-                pb_printf(o, "<w:lvlText w:val=\"%%%d.\"/>", lv + 1);
+        pb_printf(o, "<w:abstractNum w:abstractNumId=\"%d\"><w:multiLevelType w:val=\"hybridMultilevel\"/>", i);
+
+        for (k = 0; k < 9; k++) {
+            pd_list_level L = lv[k < nlv ? k : nlv > 0 ? nlv - 1 : 0];
+            int f = L.format >= PD_NUM_BULLET && L.format <= PD_NUM_NONE ? L.format : PD_NUM_DECIMAL;
+
+            if (k >= nlv) {     /* levels the list lacks: like its deepest, further in */
+                L.indent += PD_PT(18) * (k - (nlv > 0 ? nlv - 1 : 0));
+
+                if (f != PD_NUM_BULLET && f != PD_NUM_NONE) {
+                    snprintf(L.text, sizeof(L.text), "%%%d.", k + 1);
+                }
             }
 
-            pb_printf(o, "<w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"%d\" w:hanging=\"360\"/></w:pPr></w:lvl>",
-                      720 + 360 * lv);
+            pb_printf(o, "<w:lvl w:ilvl=\"%d\"><w:start w:val=\"%d\"/><w:numFmt w:val=\"%s\"/><w:lvlText w:val=\"",
+                      k, (int)(L.start >= 0 ? L.start : 1), fmts[f]);
+            xesc(o, L.text, strlen(L.text));
+            pb_printf(o, "\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"%d\" w:hanging=\"%d\"/></w:pPr></w:lvl>",
+                      TW(L.indent), TW(L.hanging));
         }
 
         pb_puts(o, "</w:abstractNum>");
     }
 
-    for (i = 0; i < x->nlistmap; i++) {     /* one numbering instance per list: each restarts at 1 */
-        pb_printf(o, "<w:num w:numId=\"%d\"><w:abstractNumId w:val=\"%d\"/>", i + 1, x->listkind[i] == 1 ? 0 : 1);
-
-        if (x->listkind[i] == 2) {
-            pb_puts(o, "<w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"1\"/></w:lvlOverride>");
-        }
-
-        pb_puts(o, "</w:num>");
+    for (i = 0; i < x->nlistmap; i++) {
+        pb_printf(o, "<w:num w:numId=\"%d\"><w:abstractNumId w:val=\"%d\"/></w:num>", i + 1, i);
     }
 
     pb_puts(o, "</w:numbering>");
@@ -1121,6 +1555,13 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     memset(&z, 0, sizeof(z));
     x->d = d;
     pd_numbers_init(&x->nb, d);
+
+    {   /* the document hyphenates when its Normal does */
+        pd_para_props np;
+
+        pd_doc_style_resolve(d, pd_doc_style_find(d, "Normal"), &np, NULL);
+        x->hyph_auto = np.hyphenate;
+    }
 
     /* document.xml; sections end in the pPr of their last paragraph, the last one in the body */
     x->o = &doc;
@@ -1157,7 +1598,9 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
                     dx_para(x, k, sect.p);
                 } else {
                     dx_block(x, k);
-                    pb_printf(&doc, "<w:p><w:pPr>%s</w:pPr></w:p>", sect.p ? sect.p : "");
+                    pb_printf(&doc, "<w:p><w:pPr>%s</w:pPr>", sect.p ? sect.p : "");
+                    dx_anchors(x);
+                    pb_puts(&doc, "</w:p>");
                 }
 
                 pb_free(&sect);
@@ -1167,6 +1610,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
         }
 
         if (s + 1 == ri.child_count) {
+            dx_flush_anchors(x);
             dx_sectpr(x, &sp, &doc);
         }
     }
@@ -1197,7 +1641,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
 
     for (i = 0; i < x->nhf; i++) {
         pb_printf(&part, "<Override PartName=\"/word/hf%d.xml\" ContentType=\"application/vnd.openxmlformats-"
-                  "officedocument.wordprocessingml.header+xml\"/>", (int)i + 1);
+                  "officedocument.wordprocessingml.%s+xml\"/>", (int)i + 1, x->hf_footer[i] ? "footer" : "header");
     }
 
     pb_puts(&part, "</Types>");
@@ -1211,7 +1655,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     zip_add(&z, "word/document.xml", doc.p, doc.n);
 
     part.n = 0;
-    dx_styles(&part);
+    dx_styles(x, &part);
     zip_add(&z, "word/styles.xml", part.p, part.n);
     part.n = 0;
     dx_numbering(x, &part);
@@ -1237,9 +1681,27 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
 
     part.n = 0;
     pb_puts(&part, XML_DECL);
-    pb_printf(&part, "<w:settings %s><w:footnotePr><w:footnote w:id=\"-1\"/><w:footnote w:id=\"0\"/></w:footnotePr>"
-              "<w:compat><w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" "
-              "w:val=\"15\"/></w:compat></w:settings>", W_NS);
+    pb_printf(&part, "<w:settings %s>", W_NS);
+
+    {   /* in the schema's order: hyphenation, the default tab, even pages, notes, compatibility */
+        pd_para_props np;
+
+        pd_doc_style_resolve(d, pd_doc_style_find(d, "Normal"), &np, NULL);
+
+        pb_printf(&part, "<w:defaultTabStop w:val=\"%d\"/>", TW(np.tab_interval > 0 ? np.tab_interval : PD_PT(36)));
+
+        if (x->hyph_auto) {
+            pb_puts(&part, "<w:autoHyphenation/>");
+        }
+    }
+
+    if (x->even_odd) {
+        pb_puts(&part, "<w:evenAndOddHeaders/>");
+    }
+
+    pb_puts(&part, "<w:footnotePr><w:footnote w:id=\"-1\"/><w:footnote w:id=\"0\"/></w:footnotePr>"
+            "<w:compat><w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" "
+            "w:val=\"15\"/></w:compat></w:settings>");
     zip_add(&z, "word/settings.xml", part.p, part.n);
 
     /* headers and footers: their own parts (with their own relationships for links) */
@@ -1252,7 +1714,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
 
         part.n = 0;
         pb_puts(&part, XML_DECL);
-        pb_printf(&part, "<w:hdr %s>", W_NS);
+        pb_printf(&part, x->hf_footer[i] ? "<w:ftr %s>" : "<w:hdr %s>", W_NS);
         x->o = &part;
         memset(&x->rels, 0, sizeof(x->rels));
         pd_doc_block_info(d, x->hf[i], &hi);
@@ -1261,7 +1723,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             dx_block(x, pd_doc_child(d, x->hf[i], k));
         }
 
-        pb_puts(&part, "</w:hdr>");
+        pb_puts(&part, x->hf_footer[i] ? "</w:ftr>" : "</w:hdr>");
         snprintf(name, sizeof(name), "word/hf%d.xml", (int)i + 1);
         zip_add(&z, name, part.p, part.n);
 
@@ -1298,17 +1760,9 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "settings\" Target=\"settings.xml\"/>");
 
     for (i = 0; i < x->nhf; i++) {
-        int is_footer = 0, s2;
-
-        for (s2 = 0; s2 < ri.child_count; s2++) {
-            pd_section_props sp;
-
-            pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), s2), &sp);
-            is_footer |= sp.footer == x->hf[i];
-        }
-
         pb_printf(&part, "<Relationship Id=\"rIdh%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
-                  "relationships/%s\" Target=\"hf%d.xml\"/>", (int)i + 1, is_footer ? "footer" : "header", (int)i + 1);
+                  "relationships/%s\" Target=\"hf%d.xml\"/>", (int)i + 1, x->hf_footer[i] ? "footer" : "header",
+                  (int)i + 1);
     }
 
     pb_put(&part, x->rels.p, x->rels.n);
@@ -2224,8 +2678,10 @@ static void dw_table_props(dw* w) {
         tp.align = w->t_jc;
     }
 
-    if (w->t_border_seen) {     /* every edge "none" is a table without rules */
-        tp.border = w->t_border_any ? (w->t_border > 0 ? w->t_border : tp.border) : 0;
+    if (!w->t_border_seen) {
+        tp.border = PD_PT(0.5);     /* Word's own grid: w:sz 4 */
+    } else {                        /* every edge "none" is a table without rules */
+        tp.border = w->t_border_any ? (w->t_border > 0 ? w->t_border : PD_PT(0.25)) : 0;    /* w:sz 0: the thinnest, 2/8 pt */
 
         if (w->t_border_color) {
             tp.border_color = w->t_border_color;
@@ -2768,6 +3224,15 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 } else {
                     dw_text(w, "\n", 1);
                 }
+            } else if (strcmp(t, "bookmarkStart") == 0 && w->in_p && mu_attr(&m, "w:name", v, sizeof(v)) && v[0] &&
+                       strcmp(v, "_GoBack") != 0 && strncmp(v, "_Toc", 4) != 0) {
+                pd_inline o;    /* a named place: Word's own hidden ones are left out */
+
+                memset(&o, 0, sizeof(o));
+                o.kind = PD_INLINE_BOOKMARK;
+                snprintf(o.name, sizeof(o.name), "%.31s", v);
+                dw_begin_para(w);
+                bld_inline(X->b, &o);
             } else if (strcmp(t, "noBreakHyphen") == 0) {
                 dw_text(w, "\xE2\x80\x91", 3);
             } else if (strcmp(t, "softHyphen") == 0) {

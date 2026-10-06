@@ -864,10 +864,13 @@ static pd_para_props para_resolved(const pd_doc* d, pd_block_id p) {
 
     if (o.mask & PD_PP_ALIGN) r.align = o.align;
     if (o.mask & PD_PP_INDENT_LEFT) r.indent_left = o.indent_left;
+    if (o.mask & PD_PP_INDENT_RIGHT) r.indent_right = o.indent_right;
     if (o.mask & PD_PP_INDENT_FIRST) r.indent_first = o.indent_first;
     if (o.mask & PD_PP_SPACE_BEFORE) r.space_before = o.space_before;
     if (o.mask & PD_PP_SPACE_AFTER) r.space_after = o.space_after;
     if (o.mask & PD_PP_LINE_SPACING) r.line_spacing = o.line_spacing;
+    if (o.mask & PD_PP_KEEP_NEXT) r.keep_with_next = o.keep_with_next;
+    if (o.mask & PD_PP_KEEP_LINES) r.keep_lines = o.keep_lines;
     if (o.mask & PD_PP_HYPHENATE) r.hyphenate = o.hyphenate;
     return r;
 }
@@ -895,6 +898,23 @@ static pd_char_props chars_at(const pd_doc* d, pd_block_id p, uint32_t off) {
    theme fonts, character styles. The shape of a proposal written in Word:
    Times New Roman 12 by default, the body in a custom justified Arial 11
    style with hyphenation off. */
+/* the document written as DOCX and read back: what the checks of an import
+   must still find after the round trip. Frees the original. */
+static pd_doc* docx_again(pd_doc* d) {
+    buf_t b = { NULL, 0 };
+    pd_doc* t = NULL;
+
+    if (d && pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK && pd_doc_import(b.p, b.n, PD_CONV_DOCX, &t) != PD_OK) {
+        t = NULL;
+    }
+
+    free(b.p);
+    pd_doc_free(d);
+    return t;
+}
+
+static void check_docx_styles(const pd_doc* d);
+
 static void test_docx_styles(void) {
     static const char* names[] = { "[Content_Types].xml", "word/document.xml", "word/styles.xml",
                                    "word/theme/theme1.xml", "word/settings.xml"
@@ -944,18 +964,36 @@ static void test_docx_styles(void) {
     };
     buf_t z = stored_zip(names, texts, 5);
     pd_doc* d = NULL;
+    int pass;
+
+    CHECK(pd_doc_import(z.p, z.n, PD_CONV_DOCX, &d) == PD_OK);
+    free(z.p);
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        check_docx_styles(d);
+    }
+
+    pd_doc_free(d);
+
+    /* fonts by kind, for a resolver that lacks the family asked for */
+    CHECK(pd_font_family_class("Arial") == PD_FAMILY_SANS && pd_font_family_class("Calibri Light") == PD_FAMILY_SANS);
+    CHECK(pd_font_family_class("Courier New") == PD_FAMILY_MONO);
+    CHECK(pd_font_family_class("DejaVu Sans Mono") == PD_FAMILY_MONO);
+    CHECK(pd_font_family_class("Times New Roman") == PD_FAMILY_SERIF && pd_font_family_class(NULL) == PD_FAMILY_SERIF);
+}
+
+static void check_docx_styles(const pd_doc* d) {
     pd_block_id sec, p[5];
     pd_para_props pp;
     pd_char_props cp;
     pd_block_info bi;
     int i;
-
-    CHECK(pd_doc_import(z.p, z.n, PD_CONV_DOCX, &d) == PD_OK);
-    free(z.p);
-
-    if (!d) {
-        return;
-    }
 
     sec = pd_doc_child(d, pd_doc_root(d), 0);
 
@@ -997,14 +1035,6 @@ static void test_docx_styles(void) {
     CHECK(strcmp(cp.family, "Calibri Light") == 0 && cp.size == PD_PT(16) && cp.weight == 700);
     cp = chars_at(d, p[4], 5);
     CHECK(strcmp(cp.family, "Calibri Light") == 0 && cp.size == PD_PT(10) && cp.weight == 400);
-
-    /* fonts by kind, for a resolver that lacks the family asked for */
-    CHECK(pd_font_family_class("Arial") == PD_FAMILY_SANS && pd_font_family_class("Calibri Light") == PD_FAMILY_SANS);
-    CHECK(pd_font_family_class("Courier New") == PD_FAMILY_MONO);
-    CHECK(pd_font_family_class("DejaVu Sans Mono") == PD_FAMILY_MONO);
-    CHECK(pd_font_family_class("Times New Roman") == PD_FAMILY_SERIF && pd_font_family_class(NULL) == PD_FAMILY_SERIF);
-
-    pd_doc_free(d);
 }
 
 /* a document from the parts of a .docx: name, text, name, text, ..., NULL.
@@ -1201,33 +1231,36 @@ static void test_docx_headers(void) {
     pd_section_props a, b;
     const char* t;
     uint32_t n;
+    int pass;
 
-    CHECK(d != NULL);
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        CHECK(d != NULL);
 
-    if (!d) {
-        return;
+        if (!d) {
+            return;
+        }
+
+        s1 = pd_doc_child(d, pd_doc_root(d), 0);
+        s2 = pd_doc_child(d, pd_doc_root(d), 1);
+        CHECK(s2 != 0 && pd_doc_section_props(d, s1, &a) == PD_OK && pd_doc_section_props(d, s2, &b) == PD_OK);
+
+        CHECK(a.header != 0 && a.footer == 0 && a.footer_first != 0 && a.title_page == 1);
+        CHECK(a.page_number_format == PD_NUM_LOWER_ROMAN && a.first_page_number == 3);
+        CHECK(a.header_distance == 500 * 65536 / 20 && a.footer_distance == 600 * 65536 / 20);
+
+        t = story_text(d, a.header, &n);
+        CHECK(n == 15 && memcmp(t, "Page \xEF\xBF\xBC of \xEF\xBF\xBC", 15) == 0);    /* no frozen 7 or 9 */
+        hp = pd_doc_child(d, a.header, 0);
+        CHECK(field_at(d, hp, 5) == PD_FIELD_PAGE && field_at(d, hp, 12) == PD_FIELD_PAGES);
+        t = story_text(d, a.footer_first, &n);
+        CHECK(n == 12 && memcmp(t, "First footer", 12) == 0);
+
+        /* the second section keeps the header, and the part is read once */
+        CHECK(b.header == a.header && b.footer_first == a.footer_first);
+        t = story_text(d, b.footer, &n);
+        CHECK(n == 13 && memcmp(t, "Second footer", 13) == 0);
+        CHECK(pd_doc_story_count(d) == 3);
     }
-
-    s1 = pd_doc_child(d, pd_doc_root(d), 0);
-    s2 = pd_doc_child(d, pd_doc_root(d), 1);
-    CHECK(s2 != 0 && pd_doc_section_props(d, s1, &a) == PD_OK && pd_doc_section_props(d, s2, &b) == PD_OK);
-
-    CHECK(a.header != 0 && a.footer == 0 && a.footer_first != 0 && a.title_page == 1);
-    CHECK(a.page_number_format == PD_NUM_LOWER_ROMAN && a.first_page_number == 3);
-    CHECK(a.header_distance == 500 * 65536 / 20 && a.footer_distance == 600 * 65536 / 20);
-
-    t = story_text(d, a.header, &n);
-    CHECK(n == 15 && memcmp(t, "Page \xEF\xBF\xBC of \xEF\xBF\xBC", 15) == 0);    /* no frozen 7 or 9 */
-    hp = pd_doc_child(d, a.header, 0);
-    CHECK(field_at(d, hp, 5) == PD_FIELD_PAGE && field_at(d, hp, 12) == PD_FIELD_PAGES);
-    t = story_text(d, a.footer_first, &n);
-    CHECK(n == 12 && memcmp(t, "First footer", 12) == 0);
-
-    /* the second section keeps the header, and the part is read once */
-    CHECK(b.header == a.header && b.footer_first == a.footer_first);
-    t = story_text(d, b.footer, &n);
-    CHECK(n == 13 && memcmp(t, "Second footer", 13) == 0);
-    CHECK(pd_doc_story_count(d) == 3);
 
     pd_doc_free(d);
 }
@@ -1370,37 +1403,169 @@ static void test_docx_floats(void) {
     const char* t;
     uint32_t n;
     int i;
+    int pass;
 
-    CHECK(d != NULL);
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        CHECK(d != NULL);
 
-    if (!d) {
-        return;
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+
+        for (i = 0; i < 6; i++) {
+            k[i] = pd_doc_child(d, sec, i);
+            memset(&bi[i], 0, sizeof(bi[i]));
+            pd_doc_block_info(d, k[i], &bi[i]);
+        }
+
+        /* the first picture before its paragraph, on the right, text round it */
+        CHECK(bi[0].kind == PD_BLOCK_FLOAT && bi[1].kind == PD_BLOCK_PARAGRAPH);
+        CHECK(pd_doc_float_props(d, k[0], &fp) == PD_OK && fp.wrap == PD_WRAP_RIGHT && fp.width == PD_PT(100));
+        CHECK(fp.gap == PD_PT(9) && (fp.placement & PD_PLACE_FORCE));
+        pd_doc_para_text(d, k[1], &t, &n);
+        CHECK(n == 12 && memcmp(t, "Text beside.", 12) == 0);
+
+        /* the second after the paragraph it was anchored in the middle of, across the column */
+        CHECK(bi[2].kind == PD_BLOCK_PARAGRAPH && bi[3].kind == PD_BLOCK_FLOAT);
+        pd_doc_para_text(d, k[2], &t, &n);
+        CHECK(n == 13 && memcmp(t, "Before after.", 13) == 0);
+        CHECK(pd_doc_float_props(d, k[3], &fp) == PD_OK && fp.wrap == PD_WRAP_NONE);
+
+        /* an inline picture stays in its line */
+        pd_doc_para_text(d, k[4], &t, &n);
+        CHECK(bi[4].kind == PD_BLOCK_PARAGRAPH && n == 11 && memcmp(t + 8, "\xEF\xBF\xBC", 3) == 0);
     }
+
+    pd_doc_free(d);
+}
+
+/* a story holding one paragraph of text */
+static pd_block_id story_of(pd_doc* d, const char* s) {
+    pd_block_id st;
+
+    pd_doc_insert_block(d, 0, -1, PD_BLOCK_STORY, &st);
+    text(d, pd_doc_child(d, st, 0), s);
+    return st;
+}
+
+/* what the DOCX writer keeps of a document made in Parade: its own styles
+   (a redefined Normal, a custom style on top), direct paragraph properties,
+   first and even page headers with the page numbers' format, and bookmarks */
+static void test_docx_writer(void) {
+    pd_doc* d;
+    pd_block_id sec, p;
+    pd_para_props pp;
+    pd_char_props cp;
+    pd_section_props sp;
+    pd_style_id normal, lead;
+    pd_inline o;
+    int pass;
+
+    pd_doc_new(&d);
+    normal = pd_doc_style_find(d, "Normal");
+    memset(&pp, 0, sizeof(pp));
+    memset(&cp, 0, sizeof(cp));
+    pp.mask = PD_PP_ALIGN | PD_PP_SPACE_AFTER;
+    pp.align = PD_ALIGN_JUSTIFY;
+    pp.space_after = PD_PT(4);
+    cp.mask = PD_CP_FAMILY | PD_CP_SIZE;
+    snprintf(cp.family, sizeof(cp.family), "Arial");
+    cp.size = PD_PT(11);
+    CHECK(pd_doc_style_define(d, "Normal", PD_STYLE_PARAGRAPH, 0, &pp, &cp, &normal) == PD_OK);
+    pp.mask = PD_PP_INDENT_LEFT;
+    pp.indent_left = PD_PT(18);
+    cp.mask = PD_CP_ITALIC;
+    cp.italic = 1;
+    CHECK(pd_doc_style_define(d, "Lead Para", PD_STYLE_PARAGRAPH, normal, &pp, &cp, &lead) == PD_OK);
 
     sec = pd_doc_child(d, pd_doc_root(d), 0);
+    p = pd_doc_child(d, sec, 0);
+    text(d, p, "Plain.");
+    p = para(d, sec, "Lead Para", 0, 0, "Lead.");
+    p = para(d, sec, NULL, 0, 0, "Direct.");
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_ALIGN | PD_PP_INDENT_LEFT | PD_PP_INDENT_RIGHT | PD_PP_INDENT_FIRST | PD_PP_SPACE_BEFORE |
+              PD_PP_SPACE_AFTER | PD_PP_LINE_SPACING | PD_PP_KEEP_NEXT | PD_PP_KEEP_LINES;
+    pp.align = PD_ALIGN_RIGHT;
+    pp.indent_left = PD_PT(36);
+    pp.indent_right = PD_PT(9);
+    pp.indent_first = -PD_PT(18);
+    pp.space_before = PD_PT(12);
+    pp.space_after = PD_PT(3);
+    pp.line_spacing = 1500;
+    pp.keep_with_next = 1;
+    pp.keep_lines = 1;
+    CHECK(pd_doc_set_para_props(d, p, &pp) == PD_OK);
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_BOOKMARK;
+    snprintf(o.name, sizeof(o.name), "here");
+    CHECK(pd_doc_insert_inline(d, at(p, 3), &o, NULL) == PD_OK);
 
-    for (i = 0; i < 6; i++) {
-        k[i] = pd_doc_child(d, sec, i);
-        memset(&bi[i], 0, sizeof(bi[i]));
-        pd_doc_block_info(d, k[i], &bi[i]);
+    pd_doc_section_props(d, sec, &sp);
+    sp.header = story_of(d, "Odd head");
+    sp.header_first = story_of(d, "First head");
+    sp.header_even = story_of(d, "Even head");
+    sp.footer_even = story_of(d, "Even foot");
+    sp.title_page = 1;
+    sp.facing_pages = 1;
+    sp.page_number_format = PD_NUM_UPPER_ROMAN;
+    sp.first_page_number = 4;
+    CHECK(pd_doc_set_section_props(d, sec, &sp) == PD_OK);
+
+    for (pass = 0; pass < 3; pass++, d = docx_again(d)) {
+        pd_block_id k[3];
+        const char* t;
+        uint32_t n;
+        int i;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+
+        for (i = 0; i < 3; i++) {
+            k[i] = pd_doc_child(d, sec, i);
+        }
+
+        /* Normal as the document has it, and the look of the style built on it
+           (read back as the paragraph's own properties) */
+        cp = chars_at(d, k[0], 0);
+        pp = para_resolved(d, k[0]);
+        CHECK(strcmp(cp.family, "Arial") == 0 && cp.size == PD_PT(11) && !cp.italic);
+        CHECK(pp.align == PD_ALIGN_JUSTIFY && pp.space_after == PD_PT(4));
+        cp = chars_at(d, k[1], 0);
+        pp = para_resolved(d, k[1]);
+        CHECK(strcmp(cp.family, "Arial") == 0 && cp.italic && pp.indent_left == PD_PT(18));
+        CHECK(pp.align == PD_ALIGN_JUSTIFY);
+
+        /* the direct properties, and the bookmark in the text */
+        pp = para_resolved(d, k[2]);
+        CHECK(pp.align == PD_ALIGN_RIGHT && pp.indent_left == PD_PT(36) && pp.indent_right == PD_PT(9));
+        CHECK(pp.indent_first == -PD_PT(18) && pp.space_before == PD_PT(12) && pp.space_after == PD_PT(3));
+        CHECK(pp.line_spacing == 1500 && pp.keep_with_next && pp.keep_lines);
+        CHECK(pd_doc_inline_at(d, at(k[2], 3), &o) == PD_OK && o.kind == PD_INLINE_BOOKMARK);
+        CHECK(strcmp(o.name, "here") == 0);
+        pd_doc_para_text(d, k[2], &t, &n);
+        CHECK(n == 10 && memcmp(t, "Dir\xEF\xBF\xBC" "ect.", 10) == 0);
+
+        /* the headers for each kind of page */
+        CHECK(pd_doc_section_props(d, sec, &sp) == PD_OK && sp.title_page == 1 && sp.facing_pages == 1);
+        CHECK(sp.page_number_format == PD_NUM_UPPER_ROMAN && sp.first_page_number == 4);
+        t = story_text(d, sp.header, &n);
+        CHECK(n == 8 && memcmp(t, "Odd head", 8) == 0);
+        t = story_text(d, sp.header_first, &n);
+        CHECK(n == 10 && memcmp(t, "First head", 10) == 0);
+        t = story_text(d, sp.header_even, &n);
+        CHECK(n == 9 && memcmp(t, "Even head", 9) == 0);
+        t = story_text(d, sp.footer_even, &n);
+        CHECK(n == 9 && memcmp(t, "Even foot", 9) == 0 && sp.footer == 0 && sp.footer_first == 0);
     }
 
-    /* the first picture before its paragraph, on the right, text round it */
-    CHECK(bi[0].kind == PD_BLOCK_FLOAT && bi[1].kind == PD_BLOCK_PARAGRAPH);
-    CHECK(pd_doc_float_props(d, k[0], &fp) == PD_OK && fp.wrap == PD_WRAP_RIGHT && fp.width == PD_PT(100));
-    CHECK(fp.gap == PD_PT(9) && (fp.placement & PD_PLACE_FORCE));
-    pd_doc_para_text(d, k[1], &t, &n);
-    CHECK(n == 12 && memcmp(t, "Text beside.", 12) == 0);
-
-    /* the second after the paragraph it was anchored in the middle of, across the column */
-    CHECK(bi[2].kind == PD_BLOCK_PARAGRAPH && bi[3].kind == PD_BLOCK_FLOAT);
-    pd_doc_para_text(d, k[2], &t, &n);
-    CHECK(n == 13 && memcmp(t, "Before after.", 13) == 0);
-    CHECK(pd_doc_float_props(d, k[3], &fp) == PD_OK && fp.wrap == PD_WRAP_NONE);
-
-    /* an inline picture stays in its line */
-    pd_doc_para_text(d, k[4], &t, &n);
-    CHECK(bi[4].kind == PD_BLOCK_PARAGRAPH && n == 11 && memcmp(t + 8, "\xEF\xBF\xBC", 3) == 0);
     pd_doc_free(d);
 }
 
@@ -2024,6 +2189,8 @@ int main(void) {
     test_docx_tables();
     printf("docx floats\n");
     test_docx_floats();
+    printf("docx writer\n");
+    test_docx_writer();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");
