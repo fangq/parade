@@ -843,6 +843,37 @@ PD_API pd_status pd_doc_save(const pd_doc* doc, pd_jdata_format format, pd_write
 PD_API pd_status pd_doc_load(const void* data, size_t len, pd_jdata_format format, pd_doc** out);
 
 /* ------------------------------------------------------------------ */
+/* Deltas: journaling and replication                                 */
+/* ------------------------------------------------------------------ */
+
+/** receives one delta: compact JSON, valid for the call */
+typedef void (*pd_delta_fn)(void* user, const char* json, size_t len);
+
+/**
+ * Write an exact snapshot of the document (native format, ids as they
+ * are, nothing compacted) and from then on report every finished
+ * operation -- undo and redo, tracked edits, comments included -- to
+ * delta as a delta: the new state of what the operation changed, and the
+ * format, revision, list and resource table entries made since the last
+ * one. A document loaded from the snapshot and given the deltas in order
+ * with pd_doc_apply_delta stays identical to this one, ids included: a
+ * durable journal (snapshot + appended deltas) recovers the document after
+ * a crash, and a follower mirrors an editor. Markers are not part of it.
+ * fn may be NULL to only start reporting; delta NULL stops.
+ */
+PD_API pd_status pd_doc_snapshot(pd_doc* doc, pd_jdata_format format, pd_writer fn, void* user, pd_delta_fn delta,
+                                 void* delta_user);
+/**
+ * Apply a delta made by the document this one was loaded from (its
+ * snapshot, then every delta before this one). Not an undoable step; the
+ * undo history is cleared, since its steps no longer describe the
+ * document. PD_ERR_STATE when the delta does not follow on from this
+ * document's state, PD_ERR_FORMAT when it is malformed; either way the
+ * document may be partly updated and should be reloaded from a snapshot.
+ */
+PD_API pd_status pd_doc_apply_delta(pd_doc* doc, const char* json, size_t len);
+
+/* ------------------------------------------------------------------ */
 /* Layout bridge                                                      */
 /* ------------------------------------------------------------------ */
 

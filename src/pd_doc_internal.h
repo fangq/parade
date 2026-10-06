@@ -197,6 +197,16 @@ struct pd_doc {
     dcomment* comments;
     int32_t ncomments, capcomments;
     uint64_t comment_rev;       /* bumped by every comment change */
+    uint64_t meta_rev;          /* bumped by every metadata change */
+    /* deltas: what each finished operation changed, for a journal or a replica */
+    pd_delta_fn delta_fn;
+    void* delta_user;
+    pd_block_id* dnew;          /* subtrees attached during the operation */
+    int32_t ndnew, capdnew;
+    int32_t sent_formats, sent_revs, sent_lists, sent_res;     /* table entries a replica has */
+    uint64_t sent_comment_rev, sent_meta_rev;
+    uint64_t delta_serial;
+    int applying;               /* pd_doc_apply_delta under way: nothing to report */
 };
 
 /* shared by pd_doc.c and pd_doc_io.c */
@@ -229,6 +239,15 @@ pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
 pd_status pd_doc_label_style(const pd_doc* d, pd_block_id para, pd_style* st);
 /* a style for characters described outright */
 pd_status pd_doc_cp_style(const pd_doc* d, const pd_char_props* cp, pd_style* st);
+/* deltas (pd_doc_io.c): write the one for the operation just finished; apply one */
+void pd_doc_delta_emit(pd_doc* d);
+/* the touched list of an applied delta, reported to the listener as an operation's would be */
+void pd_doc_delta_touch(pd_doc* d, int32_t kind, pd_block_id block, pd_style_id style);
+void pd_doc_delta_commit(pd_doc* d);
+void pd_doc_set_alive(pd_doc* d, pd_block_id id, int alive);
+void pd_doc_bstate_free(bstate* s);
+void pd_doc_touched(const pd_doc* d, int32_t i, int32_t* kind, pd_block_id* block, pd_style_id* style);
+int32_t pd_doc_touched_count(const pd_doc* d);
 /* pd_doc_comment_add outside the undo history (loading) */
 pd_status pd_doc_comment_add_raw(pd_doc* d, const pd_comment* in, pd_comment_id* out);
 /* a resolved run's look under the document's markup mode: author colours, deletions hidden or struck */

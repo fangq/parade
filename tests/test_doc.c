@@ -1103,6 +1103,151 @@ static void test_track_changes(void) {
     pd_doc_free(d);
 }
 
+/* ------------------------------------------------------------------ */
+/* deltas                                                             */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char** v;
+    size_t* n;
+    int count, cap, applied;
+    size_t bytes;
+} dlog_t;
+
+static void on_delta(void* user, const char* json, size_t len) {
+    dlog_t* l = (dlog_t*)user;
+
+    if (l->count == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 256;
+        l->v = (char**)realloc(l->v, (size_t)l->cap * sizeof(char*));
+        l->n = (size_t*)realloc(l->n, (size_t)l->cap * sizeof(size_t));
+    }
+
+    l->v[l->count] = (char*)malloc(len + 1);
+    memcpy(l->v[l->count], json, len);
+    l->v[l->count][len] = '\0';
+    l->n[l->count++] = len;
+    l->bytes += len;
+}
+
+/* the deltas not yet given to a follower */
+static int catch_up(pd_doc* r, dlog_t* l) {
+    int bad = 0;
+
+    for (; l->applied < l->count; l->applied++) {
+        pd_status st = pd_doc_apply_delta(r, l->v[l->applied], l->n[l->applied]);
+
+        if (st != PD_OK && !bad) {
+            fprintf(stderr, "delta %d failed (%d): %.300s\n", l->applied, (int)st, l->v[l->applied]);
+        }
+
+        bad += st != PD_OK;
+    }
+
+    return bad;
+}
+
+static void test_deltas(void) {
+    pd_doc* d = rich_doc(), *r = NULL, *r2 = NULL;
+    pd_res_id res = 1;
+    buf_t snap = { NULL, 0 }, a, b;
+    dlog_t log;
+    int i, bad = 0, diverged = 0, k;
+    pd_comment c;
+    pd_comment_id cid;
+
+    memset(&log, 0, sizeof(log));
+    CHECK(pd_doc_snapshot(d, PD_JDATA_TEXT, buf_write, &snap, on_delta, &log) == PD_OK);
+    CHECK(pd_doc_load(snap.p, snap.n, PD_JDATA_AUTO, &r) == PD_OK);
+
+    if (!r) {
+        return;
+    }
+
+    for (i = 0; i < 3000; i++) {
+        k = (int)rnd(16);
+
+        if (k == 0) {
+            pd_doc_undo(d);
+        } else if (k == 1) {
+            pd_doc_redo(d);
+        } else if (k == 2) {
+            pd_doc_set_tracking(d, pd_doc_tracking(d) ? NULL : "Tracker");
+        } else if (k == 3 && first_para(d)) {
+            memset(&c, 0, sizeof(c));
+            strcpy(c.author, "Commenter");
+            c.text = "note";
+            c.text_len = 4;
+            c.range.start = c.range.end = at(first_para(d), 0);
+            c.parent = pd_doc_comment_count(d) > 0 && rnd(2) ? (pd_comment_id)(1 + rnd((uint32_t)pd_doc_comment_count(d))) :
+                       0;
+            pd_doc_comment_add(d, &c, &cid);
+        } else if (k == 4 && pd_doc_comment_count(d) > 0) {
+            pd_doc_comment_remove(d, (pd_comment_id)(1 + rnd((uint32_t)pd_doc_comment_count(d))));
+        } else if (k == 5 && first_para(d)) {
+            pd_range all;
+
+            all.start = at(first_para(d), 0);
+            all.end = all.start;
+            pd_doc_revision_resolve(d, all, (int32_t)rnd(2));
+        } else {
+            random_op(d, res);
+        }
+
+        pd_doc_seal_undo(d);
+        bad += catch_up(r, &log);
+
+        if (i % 100 == 99 || i == 2999) {
+            a = save(d, PD_JDATA_TEXT);
+            b = save(r, PD_JDATA_TEXT);
+
+            if (!same(a, b)) {
+                if (!diverged) {
+                    fprintf(stderr, "follower diverged after step %d\n", i);
+                }
+
+                diverged++;
+            }
+
+            free(a.p);
+            free(b.p);
+        }
+    }
+
+    CHECK(bad == 0);
+    CHECK(diverged == 0);
+    CHECK(invariants(r));
+
+    /* a journal: the snapshot and every delta, replayed at once, recovers the document */
+    CHECK(pd_doc_load(snap.p, snap.n, PD_JDATA_AUTO, &r2) == PD_OK);
+
+    if (r2) {
+        log.applied = 0;
+        CHECK(catch_up(r2, &log) == 0);
+        a = save(d, PD_JDATA_TEXT);
+        b = save(r2, PD_JDATA_TEXT);
+        CHECK(same(a, b));
+        free(a.p);
+        free(b.p);
+        /* out of order: refused, not misapplied */
+        CHECK(log.count < 2 || pd_doc_apply_delta(r2, log.v[1], log.n[1]) != PD_OK);
+        pd_doc_free(r2);
+    }
+
+    printf("  %d operations, %d deltas, %.0f bytes each on average: a follower and a replayed journal match\n", i,
+           log.count, log.count ? (double)log.bytes / log.count : 0.0);
+
+    for (i = 0; i < log.count; i++) {
+        free(log.v[i]);
+    }
+
+    free(log.v);
+    free(log.n);
+    free(snap.p);
+    pd_doc_free(r);
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);   /* progress stays in order with sanitizer reports */
     printf("basics\n");
@@ -1123,6 +1268,8 @@ int main(void) {
     test_layout_bridge();
     printf("tracked changes, comments\n");
     test_track_changes();
+    printf("deltas: follower and journal\n");
+    test_deltas();
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

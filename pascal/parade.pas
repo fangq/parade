@@ -532,6 +532,7 @@ type
 
   pd_doc_listener = procedure(user: Pointer; change: Ppd_change); cdecl;
   pd_writer = function(user: Pointer; data: Pointer; len: csize_t): cint; cdecl;
+  pd_delta_fn = procedure(user: Pointer; json: PAnsiChar; len: csize_t); cdecl;
   { fetches a picture by its address: writes its bytes through write(sink, ...), 0 on success }
   pd_image_fetch = function(user: Pointer; address: PAnsiChar; write: pd_writer; sink: Pointer): cint; cdecl;
 
@@ -749,6 +750,9 @@ procedure pd_doc_set_listener(doc: Ppd_doc; fn: pd_doc_listener; user: Pointer);
 function pd_doc_save(doc: Ppd_doc; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 function pd_doc_load_images(doc: Ppd_doc; fetch: pd_image_fetch; user: Pointer): Int32; cdecl; PDEXT;
 function pd_doc_load(data: Pointer; len: csize_t; format: Int32; out doc: Ppd_doc): pd_status; cdecl; PDEXT;
+function pd_doc_snapshot(doc: Ppd_doc; format: Int32; fn: pd_writer; user: Pointer; delta: pd_delta_fn;
+  delta_user: Pointer): pd_status; cdecl; PDEXT;
+function pd_doc_apply_delta(doc: Ppd_doc; json: PAnsiChar; len: csize_t): pd_status; cdecl; PDEXT;
 function pd_doc_para_build(doc: Ppd_doc; paragraph: pd_block_id; column_width: pd_sp; para: Ppd_para;
   params: Ppd_params): pd_status; cdecl; PDEXT;
 

@@ -232,6 +232,10 @@ static char int_marker(int64_t lo, int64_t hi, int* bytes) {
 static void newline(pj_writer* w, int depth) {
     int k;
 
+    if (w->compact) {
+        return;
+    }
+
     emit_c(w, '\n');
 
     for (k = 0; k < depth; k++) {
@@ -493,7 +497,7 @@ void pj_int_matrix(pj_writer* w, const int64_t* data, int64_t rows, int32_t cols
 }
 
 int pj_finish(pj_writer* w) {
-    if (!w->binary) {
+    if (!w->binary && !w->compact) {
         emit_c(w, '\n');
     }
 

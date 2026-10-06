@@ -1,0 +1,1 @@
+{"Delta": 1,"NextID": 5,"FormatBase": 0,"Formats": [{"Style": 0,"Char": {"Revision": 1}}],"RevisionBase": 0,"Revisions": [{"Kind": "insert","Author": "Ann","Date": "2026-10-06T11:49:20Z"}],"Blocks": [{"_TreeNode_(paragraph)": {"ID": 4,"Style": 1,"Role": "body","Level": 0,"Text": "Hello, dear world","Runs": [[0,5,0],[5,11,1],[11,17,0]]}}]}

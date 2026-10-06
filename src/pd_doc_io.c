@@ -289,10 +289,11 @@ typedef struct {
     pd_format_id* order;
     int32_t nused;
     uint32_t maxid;
+    int exact;          /* ids as they are (deltas) */
 } saver;
 
 static uint32_t fmt_id(const saver* sv, pd_format_id f) {
-    return f ? sv->fmap[f] : 0;
+    return sv->exact ? f : f ? sv->fmap[f] : 0;
 }
 
 static void collect(saver* sv, const blk* b) {
@@ -314,7 +315,14 @@ static void collect(saver* sv, const blk* b) {
     }
 }
 
+static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids);
+
 static void save_block(pj_writer* w, const saver* sv, const blk* b) {
+    save_block_ex(w, sv, b, 1);
+}
+
+/* a block, with its subtree when kids is set */
+static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids) {
     const pd_doc* d = sv->d;
     char tag[32];
     const bstate* s = &b->st;
@@ -624,7 +632,7 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
 
     pj_obj_end(w);
 
-    if (b->nkids) {
+    if (b->nkids && kids) {
         pj_key(w, "_TreeChildren_");
         pj_arr_begin(w);
 
@@ -638,6 +646,70 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
     pj_obj_end(w);
 }
 
+static void save_style(pj_writer* w, const dstyle* s) {
+    pj_obj_begin(w);
+    put_str(w, "Name", s->name);
+    put_str(w, "Kind", name_of(NAMES(style_kind_names), s->kind));
+    put_int(w, "Parent", s->parent);
+
+    if (s->kind == PD_STYLE_PARAGRAPH) {
+        pj_key(w, "Para");
+        save_pp(w, &s->pp);
+    }
+
+    pj_key(w, "Char");
+    save_cp(w, &s->cp);
+    pj_obj_end(w);
+}
+
+static void save_list(pj_writer* w, const dlist* l) {
+    int32_t k;
+
+    pj_obj_begin(w);
+    pj_key(w, "Levels");
+    pj_arr_begin(w);
+
+    for (k = 0; k < l->n; k++) {
+        const pd_list_level* L = &l->lv[k];
+
+        pj_obj_begin(w);
+        put_str(w, "Format", name_of(NAMES(num_names), L->format));
+        put_int(w, "Start", L->start);
+        put_str(w, "Text", L->text);
+        put_int(w, "Indent", L->indent);
+        put_int(w, "Hanging", L->hanging);
+
+        if (L->restart_after) {
+            put_int(w, "RestartAfter", L->restart_after);
+        }
+
+        if (L->label_family[0]) {
+            put_str(w, "LabelFamily", L->label_family);
+        }
+
+        if (L->label_size) {
+            put_int(w, "LabelSize", L->label_size);
+        }
+
+        if (L->label_weight) {
+            put_int(w, "LabelWeight", L->label_weight);
+        }
+
+        if (L->label_italic) {
+            put_int(w, "LabelItalic", L->label_italic);
+        }
+
+        if (L->label_color) {
+            put_int(w, "LabelColor", (int64_t)L->label_color);
+        }
+
+        pj_obj_end(w);
+    }
+
+    pj_arr_end(w);
+    pj_obj_end(w);
+}
+
 static void put_pos(pj_writer* w, const char* k, const pd_pos* p) {
     pj_key(w, k);
     pj_arr_begin(w);
@@ -646,13 +718,14 @@ static void put_pos(pj_writer* w, const char* k, const pd_pos* p) {
     pj_arr_end(w);
 }
 
-/* live comments only, renumbered in order; replies refer to the new numbers */
-static void save_comments(pj_writer* w, const pd_doc* d) {
+/* live comments only, renumbered in order, replies referring to the new numbers; or exactly, every one
+   in its place, a removed one as {"Removed": true} */
+static void save_comments(pj_writer* w, const pd_doc* d, int exact) {
     int32_t i, j, n = 0;
     pd_comment q;
 
     for (i = 1; i <= pd_doc_comment_count(d); i++) {
-        n += pd_doc_comment_get(d, (pd_comment_id)i, &q) == PD_OK;
+        n += exact || pd_doc_comment_get(d, (pd_comment_id)i, &q) == PD_OK;
     }
 
     if (!n) {
@@ -666,6 +739,12 @@ static void save_comments(pj_writer* w, const pd_doc* d) {
         pd_comment c;
 
         if (pd_doc_comment_get(d, (pd_comment_id)i, &c) != PD_OK) {
+            if (exact) {
+                pj_obj_begin(w);
+                put_bool(w, "Removed", 1);
+                pj_obj_end(w);
+            }
+
             continue;
         }
 
@@ -683,7 +762,7 @@ static void save_comments(pj_writer* w, const pd_doc* d) {
             int32_t no = 0;
 
             for (j = 1; j <= (int32_t)c.parent; j++) {
-                no += pd_doc_comment_get(d, (pd_comment_id)j, &q) == PD_OK;
+                no += exact || pd_doc_comment_get(d, (pd_comment_id)j, &q) == PD_OK;
             }
 
             put_int(w, "Parent", no);
@@ -702,7 +781,8 @@ static void save_comments(pj_writer* w, const pd_doc* d) {
     pj_arr_end(w);
 }
 
-pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, void* user) {
+/* exact: every table entry where it is (a snapshot for deltas); else compacted, by content alone */
+static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn, void* user, int exact) {
     pj_writer w;
     saver sv;
     int32_t i, k;
@@ -735,6 +815,16 @@ pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, voi
         collect(&sv, d->tab[sr->kids[i]]);
     }
 
+    if (exact) {
+        for (i = 1; i <= d->nformats; i++) {
+            sv.fmap[i] = (uint32_t)i;
+            sv.order[i - 1] = (pd_format_id)i;
+        }
+
+        sv.nused = d->nformats;
+        sv.maxid = d->next_id - 1;
+    }
+
     pj_init(&w, format == PD_JDATA_BINARY, fn, user);
     pj_obj_begin(&w);
     pj_key(&w, "_DataInfo_");
@@ -757,19 +847,7 @@ pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, voi
             continue;
         }
 
-        pj_obj_begin(&w);
-        put_str(&w, "Name", s->name);
-        put_str(&w, "Kind", name_of(NAMES(style_kind_names), s->kind));
-        put_int(&w, "Parent", s->parent);
-
-        if (s->kind == PD_STYLE_PARAGRAPH) {
-            pj_key(&w, "Para");
-            save_pp(&w, &s->pp);
-        }
-
-        pj_key(&w, "Char");
-        save_cp(&w, &s->cp);
-        pj_obj_end(&w);
+        save_style(&w, s);
     }
 
     pj_arr_end(&w);
@@ -781,13 +859,17 @@ pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, voi
         return PD_ERR_NOMEM;
     }
 
-    for (i = 0; i < sv.nused; i++) {
+    for (i = 0; i < sv.nused && !exact; i++) {
         const dformat* f = &d->formats[sv.order[i] - 1];
 
         if ((f->cp.mask & PD_CP_REVISION) && f->cp.revision && (int32_t)f->cp.revision <= d->nrevs &&
                 !rmap[f->cp.revision]) {
             rmap[f->cp.revision] = ++nrev;
         }
+    }
+
+    for (i = 1; i <= d->nrevs && exact; i++) {
+        rmap[i] = ++nrev;
     }
 
     if (nrev) {
@@ -839,49 +921,7 @@ pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, voi
     pj_arr_begin(&w);
 
     for (i = 0; i < d->nlists; i++) {
-        pj_obj_begin(&w);
-        pj_key(&w, "Levels");
-        pj_arr_begin(&w);
-
-        for (k = 0; k < d->lists[i].n; k++) {
-            const pd_list_level* L = &d->lists[i].lv[k];
-
-            pj_obj_begin(&w);
-            put_str(&w, "Format", name_of(NAMES(num_names), L->format));
-            put_int(&w, "Start", L->start);
-            put_str(&w, "Text", L->text);
-            put_int(&w, "Indent", L->indent);
-            put_int(&w, "Hanging", L->hanging);
-
-            if (L->restart_after) {
-                put_int(&w, "RestartAfter", L->restart_after);
-            }
-
-            if (L->label_family[0]) {
-                put_str(&w, "LabelFamily", L->label_family);
-            }
-
-            if (L->label_size) {
-                put_int(&w, "LabelSize", L->label_size);
-            }
-
-            if (L->label_weight) {
-                put_int(&w, "LabelWeight", L->label_weight);
-            }
-
-            if (L->label_italic) {
-                put_int(&w, "LabelItalic", L->label_italic);
-            }
-
-            if (L->label_color) {
-                put_int(&w, "LabelColor", (int64_t)L->label_color);
-            }
-
-            pj_obj_end(&w);
-        }
-
-        pj_arr_end(&w);
-        pj_obj_end(&w);
+        save_list(&w, &d->lists[i]);
     }
 
     pj_arr_end(&w);
@@ -922,12 +962,16 @@ pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, voi
     }
 
     pj_arr_end(&w);
-    save_comments(&w, d);
+    save_comments(&w, d, exact);
     pj_obj_end(&w);
     st = pj_finish(&w) ? PD_ERR_IO : PD_OK;
     free(sv.fmap);
     free(sv.order);
     return st;
+}
+
+pd_status pd_doc_save(const pd_doc* d, pd_jdata_format format, pd_writer fn, void* user) {
+    return save_doc(d, format, fn, user, 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1131,6 +1175,38 @@ static void load_cp(const pj_node* o, pd_char_props* c, loader* L) {
     F("Revision", PD_CP_REVISION, revision, 1, 0xFFFFFF);
 #undef F
     pd_doc_cp_normalize(c);
+}
+
+/* a list definition */
+static void load_list(loader* L, const pj_node* c, dlist* lp) {
+    const pj_node* lv = pj_get(c, "Levels"), *y;
+    dlist l;
+
+    memset(&l, 0, sizeof(l));
+    L->bad |= !lv || lv->type != PJ_ARR || lv->n < 1 || lv->n > 9;
+
+    for (y = lv && !L->bad ? lv->child : NULL; y && !L->bad; y = y->next) {
+        pd_list_level* v = &l.lv[l.n++];
+
+        v->format = enum_of(pj_get(y, "Format"), NAMES(num_names));
+        v->start = (int32_t)int_or(pj_get(y, "Start"), 1, -1000000, 1000000, L);
+        copy_name(pj_get(y, "Text"), v->text, sizeof(v->text), L);
+        v->indent = (pd_sp)int_or(pj_get(y, "Indent"), 0, SP_MIN, SP_MAX, L);
+        v->hanging = (pd_sp)int_or(pj_get(y, "Hanging"), 0, SP_MIN, SP_MAX, L);
+        v->restart_after = (int32_t)int_or(pj_get(y, "RestartAfter"), 0, -1, 9, L);
+
+        if (pj_get(y, "LabelFamily")) {
+            copy_name(pj_get(y, "LabelFamily"), v->label_family, sizeof(v->label_family), L);
+        }
+
+        v->label_size = (pd_sp)int_or(pj_get(y, "LabelSize"), 0, 0, PD_PT(1000), L);
+        v->label_weight = (int32_t)int_or(pj_get(y, "LabelWeight"), 0, 0, 1000, L);
+        v->label_italic = (int32_t)int_or(pj_get(y, "LabelItalic"), 0, -1, 1, L);
+        v->label_color = (uint32_t)int_or(pj_get(y, "LabelColor"), 0, 0, 0xFFFFFFFFLL, L);
+        L->bad |= v->format < 0;
+    }
+
+    *lp = l;
 }
 
 static void want_story(loader* L, pd_block_id id) {
@@ -1632,32 +1708,9 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
     x = pj_get(r, "Lists");
 
     for (c = x ? x->child : NULL; c && !L->bad; c = c->next) {
-        const pj_node* lv = pj_get(c, "Levels"), *y;
         dlist l;
 
-        memset(&l, 0, sizeof(l));
-        L->bad |= !lv || lv->type != PJ_ARR || lv->n < 1 || lv->n > 9;
-
-        for (y = lv && !L->bad ? lv->child : NULL; y && !L->bad; y = y->next) {
-            pd_list_level* v = &l.lv[l.n++];
-
-            v->format = enum_of(pj_get(y, "Format"), NAMES(num_names));
-            v->start = (int32_t)int_or(pj_get(y, "Start"), 1, -1000000, 1000000, L);
-            copy_name(pj_get(y, "Text"), v->text, sizeof(v->text), L);
-            v->indent = (pd_sp)int_or(pj_get(y, "Indent"), 0, SP_MIN, SP_MAX, L);
-            v->hanging = (pd_sp)int_or(pj_get(y, "Hanging"), 0, SP_MIN, SP_MAX, L);
-            v->restart_after = (int32_t)int_or(pj_get(y, "RestartAfter"), 0, -1, 9, L);
-
-            if (pj_get(y, "LabelFamily")) {
-                copy_name(pj_get(y, "LabelFamily"), v->label_family, sizeof(v->label_family), L);
-            }
-
-            v->label_size = (pd_sp)int_or(pj_get(y, "LabelSize"), 0, 0, PD_PT(1000), L);
-            v->label_weight = (int32_t)int_or(pj_get(y, "LabelWeight"), 0, 0, 1000, L);
-            v->label_italic = (int32_t)int_or(pj_get(y, "LabelItalic"), 0, -1, 1, L);
-            v->label_color = (uint32_t)int_or(pj_get(y, "LabelColor"), 0, 0, 0xFFFFFFFFLL, L);
-            L->bad |= v->format < 0;
-        }
+        load_list(L, c, &l);
 
         if (!L->bad && pd_grow((void**)&d->lists, &d->caplists, (int64_t)d->nlists + 1, sizeof(dlist))) {
             L->bad = 1;
@@ -1751,6 +1804,17 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
         pd_comment_id id;
         const pj_node* t = pj_get(c, "Text"), *p0 = pj_get(c, "Start"), *p1 = pj_get(c, "End");
 
+        if (pj_int_or(pj_get(c, "Removed"), 0)) {  /* an exact snapshot's place for one that went */
+            if (d->ncomments >= 0xFFFFFF ||
+                    pd_grow((void**)&d->comments, &d->capcomments, (int64_t)d->ncomments + 1, sizeof(dcomment))) {
+                L->bad = 1;
+                break;
+            }
+
+            memset(&d->comments[d->ncomments++], 0, sizeof(dcomment));
+            continue;
+        }
+
         memset(&cm, 0, sizeof(cm));
         copy_name(pj_get(c, "Author"), cm.author, sizeof(cm.author), L);
         copy_name(pj_get(c, "Date"), cm.date, sizeof(cm.date), L);
@@ -1830,4 +1894,867 @@ pd_status pd_doc_load(const void* data, size_t len, pd_jdata_format format, pd_d
     free(L.story_refs);
     pj_free(j);
     return *out ? PD_OK : PD_ERR_FORMAT;
+}
+
+/* ------------------------------------------------------------------ */
+/* deltas                                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A delta is what one finished operation changed, written so that a copy
+ * of the document (loaded from an exact snapshot, given every delta since)
+ * can be brought to the same state, ids included:
+ * {
+ *   "Delta": serial, "NextID": n,
+ *   "FormatBase": k, "Formats": [...],           (entries k+1.. made since the last delta)
+ *   "RevisionBase", "Revisions", "ListBase", "Lists", "ResourceBase", "Resources",
+ *   "Styles": [ {"ID": id, "Style": {...} | null} ],
+ *   "New": [ {"Parent": id, "Tree": subtree} ],   (attached in the operation: content whole)
+ *   "Blocks": [ block ],                          (a block's own state, no children)
+ *   "Trees": [ {"Parent": id, "Kids": [ids]} ],   (children now, in order)
+ *   "Comments": [...] (all, exactly) | "CommentRanges": [[id, b0, o0, b1, o1]],
+ *   "Metadata": "..."
+ * }
+ */
+
+typedef struct {
+    char* p;
+    size_t n, cap;
+    int err;
+} dbuf;
+
+static int dbuf_write(void* user, const void* data, size_t len) {
+    dbuf* b = (dbuf*)user;
+
+    if (b->n + len + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 4096;
+        char* t;
+
+        while (nc < b->n + len + 1) {
+            nc *= 2;
+        }
+
+        if ((t = (char*)realloc(b->p, nc)) == NULL) {
+            b->err = 1;
+            return 1;
+        }
+
+        b->p = t;
+        b->cap = nc;
+    }
+
+    memcpy(b->p + b->n, data, len);
+    b->n += len;
+    b->p[b->n] = '\0';
+    return 0;
+}
+
+static int seen_id(const pd_block_id* ids, int32_t n, pd_block_id id) {
+    int32_t i;
+
+    for (i = 0; i < n; i++) {
+        if (ids[i] == id) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+void pd_doc_delta_emit(pd_doc* d) {
+    int32_t i, k, nt = pd_doc_touched_count(d), nb = 0, ntr = 0, nst = 0, nnew = 0;
+    pd_block_id* bl = NULL, *tr = NULL, *nw = NULL;
+    pd_style_id* sl = NULL;
+    pj_writer w;
+    saver sv;
+    dbuf out;
+    int comments = d->comment_rev != d->sent_comment_rev;
+
+    if (nt == 0 && d->ndnew == 0 && d->nformats == d->sent_formats && d->nrevs == d->sent_revs &&
+            d->nlists == d->sent_lists && d->nres == d->sent_res && !comments && d->meta_rev == d->sent_meta_rev) {
+        return;
+    }
+
+    memset(&out, 0, sizeof(out));
+    memset(&sv, 0, sizeof(sv));
+    sv.d = d;
+    sv.exact = 1;
+    bl = (pd_block_id*)calloc((size_t)nt + 1, sizeof(pd_block_id));
+    tr = (pd_block_id*)calloc((size_t)nt + 1, sizeof(pd_block_id));
+    sl = (pd_style_id*)calloc((size_t)nt + 1, sizeof(pd_style_id));
+    nw = (pd_block_id*)calloc((size_t)d->ndnew + 1, sizeof(pd_block_id));
+
+    if (!bl || !tr || !sl || !nw) {
+        goto done;
+    }
+
+    for (i = 0; i < nt; i++) {
+        int32_t kind;
+        pd_block_id b;
+        pd_style_id st;
+
+        pd_doc_touched(d, i, &kind, &b, &st);
+
+        if (kind == PD_CHANGE_STRUCTURE && b && pd_doc_blk(d, b) && !seen_id(tr, ntr, b)) {
+            tr[ntr++] = b;
+        } else if (kind == PD_CHANGE_STYLE && st && (int32_t)st <= d->nstyles && !seen_id(sl, nst, st)) {
+            sl[nst++] = st;
+        } else if (kind != PD_CHANGE_STRUCTURE && kind != PD_CHANGE_STYLE && b && b < d->captab && d->tab[b] &&
+                   !seen_id(bl, nb, b)) {
+            bl[nb++] = b;
+        }
+    }
+
+    /* new subtrees, but not ones inside another new one */
+    for (i = 0; i < d->ndnew; i++) {
+        blk* b = pd_doc_blk(d, d->dnew[i]), *a;
+        int inner = 0;
+
+        if (!b || seen_id(nw, nnew, b->id)) {
+            continue;
+        }
+
+        for (a = pd_doc_blk(d, b->parent); a && !inner; a = pd_doc_blk(d, a->parent)) {
+            inner = seen_id(d->dnew, d->ndnew, a->id);
+        }
+
+        if (!inner) {
+            nw[nnew++] = b->id;
+        }
+    }
+
+    /* blocks a new subtree carries already */
+    for (i = k = 0; i < nb; i++) {
+        blk* a;
+        int inside = 0;
+
+        for (a = pd_doc_blk(d, bl[i]); a && !inside; a = pd_doc_blk(d, a->parent)) {
+            inside = seen_id(nw, nnew, a->id);
+        }
+
+        if (!inside) {
+            bl[k++] = bl[i];
+        }
+    }
+
+    nb = k;
+    pj_init(&w, 0, dbuf_write, &out);
+    w.compact = 1;      /* a line of a journal */
+    pj_obj_begin(&w);
+    put_int(&w, "Delta", (int64_t)++d->delta_serial);
+    put_int(&w, "NextID", d->next_id);
+
+    if (d->nformats > d->sent_formats) {
+        put_int(&w, "FormatBase", d->sent_formats);
+        pj_key(&w, "Formats");
+        pj_arr_begin(&w);
+
+        for (i = d->sent_formats; i < d->nformats; i++) {
+            pj_obj_begin(&w);
+            put_int(&w, "Style", d->formats[i].style);
+            pj_key(&w, "Char");
+            save_cp(&w, &d->formats[i].cp);
+            pj_obj_end(&w);
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (d->nrevs > d->sent_revs) {
+        put_int(&w, "RevisionBase", d->sent_revs);
+        pj_key(&w, "Revisions");
+        pj_arr_begin(&w);
+
+        for (i = d->sent_revs; i < d->nrevs; i++) {
+            pj_obj_begin(&w);
+            put_str(&w, "Kind", d->revs[i].kind == PD_REV_DELETE ? "delete" : "insert");
+            put_str(&w, "Author", d->revs[i].author);
+            put_str(&w, "Date", d->revs[i].date);
+            pj_obj_end(&w);
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (d->nlists > d->sent_lists) {
+        put_int(&w, "ListBase", d->sent_lists);
+        pj_key(&w, "Lists");
+        pj_arr_begin(&w);
+
+        for (i = d->sent_lists; i < d->nlists; i++) {
+            save_list(&w, &d->lists[i]);
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (d->nres > d->sent_res) {
+        put_int(&w, "ResourceBase", d->sent_res);
+        pj_key(&w, "Resources");
+        pj_arr_begin(&w);
+
+        for (i = d->sent_res; i < d->nres; i++) {
+            pj_obj_begin(&w);
+            pj_key(&w, "_ByteStream_");
+            pj_obj_begin(&w);
+            pj_key(&w, "_DataInfo_");
+            pj_obj_begin(&w);
+            put_str(&w, "MediaType", d->res[i].mime);
+            put_int(&w, "ByteLength", (int64_t)d->res[i].len);
+            pj_obj_end(&w);
+            pj_key(&w, "Data");
+            pj_bytes(&w, d->res[i].data, d->res[i].len);
+            pj_obj_end(&w);
+            pj_obj_end(&w);
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (nst) {
+        pj_key(&w, "Styles");
+        pj_arr_begin(&w);
+
+        for (i = 0; i < nst; i++) {
+            pj_obj_begin(&w);
+            put_int(&w, "ID", sl[i]);
+            pj_key(&w, "Style");
+
+            if (d->styles[sl[i] - 1].alive) {
+                save_style(&w, &d->styles[sl[i] - 1]);
+            } else {
+                pj_null(&w);
+            }
+
+            pj_obj_end(&w);
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (nnew) {
+        pj_key(&w, "New");
+        pj_arr_begin(&w);
+
+        for (i = 0; i < nnew; i++) {
+            pj_obj_begin(&w);
+            put_int(&w, "Parent", d->tab[nw[i]]->parent);
+            pj_key(&w, "Tree");
+            save_block(&w, &sv, d->tab[nw[i]]);
+            pj_obj_end(&w);
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (nb) {
+        pj_key(&w, "Blocks");
+        pj_arr_begin(&w);
+
+        for (i = 0; i < nb; i++) {
+            save_block_ex(&w, &sv, d->tab[bl[i]], 0);
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (ntr) {
+        pj_key(&w, "Trees");
+        pj_arr_begin(&w);
+
+        for (i = 0; i < ntr; i++) {
+            const blk* p = d->tab[tr[i]];
+
+            pj_obj_begin(&w);
+            put_int(&w, "Parent", p->id);
+            pj_key(&w, "Kids");
+            pj_arr_begin(&w);
+
+            for (k = 0; k < p->nkids; k++) {
+                pj_int(&w, p->kids[k]);
+            }
+
+            pj_arr_end(&w);
+            pj_obj_end(&w);
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (comments) {
+        save_comments(&w, d, 1);
+    } else if (d->ncomments) {     /* edits move the ranges: where they are now */
+        pj_key(&w, "CommentRanges");
+        pj_arr_begin(&w);
+
+        for (i = 1; i <= d->ncomments; i++) {
+            pd_comment c;
+
+            if (pd_doc_comment_get(d, (pd_comment_id)i, &c) == PD_OK && !c.parent) {
+                pj_arr_begin(&w);
+                pj_int(&w, i);
+                pj_int(&w, c.range.start.block);
+                pj_int(&w, c.range.start.offset);
+                pj_int(&w, c.range.end.block);
+                pj_int(&w, c.range.end.offset);
+                pj_arr_end(&w);
+            }
+        }
+
+        pj_arr_end(&w);
+    }
+
+    if (d->meta_rev != d->sent_meta_rev) {
+        pj_key(&w, "Metadata");
+        pj_str(&w, d->meta ? d->meta : "", d->meta_len);
+    }
+
+    pj_obj_end(&w);
+
+    if (pj_finish(&w) == 0 && !out.err) {
+        d->sent_formats = d->nformats;
+        d->sent_revs = d->nrevs;
+        d->sent_lists = d->nlists;
+        d->sent_res = d->nres;
+        d->sent_comment_rev = d->comment_rev;
+        d->sent_meta_rev = d->meta_rev;
+        d->delta_fn(d->delta_user, out.p, out.n);
+    }
+
+done:
+    free(out.p);
+    free(bl);
+    free(tr);
+    free(sl);
+    free(nw);
+}
+
+pd_status pd_doc_snapshot(pd_doc* d, pd_jdata_format format, pd_writer fn, void* user, pd_delta_fn delta,
+                          void* delta_user) {
+    pd_status st;
+
+    if (!d || d->in_op || d->group_depth > 0) {
+        return d ? PD_ERR_STATE : PD_ERR_ARG;
+    }
+
+    if (fn && (st = save_doc(d, format, fn, user, 1)) != PD_OK) {
+        return st;
+    }
+
+    d->delta_fn = delta;
+    d->delta_user = delta_user;
+    d->sent_formats = d->nformats;
+    d->sent_revs = d->nrevs;
+    d->sent_lists = d->nlists;
+    d->sent_res = d->nres;
+    d->sent_comment_rev = d->comment_rev;
+    d->sent_meta_rev = d->meta_rev;
+    d->delta_serial = 0;
+    d->ndnew = 0;
+    return PD_OK;
+}
+
+static int is_ancestor(const pd_doc* d, pd_block_id anc, pd_block_id id);
+
+/* the ids a JData subtree names, checked: each must be free or a block that is not the new parent or
+   above it (a block moved in the operation is still attached here; it is made again in place) */
+static int tree_ids_free(pd_doc* d, const pj_node* node, pd_block_id parent, int depth, int free_them) {
+    const pj_node* c, *kids;
+
+    if (!node || node->type != PJ_OBJ || depth > 64) {
+        return 0;
+    }
+
+    for (c = node->child; c; c = c->next) {
+        if (c->keylen > 12 && memcmp(c->key, "_TreeNode_(", 11) == 0) {
+            int64_t id = pj_int_or(pj_get(c, "ID"), -1);
+
+            if (id <= PD_STORYROOT_ID || (uint64_t)id >= d->next_id) {
+                return 0;
+            }
+
+            if (d->tab[id] && (d->tab[id]->kind == PD_BLOCK_ROOT || is_ancestor(d, (pd_block_id)id, parent))) {
+                return 0;
+            }
+
+            if (free_them && d->tab[id]) {
+                blk* old = d->tab[id];
+                int32_t i;
+
+                for (i = 0; i < old->nkids; i++) {      /* its old children: out, unless named again or taken in
+                                                           elsewhere by the delta's trees */
+                    if (old->kids[i] < d->captab && d->tab[old->kids[i]]) {
+                        pd_doc_set_alive(d, old->kids[i], 0);
+                    }
+                }
+
+                pd_doc_free_blk(old);
+                d->tab[id] = NULL;
+            }
+        }
+    }
+
+    kids = pj_get(node, "_TreeChildren_");
+
+    for (c = kids && kids->type == PJ_ARR ? kids->child : NULL; c; c = c->next) {
+        if (!tree_ids_free(d, c, parent, depth + 1, free_them)) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int is_ancestor(const pd_doc* d, pd_block_id anc, pd_block_id id) {
+    int n = 0;
+
+    for (; id && n < 4096; id = d->tab[id] ? d->tab[id]->parent : 0, n++) {
+        if (id == anc) {
+            return 1;
+        }
+    }
+
+    return n >= 4096;
+}
+
+pd_status pd_doc_apply_delta(pd_doc* d, const char* json, size_t len) {
+    pj_doc* j;
+    const pj_node* r, *x, *c;
+    loader L;
+    pd_status st = PD_OK;
+    int64_t next;
+    int32_t i;
+
+    if (!d || !json || d->in_op || d->group_depth > 0) {
+        return PD_ERR_ARG;
+    }
+
+    if ((j = pj_parse(json, len, 0, NULL)) == NULL) {
+        return PD_ERR_FORMAT;
+    }
+
+    r = pj_root(j);
+    memset(&L, 0, sizeof(L));
+    L.d = d;
+    d->revision++;
+    d->ntouched = 0;
+
+#define FAIL(s) do { st = (s); goto end; } while (0)
+
+    if (!r || r->type != PJ_OBJ || !pj_is_int(pj_get(r, "Delta"))) {
+        FAIL(PD_ERR_FORMAT);
+    }
+
+    next = pj_int_or(pj_get(r, "NextID"), -1);
+
+    if (next < (int64_t)d->next_id || next > PD_MAX_BLOCKS) {
+        FAIL(next < 0 || next > PD_MAX_BLOCKS ? PD_ERR_FORMAT : PD_ERR_STATE);
+    }
+
+    if ((uint32_t)next > d->captab) {
+        blk** t = (blk**)realloc(d->tab, (size_t)next * sizeof(blk*));
+
+        if (!t) {
+            FAIL(PD_ERR_NOMEM);
+        }
+
+        memset(t + d->captab, 0, ((size_t)next - d->captab) * sizeof(blk*));
+        d->tab = t;
+        d->captab = (uint32_t)next;
+    }
+
+    d->next_id = (uint32_t)next;
+
+    /* table entries, each list taking up exactly where this document's ends */
+    if ((x = pj_get(r, "Formats")) != NULL) {
+        if (pj_int_or(pj_get(r, "FormatBase"), -1) != d->nformats) {
+            FAIL(PD_ERR_STATE);
+        }
+
+        for (c = x->type == PJ_ARR ? x->child : NULL; c && !L.bad; c = c->next) {
+            dformat f;
+
+            memset(&f, 0, sizeof(f));
+            f.style = (pd_style_id)int_or(pj_get(c, "Style"), 0, 0, d->nstyles, &L);
+            load_cp(pj_get(c, "Char"), &f.cp, &L);
+
+            if (!L.bad && pd_grow((void**)&d->formats, &d->capformats, (int64_t)d->nformats + 1, sizeof(dformat))) {
+                FAIL(PD_ERR_NOMEM);
+            }
+
+            if (!L.bad) {
+                d->formats[d->nformats++] = f;
+            }
+        }
+    }
+
+    if ((x = pj_get(r, "Revisions")) != NULL) {
+        if (pj_int_or(pj_get(r, "RevisionBase"), -1) != d->nrevs) {
+            FAIL(PD_ERR_STATE);
+        }
+
+        for (c = x->type == PJ_ARR ? x->child : NULL; c && !L.bad; c = c->next) {
+            pd_revision rv;
+            pd_rev_id rid;
+            const pj_node* kn = pj_get(c, "Kind");
+
+            memset(&rv, 0, sizeof(rv));
+            rv.kind = kn && kn->type == PJ_STR && kn->len == 6 && !memcmp(kn->s, "delete", 6) ? PD_REV_DELETE : PD_REV_INSERT;
+            copy_name(pj_get(c, "Author"), rv.author, sizeof(rv.author), &L);
+            copy_name(pj_get(c, "Date"), rv.date, sizeof(rv.date), &L);
+
+            if (!L.bad && (pd_doc_revision_add(d, &rv, &rid) != PD_OK || (int32_t)rid != d->nrevs)) {
+                FAIL(PD_ERR_STATE);
+            }
+        }
+    }
+
+    for (i = 0; i < d->nformats; i++) {     /* formats name revisions that exist */
+        if ((d->formats[i].cp.mask & PD_CP_REVISION) && (int32_t)d->formats[i].cp.revision > d->nrevs) {
+            FAIL(PD_ERR_FORMAT);
+        }
+    }
+
+    if ((x = pj_get(r, "Lists")) != NULL) {
+        if (pj_int_or(pj_get(r, "ListBase"), -1) != d->nlists) {
+            FAIL(PD_ERR_STATE);
+        }
+
+        for (c = x->type == PJ_ARR ? x->child : NULL; c && !L.bad; c = c->next) {
+            dlist l;
+
+            load_list(&L, c, &l);
+
+            if (!L.bad && pd_grow((void**)&d->lists, &d->caplists, (int64_t)d->nlists + 1, sizeof(dlist))) {
+                FAIL(PD_ERR_NOMEM);
+            }
+
+            if (!L.bad) {
+                d->lists[d->nlists++] = l;
+            }
+        }
+    }
+
+    if ((x = pj_get(r, "Resources")) != NULL) {
+        if (pj_int_or(pj_get(r, "ResourceBase"), -1) != d->nres) {
+            FAIL(PD_ERR_STATE);
+        }
+
+        for (c = x->type == PJ_ARR ? x->child : NULL; c && !L.bad; c = c->next) {
+            const pj_node* bs = pj_get(c, "_ByteStream_");
+            unsigned char* data;
+            size_t n;
+            pd_res_id rid;
+            char mime[64] = "application/octet-stream";
+
+            copy_name(pj_get(pj_get(bs, "_DataInfo_"), "MediaType"), mime, sizeof(mime), &L);
+
+            if (L.bad || pj_stream_bytes(bs, &data, &n)) {
+                FAIL(PD_ERR_FORMAT);
+            }
+
+            st = pd_doc_add_resource(d, mime, data, n, &rid);
+            free(data);
+
+            if (st != PD_OK) {
+                goto end;
+            }
+        }
+    }
+
+    if ((x = pj_get(r, "Styles")) != NULL) {
+        for (c = x->type == PJ_ARR ? x->child : NULL; c && !L.bad; c = c->next) {
+            int64_t id = pj_int_or(pj_get(c, "ID"), -1);
+            const pj_node* sd = pj_get(c, "Style");
+            dstyle s;
+
+            if (id < 1 || id > d->nstyles + 1) {
+                FAIL(PD_ERR_STATE);
+            }
+
+            memset(&s, 0, sizeof(s));
+
+            if (sd && sd->type == PJ_OBJ) {
+                s.alive = 1;
+                copy_name(pj_get(sd, "Name"), s.name, sizeof(s.name), &L);
+                s.kind = enum_of(pj_get(sd, "Kind"), NAMES(style_kind_names));
+                s.parent = (pd_style_id)int_or(pj_get(sd, "Parent"), 0, 0, d->nstyles + 1, &L);
+                load_pp(pj_get(sd, "Para"), &s.pp, &L);
+                load_cp(pj_get(sd, "Char"), &s.cp, &L);
+                pd_doc_pp_normalize(&s.pp);
+                L.bad |= s.kind < 0 || s.parent == (pd_style_id)id;
+            }
+
+            if (L.bad) {
+                break;
+            }
+
+            if (id == d->nstyles + 1) {
+                if (pd_grow((void**)&d->styles, &d->capstyles, (int64_t)d->nstyles + 1, sizeof(dstyle))) {
+                    FAIL(PD_ERR_NOMEM);
+                }
+
+                d->nstyles++;
+            }
+
+            d->styles[id - 1] = s;
+            pd_doc_delta_touch(d, PD_CHANGE_STYLE, 0, (pd_style_id)id);
+        }
+    }
+
+    if (L.bad) {
+        FAIL(PD_ERR_FORMAT);
+    }
+
+    /* new subtrees, made before the trees that take them in */
+    if ((x = pj_get(r, "New")) != NULL) {
+        for (c = x->type == PJ_ARR ? x->child : NULL; c; c = c->next) {
+            int64_t parent = pj_int_or(pj_get(c, "Parent"), -1);
+            const pj_node* t = pj_get(c, "Tree");
+
+            if (parent < 1 || (uint64_t)parent >= d->next_id || !d->tab[parent] || !tree_ids_free(d, t, (pd_block_id)parent, 0, 0)) {
+                FAIL(PD_ERR_STATE);
+            }
+
+            tree_ids_free(d, t, (pd_block_id)parent, 0, 1);
+
+            if (!load_tree(&L, t, (pd_block_id)parent, parent == PD_STORYROOT_ID ? -1 : d->tab[parent]->kind, 1) ||
+                    L.bad) {
+                FAIL(PD_ERR_FORMAT);
+            }
+        }
+    }
+
+    /* blocks' own state, in place */
+    if ((x = pj_get(r, "Blocks")) != NULL) {
+        for (c = x->type == PJ_ARR ? x->child : NULL; c; c = c->next) {
+            const pj_node* data = NULL, *e;
+            int64_t id;
+            blk* b;
+            bstate ns;
+
+            for (e = c->type == PJ_OBJ ? c->child : NULL; e; e = e->next) {
+                if (e->keylen > 12 && memcmp(e->key, "_TreeNode_(", 11) == 0 && e->type == PJ_OBJ) {
+                    data = e;
+                }
+            }
+
+            id = data ? pj_int_or(pj_get(data, "ID"), -1) : -1;
+
+            if (id < 1 || (uint64_t)id >= d->next_id || !(b = d->tab[id]) ||
+                    strlen(kind_names[b->kind]) != data->keylen - 12 ||
+                    memcmp(data->key + 11, kind_names[b->kind], data->keylen - 12) != 0) {
+                FAIL(PD_ERR_STATE);
+            }
+
+            pd_doc_bstate_init(&ns, b->kind);
+
+            if (b->kind == PD_BLOCK_PARAGRAPH) {
+                load_paragraph(&L, data, &ns);
+            } else {
+                ns = b->st;     /* the other kinds' state is properties alone: copied, then read over */
+                ns.text = NULL;
+                ns.runs = NULL;
+                ns.inl = NULL;
+                ns.len = ns.cap = 0;
+                ns.nruns = ns.caprun = ns.ninl = ns.capinl = 0;
+
+                if (b->kind == PD_BLOCK_SECTION) {
+                    load_section(&L, data, &ns.sp);
+                } else if (b->kind == PD_BLOCK_FLOAT) {
+                    load_float(&L, data, &ns.fp);
+                } else if (b->kind == PD_BLOCK_TABLE) {
+                    load_table(&L, data, &ns.tp);
+                } else if (b->kind == PD_BLOCK_CELL) {
+                    load_cell(&L, data, &ns.cell);
+                } else if (b->kind == PD_BLOCK_BREAK && pj_get(data, "Break")) {
+                    ns.break_kind = enum_of(pj_get(data, "Break"), NAMES(break_names));
+                    L.bad |= ns.break_kind < 0;
+                }
+            }
+
+            if (L.bad) {
+                pd_doc_bstate_free(&ns);
+                FAIL(PD_ERR_FORMAT);
+            }
+
+            pd_doc_bstate_free(&b->st);
+            b->st = ns;
+            pd_doc_delta_touch(d, b->kind == PD_BLOCK_SECTION ? PD_CHANGE_SECTION : PD_CHANGE_TEXT, b->id, 0);
+        }
+    }
+
+    /* children: checked first, all of them, so a bad list changes nothing */
+    if ((x = pj_get(r, "Trees")) != NULL) {
+        for (c = x->type == PJ_ARR ? x->child : NULL; c; c = c->next) {
+            int64_t parent = pj_int_or(pj_get(c, "Parent"), -1);
+            const pj_node* kids = pj_get(c, "Kids"), *k;
+            blk* p;
+
+            if (parent < 1 || (uint64_t)parent >= d->next_id || !(p = d->tab[parent]) || !kids || kids->type != PJ_ARR ||
+                    kids->n > 0x100000 || (kids->n == 0 && p->kind != PD_BLOCK_ROOT)) {
+                FAIL(PD_ERR_STATE);
+            }
+
+            for (k = kids->child; k; k = k->next) {
+                int64_t id = pj_int_or(k, -1);
+                const pj_node* k2;
+
+                if (id <= PD_STORYROOT_ID || (uint64_t)id >= d->next_id || !d->tab[id] ||
+                        !(p->id == PD_STORYROOT_ID ? d->tab[id]->kind == PD_BLOCK_STORY :
+                          pd_doc_child_allowed(p->kind, d->tab[id]->kind)) || is_ancestor(d, (pd_block_id)id, p->id)) {
+                    FAIL(PD_ERR_STATE);
+                }
+
+                for (k2 = kids->child; k2 != k; k2 = k2->next) {
+                    if (pj_int_or(k2, -1) == id) {
+                        FAIL(PD_ERR_FORMAT);
+                    }
+                }
+            }
+        }
+
+        for (c = x->type == PJ_ARR ? x->child : NULL; c; c = c->next) {
+            blk* p = d->tab[pj_int_or(pj_get(c, "Parent"), -1)];
+            const pj_node* kids = pj_get(c, "Kids"), *k;
+            pd_block_id* nk = (pd_block_id*)malloc(((size_t)kids->n + 1) * sizeof(pd_block_id));
+            int32_t n = 0;
+
+            if (!nk) {
+                FAIL(PD_ERR_NOMEM);
+            }
+
+            for (k = kids->child; k; k = k->next) {
+                nk[n++] = (pd_block_id)k->i;
+            }
+
+            for (i = 0; i < p->nkids; i++) {    /* gone from here, unless it moved under another parent already */
+                blk* o = d->tab[p->kids[i]];
+
+                if (o && o->parent == p->id && !seen_id(nk, n, o->id)) {
+                    pd_doc_set_alive(d, o->id, 0);
+                }
+            }
+
+            free(p->kids);
+            p->kids = nk;
+            p->nkids = p->capkids = n;
+
+            for (i = 0; i < n; i++) {
+                d->tab[nk[i]]->parent = p->id;
+                pd_doc_set_alive(d, nk[i], p->alive);
+            }
+
+            pd_doc_delta_touch(d, PD_CHANGE_STRUCTURE, p->id, 0);
+        }
+    }
+
+    for (i = 0; i < L.nrefs; i++) {     /* footnotes point at stories */
+        blk* s = L.story_refs[i] < d->captab ? d->tab[L.story_refs[i]] : NULL;
+
+        if (!s || s->kind != PD_BLOCK_STORY) {
+            FAIL(PD_ERR_FORMAT);
+        }
+    }
+
+    if ((x = pj_get(r, "Comments")) != NULL) {     /* all of them, as they are now */
+        for (i = 0; i < d->ncomments; i++) {
+            if (d->comments[i].alive && !d->comments[i].parent) {
+                pd_doc_marker_free(d, d->comments[i].start);
+                pd_doc_marker_free(d, d->comments[i].end);
+            }
+
+            free(d->comments[i].text);
+        }
+
+        d->ncomments = 0;
+        d->comment_rev++;
+
+        for (c = x->type == PJ_ARR ? x->child : NULL; c; c = c->next) {
+            pd_comment cm;
+            pd_comment_id id;
+            const pj_node* t = pj_get(c, "Text"), *p0 = pj_get(c, "Start"), *p1 = pj_get(c, "End");
+
+            if (pj_int_or(pj_get(c, "Removed"), 0)) {
+                if (pd_grow((void**)&d->comments, &d->capcomments, (int64_t)d->ncomments + 1, sizeof(dcomment))) {
+                    FAIL(PD_ERR_NOMEM);
+                }
+
+                memset(&d->comments[d->ncomments++], 0, sizeof(dcomment));
+                continue;
+            }
+
+            memset(&cm, 0, sizeof(cm));
+            copy_name(pj_get(c, "Author"), cm.author, sizeof(cm.author), &L);
+            copy_name(pj_get(c, "Date"), cm.date, sizeof(cm.date), &L);
+            cm.parent = (pd_comment_id)int_or(pj_get(c, "Parent"), 0, 0, d->ncomments, &L);
+            cm.resolved = (int32_t)int_or(pj_get(c, "Resolved"), 0, 0, 1, &L);
+
+            if (t && t->type == PJ_STR) {
+                cm.text = t->s;
+                cm.text_len = (uint32_t)t->len;
+            }
+
+            if (!cm.parent && p0 && p1 && p0->type == PJ_ARR && p1->type == PJ_ARR && p0->n == 2 && p1->n == 2) {
+                cm.range.start.block = (pd_block_id)pj_int_or(p0->child, 0);
+                cm.range.start.offset = (uint32_t)pj_int_or(p0->child->next, 0);
+                cm.range.end.block = (pd_block_id)pj_int_or(p1->child, 0);
+                cm.range.end.offset = (uint32_t)pj_int_or(p1->child->next, 0);
+            }
+
+            if (L.bad) {
+                FAIL(PD_ERR_FORMAT);
+            }
+
+            if (pd_doc_comment_add_raw(d, &cm, &id) != PD_OK) {    /* its range is gone: keep its place */
+                if (pd_grow((void**)&d->comments, &d->capcomments, (int64_t)d->ncomments + 1, sizeof(dcomment))) {
+                    FAIL(PD_ERR_NOMEM);
+                }
+
+                memset(&d->comments[d->ncomments++], 0, sizeof(dcomment));
+            }
+        }
+
+        pd_doc_delta_touch(d, PD_CHANGE_FORMAT, 0, 0);
+    } else if ((x = pj_get(r, "CommentRanges")) != NULL) {
+        for (c = x->type == PJ_ARR ? x->child : NULL; c; c = c->next) {
+            int64_t v[5];
+            const pj_node* e;
+            int n = 0;
+            pd_pos a, b;
+
+            for (e = c->type == PJ_ARR ? c->child : NULL; e && n < 5; e = e->next) {
+                v[n++] = pj_int_or(e, -1);
+            }
+
+            if (n != 5 || v[0] < 1 || v[0] > d->ncomments || !d->comments[v[0] - 1].alive || v[1] < 0 || v[2] < 0 ||
+                    v[3] < 0 || v[4] < 0 || v[1] > UINT32_MAX || v[2] > UINT32_MAX || v[3] > UINT32_MAX || v[4] > UINT32_MAX) {
+                FAIL(PD_ERR_STATE);
+            }
+
+            a.block = (pd_block_id)v[1];
+            a.offset = (uint32_t)v[2];
+            b.block = (pd_block_id)v[3];
+            b.offset = (uint32_t)v[4];
+            pd_doc_marker_set(d, d->comments[v[0] - 1].start, a);
+            pd_doc_marker_set(d, d->comments[v[0] - 1].end, b);
+        }
+    }
+
+    if ((x = pj_get(r, "Metadata")) != NULL) {
+        if (x->type != PJ_STR || pd_doc_set_metadata(d, x->s, x->len) != PD_OK) {
+            FAIL(PD_ERR_FORMAT);
+        }
+    }
+
+#undef FAIL
+end:
+    if (st == PD_OK && L.bad) {
+        st = PD_ERR_FORMAT;
+    }
+
+    free(L.story_refs);
+    pj_free(j);
+    pd_doc_delta_commit(d);
+    return st;
 }

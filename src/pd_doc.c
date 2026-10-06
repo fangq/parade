@@ -669,6 +669,7 @@ void pd_doc_free(pd_doc* d) {
 
     free(d->comments);
     free(d->revs);
+    free(d->dnew);
     free(d->meta);
     free(d->tab);
     free(d->styles);
@@ -1807,6 +1808,12 @@ static void enforce_limit(pd_doc* d) {
 static void notify(pd_doc* d) {
     int32_t i;
 
+    if (d->delta_fn && !d->applying) {
+        pd_doc_delta_emit(d);
+    }
+
+    d->ndnew = 0;
+
     for (i = 0; i < d->ntouched; i++) {
         blk* b = d->touched[i].block < d->captab ? d->tab[d->touched[i].block] : NULL;
 
@@ -1895,6 +1902,13 @@ static int snap(pd_doc* d, blk* b) {
 }
 
 /* attach a detached subtree under parent at index, recording it */
+/* a subtree attached in this operation: a delta carries it whole */
+static void delta_new(pd_doc* d, pd_block_id id) {
+    if (d->delta_fn && !grow((void**)&d->dnew, &d->capdnew, (int64_t)d->ndnew + 1, sizeof(pd_block_id))) {
+        d->dnew[d->ndnew++] = id;
+    }
+}
+
 static int do_attach(pd_doc* d, pd_block_id id, pd_block_id parent, int32_t index) {
     blk* b = d->tab[id], *p = d->tab[parent];
     urec* r = add_rec(d, UR_ATTACH);
@@ -1909,6 +1923,7 @@ static int do_attach(pd_doc* d, pd_block_id id, pd_block_id parent, int32_t inde
 
     b->parent = parent;
     set_alive(d, id, 1);
+    delta_new(d, id);
     r->id = id;
     r->attached = 1;
     r->parent = parent;
@@ -1962,6 +1977,7 @@ static void toggle(pd_doc* d, urec* r) {
             pd_doc_add_kid(p, r->id, r->index);
             b->parent = r->parent;
             set_alive(d, r->id, 1);
+            delta_new(d, r->id);
             r->attached = 1;
         }
 
@@ -3426,6 +3442,7 @@ pd_status pd_doc_set_metadata(pd_doc* d, const char* text, size_t len) {
     free(d->meta);
     d->meta = m;
     d->meta_len = len;
+    d->meta_rev++;
     return PD_OK;
 }
 
@@ -4060,6 +4077,10 @@ static pd_status comment_add(pd_doc* d, const pd_comment* in, pd_comment_id* out
 
     p = in->parent ? comment_of(d, in->parent) : NULL;
 
+    if (p && p->parent) {   /* a reply to a reply is one more in the thread */
+        p = comment_of(d, p->parent);
+    }
+
     if ((in->parent && !p) || (!p && !range_ok(d, in->range))) {
         return PD_ERR_ARG;
     }
@@ -4071,7 +4092,7 @@ static pd_status comment_add(pd_doc* d, const pd_comment* in, pd_comment_id* out
     }
 
     c.alive = 1;
-    c.parent = in->parent;
+    c.parent = p ? (pd_comment_id)(p - d->comments + 1) : 0;
 
     if (p) {
         c.start = p->start;
@@ -4179,4 +4200,47 @@ pd_status pd_doc_comment_remove(pd_doc* d, pd_comment_id id) {
 
 int32_t pd_doc_comment_count(const pd_doc* d) {
     return d ? d->ncomments : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* deltas: the parts pd_doc_io.c needs of the operation framework     */
+/* ------------------------------------------------------------------ */
+
+void pd_doc_set_alive(pd_doc* d, pd_block_id id, int alive) {
+    set_alive(d, id, alive);
+}
+
+void pd_doc_bstate_free(bstate* s) {
+    bstate_free(s);
+}
+
+int32_t pd_doc_touched_count(const pd_doc* d) {
+    return d->ntouched;
+}
+
+void pd_doc_touched(const pd_doc* d, int32_t i, int32_t* kind, pd_block_id* block, pd_style_id* style) {
+    *kind = d->touched[i].kind;
+    *block = d->touched[i].block;
+    *style = d->touched[i].style;
+}
+
+void pd_doc_delta_touch(pd_doc* d, int32_t kind, pd_block_id block, pd_style_id style) {
+    if (kind == PD_CHANGE_STYLE) {
+        d->style_rev++;
+    }
+
+    touch(d, kind, block, style);
+}
+
+/* an applied delta is reported like an operation, and the undo steps, which describe what was there, go */
+void pd_doc_delta_commit(pd_doc* d) {
+    pd_pos none;
+
+    none.block = 0;
+    none.offset = 0;
+    clamp_markers(d, none);
+    d->applying = 1;
+    notify(d);
+    d->applying = 0;
+    pd_doc_clear_undo(d);
 }

@@ -1,6 +1,7 @@
 /* fuzz target: native document loading (JData text and BJData), layout, display lists, PDF and export */
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include "parade_convert.h"
 #include "parade_layout.h"
 #include "fuzz_common.h"
@@ -11,6 +12,37 @@ static const pd_font* resolve(void* user, const char* family, int32_t weight, in
     (void)weight;
     (void)italic;
     return fuzz_text_font();
+}
+
+/* a follower kept in step with the document by its deltas */
+static pd_doc* follower;
+
+static void to_follower(void* user, const char* json, size_t len) {
+    (void)user;
+
+    if (follower && pd_doc_apply_delta(follower, json, len) != PD_OK) {
+        pd_doc_free(follower);      /* out of step: a real follower would reload */
+        follower = NULL;
+    }
+}
+
+typedef struct {
+    unsigned char* p;
+    size_t n;
+} grow_buf;
+
+static int to_buf(void* user, const void* data, size_t len) {
+    grow_buf* b = (grow_buf*)user;
+    unsigned char* q = (unsigned char*)realloc(b->p, b->n + len);
+
+    if (!q) {
+        return 1;
+    }
+
+    memcpy(q + b->n, data, len);
+    b->p = q;
+    b->n += len;
+    return 0;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
@@ -70,7 +102,19 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
             pd_layout_write_pdf(L, NULL, fuzz_discard, &bytes);
 
-            /* review: tracked edits, then every change accepted or rejected, and undone */
+            /* review: tracked edits, then every change accepted or rejected, and undone -- followed by a
+               copy through deltas, which also takes the input itself as one */
+            if (pos.block) {
+                grow_buf snap = { NULL, 0 };
+
+                if (pd_doc_snapshot(d, PD_JDATA_BINARY, to_buf, &snap, to_follower, NULL) == PD_OK &&
+                        pd_doc_load(snap.p, snap.n, PD_JDATA_BINARY, &follower) != PD_OK) {
+                    follower = NULL;
+                }
+
+                free(snap.p);
+            }
+
             if (pos.block) {
                 pd_range all;
                 pd_pos e = pos, q;
@@ -96,6 +140,14 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
                 pd_doc_undo(d);
                 pd_doc_undo(d);
                 pd_doc_undo(d);
+                pd_doc_snapshot(d, PD_JDATA_TEXT, NULL, NULL, NULL, NULL);
+
+                if (follower) {
+                    pd_doc_apply_delta(follower, (const char*)data, size);
+                    pd_doc_save(follower, PD_JDATA_BINARY, fuzz_discard, &bytes);
+                    pd_doc_free(follower);
+                    follower = NULL;
+                }
             }
         }
 

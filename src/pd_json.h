@@ -36,6 +36,7 @@ typedef struct {
     int depth;
     int32_t count[PJ_MAX_DEPTH];    /* values written at each depth */
     int after_key;
+    int compact;                    /* JSON on one line, no indentation */
     unsigned char buf[8192];
     size_t nbuf;
 } pj_writer;
