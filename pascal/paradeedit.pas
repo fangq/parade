@@ -29,6 +29,10 @@ type
   TGlyphBmp = record
     W, H, Left, Top: Integer;
     Alpha: array of Byte;
+    KFont: Pointer;               { what it is the bitmap of: the cache's key }
+    KGlyph: UInt32;
+    KPx: pd_sp;
+    KSub: Integer;
   end;
   PGlyphBmp = ^TGlyphBmp;
 
@@ -48,7 +52,8 @@ type
     FScrollBar: TScrollBar;
     FBlink: TTimer;
     FCaretOn: Boolean;
-    FGlyphs: TStringList;          { key -> PGlyphBmp }
+    FGlyphs: array of PGlyphBmp;   { open-addressing hash table by font, glyph, size and subpixel position }
+    FGlyphCount: Integer;
     FPics: array of TLazIntfImage; { by resource id - 1: the picture, decoded once }
     FPicSized: array of TLazIntfImage; { ... and at the size it was last drawn }
     FPicDoc: Ppd_doc;              { the document they are of }
@@ -59,6 +64,10 @@ type
     FOnChange: TNotifyEvent;
     FModified: Boolean;
     FPageGap: Integer;
+    FBack: TBitmap;                { the pages as last drawn, on the display's side: a paint copies from it }
+    FBackImg: TLazIntfImage;       { ... and the same pixels here, to find what a redraw changes }
+    FBackSig: string;              { what they were drawn for: size, zoom, scroll, layout, selection }
+    FLayoutEpoch: Integer;         { counts layout updates }
     function GetPageCount: Integer;
     procedure SetZoom(AValue: Double);
     procedure BlinkTimer(Sender: TObject);
@@ -96,6 +105,9 @@ type
     function PropsAt(const P: pd_pos): pd_char_props;
     function FormatAt(const P: pd_pos): pd_format_id;
     procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
+    function BackSignature: string;
+    procedure RebuildBack;
+    function CaretRect(out R: TRect): Boolean;
   protected
     procedure Paint; override;
     procedure Resize; override;
@@ -169,6 +181,150 @@ type
   end;
 
 implementation
+
+{ ---------------- pixels ---------------- }
+
+function Floor0(V: Double): Integer; inline;
+begin
+  Result := Trunc(V);
+  if V < Result then
+    Dec(Result);
+end;
+
+type
+  TPixel = packed record
+    B, G, R, A: Byte;
+  end;
+  PPixel = ^TPixel;
+
+{ a picture onto the page at X, Y, over what is there by its alpha }
+{ a picture in the page's pixel layout onto the page: opaque runs copied, the rest blended }
+procedure BlendPicture(Img, Pic: TLazIntfImage; X, Y: Integer);
+var
+  PX, PY, A, X0, X1: Integer;
+  Src, Dst: PPixel;
+begin
+  X0 := 0;
+  if X < 0 then X0 := -X;
+  X1 := Pic.Width;
+  if X + X1 > Img.Width then X1 := Img.Width - X;
+  if X1 <= X0 then
+    Exit;
+  for PY := 0 to Pic.Height - 1 do
+  begin
+    if (Y + PY < 0) or (Y + PY >= Img.Height) then
+      Continue;
+    Src := PPixel(Pic.GetDataLineStart(PY));
+    Inc(Src, X0);
+    Dst := PPixel(Img.GetDataLineStart(Y + PY));
+    Inc(Dst, X + X0);
+    for PX := X0 to X1 - 1 do
+    begin
+      A := Src^.A;
+      if A = 255 then
+        Dst^ := Src^
+      else if A > 0 then
+      begin
+        Dst^.R := (Dst^.R * (255 - A) + Src^.R * A) div 255;
+        Dst^.G := (Dst^.G * (255 - A) + Src^.G * A) div 255;
+        Dst^.B := (Dst^.B * (255 - A) + Src^.B * A) div 255;
+        Dst^.A := 255;
+      end;
+      Inc(Src);
+      Inc(Dst);
+    end;
+  end;
+end;
+
+procedure FillRectImg(Img: TLazIntfImage; X0, Y0, X1, Y1: Integer; Col: UInt32; Alpha: Integer);
+var
+  X, Y: Integer;
+  P: PPixel;
+  R, G, B: Integer;
+begin
+  if X0 < 0 then X0 := 0;
+  if Y0 < 0 then Y0 := 0;
+  if X1 > Img.Width then X1 := Img.Width;
+  if Y1 > Img.Height then Y1 := Img.Height;
+  R := (Col shr 16) and $FF;
+  G := (Col shr 8) and $FF;
+  B := Col and $FF;
+  if Alpha >= 255 then
+  begin   { opaque: the pixel itself, row by row }
+    if X1 > X0 then
+      for Y := Y0 to Y1 - 1 do
+      begin
+        P := PPixel(Img.GetDataLineStart(Y));
+        Inc(P, X0);
+        FillDWord(P^, X1 - X0, UInt32(B) or (UInt32(G) shl 8) or (UInt32(R) shl 16) or $FF000000);
+      end;
+    Exit;
+  end;
+  for Y := Y0 to Y1 - 1 do
+  begin
+    P := PPixel(Img.GetDataLineStart(Y));
+    Inc(P, X0);
+    for X := X0 to X1 - 1 do
+    begin
+      P^.R := (P^.R * (255 - Alpha) + R * Alpha) div 255;
+      P^.G := (P^.G * (255 - Alpha) + G * Alpha) div 255;
+      P^.B := (P^.B * (255 - Alpha) + B * Alpha) div 255;
+      P^.A := 255;    { opaque: a zero alpha byte would make the bitmap transparent }
+      Inc(P);
+    end;
+  end;
+end;
+
+procedure BlendGlyph(Img: TLazIntfImage; G: PGlyphBmp; X, Y: Integer; Col: UInt32);
+var
+  Row, Cl, PX, PY, A: Integer;
+  Line, Pix: PPixel;
+  CR, CG, CB: Integer;
+begin
+  CR := (Col shr 16) and $FF;
+  CG := (Col shr 8) and $FF;
+  CB := Col and $FF;
+  for Row := 0 to G^.H - 1 do
+  begin
+    PY := Y - G^.Top + Row;
+    if (PY < 0) or (PY >= Img.Height) then
+      Continue;
+    Line := PPixel(Img.GetDataLineStart(PY));
+    for Cl := 0 to G^.W - 1 do
+    begin
+      PX := X + G^.Left + Cl;
+      A := G^.Alpha[Row * G^.W + Cl];
+      if (A = 0) or (PX < 0) or (PX >= Img.Width) then
+        Continue;
+      Pix := Line;
+      Inc(Pix, PX);
+      Pix^.R := (Pix^.R * (255 - A) + CR * A) div 255;
+      Pix^.G := (Pix^.G * (255 - A) + CG * A) div 255;
+      Pix^.B := (Pix^.B * (255 - A) + CB * A) div 255;
+      Pix^.A := 255;
+    end;
+  end;
+end;
+
+function NewImage(W, H: Integer; Col: UInt32): TLazIntfImage;
+var
+  Desc: TRawImageDescription;
+begin
+  Result := TLazIntfImage.Create(0, 0);
+  Desc.Init_BPP32_B8G8R8A8_BIO_TTB(W, H);
+  Result.DataDescription := Desc;
+  FillRectImg(Result, 0, 0, W, H, Col, 255);
+end;
+
+function TColorToRGB(C: TColor): UInt32;
+var
+  V: LongInt;
+begin
+  V := ColorToRGB(C);
+  Result := (UInt32(V and $FF) shl 16) or (UInt32((V shr 8) and $FF) shl 8) or UInt32((V shr 16) and $FF);
+end;
+
+
 
 const
   SCREEN_PPI = 96.0;
@@ -353,11 +509,9 @@ begin
   ControlStyle := ControlStyle + [csOpaque] - [csSetCaption];
   TabStop := True;
   Color := $00E0E0E0;
+  Cursor := crIBeam;       { a text editor's: the scroll bar keeps its own }
   FZoom := 1.0;
   FPageGap := 16;
-  FGlyphs := TStringList.Create;
-  FGlyphs.Sorted := True;
-  FGlyphs.Duplicates := dupError;
   FScrollBar := TScrollBar.Create(Self);
   FScrollBar.Kind := sbVertical;
   FScrollBar.Align := alRight;
@@ -380,7 +534,8 @@ begin
     pd_doc_free(FDoc);
   ClearGlyphCache;
   ClearPictures;
-  FGlyphs.Free;
+  FBack.Free;
+  FBackImg.Free;
   for I := 0 to High(FFonts) do
     pd_font_free(FFonts[I].Font);
   if FMathFont <> nil then
@@ -655,6 +810,7 @@ begin
   { without fonts there is nothing to lay out yet: show no pages rather than fail }
   if Length(FFonts) > 0 then
     ParadeCheck(pd_layout_update(FLayout, nil), 'layout update');
+  Inc(FLayoutEpoch);
   UpdateScrollBar;
   Invalidate;
 end;
@@ -682,9 +838,11 @@ procedure TParadeEdit.ClearGlyphCache;
 var
   I: Integer;
 begin
-  for I := 0 to FGlyphs.Count - 1 do
-    Dispose(PGlyphBmp(FGlyphs.Objects[I]));
-  FGlyphs.Clear;
+  for I := 0 to High(FGlyphs) do
+    if FGlyphs[I] <> nil then
+      Dispose(FGlyphs[I]);
+  FGlyphs := nil;
+  FGlyphCount := 0;
 end;
 
 procedure TParadeEdit.ClearPictures;
@@ -711,6 +869,8 @@ var
   Pic: TPicture;
   Src: TLazIntfImage;
   X, Y, I: Integer;
+  Px: PPixel;
+  C: TFPColor;
 begin
   Result := nil;
   if (Res = 0) or (W <= 0) or (H <= 0) or (W > 8000) or (H > 8000) then
@@ -754,25 +914,73 @@ begin
   begin
     FPicSized[I].Free;
     Src := FPics[I];
-    FPicSized[I] := TLazIntfImage.Create(0, 0, [riqfRGB, riqfAlpha]);
-    FPicSized[I].SetSize(W, H);
+    FPicSized[I] := NewImage(W, H, 0);     { the page's own pixel layout: drawn by copying bytes }
     for Y := 0 to H - 1 do
+    begin
+      Px := PPixel(FPicSized[I].GetDataLineStart(Y));
       for X := 0 to W - 1 do
-        FPicSized[I].Colors[X, Y] := Src.Colors[X * Src.Width div W, Y * Src.Height div H];
+      begin
+        C := Src.Colors[X * Src.Width div W, Y * Src.Height div H];
+        Px^.R := C.red shr 8;
+        Px^.G := C.green shr 8;
+        Px^.B := C.blue shr 8;
+        Px^.A := C.alpha shr 8;
+        Inc(Px);
+      end;
+    end;
   end;
   Result := FPicSized[I];
 end;
 
+function GlyphHash(AFont: Pointer; GlyphId: UInt32; PxPerEm: pd_sp; Sub: Integer): UInt32; inline;
+begin
+  Result := (UInt32(PtrUInt(AFont) shr 4) * 2654435761) xor (GlyphId * 40503) xor (UInt32(PxPerEm) * 2246822519) xor
+            UInt32(Sub);
+  Result := Result xor (Result shr 15);
+end;
+
 function TParadeEdit.GetGlyphBmp(AFont: Ppd_font; GlyphId: UInt32; PxPerEm: pd_sp; Sub: Integer): PGlyphBmp;
 var
-  Key: string;
-  Idx: Integer;
   Info: pd_glyph_image;
+  I, Mask: Integer;
+  Old: array of PGlyphBmp;
+  G: PGlyphBmp;
 begin
-  Key := Format('%p:%d:%d:%d', [AFont, GlyphId, PxPerEm, Sub]);
-  if FGlyphs.Find(Key, Idx) then
-    Exit(PGlyphBmp(FGlyphs.Objects[Idx]));
+  if Length(FGlyphs) > 0 then
+  begin
+    Mask := High(FGlyphs);
+    I := GlyphHash(AFont, GlyphId, PxPerEm, Sub) and Mask;
+    while FGlyphs[I] <> nil do
+    begin
+      G := FGlyphs[I];
+      if (G^.KFont = AFont) and (G^.KGlyph = GlyphId) and (G^.KPx = PxPerEm) and (G^.KSub = Sub) then
+        Exit(G);
+      I := (I + 1) and Mask;
+    end;
+  end;
+  if (FGlyphCount + 1) * 10 > Length(FGlyphs) * 7 then
+  begin   { grow, and put every bitmap in its new place }
+    Old := FGlyphs;
+    FGlyphs := nil;
+    if Length(Old) = 0 then
+      SetLength(FGlyphs, 1024)
+    else
+      SetLength(FGlyphs, Length(Old) * 2);
+    Mask := High(FGlyphs);
+    for G in Old do
+      if G <> nil then
+      begin
+        I := GlyphHash(G^.KFont, G^.KGlyph, G^.KPx, G^.KSub) and Mask;
+        while FGlyphs[I] <> nil do
+          I := (I + 1) and Mask;
+        FGlyphs[I] := G;
+      end;
+  end;
   New(Result);
+  Result^.KFont := AFont;
+  Result^.KGlyph := GlyphId;
+  Result^.KPx := PxPerEm;
+  Result^.KSub := Sub;
   Result^.W := 0;
   Result^.H := 0;
   if pd_font_glyph_render(AFont, GlyphId, PxPerEm, Sub, nil, 0, Info) = PD_OK then
@@ -787,7 +995,12 @@ begin
       Result^.Top := Info.top;
     end;
   end;
-  FGlyphs.AddObject(Key, TObject(Result));
+  Mask := High(FGlyphs);
+  I := GlyphHash(AFont, GlyphId, PxPerEm, Sub) and Mask;
+  while FGlyphs[I] <> nil do
+    I := (I + 1) and Mask;
+  FGlyphs[I] := Result;
+  Inc(FGlyphCount);
 end;
 
 { ---------------- reading order, positions ---------------- }
@@ -1596,134 +1809,31 @@ begin
 end;
 
 procedure TParadeEdit.BlinkTimer(Sender: TObject);
+var
+  R: TRect;
 begin
   FCaretOn := not FCaretOn;
-  Invalidate;
+  { only the caret's few pixels: the pages under it come back from the back buffer }
+  if HandleAllocated and CaretRect(R) then
+    InvalidateRect(Handle, @R, False)
+  else
+    Invalidate;
 end;
 
 { ---------------- painting ---------------- }
 
-function Floor0(V: Double): Integer; inline;
-begin
-  Result := Trunc(V);
-  if V < Result then
-    Dec(Result);
-end;
-
 type
-  TPixel = packed record
-    B, G, R, A: Byte;
+  TSelBand = record
+    Block: pd_block_id;
+    Y, X0, X1, LineEnd: pd_sp;
+    Off: Int64;
+    LastSel: Boolean;
   end;
-  PPixel = ^TPixel;
-
-{ a picture onto the page at X, Y, over what is there by its alpha }
-procedure BlendPicture(Img, Pic: TLazIntfImage; X, Y: Integer);
-var
-  PX, PY, A: Integer;
-  C: TFPColor;
-  Pix: PPixel;
-begin
-  for PY := 0 to Pic.Height - 1 do
-  begin
-    if (Y + PY < 0) or (Y + PY >= Img.Height) then
-      Continue;
-    for PX := 0 to Pic.Width - 1 do
-    begin
-      if (X + PX < 0) or (X + PX >= Img.Width) then
-        Continue;
-      C := Pic.Colors[PX, PY];
-      A := C.alpha shr 8;
-      if A = 0 then
-        Continue;
-      Pix := PPixel(Img.GetDataLineStart(Y + PY));
-      Inc(Pix, X + PX);
-      Pix^.R := (Pix^.R * (255 - A) + (C.red shr 8) * A) div 255;
-      Pix^.G := (Pix^.G * (255 - A) + (C.green shr 8) * A) div 255;
-      Pix^.B := (Pix^.B * (255 - A) + (C.blue shr 8) * A) div 255;
-      Pix^.A := 255;
-    end;
-  end;
-end;
-
-procedure FillRectImg(Img: TLazIntfImage; X0, Y0, X1, Y1: Integer; Col: UInt32; Alpha: Integer);
-var
-  X, Y: Integer;
-  P: PPixel;
-  R, G, B: Integer;
-begin
-  if X0 < 0 then X0 := 0;
-  if Y0 < 0 then Y0 := 0;
-  if X1 > Img.Width then X1 := Img.Width;
-  if Y1 > Img.Height then Y1 := Img.Height;
-  R := (Col shr 16) and $FF;
-  G := (Col shr 8) and $FF;
-  B := Col and $FF;
-  for Y := Y0 to Y1 - 1 do
-  begin
-    P := PPixel(Img.GetDataLineStart(Y));
-    Inc(P, X0);
-    for X := X0 to X1 - 1 do
-    begin
-      P^.R := (P^.R * (255 - Alpha) + R * Alpha) div 255;
-      P^.G := (P^.G * (255 - Alpha) + G * Alpha) div 255;
-      P^.B := (P^.B * (255 - Alpha) + B * Alpha) div 255;
-      P^.A := 255;    { opaque: a zero alpha byte would make the bitmap transparent }
-      Inc(P);
-    end;
-  end;
-end;
-
-procedure BlendGlyph(Img: TLazIntfImage; G: PGlyphBmp; X, Y: Integer; Col: UInt32);
-var
-  Row, Cl, PX, PY, A: Integer;
-  Line, Pix: PPixel;
-  CR, CG, CB: Integer;
-begin
-  CR := (Col shr 16) and $FF;
-  CG := (Col shr 8) and $FF;
-  CB := Col and $FF;
-  for Row := 0 to G^.H - 1 do
-  begin
-    PY := Y - G^.Top + Row;
-    if (PY < 0) or (PY >= Img.Height) then
-      Continue;
-    Line := PPixel(Img.GetDataLineStart(PY));
-    for Cl := 0 to G^.W - 1 do
-    begin
-      PX := X + G^.Left + Cl;
-      A := G^.Alpha[Row * G^.W + Cl];
-      if (A = 0) or (PX < 0) or (PX >= Img.Width) then
-        Continue;
-      Pix := Line;
-      Inc(Pix, PX);
-      Pix^.R := (Pix^.R * (255 - A) + CR * A) div 255;
-      Pix^.G := (Pix^.G * (255 - A) + CG * A) div 255;
-      Pix^.B := (Pix^.B * (255 - A) + CB * A) div 255;
-      Pix^.A := 255;
-    end;
-  end;
-end;
-
-function NewImage(W, H: Integer; Col: UInt32): TLazIntfImage;
-var
-  Desc: TRawImageDescription;
-begin
-  Result := TLazIntfImage.Create(0, 0);
-  Desc.Init_BPP32_B8G8R8A8_BIO_TTB(W, H);
-  Result.DataDescription := Desc;
-  FillRectImg(Result, 0, 0, W, H, Col, 255);
-end;
-
-function TColorToRGB(C: TColor): UInt32;
-var
-  V: LongInt;
-begin
-  V := ColorToRGB(C);
-  Result := (UInt32(V and $FF) shl 16) or (UInt32((V shr 8) and $FF) shl 8) or UInt32((V shr 16) and $FF);
-end;
 
 procedure TParadeEdit.PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
 var
+  Bands: array of TSelBand;
+  NB, K: Integer;
   Info: pd_page_info;
   Items: array of pd_draw;
   N, I, PW, PH, IX, IY, Sub: Integer;
@@ -1747,21 +1857,68 @@ begin
   SetLength(Items, N + 1);
   pd_layout_page_items(FLayout, Page, @Items[0], N, N);
 
-  { selection behind the text }
+  { selection behind the text: one band per line, the line's full height, from
+    the first selected character to the last -- the spaces between them too --
+    and on to the end of the line's text where the selection goes on past it }
   Sel := HasSelection;
   if Sel then
   begin
     A := SelStart;
     B := SelEnd;
+    NB := 0;
+    SetLength(Bands, 0);
     for I := 0 to N - 1 do
-      if (Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE) then
+      if ((Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE)) and (Items[I].region = 0) then
       begin
+        { the band of this line: the last one, or a new one }
+        K := NB - 1;
+        while (K >= 0) and ((Bands[K].Block <> Items[I].block) or (Bands[K].Y <> Items[I].y)) do
+          Dec(K);
+        if K < 0 then
+        begin
+          if NB >= Length(Bands) then
+            SetLength(Bands, NB * 2 + 16);
+          K := NB;
+          Inc(NB);
+          Bands[K].Block := Items[I].block;
+          Bands[K].Y := Items[I].y;
+          Bands[K].X0 := High(pd_sp);
+          Bands[K].X1 := Low(pd_sp);
+          Bands[K].LineEnd := Low(pd_sp);
+          Bands[K].Off := -1;
+          Bands[K].LastSel := False;
+        end;
+        if Items[I].x + Items[I].w > Bands[K].LineEnd then
+          Bands[K].LineEnd := Items[I].x + Items[I].w;
         Q := PdPos(Items[I].block, Items[I].offset);
-        if (Compare(Q, A) >= 0) and (Compare(Q, B) < 0) then
-          FillRectImg(Img, OX + Floor0(Items[I].x * PxScale), OY + Round((Items[I].y - Items[I].size * 4 div 5) * PxScale),
-            OX + Round((Items[I].x + Items[I].w) * PxScale) + 1, OY + Round((Items[I].y + Items[I].size div 4) * PxScale),
-            $003390FF, 80);
+        Bands[K].LastSel := (Compare(Q, A) >= 0) and (Compare(Q, B) < 0);
+        if Bands[K].LastSel then
+        begin
+          if Items[I].x < Bands[K].X0 then
+          begin
+            Bands[K].X0 := Items[I].x;
+            Bands[K].Off := Items[I].offset;
+          end;
+          if Items[I].x + Items[I].w > Bands[K].X1 then
+            Bands[K].X1 := Items[I].x + Items[I].w;
+        end;
       end;
+    for K := 0 to NB - 1 do
+      with Bands[K] do
+        if (Off >= 0) and (X1 > X0) then
+        begin
+          { the line's height where it is, as the caret has it }
+          if pd_layout_caret(FLayout, PdPos(Block, Off), CPage, CX, CBase, CAsc, CDesc) <> PD_OK then
+          begin
+            CBase := Y;
+            CAsc := 0;
+            CDesc := 0;
+          end;
+          if LastSel then   { its last character is selected: the selection goes on, through the line's end }
+            X1 := LineEnd + Round(4 / PxScale);
+          FillRectImg(Img, OX + Floor0(X0 * PxScale), OY + Round((Y - CAsc) * PxScale), OX + Round(X1 * PxScale),
+            OY + Round((Y + CDesc) * PxScale), $003390FF, 80);
+        end;
   end;
 
   for I := 0 to N - 1 do
@@ -1810,38 +1967,145 @@ begin
       OY + Round((CBase + CDesc) * PxScale), $00000000, 255);
 end;
 
-procedure TParadeEdit.Paint;
+{ the caret in client pixels, if it is on a page in view }
+function TParadeEdit.CaretRect(out R: TRect): Boolean;
 var
-  Img: TLazIntfImage;
-  Bmp: TBitmap;
-  W, H, Page, PTop: Integer;
+  CPage: Int32;
+  CX, CBase, CAsc, CDesc: pd_sp;
+  OX, OY: Integer;
+begin
+  Result := (FLayout <> nil) and (PageCount > 0) and
+            (pd_layout_caret(FLayout, CaretPos, CPage, CX, CBase, CAsc, CDesc) = PD_OK) and (CPage < PageCount);
+  if not Result then
+    Exit;
+  OX := PageLeft(CPage);
+  OY := PageTop(CPage);
+  R := Rect(OX + Round(CX * PxPerSp), OY + Round((CBase - CAsc) * PxPerSp), OX + Round(CX * PxPerSp) + 2,
+    OY + Round((CBase + CDesc) * PxPerSp));
+  Result := (R.Bottom > 0) and (R.Top < ClientHeight);
+end;
+
+{ everything the drawn pages depend on, but the caret }
+function TParadeEdit.BackSignature: string;
+var
+  A, B: pd_pos;
+begin
+  Result := Format('%d %d %g %d %d %p %d', [ClientWidth, ClientHeight, FZoom, FScrollY, FLayoutEpoch, Pointer(FDoc),
+    Int64(pd_doc_revision(FDoc))]);
+  if HasSelection then
+  begin
+    A := SelStart;
+    B := SelEnd;
+    Result := Result + Format(' %d:%d-%d:%d', [A.block, A.offset, B.block, B.offset]);
+  end;
+end;
+
+{ Draw the pages in view again and send the display only what changed: the
+   rows and columns that differ from the last drawing. Over a remote X
+   connection the whole window would be megabytes for every keystroke. }
+procedure TParadeEdit.RebuildBack;
+var
+  Img, Part: TLazIntfImage;
+  W, H, Page, PTop, Y, X, X0, X1, Y0, Y1, RowBytes: Integer;
   Info: pd_page_info;
+  P, Q: PByte;
+  Bmp: TBitmap;
+  Full: Boolean;
 begin
   W := ClientWidth - FScrollBar.Width;
   H := ClientHeight;
   if (W <= 0) or (H <= 0) then
     Exit;
   Img := NewImage(W, H, TColorToRGB(Color));
-  try
-    for Page := 0 to PageCount - 1 do
+  for Page := 0 to PageCount - 1 do
+  begin
+    PTop := PageTop(Page);
+    pd_layout_page_info(FLayout, Page, Info);
+    if PTop + Round(Info.height * PxPerSp) < 0 then
+      Continue;
+    if PTop > H then
+      Break;
+    PaintPage(Img, Page, PageLeft(Page), PTop, PxPerSp, False);
+  end;
+
+  Full := (FBack = nil) or (FBackImg = nil) or (FBackImg.Width <> W) or (FBackImg.Height <> H);
+  RowBytes := W * 4;
+  X0 := W;
+  X1 := -1;
+  Y0 := H;
+  Y1 := -1;
+  if Full then
+  begin
+    X0 := 0; Y0 := 0; X1 := W - 1; Y1 := H - 1;
+  end
+  else
+    for Y := 0 to H - 1 do
     begin
-      PTop := PageTop(Page);
-      pd_layout_page_info(FLayout, Page, Info);
-      if PTop + Round(Info.height * PxPerSp) < 0 then
+      P := Img.GetDataLineStart(Y);
+      Q := FBackImg.GetDataLineStart(Y);
+      if CompareMem(P, Q, RowBytes) then
         Continue;
-      if PTop > H then
-        Break;
-      PaintPage(Img, Page, PageLeft(Page), PTop, PxPerSp, Focused and FCaretOn);
+      if Y < Y0 then Y0 := Y;
+      Y1 := Y;
+      X := 0;
+      while (X < X0) and (PUInt32(P)[X] = PUInt32(Q)[X]) do
+        Inc(X);
+      if X < X0 then X0 := X;
+      X := W - 1;
+      while (X > X1) and (PUInt32(P)[X] = PUInt32(Q)[X]) do
+        Dec(X);
+      if X > X1 then X1 := X;
     end;
+
+  if Full then
+  begin
+    FBack.Free;
+    FBack := TBitmap.Create;
+    FBack.LoadFromIntfImage(Img);
+  end
+  else if Y1 >= Y0 then
+  begin   { just the changed rectangle }
+    Part := NewImage(X1 - X0 + 1, Y1 - Y0 + 1, 0);
     Bmp := TBitmap.Create;
     try
-      Bmp.LoadFromIntfImage(Img);
-      Canvas.Draw(0, 0, Bmp);
+      for Y := Y0 to Y1 do
+        Move(PUInt32(Img.GetDataLineStart(Y))[X0], Part.GetDataLineStart(Y - Y0)^, (X1 - X0 + 1) * 4);
+      Bmp.LoadFromIntfImage(Part);
+      FBack.Canvas.Draw(X0, Y0, Bmp);
     finally
       Bmp.Free;
+      Part.Free;
     end;
-  finally
-    Img.Free;
+  end;
+  FBackImg.Free;
+  FBackImg := Img;
+end;
+
+procedure TParadeEdit.Paint;
+var
+  Sig: string;
+  R: TRect;
+begin
+  if (ClientWidth - FScrollBar.Width <= 0) or (ClientHeight <= 0) then
+    Exit;
+  Sig := BackSignature;
+  if (Sig <> FBackSig) or (FBack = nil) then
+  begin
+    RebuildBack;
+    FBackSig := Sig;
+  end;
+  if FBack = nil then
+    Exit;
+  R := Canvas.ClipRect;
+  if R.Right > FBack.Width then R.Right := FBack.Width;
+  if R.Bottom > FBack.Height then R.Bottom := FBack.Height;
+  if (R.Right > R.Left) and (R.Bottom > R.Top) then
+    Canvas.CopyRect(R, FBack.Canvas, R);     { on the display's side: no pixels cross the connection }
+  if Focused and FCaretOn and CaretRect(R) then
+  begin
+    Canvas.Brush.Style := bsSolid;
+    Canvas.Brush.Color := clBlack;
+    Canvas.FillRect(R);
   end;
 end;
 
