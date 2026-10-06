@@ -3806,6 +3806,11 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                 while (j < nl) {
                     size_t la = skip_cols(s, lines[j].a, lines[j].b, cols_to(s, lines[i].a, pos)), lc = skip_ws(s, la, lines[j].b);
 
+                    if (j == i) {   /* the line found to open it: where it was found */
+                        la = pos;
+                        lc = c;
+                    }
+
                     if (lc + 1 < lines[j].b && s[lc] == '|' && (s[lc + 1] == ' ' || lc + 1 == lines[j].b)) {
                         if (j > i) {
                             pb_puts(&P.text, "\\\n");    /* a hard break */
@@ -3824,7 +3829,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
 
                 P.nlines = 1;
                 leaf_close(&P);
-                i = j - 1;
+                i = j > i ? j - 1 : i;
                 continue;
             }
 
