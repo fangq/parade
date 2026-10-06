@@ -207,6 +207,8 @@ begin
   WriteLn('pd_para_attrs.task ', PtrUInt(@v_pd_para_attrs.task) - PtrUInt(@v_pd_para_attrs));
   WriteLn('pd_para_attrs.loose ', PtrUInt(@v_pd_para_attrs.loose) - PtrUInt(@v_pd_para_attrs));
   WriteLn('pd_para_attrs.lang ', PtrUInt(@v_pd_para_attrs.lang) - PtrUInt(@v_pd_para_attrs));
+  WriteLn('pd_para_attrs.cont ', PtrUInt(@v_pd_para_attrs.cont) - PtrUInt(@v_pd_para_attrs));
+  WriteLn('pd_para_attrs.div_class ', PtrUInt(@v_pd_para_attrs.div_class) - PtrUInt(@v_pd_para_attrs));
   WriteLn('pd_float_props ', SizeOf(pd_float_props));
   WriteLn('pd_float_props.placement ', PtrUInt(@v_pd_float_props.placement) - PtrUInt(@v_pd_float_props));
   WriteLn('pd_float_props.wrap ', PtrUInt(@v_pd_float_props.wrap) - PtrUInt(@v_pd_float_props));

@@ -772,7 +772,7 @@ static void count_walk(pd_layout* L, pd_block_id id, seqc* seq, int32_t* nseq, i
     }
 
     /* list labels, same numbering rule as pd_doc_list_label */
-    if (b->st.list && (int32_t)b->st.list <= d->nlists && b->st.list <= 64) {
+    if (b->st.list && !b->st.at.cont && (int32_t)b->st.list <= d->nlists && b->st.list <= 64) {
         const dlist* l = &d->lists[b->st.list - 1];
         int32_t lv = b->st.list_level, li = (int32_t)b->st.list - 1;
         char buf[32];

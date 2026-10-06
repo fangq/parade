@@ -1864,6 +1864,143 @@ static void test_md_model(void) {
     pd_doc_free(d);
 }
 
+/* the Markdown a document writes after reading md */
+static char* md_again(const char* md) {
+    pd_doc* d = md_doc(md);
+    char* out = d ? md_of(d) : NULL;
+
+    pd_doc_free(d);
+    return out;
+}
+
+/* more of Markdown: several blocks in a list item, headings in items, pandoc's code attributes,
+   GFM's bare links and single-tilde strike, pandoc's sub/superscript, inline notes, line blocks and
+   fenced divs, GitHub's alerts, HTML blocks of any tag, references inside quotes and items */
+static void test_md_more(void) {
+    static const char* canon =
+        "1. first item\n\n   second paragraph\n\n   ```c\n   int x;\n   ```\n\n2. next item\n\n"
+        "- ## A heading item\n- plain item\n\n"
+        "::: warning\n\nIn a div.\n\n:::\n\n"
+        "> [!TIP]\n> A tip.\n\n> Plain quote.\n";
+    pd_doc* d;
+    pd_block_id p;
+    pd_para_attrs pa;
+    pd_block_info bi;
+    pd_inline o;
+    char* md, lab[32];
+    int i;
+
+    /* the canonical form reads back as itself, also through HTML and JData */
+    md = md_again(canon);
+    CHECK(md && strcmp(md, canon) == 0);
+
+    if (md && strcmp(md, canon) != 0) {
+        printf("--- got:\n%s--- wanted:\n%s---\n", md, canon);
+    }
+
+    free(md);
+    d = md_doc(canon);
+
+    if (!d) {
+        CHECK(0);
+        return;
+    }
+
+    {
+        buf_t b;
+        pd_doc* h = NULL, *j = NULL;
+
+        memset(&b, 0, sizeof(b));
+        pd_doc_export(d, PD_CONV_HTML, to_buf, &b);
+        pd_doc_import(b.p, b.n, PD_CONV_HTML, &h);
+        free(b.p);
+        md = h ? md_of(h) : NULL;
+        CHECK(md && strcmp(md, canon) == 0);
+        free(md);
+        memset(&b, 0, sizeof(b));
+        pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b);
+        pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j);
+        free(b.p);
+        md = j ? md_of(j) : NULL;
+        CHECK(md && strcmp(md, canon) == 0);
+        free(md);
+        pd_doc_free(h);
+        pd_doc_free(j);
+    }
+
+    /* the item's later blocks: in its list, no label, not counted */
+    p = nth_para(d, 1);
+    pa = attrs_of(d, p);
+    pd_doc_block_info(d, p, &bi);
+    CHECK(pa.cont == 1 && bi.list != 0 && para_is(d, p, "second paragraph"));
+    label_of(d, p, lab);
+    CHECK(lab[0] == '\0');
+    label_of(d, nth_para(d, 3), lab);
+    CHECK(strcmp(lab, "2.") == 0);
+    pd_doc_block_info(d, nth_para(d, 4), &bi);
+    CHECK(bi.role == PD_ROLE_HEADING && bi.level == 2 && bi.list != 0);
+    CHECK(strcmp(attrs_of(d, nth_para(d, 6)).div_class, "warning") == 0);
+    CHECK(strcmp(attrs_of(d, nth_para(d, 7)).div_class, "!tip") == 0 && attrs_of(d, nth_para(d, 7)).quote_depth == 1);
+    CHECK(attrs_of(d, nth_para(d, 8)).div_class[0] == '\0' && attrs_of(d, nth_para(d, 8)).quote_depth == 1);
+    pd_doc_free(d);
+
+    /* inline extensions */
+    d = md_doc("Go to www.example.com, or https://x.org/a_(b).\n\nH~2~O, ~gone~, E=mc^2^, a note^[Inline *note*].\n");
+
+    if (d) {
+        const char* t;
+        uint32_t n, k;
+        int links = 0, notes = 0;
+
+        p = nth_para(d, 0);
+        pd_doc_para_text(d, p, &t, &n);
+
+        for (k = 0; k + 2 < n; k++) {
+            if (memcmp(t + k, "\xEF\xBF\xBC", 3) == 0 && pd_doc_inline_at(d, at(p, k), &o) == PD_OK &&
+                    o.kind == PD_INLINE_LINK && o.source_len > 0) {
+                links++;
+                CHECK((o.source_len == 22 && memcmp(o.source, "http://www.example.com", 22) == 0) ||
+                      (o.source_len == 19 && memcmp(o.source, "https://x.org/a_(b)", 19) == 0));
+            }
+        }
+
+        CHECK(links == 2);
+        p = nth_para(d, 1);
+        pd_doc_para_text(d, p, &t, &n);
+
+        for (k = 0; k + 2 < n; k++) {
+            notes += memcmp(t + k, "\xEF\xBF\xBC", 3) == 0 && pd_doc_inline_at(d, at(p, k), &o) == PD_OK &&
+                     o.kind == PD_INLINE_FOOTNOTE;
+        }
+
+        CHECK(notes == 1);
+        CHECK(chars_at(d, p, 1).shift == PD_SHIFT_SUB && chars_at(d, p, 6).strike && !chars_at(d, p, 6).shift);
+        CHECK(chars_at(d, p, 15).shift == PD_SHIFT_SUPER);
+        md = md_of(d);
+        CHECK(md && strstr(md, "Go to www.example.com, or <https://x.org/a_(b)>.") != NULL);
+        free(md);
+        pd_doc_free(d);
+    }
+
+    /* pandoc's code attributes, line blocks; any tag alone on a line; references in containers */
+    d = md_doc("```{.python .numberLines}\nx = 1\n```\n\n| one\n| two\n\n<my-tag a=\"1\">\nraw\n</my-tag>\n\n"
+               "> See [q].\n>\n> [q]: http://q.org\n\n- See [i].\n\n  [i]: http://i.org\n");
+
+    if (d) {
+        CHECK(strcmp(attrs_of(d, nth_para(d, 0)).lang, "python") == 0);
+        CHECK(para_is(d, nth_para(d, 1), "one\ntwo"));
+        pd_doc_block_info(d, nth_para(d, 2), &bi);
+        CHECK(bi.role == PD_ROLE_RAW && para_is(d, nth_para(d, 2), "<my-tag a=\"1\">\nraw\n</my-tag>"));
+
+        for (i = 3; i <= 4; i++) {
+            CHECK(pd_doc_inline_at(d, at(nth_para(d, i), 4), &o) == PD_OK && o.kind == PD_INLINE_LINK &&
+                  o.source_len == 12);
+        }
+
+        pd_doc_free(d);
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1895,6 +2032,8 @@ int main(void) {
     test_md_import();
     printf("markdown elements\n");
     test_md_model();
+    printf("markdown, more\n");
+    test_md_more();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

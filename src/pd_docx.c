@@ -715,6 +715,14 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
         pb_puts(o, "</w:tabs>");
     }
 
+    {
+        int32_t clevel;
+
+        if (!x->in_note && pd_conv_item_level(x->d, p, &clevel)) {  /* a later block of a list item: under its text */
+            pb_printf(o, "<w:ind w:left=\"%d\"/>", 360 * (int)(clevel + 1));
+        }
+    }
+
     if (pp.align == PD_ALIGN_CENTER || pp.align == PD_ALIGN_RIGHT || (pp.align == PD_ALIGN_JUSTIFY && !sid && !num)) {
         pb_printf(o, "<w:jc w:val=\"%s\"/>", pp.align == PD_ALIGN_CENTER ? "center" : pp.align == PD_ALIGN_RIGHT ? "right" :
                   "both");

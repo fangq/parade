@@ -386,6 +386,8 @@ type
   pd_para_attrs = record
     quote_depth, task, loose: Int32;
     lang: array[0..31] of AnsiChar;
+    cont: Int32;              { a later block of the list item above }
+    div_class: array[0..31] of AnsiChar;   { a named block it is in: ::: name, <div class> }
   end;
   Ppd_para_attrs = ^pd_para_attrs;
 

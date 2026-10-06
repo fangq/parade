@@ -29,6 +29,7 @@ typedef struct {
     int nopen;
     char link[2048];            /* destination of the open link, with its title */
     size_t link_at;             /* where its text starts in the output */
+    char link_raw[2048];        /* its address as it is, for <url> */
     int link_url;               /* link is only the address (no title): it may be written <url> */
     int in_link, in_table, in_code;
     pd_block_id notes[4096];
@@ -48,6 +49,8 @@ typedef struct {
     int prev_q;                 /* the quote depth of the last block */
     int prev_loose;             /* the last list item was in a loose list */
     int prev_term;              /* the last block was a definition list's term */
+    char div[32];               /* the ::: fenced div open */
+    char alert[32];             /* the alert of the quote being written */
 } mx;
 
 static int span_flags(const mx* x, const pd_char_props* c) {
@@ -226,12 +229,30 @@ static void md_title(pd_buf* o, const char* t, int32_t n) {
 /* the end of a link: ](url), or the whole link as <url> when its text is the address */
 static void mx_end_link(mx* x) {
     pd_buf* o = x->o;
-    size_t tl = o->n - x->link_at, ul = strlen(x->link);
+    size_t tl = o->n - x->link_at, ul = strlen(x->link), rl = strlen(x->link_raw), k, w = 0;
+    char txt[2048];
 
-    if (x->link_url && tl == ul && memcmp(o->p + x->link_at, x->link, ul) == 0 && strchr(x->link, ':') &&
-            !strpbrk(x->link, "<> %")) {
-        o->p[x->link_at - 1] = '<';
+    /* the text as written, its escapes taken off, to tell a link that is its own address */
+    for (k = 0; k < tl && w + 1 < sizeof(txt); k++) {
+        if (o->p[x->link_at + k] == '\\' && k + 1 < tl) {
+            k++;
+        }
+
+        txt[w++] = o->p[x->link_at + k];
+    }
+
+    txt[w] = '\0';
+
+    if (x->link_url && w == rl && memcmp(txt, x->link_raw, rl) == 0 && strchr(x->link_raw, ':') &&
+            !strpbrk(x->link_raw, "<> ")) {
+        o->n = x->link_at - 1;
+        pb_putc(o, '<');
+        pb_puts(o, x->link_raw);
         pb_putc(o, '>');
+    } else if (x->link_url && ul == tl + 7 && strncmp(x->link, "http://www.", 11) == 0 &&
+               memcmp(o->p + x->link_at, x->link + 7, tl) == 0) {    /* www.example.com, as it was written */
+        memmove(o->p + x->link_at - 1, o->p + x->link_at, tl);
+        o->n--;
     } else {
         pb_printf(o, "](%s)", x->link);
     }
@@ -334,6 +355,7 @@ static int mx_span(void* user, const pd_span* sp) {
                     md_dest(&dst, ob->source, (size_t)ob->source_len);
                     md_title(&dst, ob->title, ob->title_len);
                     snprintf(x->link, sizeof(x->link), "%.*s", (int)dst.n, dst.p ? dst.p : "");
+                    snprintf(x->link_raw, sizeof(x->link_raw), "%.*s", (int)ob->source_len, ob->source);
                     x->link_url = ob->title_len ? 0 : 1;
                     pb_free(&dst);
                     pb_putc(o, '[');
@@ -460,6 +482,34 @@ static void blank(mx* x, int q) {
 
 static void mx_block(mx* x, pd_block_id id);
 
+/* the ::: fenced div a block is in: the open one closed when it is not, the block's opened */
+static void mx_div(mx* x, const char* div) {
+    if (div[0] == '!') {    /* an alert is a quote's, not a div */
+        div = "";
+    }
+
+    if (strcmp(div, x->div) == 0) {
+        return;
+    }
+
+    if (x->div[0]) {
+        blank(x, 0);
+        pb_puts(x->o, ":::\n");
+        x->prev_block = 2;
+        x->ldepth = 0;
+    }
+
+    if (div[0]) {
+        blank(x, 0);
+        pb_printf(x->o, "::: %s\n", div);
+        x->prev_block = 2;
+        x->ldepth = 0;
+    }
+
+    x->prev_q = 0;
+    snprintf(x->div, sizeof(x->div), "%s", div);
+}
+
 /* text that goes out as it is, line by line behind the quote markers */
 static void mx_lines(mx* x, const char* t, uint32_t n) {
     uint32_t k;
@@ -479,12 +529,47 @@ static void mx_para(mx* x, pd_block_id p) {
     pd_block_info bi;
     pd_para_attrs at;
     int32_t level = 0, i;
-    int kind = pd_conv_list_kind(x->d, p, &level), q;
+    int kind = pd_conv_list_kind(x->d, p, &level), q, ind = 0;
 
     pd_doc_block_info(x->d, p, &bi);
     memset(&at, 0, sizeof(at));
     pd_doc_para_attrs(x->d, p, &at);
     q = at.quote_depth > 0 ? at.quote_depth : bi.role == PD_ROLE_QUOTE ? 1 : 0;
+
+    mx_div(x, at.div_class);
+
+    if (pd_conv_item_level(x->d, p, &level)) {     /* a later block of an item: under its text */
+        ind = level < x->ldepth && q == x->prev_q ? x->lw[level] : 0;
+    }
+
+    /* a quote of another kind is another quote: a plain blank line between */
+    if (q > 0 && x->prev_q > 0 && strcmp(x->alert, at.div_class[0] == '!' ? at.div_class : "") != 0) {
+        mx_close_code(x);
+        x->prev_q = 0;
+        x->ldepth = 0;
+    }
+
+    /* GitHub's alert: its quote opens with [!NOTE] */
+    if (at.div_class[0] == '!' && q > 0 && (strcmp(x->alert, at.div_class) != 0 || q != x->prev_q)) {
+        size_t k;
+
+        mx_close_code(x);
+        blank(x, q);
+        quote_prefix(x->prefix, sizeof(x->prefix), q);
+        pb_puts(x->o, x->prefix);
+        pb_puts(x->o, "[!");
+
+        for (k = 1; at.div_class[k]; k++) {
+            pb_putc(x->o, (char)toupper((unsigned char)at.div_class[k]));
+        }
+
+        pb_puts(x->o, "]\n");
+        x->prev_block = 0;      /* the quote's text follows on the next line */
+        x->prev_q = q;
+        x->ldepth = 0;
+    }
+
+    snprintf(x->alert, sizeof(x->alert), "%s", at.div_class[0] == '!' ? at.div_class : "");
 
     if (bi.role == PD_ROLE_CODE) {
         const char* t;
@@ -502,6 +587,12 @@ static void mx_para(mx* x, pd_block_id p) {
         if (!x->code_open) {
             blank(x, q);
             quote_prefix(x->prefix, sizeof(x->prefix), q);
+
+            if (ind > 0 && strlen(x->prefix) + (size_t)ind < sizeof(x->prefix)) {   /* in a list item */
+                memset(x->prefix + strlen(x->prefix), ' ', (size_t)ind);
+                x->prefix[strlen(x->prefix) + (size_t)ind] = '\0';
+            }
+
             pb_puts(x->o, x->prefix);
             pb_puts(x->o, "```");
             pb_puts(x->o, at.lang);
@@ -514,7 +605,7 @@ static void mx_para(mx* x, pd_block_id p) {
 
         mx_lines(x, t, n);
         x->code_multi = multi;
-        x->ldepth = 0;
+        x->ldepth = ind ? x->ldepth : 0;
         x->prev_q = q;
         x->prev_term = 0;
         return;
@@ -574,6 +665,14 @@ static void mx_para(mx* x, pd_block_id p) {
             pb_puts(x->o, at.task == 2 ? "[x] " : "[ ] ");
         }
 
+        if (bi.role == PD_ROLE_HEADING) {   /* - ## a heading as an item */
+            for (i = 0; i < bi.level; i++) {
+                pb_putc(x->o, '#');
+            }
+
+            pb_putc(x->o, ' ');
+        }
+
         x->lw[level] = (level ? x->lw[level - 1] : 0) + (int)strlen(marker);
         x->ldepth = level + 1;
         mx_inline(x, p);
@@ -586,7 +685,9 @@ static void mx_para(mx* x, pd_block_id p) {
         return;
     }
 
-    x->ldepth = 0;
+    if (!ind) {
+        x->ldepth = 0;
+    }
 
     if (!(bi.role == PD_ROLE_DEFINITION && x->prev_term)) {     /* a definition sits right under its term */
         blank(x, q);
@@ -597,6 +698,12 @@ static void mx_para(mx* x, pd_block_id p) {
         uint32_t n;
 
         pd_doc_para_text(x->d, p, &t, &n);
+
+        if (ind > 0 && strlen(x->prefix) + (size_t)ind < sizeof(x->prefix)) {
+            memset(x->prefix + strlen(x->prefix), ' ', (size_t)ind);
+            x->prefix[strlen(x->prefix) + (size_t)ind] = '\0';
+        }
+
         mx_lines(x, t, n);
         pb_putc(x->o, '\n');
         x->prefix[0] = '\0';
@@ -607,6 +714,10 @@ static void mx_para(mx* x, pd_block_id p) {
     }
 
     pb_puts(x->o, x->prefix);
+
+    if (ind > 0) {
+        pb_printf(x->o, "%*s", ind, "");
+    }
 
     switch (bi.role) {
         case PD_ROLE_TITLE:
@@ -793,6 +904,7 @@ static void mx_block(mx* x, pd_block_id id) {
 
         case PD_BLOCK_TABLE:
             mx_close_code(x);
+            mx_div(x, "");
             x->ldepth = 0;
             mx_table(x, id);
             x->prev_q = 0;
@@ -800,6 +912,7 @@ static void mx_block(mx* x, pd_block_id id) {
             break;
 
         case PD_BLOCK_BREAK:
+            mx_div(x, "");
             blank(x, 0);
             x->ldepth = 0;
             pb_puts(x->o, bi.break_kind == PD_BREAK_RULE ? "***\n" : "<div style=\"break-after:page\"></div>\n");
@@ -841,6 +954,7 @@ pd_status pd_md_export(const pd_doc* d, pd_buf* o) {
 
     mx_block(x, pd_doc_root(d));
     mx_close_code(x);
+    mx_div(x, "");
 
     for (i = 0; i < x->nnotes; i++) {   /* footnote definitions; continuation paragraphs indented */
         pd_block_info si;
@@ -1103,7 +1217,62 @@ static const struct {
 };
 
 /* tokenize inline content of s[a..b) into nodes */
+/* GFM's extended autolink at i -- www.host, http://, https:// -- its end, 0 if none */
+static size_t bare_link(const char* s, size_t a, size_t i, size_t b) {
+    size_t k, dots = 0, e;
+    int paren = 0;
+
+    if (i > a && !(s[i - 1] == ' ' || s[i - 1] == '\t' || s[i - 1] == '\n' || s[i - 1] == '(' || s[i - 1] == '*' ||
+                   s[i - 1] == '_' || s[i - 1] == '~')) {
+        return 0;
+    }
+
+    if (b - i > 4 && strncmp(s + i, "www.", 4) == 0) {
+        k = i + 4;
+    } else if (b - i > 7 && strncmp(s + i, "http://", 7) == 0) {
+        k = i + 7;
+    } else if (b - i > 8 && strncmp(s + i, "https://", 8) == 0) {
+        k = i + 8;
+    } else {
+        return 0;
+    }
+
+    e = k;
+
+    while (e < b && (isalnum((unsigned char)s[e]) || s[e] == '-' || s[e] == '_' || s[e] == '.')) {   /* the host */
+        dots += s[e] == '.';
+        e++;
+    }
+
+    if (e == k) {   /* a host is a name (www. supplies the period GFM wants) */
+        return 0;
+    }
+
+    (void)dots;
+
+    while (e < b && !isspace((unsigned char)s[e]) && s[e] != '<') {     /* the rest */
+        paren += s[e] == '(' ? 1 : s[e] == ')' ? -1 : 0;
+        e++;
+    }
+
+    /* trailing punctuation is the sentence's, and a ')' without its '(' */
+    while (e > k && (strchr("?!.,:*_~'\"", s[e - 1]) || (s[e - 1] == ')' && paren < 0))) {
+        paren += s[e - 1] == ')' ? 1 : 0;
+        e--;
+    }
+
+    return e > k ? e : 0;
+}
+
+static void tokenize_l(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, int32_t* cap, const mrefs* refs,
+                       int in_link);
+
 static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, int32_t* cap, const mrefs* refs) {
+    tokenize_l(s, a, b, v, nv, cap, refs, 0);
+}
+
+static void tokenize_l(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, int32_t* cap, const mrefs* refs,
+                       int in_link) {
     size_t i = a, t = a;
 
     while (i < b) {
@@ -1216,6 +1385,70 @@ static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, 
 
             i += r;
             continue;
+        }
+
+        if (!in_link && (c == 'w' || c == 'h')) {    /* www.example.com, https://example.com */
+            size_t e = bare_link(s, a, i, b);
+
+            if (e) {
+                FLUSH();
+                x.type = N_LINK_OPEN;
+                x.a = i;
+                x.b = e;
+                x.ch = s[i] == 'w' ? 'w' : 0;   /* www.: http:// in front */
+                push_node(v, nv, cap, &x);
+                memset(&x, 0, sizeof(x));
+                x.type = N_TEXT;
+                x.a = i;
+                x.b = e;
+                x.ch = 1;
+                push_node(v, nv, cap, &x);
+                memset(&x, 0, sizeof(x));
+                x.type = N_LINK_CLOSE;
+                push_node(v, nv, cap, &x);
+                i = e;
+                t = i;
+                continue;
+            }
+        }
+
+        if (c == '^' && i + 1 < b && s[i + 1] == '[') {     /* pandoc's inline note: ^[text] */
+            size_t rb = close_bracket(s, i + 1, b);
+
+            if (rb > i + 2) {
+                FLUSH();
+                x.type = N_NOTE;
+                x.ch = 'i';
+                x.a = i + 2;
+                x.b = rb;
+                push_node(v, nv, cap, &x);
+                i = rb + 1;
+                t = i;
+                continue;
+            }
+        }
+
+        if (c == '^' && i + 1 < b && s[i + 1] != ' ' && s[i + 1] != '^') {     /* pandoc's ^superscript^ */
+            size_t k = i + 1;
+
+            while (k < b && s[k] != '^' && s[k] != ' ' && s[k] != '\n' && s[k] != '\t') {
+                k += s[k] == '\\' && k + 1 < b ? 2 : 1;
+            }
+
+            if (k < b && s[k] == '^' && k > i + 1) {
+                FLUSH();
+                x.type = N_TAG;
+                x.tag = MF_SUP;
+                push_node(v, nv, cap, &x);
+                tokenize_l(s, i + 1, k, v, nv, cap, refs, in_link);
+                memset(&x, 0, sizeof(x));
+                x.type = N_TAG;
+                x.tag = -MF_SUP;
+                push_node(v, nv, cap, &x);
+                i = k + 1;
+                t = i;
+                continue;
+            }
         }
 
         if (c == '*' || c == '_' || c == '~') {
@@ -1388,7 +1621,7 @@ static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, 
                     x.tlen = tb - ta;
                 }
                 push_node(v, nv, cap, &x);
-                tokenize(s, i + 1, rb, v, nv, cap, refs);
+                tokenize_l(s, i + 1, rb, v, nv, cap, refs, 1);
                 memset(&x, 0, sizeof(x));
                 x.type = N_LINK_CLOSE;
                 push_node(v, nv, cap, &x);
@@ -1420,7 +1653,7 @@ static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, 
                     x.title = r->title;
                     x.tlen = r->tlen;
                     push_node(v, nv, cap, &x);
-                    tokenize(s, i + 1, rb, v, nv, cap, refs);
+                    tokenize_l(s, i + 1, rb, v, nv, cap, refs, 1);
                     memset(&x, 0, sizeof(x));
                     x.type = N_LINK_CLOSE;
                     push_node(v, nv, cap, &x);
@@ -1541,7 +1774,7 @@ static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, 
 }
 
 /* the CommonMark "process emphasis" procedure over the delimiter runs */
-static void emphasis(mnode* v, int32_t n) {
+static void emphasis(mnode* v, int32_t n, const char* s, size_t a, size_t b) {
     int32_t c, o, k;
 
     for (c = 0; c < n; c++) {
@@ -1566,13 +1799,19 @@ static void emphasis(mnode* v, int32_t n) {
                     continue;   /* rule of three */
                 }
 
-                if (cl->ch == '~' && (op->count < 2 || cl->count < 2)) {
-                    continue;
+                if (cl->ch == '~' && op->orig != cl->orig) {
+                    continue;   /* ~ with ~, ~~ with ~~ */
                 }
 
                 {
-                    int use = cl->ch == '~' ? 2 : (op->count >= 2 && cl->count >= 2 ? 2 : 1);
+                    int use = cl->ch == '~' ? (int)op->orig : (op->count >= 2 && cl->count >= 2 ? 2 : 1);
                     int f = cl->ch == '~' ? MF_STRIKE : use == 2 ? MF_BOLD : MF_ITAL;
+
+                    /* one ~ inside a word, as in H~2~O, is pandoc's subscript; elsewhere GFM's strike */
+                    if (cl->ch == '~' && use == 1 && ((op->a > a && isalnum((unsigned char)s[op->a - 1])) ||
+                                                      (cl->b < b && isalnum((unsigned char)s[cl->b])))) {
+                        f = MF_SUB;
+                    }
 
                     op->count -= use;
                     cl->count -= use;
@@ -1819,7 +2058,7 @@ static void md_inline(mctx* m, size_t a, size_t b) {
     pd_char_props saved = m->b->cp;
 
     tokenize(m->s, a, b, &v, &n, &cap, m->refs);
-    emphasis(v, n);
+    emphasis(v, n, m->s, a, b);
 
     if ((role = (int (*)[6])calloc((size_t)n + 1, sizeof(int[6]))) == NULL) {
         free(v);
@@ -1924,6 +2163,11 @@ static void md_inline(mctx* m, size_t a, size_t b) {
                 size_t r, w = 0;
 
                 memset(&url, 0, sizeof(url));
+
+                if (x->ch == 'w') {
+                    pb_puts(&url, "http://");
+                }
+
                 mu_decode(x->url ? x->url : m->s + x->a, x->url ? x->ulen : x->b - x->a, &url);
 
                 for (r = 0; r < url.n; r++) {   /* undo what the exporter encoded, and escapes */
@@ -1974,6 +2218,23 @@ static void md_inline(mctx* m, size_t a, size_t b) {
             case N_NOTE: {
                 mnote_list* nl = m->notes;
                 int32_t q;
+
+                if (x->ch == 'i') {     /* an inline note: its text is right here */
+                    pd_char_props keep = m->b->cp;
+                    mctx nm = *m;
+
+                    if (m->depth < 4) {
+                        nm.depth = m->depth + 1;
+                        bld_footnote_begin(m->b);
+                        bld_begin_para(m->b);
+                        md_inline(&nm, x->a, x->b);
+                        bld_end_para(m->b);
+                        bld_footnote_end(m->b);
+                        m->b->cp = keep;
+                    }
+
+                    break;
+                }
 
                 for (q = 0; nl && q < nl->n; q++) {
                     if (strlen(nl->v[q].label) == x->b - x->a && strncmp(nl->v[q].label, m->s + x->a, x->b - x->a) == 0) {
@@ -2367,6 +2628,7 @@ typedef struct {
     int32_t level;              /* list item: its list's nesting level */
     int labelled;               /* the item's first paragraph, which carries its label, is made */
     int task;                   /* 0, 1 open, 2 checked */
+    char alert[16];             /* a quote: GitHub's [!NOTE] and the like, as "!note" */
 } mcont;
 
 /* a list in the text, for its looseness */
@@ -2398,6 +2660,8 @@ typedef struct {
     char html_end[16];          /* the text that ends the HTML block, "" = a blank line */
     int def;                    /* the paragraph is a definition */
     int32_t table_line;         /* LF_TABLE: index of the header line */
+    char divs[8][32];           /* ::: fenced divs open, innermost last */
+    int ndiv;
 } mparse;
 
 static mlistinfo* list_info(mparse* P, pd_list_id id) {
@@ -2470,17 +2734,15 @@ static pd_block_id md_begin(mparse* P, const char* style, int32_t role, int32_t 
         bld_para_style(b, style, role, level);
     }
 
-    if (item && !item->labelled) {
+    if (item) {     /* the item, or a later block of it: in its list either way */
         bld_list(b, item->kind, item->level);
         b->list_id = item->list;
-    } else if (item) {  /* a later block of the item: under its text */
-        b->pp.mask |= PD_PP_INDENT_LEFT;
-        b->pp.indent_left = PD_PT(18) * (item->level + 1);
     }
 
     id = bld_begin_para(b);
     memset(&at, 0, sizeof(at));
     at.quote_depth = q;
+    at.cont = item && item->labelled;
 
     if (item && !item->labelled) {
         mlistinfo* L = list_info(P, item->list);
@@ -2497,7 +2759,17 @@ static pd_block_id md_begin(mparse* P, const char* style, int32_t role, int32_t 
         snprintf(at.lang, sizeof(at.lang), "%s", lang);
     }
 
-    if (id && (at.quote_depth || at.task || at.lang[0])) {
+    for (i = P->nc - 1; i >= 0 && !at.div_class[0]; i--) {     /* an alert's quote, else a fenced div */
+        if (P->c[i].type == 'q' && P->c[i].alert[0]) {
+            snprintf(at.div_class, sizeof(at.div_class), "%s", P->c[i].alert);
+        }
+    }
+
+    if (!at.div_class[0] && P->ndiv > 0) {
+        snprintf(at.div_class, sizeof(at.div_class), "%s", P->divs[P->ndiv - 1]);
+    }
+
+    if (id && (at.quote_depth || at.task || at.lang[0] || at.cont || at.div_class[0])) {
         pd_doc_set_para_attrs(b->d, id, &at);
     }
 
@@ -2788,6 +3060,41 @@ static int html_start(const char* s, size_t c, size_t e, char* end, size_t cap) 
     return 0;
 }
 
+/* a complete open or closing tag alone on its line (CommonMark's HTML block kind 7) */
+static int lone_tag(const char* s, size_t c, size_t e) {
+    size_t k = c + 1;
+
+    if (c >= e || s[c] != '<') {
+        return 0;
+    }
+
+    if (k < e && s[k] == '/') {
+        k++;
+    }
+
+    if (k >= e || !isalpha((unsigned char)s[k])) {
+        return 0;
+    }
+
+    while (k < e && (isalnum((unsigned char)s[k]) || s[k] == '-')) {
+        k++;
+    }
+
+    while (k < e && s[k] != '>') {     /* attributes, quoted values may hold > */
+        if (s[k] == '"' || s[k] == '\'') {
+            char q = s[k++];
+
+            while (k < e && s[k] != q) {
+                k++;
+            }
+        }
+
+        k++;
+    }
+
+    return k < e && s[k] == '>' && skip_ws(s, k + 1, e) == e;
+}
+
 /* ignoring ASCII case */
 static int contains_ci(const char* s, size_t n, const char* w) {
     size_t i, k = strlen(w), j;
@@ -2930,7 +3237,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
 
     /* link reference definitions: where a paragraph could start, outside code */
     {
-        int fenced = 0, can = 1;
+        int fenced = 0, can = 1, in_item = 0;
         char f0;
         size_t fl;
 
@@ -2951,12 +3258,33 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                 continue;
             }
 
-            if (blank_line(s, a, e)) {
-                can = 1;
-            } else if (can && ref_def(s, a, e, &refs)) {
-                skip[i] = 1;
-            } else {
-                can = s[skip_ws(s, a, e)] == '#';   /* after a heading, a definition may follow */
+            {
+                size_t b0 = a;
+                int quoted = 0, kk, nn;
+
+                /* inside block quotes, and indented into list items, too */
+                while (skip_ws(s, b0, e) < e && s[skip_ws(s, b0, e)] == '>' && cols_to(s, b0, skip_ws(s, b0, e)) < 4) {
+                    b0 = skip_ws(s, b0, e) + 1;
+                    b0 += b0 < e && s[b0] == ' ';
+                    quoted = 1;
+                }
+
+                if (blank_line(s, b0, e)) {
+                    can = 1;
+                } else if (can && (cols_to(s, b0, skip_ws(s, b0, e)) < 4 || (in_item && cols_to(s, b0, skip_ws(s, b0, e)) < 8)) &&
+                           ref_def(s, skip_ws(s, b0, e), e, &refs)) {
+                    skip[i] = 1;
+                } else {
+                    can = s[skip_ws(s, b0, e)] == '#';   /* after a heading, a definition may follow */
+                }
+
+                /* whether the lines that follow are in a list item */
+                if (!blank_line(s, b0, e)) {
+                    in_item = list_marker(s, skip_ws(s, b0, e), e, &kk, &nn) != 0 ||
+                              (in_item && cols_to(s, b0, skip_ws(s, b0, e)) >= 2);
+                }
+
+                (void)quoted;
             }
         }
     }
@@ -3158,6 +3486,28 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                     pos++;
                 }
 
+                {   /* GitHub's alerts: a quote opening with [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION] */
+                    size_t z = skip_ws(s, pos, e), ze = z + 2;
+
+                    while (ze < e && isalpha((unsigned char)s[ze])) {
+                        ze++;
+                    }
+
+                    if (z + 3 < e && s[z] == '[' && s[z + 1] == '!' && ze < e && s[ze] == ']' && ze - z - 2 < 12 &&
+                            skip_ws(s, ze + 1, e) == e && P.nc > 0) {
+                        size_t q2;
+
+                        P.c[P.nc - 1].alert[0] = '!';
+
+                        for (q2 = 0; q2 < ze - z - 2; q2++) {
+                            P.c[P.nc - 1].alert[q2 + 1] = (char)tolower((unsigned char)s[z + 2 + q2]);
+                        }
+
+                        P.c[P.nc - 1].alert[ze - z - 1] = '\0';
+                        pos = e;
+                    }
+                }
+
                 continue;
             }
 
@@ -3244,6 +3594,43 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
 
         for (k = P.nc; k < 32; k++) {   /* a block between items ends their list */
             P.sibok[k] = 0;
+        }
+
+        /* pandoc's fenced divs: ::: name (or {.name}) opens one, ::: closes it */
+        if (cols_to(s, pos, c) < 4 && c + 2 < e && s[c] == ':' && s[c + 1] == ':' && s[c + 2] == ':') {
+            size_t z = c, ne;
+            char name[32] = "";
+
+            while (z < e && s[z] == ':') {
+                z++;
+            }
+
+            z = skip_ws(s, z, e);
+
+            if (z < e && s[z] == '{') {     /* {.name ...} */
+                while (z < e && s[z] != '.' && s[z] != '}') {
+                    z++;
+                }
+
+                z += z < e && s[z] == '.';
+            }
+
+            for (ne = z; ne < e && (isalnum((unsigned char)s[ne]) || s[ne] == '-' || s[ne] == '_'); ne++) {
+            }
+
+            snprintf(name, sizeof(name), "%.*s", (int)(ne - z < 31 ? ne - z : 31), s + z);
+
+            if (name[0] || P.ndiv > 0) {
+                leaf_close(&P);
+
+                if (name[0] && P.ndiv < 8) {
+                    snprintf(P.divs[P.ndiv++], sizeof(P.divs[0]), "%s", name);
+                } else if (!name[0]) {
+                    P.ndiv--;
+                }
+
+                continue;
+            }
         }
 
         /* the paragraph under way: a setext underline, a table, a definition, or more of it */
@@ -3346,9 +3733,21 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
             }
 
             if (fence_start(s, c, e, &fc, &flen)) {
-                size_t info = skip_ws(s, c + flen, e), ie = info;
+                size_t info = skip_ws(s, c + flen, e), ie;
 
-                while (ie < e && s[ie] != ' ' && s[ie] != '\t' && s[ie] != '{') {
+                if (info < e && s[info] == '{') {   /* pandoc: {.python .numberLines}, the first class */
+                    size_t z = info + 1;
+
+                    while (z < e && s[z] != '.' && s[z] != '}') {
+                        z++;
+                    }
+
+                    info = z < e && s[z] == '.' ? z + 1 : e;
+                }
+
+                ie = info;
+
+                while (ie < e && s[ie] != ' ' && s[ie] != '\t' && s[ie] != '{' && s[ie] != '}') {
                     ie++;
                 }
 
@@ -3382,7 +3781,11 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                 continue;
             }
 
-            if (html_start(s, c, e, P.html_end, sizeof(P.html_end))) {
+            if (html_start(s, c, e, P.html_end, sizeof(P.html_end)) || lone_tag(s, c, e)) {
+                if (lone_tag(s, c, e) && !html_start(s, c, e, P.html_end, sizeof(P.html_end))) {
+                    P.html_end[0] = '\0';  /* CommonMark's kind 7: to a blank line */
+                }
+
                 P.leaf = LF_HTML;
                 leaf_add(&P, s + pos, e - pos);
 
@@ -3390,6 +3793,38 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                     leaf_close(&P);
                 }
 
+                continue;
+            }
+
+            /* pandoc's line block: | lines, each kept a line; not a table, which has a delimiter row */
+            if (c + 1 < e && s[c] == '|' && s[c + 1] == ' ' && !(i + 1 < nl && table_delim(s, lines[i + 1].a,
+                    lines[i + 1].b))) {
+                int32_t j = i;
+
+                P.leaf = LF_PARA;
+
+                while (j < nl) {
+                    size_t la = skip_cols(s, lines[j].a, lines[j].b, cols_to(s, lines[i].a, pos)), lc = skip_ws(s, la, lines[j].b);
+
+                    if (lc + 1 < lines[j].b && s[lc] == '|' && (s[lc + 1] == ' ' || lc + 1 == lines[j].b)) {
+                        if (j > i) {
+                            pb_puts(&P.text, "\\\n");    /* a hard break */
+                        }
+
+                        pb_put(&P.text, s + lc + 2, lines[j].b - lc - 2);
+                    } else if (j > i && lc < lines[j].b && lc > la) {
+                        pb_putc(&P.text, ' ');  /* an indented line goes on the one before */
+                        pb_put(&P.text, s + lc, lines[j].b - lc);
+                    } else {
+                        break;
+                    }
+
+                    j++;
+                }
+
+                P.nlines = 1;
+                leaf_close(&P);
+                i = j - 1;
                 continue;
             }
 

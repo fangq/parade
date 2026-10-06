@@ -393,7 +393,29 @@ int pd_conv_list_kind(const pd_doc* d, pd_block_id para, int32_t* level) {
     }
 
     *level = bi.list_level < n ? bi.list_level : n - 1;
+
+    {
+        pd_para_attrs at;
+
+        if (pd_doc_para_attrs(d, para, &at) == PD_OK && at.cont) {
+            return 0;   /* a later block of an item is no item (pd_conv_item_level finds its item) */
+        }
+    }
+
     return lv[*level].format == PD_NUM_BULLET || lv[*level].format == PD_NUM_NONE ? 1 : 2;
+}
+
+int pd_conv_item_level(const pd_doc* d, pd_block_id para, int32_t* level) {
+    pd_block_info bi;
+    pd_para_attrs at;
+
+    if (pd_doc_block_info(d, para, &bi) != PD_OK || !bi.list || pd_doc_para_attrs(d, para, &at) != PD_OK ||
+            !at.cont) {
+        return 0;
+    }
+
+    *level = bi.list_level;
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1112,7 +1134,8 @@ static void copy_attrs(copier* C, pd_block_id sp, pd_block_id dp) {
     {
         pd_para_attrs at;
 
-        if (pd_doc_para_attrs(C->s, sp, &at) == PD_OK && (at.quote_depth || at.task || at.loose || at.lang[0])) {
+        if (pd_doc_para_attrs(C->s, sp, &at) == PD_OK && (at.quote_depth || at.task || at.loose || at.lang[0] ||
+                at.cont || at.div_class[0])) {
             pd_doc_set_para_attrs(C->d, dp, &at);
         }
     }

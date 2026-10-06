@@ -31,6 +31,7 @@ typedef struct {
     int code_multi;             /* the open <pre> holds a block of several lines */
     char code_lang[32];
     int dl_open;
+    char div[32];               /* the <div class> open */
 } hx;
 
 static void esc(pd_buf* o, const char* s, size_t n, int attr) {
@@ -96,10 +97,39 @@ static void quotes_to(hx* x, int q) {
     }
 }
 
+/* the named block a paragraph is in: <div class="name">, an alert GitHub's markdown-alert */
+static void div_to(hx* x, const char* div) {
+    if (strcmp(div, x->div) == 0) {
+        return;
+    }
+
+    close_code(x);
+    close_dl(x);
+    quotes_to(x, 0);
+    close_lists(x, 0);
+
+    if (x->div[0]) {
+        pb_puts(x->o, "</div>\n");
+    }
+
+    if (div[0] == '!') {
+        pb_puts(x->o, "<div class=\"markdown-alert markdown-alert-");
+        esc(x->o, div + 1, strlen(div + 1), 1);
+        pb_puts(x->o, "\">\n");
+    } else if (div[0]) {
+        pb_puts(x->o, "<div class=\"");
+        esc(x->o, div, strlen(div), 1);
+        pb_puts(x->o, "\">\n");
+    }
+
+    snprintf(x->div, sizeof(x->div), "%s", div);
+}
+
 static void close_groups(hx* x) {
     close_code(x);
     close_dl(x);
     quotes_to(x, 0);
+    div_to(x, "");
 }
 
 static int hx_span(void* user, const pd_span* sp) {
@@ -345,9 +375,11 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
     pd_block_info bi;
     pd_para_props pp;
     int32_t level = 0;
-    int kind = pd_conv_list_kind(x->d, p, &level), task = 0;
+    int kind = pd_conv_list_kind(x->d, p, &level), task = 0, cont = 0, loose = 0;
     const char* align = "";
     char lang[32];
+    const char* ct;
+    uint32_t cn;
 
     pd_doc_block_info(x->d, p, &bi);
     pd_doc_style_resolve(x->d, bi.style, &pp, NULL);
@@ -368,8 +400,11 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
 
         memset(&at, 0, sizeof(at));
         pd_doc_para_attrs(x->d, p, &at);
+        div_to(x, at.div_class);
         quotes_to(x, at.quote_depth > 0 ? at.quote_depth : bi.role == PD_ROLE_QUOTE ? 1 : 0);
         task = at.task;
+        cont = at.cont;
+        loose = at.loose;
         snprintf(lang, sizeof(lang), "%s", at.lang);
     }
 
@@ -379,6 +414,32 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
 
     if (bi.role != PD_ROLE_TERM && bi.role != PD_ROLE_DEFINITION) {
         close_dl(x);
+    }
+
+    /* a later block of the item open at its level: inside it */
+    if (cont && pd_conv_item_level(x->d, p, &level) && x->ldepth == level + 1) {
+        close_lists(x, level + 1);
+
+        if (bi.role == PD_ROLE_CODE) {
+            pd_doc_para_text(x->d, p, &ct, &cn);
+            pb_puts(x->o, "\n<pre><code");
+
+            if (lang[0]) {
+                pb_puts(x->o, " class=\"language-");
+                esc(x->o, lang, strlen(lang), 1);
+                pb_putc(x->o, '"');
+            }
+
+            pb_putc(x->o, '>');
+            esc(x->o, ct, cn, 0);
+            pb_puts(x->o, "</code></pre>");
+        } else {
+            pb_printf(x->o, "\n<p%s>", align);
+            hx_inline(x, p);
+            pb_puts(x->o, "</p>");
+        }
+
+        return;
     }
 
     /* lists: open, close or continue to this item's level */
@@ -418,6 +479,20 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
         if (task) {
             pb_puts(x->o, task == 2 ? "<input type=\"checkbox\" disabled checked> " :
                     "<input type=\"checkbox\" disabled> ");
+        }
+
+        if (bi.role == PD_ROLE_HEADING) {   /* a heading as an item */
+            pb_printf(x->o, "<h%d>", (int)bi.level);
+            hx_inline(x, p);
+            pb_printf(x->o, "</h%d>", (int)bi.level);
+            return;
+        }
+
+        if (loose) {    /* a loose list's item holds a paragraph, as CommonMark writes it */
+            pb_puts(x->o, "<p>");
+            hx_inline(x, p);
+            pb_puts(x->o, "</p>");
+            return;
         }
 
         hx_inline(x, p);
@@ -813,7 +888,8 @@ typedef struct {
     pd_list_id list;            /* E_UL/E_OL: its list, made with its first item */
     int start;                  /* E_OL: <ol start> */
     int task;                   /* E_LI: a checkbox opened it, 1 empty, 2 checked */
-    char lang[32];              /* E_PRE: <code class="language-..."> */
+    int labelled;               /* E_LI: its first paragraph, which carries the label, is made */
+    char lang[32];              /* E_PRE: <code class="language-...">; E_DIV: its class, "!note" for an alert */
 } hel;
 
 typedef struct {
@@ -1137,7 +1213,7 @@ static int block_kind(const char* n, int* level) {
 /* the paragraph a text run opens, from the enclosing elements */
 static void hi_begin_para(hi* h) {
     pd_bld* b = h->b;
-    int32_t i, lists = 0, lkind = 1, align = -1, quotes = 0;
+    int32_t i, lists = 0, lkind = 1, align = -1, quotes = 0, inner_at = -1, item_at = -1;
     hel* inner = NULL, *list = NULL, *item = NULL;
     pd_para_attrs at;
     pd_block_id p;
@@ -1152,12 +1228,17 @@ static void hi_begin_para(hi* h) {
             inner = e;
         }
 
+        if (inner_at < 0 && e->kind == E_P) {
+            inner_at = i;   /* the <p> it is in */
+        }
+
         if (align < 0 && e->align >= 0) {
             align = e->align;
         }
 
         if (e->kind == E_LI && !item && lists == 0) {
             item = e;
+            item_at = i;
         }
 
         if (e->kind == E_UL || e->kind == E_OL) {
@@ -1177,6 +1258,16 @@ static void hi_begin_para(hi* h) {
     }
 
     at.quote_depth = quotes < 9 ? quotes : 9;
+
+    for (i = h->depth - 1; i >= 0 && !at.div_class[0]; i--) {   /* the innermost named <div> */
+        if (h->stack[i].kind == E_BARRIER || h->stack[i].kind == E_CELL || h->stack[i].kind == E_FIG) {
+            break;
+        }
+
+        if (h->stack[i].kind == E_DIV && h->stack[i].lang[0]) {
+            snprintf(at.div_class, sizeof(at.div_class), "%s", h->stack[i].lang);
+        }
+    }
 
     if (inner && inner->kind == E_H) {
         if (inner->title) {
@@ -1219,6 +1310,16 @@ static void hi_begin_para(hi* h) {
         item->task = 0;     /* the item's first paragraph has it */
     }
 
+    if (item && lists > 0) {    /* a later paragraph of the item: in it, without a label */
+        at.cont = item->labelled;
+
+        if (!item->labelled && inner_at == item_at + 1) {
+            at.loose = 1;   /* <li><p>: an item of a loose list */
+        }
+
+        item->labelled = 1;
+    }
+
     if (align >= 0) {
         b->pp.mask |= PD_PP_ALIGN;
         b->pp.align = align;
@@ -1226,7 +1327,7 @@ static void hi_begin_para(hi* h) {
 
     p = bld_begin_para(b);
 
-    if (p && (at.quote_depth || at.task || at.lang[0])) {
+    if (p && (at.quote_depth || at.task || at.lang[0] || at.cont || at.div_class[0] || at.loose)) {
         pd_doc_set_para_attrs(b->d, p, &at);
     }
 
@@ -1866,6 +1967,17 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
 
             if (kind == E_OL && mu_attr(&m, "start", v, sizeof(v))) {
                 e.start = atoi(v);
+            }
+
+            if (kind == E_DIV && !strcmp(m.name, "div") && mu_attr(&m, "class", v, sizeof(v)) && v[0] &&
+                    !strstr(v, "page-break") && !strstr(v, "footnotes")) {
+                const char* al = strstr(v, "markdown-alert-");
+
+                if (al) {   /* GitHub's alert */
+                    snprintf(e.lang, sizeof(e.lang), "!%.*s", (int)strcspn(al + 15, " \t"), al + 15);
+                } else if (!strstr(v, "markdown-alert")) {
+                    snprintf(e.lang, sizeof(e.lang), "%.*s", (int)strcspn(v, " \t"), v);
+                }
             }
 
             switch (kind) {

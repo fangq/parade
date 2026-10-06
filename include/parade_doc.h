@@ -541,6 +541,11 @@ typedef struct {
     int32_t task;               /**< a list item's checkbox: 0 none, 1 open, 2 checked */
     int32_t loose;              /**< 1 = an item of a loose list (blank lines between its items) */
     char lang[32];              /**< a code block's language ("python"), UTF-8, "" = none */
+    int32_t cont;               /**< 1 = a later block of the list item above (its list and level): no label of
+                                     its own, not counted, indented as the item's text */
+    char div_class[32];         /**< a named block it is in (Markdown's ::: warning, HTML's <div class>): a run of
+                                     paragraphs with one name is one block; "!note" etc. are GitHub's alerts,
+                                     block quotes of a kind. UTF-8, "" = none */
 } pd_para_attrs;
 
 PD_API pd_status pd_doc_para_attrs(const pd_doc* doc, pd_block_id paragraph, pd_para_attrs* out);

@@ -29,7 +29,7 @@ STRUCTS = {
     "pd_run": "start end format",
     "pd_inline": "kind resource width height depth field target level name source source_len user title title_len "
                  "alt alt_len",
-    "pd_para_attrs": "quote_depth task loose lang",
+    "pd_para_attrs": "quote_depth task loose lang cont div_class",
     "pd_float_props": "placement wrap width width_fraction span_columns gap sequence",
     "pd_section_props": "page_width page_height margin_top margin_bottom margin_left margin_right header_distance "
                         "footer_distance columns column_gap first_page_number page_number_format title_page "

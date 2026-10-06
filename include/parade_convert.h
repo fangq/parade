@@ -12,13 +12,17 @@
  *             figures with captions, footnotes; import is tolerant (real
  *             web pages, office clipboard fragments)
  *   Markdown  CommonMark blocks and inlines -- quotes and lists nested in
- *             each other, reference links, fenced code with its language,
+ *             each other, several blocks in an item, reference links (also
+ *             defined in quotes and items), fenced code with its language,
  *             rules, raw HTML kept as it is -- plus GFM tables (column
- *             alignment), task lists, strikethrough and footnotes; pandoc
- *             heading ids, definition lists and image sizes; YAML front
- *             matter as the document's metadata; underline, super/subscript
- *             as inline HTML. Pictures by address are kept as addresses
- *             (pd_doc_load_images fetches them)
+ *             alignment), task lists, strikethrough, bare www./https://
+ *             links, footnotes and alerts ([!NOTE]); pandoc heading ids,
+ *             code attributes, definition lists, image sizes, ^sup^ and
+ *             H~2~O subscripts, inline notes ^[..], line blocks and :::
+ *             fenced divs; YAML front matter as the document's metadata;
+ *             underline, super/subscript as inline HTML. Pictures by
+ *             address are kept as addresses (pd_doc_load_images fetches
+ *             them)
  *   LaTeX     export only: article class, sectioning, lists, tables
  *             (longtable with repeated header), figures, footnotes,
  *             cross-references, inline and display equations

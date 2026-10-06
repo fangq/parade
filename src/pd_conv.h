@@ -76,6 +76,8 @@ int pd_conv_is_mono(const pd_char_props* cp);
 
 /* list kind of a paragraph: 0 none, 1 bullet, 2 numbered; level 0-8 */
 int pd_conv_list_kind(const pd_doc* d, pd_block_id para, int32_t* level);
+/* a later block of a list item (pd_para_attrs.cont): 1 and the item's level, else 0 */
+int pd_conv_item_level(const pd_doc* d, pd_block_id para, int32_t* level);
 
 /* ------------------------------------------------------------------ */
 /* building a document                                                */

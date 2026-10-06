@@ -1404,8 +1404,12 @@ pd_status pd_doc_list_label(const pd_doc* d, pd_block_id para, char* buf, int32_
         blk* c = d->tab[cur];
         int32_t lv = c->st.list_level;
 
-        if (c->st.list != b->st.list) {
-            continue;
+        if (c->st.list != b->st.list || (c->st.at.cont && cur != para)) {
+            continue;   /* a later block of an item is not an item */
+        }
+
+        if (cur == para && c->st.at.cont) {
+            return PD_OK;   /* and has no label */
         }
 
         lv = lv < l->n ? lv : l->n - 1;
@@ -2479,6 +2483,8 @@ pd_status pd_doc_split(pd_doc* d, pd_pos at, pd_pos* after) {
         q->st.list_level = b->st.list_level;
         q->st.style = b->st.style;
         q->st.list = b->st.list;
+        q->st.at = b->st.at;    /* in the same quote, code block, list */
+        q->st.at.task = q->st.at.task ? 1 : 0;  /* a new task is not done yet */
         q->st.pp = b->st.pp;
         q->st.pp.mask &= ~(uint32_t)PD_PP_BREAK_BEFORE;
         q->st.empty_format = format_at(&b->st, at.offset, 1);
@@ -3311,10 +3317,12 @@ pd_status pd_doc_set_para_attrs(pd_doc* d, pd_block_id para, const pd_para_attrs
     if (at) {
         a = *at;
         a.lang[sizeof(a.lang) - 1] = '\0';
+        a.div_class[sizeof(a.div_class) - 1] = '\0';
     }
 
     BLOCK_OP("Paragraph attributes", b && at && a.quote_depth >= 0 && a.quote_depth <= 9 && a.task >= 0 &&
-             a.task <= 2 && (a.loose == 0 || a.loose == 1) && pd_doc_utf8_valid(a.lang, strlen(a.lang), 0),
+             a.task <= 2 && (a.loose == 0 || a.loose == 1) && (a.cont == 0 || a.cont == 1) &&
+             pd_doc_utf8_valid(a.lang, strlen(a.lang), 0) && pd_doc_utf8_valid(a.div_class, strlen(a.div_class), 0),
              b->st.at = a);
 }
 

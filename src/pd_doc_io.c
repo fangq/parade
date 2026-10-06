@@ -316,7 +316,7 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
                 put_int(w, "EmptyFormat", fmt_id(sv, s->empty_format));
             }
 
-            if (s->at.quote_depth || s->at.task || s->at.loose || s->at.lang[0]) {
+            if (s->at.quote_depth || s->at.task || s->at.loose || s->at.lang[0] || s->at.cont || s->at.div_class[0]) {
                 pj_key(w, "Attrs");
                 pj_obj_begin(w);
 
@@ -334,6 +334,14 @@ static void save_block(pj_writer* w, const saver* sv, const blk* b) {
 
                 if (s->at.lang[0]) {
                     put_str(w, "Language", s->at.lang);
+                }
+
+                if (s->at.cont) {
+                    put_bool(w, "Continues", s->at.cont);
+                }
+
+                if (s->at.div_class[0]) {
+                    put_str(w, "Div", s->at.div_class);
                 }
 
                 pj_obj_end(w);
@@ -926,6 +934,8 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
         s->at.task = (int32_t)int_or(pj_get(x, "Task"), 0, 0, 2, L);
         s->at.loose = (int32_t)int_or(pj_get(x, "Loose"), 0, 0, 1, L);
         copy_name(pj_get(x, "Language"), s->at.lang, sizeof(s->at.lang), L);
+        s->at.cont = (int32_t)int_or(pj_get(x, "Continues"), 0, 0, 1, L);
+        copy_name(pj_get(x, "Div"), s->at.div_class, sizeof(s->at.div_class), L);
     }
 
     x = pj_get(o, "Text");

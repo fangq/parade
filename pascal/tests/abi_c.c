@@ -179,6 +179,8 @@ int main(void) {
     printf("pd_para_attrs.task %zu\n", offsetof(pd_para_attrs, task));
     printf("pd_para_attrs.loose %zu\n", offsetof(pd_para_attrs, loose));
     printf("pd_para_attrs.lang %zu\n", offsetof(pd_para_attrs, lang));
+    printf("pd_para_attrs.cont %zu\n", offsetof(pd_para_attrs, cont));
+    printf("pd_para_attrs.div_class %zu\n", offsetof(pd_para_attrs, div_class));
     printf("pd_float_props %zu\n", sizeof(pd_float_props));
     printf("pd_float_props.placement %zu\n", offsetof(pd_float_props, placement));
     printf("pd_float_props.wrap %zu\n", offsetof(pd_float_props, wrap));
