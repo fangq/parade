@@ -2366,6 +2366,90 @@ static void test_docx_omml(void) {
     pd_doc_free(d);
 }
 
+static int has_bytes(const char* t, uint32_t n, const char* want) {
+    size_t w = strlen(want), k;
+
+    for (k = 0; k + w <= n; k++) {
+        if (!memcmp(t + k, want, w)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* Word's fields and cross-references: a page reference to a bookmark
+   further on (a table of contents' kind) is the live page of its
+   paragraph; a SEQ caption number is a live counter; a REF keeps Word's
+   text and links to its bookmark; a link to a place in the document goes
+   there. All of it kept through DOCX. */
+static void test_docx_fields(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:hyperlink w:anchor=\"_Toc1\"><w:r><w:t xml:space=\"preserve\">Intro </w:t></w:r></w:hyperlink>"
+        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> PAGEREF _Toc1 \\h </w:instrText></w:r>"
+        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
+        "<w:p><w:r><w:br w:type=\"page\"/></w:r><w:bookmarkStart w:id=\"0\" w:name=\"_Toc1\"/><w:r><w:t>Intro</w:t></w:r>"
+        "<w:bookmarkEnd w:id=\"0\"/></w:p>"
+        "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"_Ref5\"/><w:r><w:t xml:space=\"preserve\">Figure </w:t></w:r>"
+        "<w:fldSimple w:instr=\" SEQ Figure \\* ARABIC \"><w:r><w:t>7</w:t></w:r></w:fldSimple><w:bookmarkEnd w:id=\"1\"/></w:p>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">See </w:t></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>"
+        "<w:r><w:instrText> REF _Ref5 \\h </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>"
+        "<w:r><w:t>Figure 1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r><w:r><w:t>.</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id p0, p1, p2, p3;
+        pd_inline o;
+        const char* t;
+        uint32_t n, k;
+        int found_ref = 0, found_seq = 0, links = 0;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        p0 = pd_doc_next_paragraph(d, 0);
+        p1 = pd_doc_next_paragraph(d, p0);
+        p2 = pd_doc_next_paragraph(d, p1);
+        p3 = pd_doc_next_paragraph(d, p2);
+
+        for (pd_doc_para_text(d, p0, &t, &n), k = 0; k + 3 <= n; k++) {
+            if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at(p0, k), &o) == PD_OK) {
+                found_ref |= o.kind == PD_INLINE_FIELD && o.field == PD_FIELD_REF_PAGE && o.target == p1;
+                links += o.kind == PD_INLINE_LINK && o.source_len == 6 && !memcmp(o.source, "#_Toc1", 6);
+            }
+        }
+
+        CHECK(found_ref && links == 1);     /* the page of the heading's paragraph; the entry links to it */
+        CHECK(memchr(t, '9', n) == NULL);   /* Word's old page number not kept */
+
+        for (pd_doc_para_text(d, p2, &t, &n), k = 0; k + 3 <= n; k++) {
+            if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at(p2, k), &o) == PD_OK) {
+                found_seq |= o.kind == PD_INLINE_FIELD && o.field == PD_FIELD_SEQ && !strcmp(o.name, "Figure");
+            }
+        }
+
+        CHECK(found_seq);
+        links = 0;
+
+        for (pd_doc_para_text(d, p3, &t, &n), k = 0; k + 3 <= n; k++) {
+            if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at(p3, k), &o) == PD_OK) {
+                links += o.kind == PD_INLINE_LINK && o.source_len == 6 && !memcmp(o.source, "#_Ref5", 6);
+            }
+        }
+
+        CHECK(links == 1 && has_bytes(t, n, "Figure 1"));     /* Word's text, linked to the caption */
+    }
+
+    pd_doc_free(d);
+}
+
 /* the note mark at a paragraph's byte offset: 0 footnote, 1 endnote, -1 none */
 static int note_at(const pd_doc* d, pd_block_id para, uint32_t off, pd_block_id* story) {
     pd_inline o;
@@ -3008,6 +3092,8 @@ int main(void) {
     test_emf();
     printf("docx equations\n");
     test_docx_omml();
+    printf("docx fields and references\n");
+    test_docx_fields();
     printf("docx endnotes\n");
     test_docx_endnotes();
     printf("docx tab stops\n");

@@ -322,6 +322,8 @@ typedef struct {
     pd_block_id pending[8];     /* picture floats to anchor in the next paragraph */
     int npending;
     int page_break;             /* a page break opens the next paragraph */
+    pd_block_id reft[1024];     /* paragraphs referred to that have no bookmark: given _RefPd<id> */
+    int nreft;
     int even_odd;               /* some section has even-page headers */
     int nbookmarks;
     pd_buf* hf_rels[8];
@@ -503,6 +505,7 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
 /* a picture as a run: inline, or anchored where a float is (fp) -- beside the text on the side the float
    wraps on, or across the column */
 static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx, long long cy);
+static int dx_ref_name(const pd_doc* d, pd_block_id para, char* out, size_t cap);
 
 static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     pd_buf* o = x->o;
@@ -1022,6 +1025,23 @@ static int dx_span(void* user, const pd_span* sp) {
                         snprintf(v, sizeof(v), "%d", (int)pd_numbers_ref(&x->nb, ob->target));
                         break;
 
+                    case PD_FIELD_REF_PAGE:     /* the page of a place: its bookmark's, or one made for it */
+                        if (ob->target) {
+                            char bm[48];
+
+                            dx_ref_name(x->d, ob->target, bm, sizeof(bm));
+                            pb_puts(o, "<w:fldSimple w:instr=\" PAGEREF ");
+                            xesc(o, bm, strlen(bm));
+                            pb_puts(o, " \\h \"><w:r><w:t>1</w:t></w:r></w:fldSimple>");
+                        }
+
+                        break;
+
+                    case PD_FIELD_DATE:
+                        strcpy(v, " ");
+                        instr = "DATE";
+                        break;
+
                     case PD_FIELD_PAGE:
                         strcpy(v, "1");
                         instr = "PAGE";
@@ -1109,7 +1129,12 @@ static int dx_span(void* user, const pd_span* sp) {
                     x->in_link = 0;
                 }
 
-                if (ob->source && ob->source_len > 0 && !x->in_note) {
+                if (ob->source && ob->source_len > 1 && ob->source[0] == '#') {     /* to a bookmark of the document */
+                    pb_puts(o, "<w:hyperlink w:anchor=\"");
+                    xesc(o, ob->source + 1, (size_t)ob->source_len - 1);
+                    pb_puts(o, "\" w:history=\"1\">");
+                    x->in_link = 1;
+                } else if (ob->source && ob->source_len > 0 && !x->in_note) {
                     x->nlinks++;
                     pb_printf(&x->rels, "<Relationship Id=\"rIdl%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/"
                               "2006/relationships/hyperlink\" Target=\"", x->nlinks);
@@ -1191,6 +1216,45 @@ static int dx_num_id(dxo* x, pd_block_id p, int32_t* level) {
     x->listmap[x->nlistmap] = bi.list;
     x->listkind[x->nlistmap] = kind;
     return ++x->nlistmap;
+}
+
+/* the bookmark a reference to a paragraph names: the paragraph's own first one, or _RefPd<id>, which the
+   paragraph is given when it is written */
+static int dx_ref_name(const pd_doc* d, pd_block_id para, char* out, size_t cap) {
+    const char* t;
+    uint32_t n, k;
+
+    if (pd_doc_para_text(d, para, &t, &n) == PD_OK) {
+        for (k = 0; k + 3 <= n; k++) {
+            pd_inline o;
+            pd_pos at;
+
+            at.block = para;
+            at.offset = k;
+
+            if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at, &o) == PD_OK &&
+                    o.kind == PD_INLINE_BOOKMARK && o.name[0]) {
+                snprintf(out, cap, "%s", o.name);
+                return 1;
+            }
+        }
+    }
+
+    snprintf(out, cap, "_RefPd%u", (unsigned)para);
+    return 0;
+}
+
+/* whether a paragraph is the target of a reference that needs a bookmark made for it */
+static int dx_ref_target(const dxo* x, pd_block_id para) {
+    int i;
+
+    for (i = 0; i < x->nreft; i++) {
+        if (x->reft[i] == para) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
@@ -1280,6 +1344,12 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
     if (x->page_break) {
         pb_puts(o, "<w:r><w:br w:type=\"page\"/></w:r>");
         x->page_break = 0;
+    }
+
+    if (dx_ref_target(x, p)) {  /* a place references point at */
+        int bid = x->nbookmarks++;
+
+        pb_printf(o, "<w:bookmarkStart w:id=\"%d\" w:name=\"_RefPd%u\"/><w:bookmarkEnd w:id=\"%d\"/>", bid, (unsigned)p, bid);
     }
 
     if (x->in_note == 2 && bi.index == 0) {     /* the note's number opens its first paragraph */
@@ -2153,6 +2223,32 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     x->d = d;
     pd_numbers_init(&x->nb, d);
 
+    {   /* the paragraphs page references point at that have no bookmark of their own */
+        pd_block_id p;
+
+        for (p = pd_doc_next_paragraph(d, 0); p; p = pd_doc_next_paragraph(d, p)) {
+            const char* t;
+            uint32_t n, k;
+
+            pd_doc_para_text(d, p, &t, &n);
+
+            for (k = 0; k + 3 <= n; k++) {
+                pd_inline o;
+                pd_pos at;
+                char bm[48];
+
+                at.block = p;
+                at.offset = k;
+
+                if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at, &o) == PD_OK && o.kind == PD_INLINE_FIELD &&
+                        o.field == PD_FIELD_REF_PAGE && o.target && !dx_ref_name(d, o.target, bm, sizeof(bm)) &&
+                        !dx_ref_target(x, o.target) && x->nreft < 1024) {
+                    x->reft[x->nreft++] = o.target;
+                }
+            }
+        }
+    }
+
     {   /* the document hyphenates when its Normal does */
         pd_para_props np;
 
@@ -2502,6 +2598,18 @@ typedef struct {
     char def_pstyle[64];        /* the paragraph style of a paragraph that names none */
     char theme_major[64], theme_minor[64];  /* the theme's heading and body fonts */
     pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
+    struct {                    /* bookmarks read: where they are */
+        char name[32];
+        pd_block_id para;
+    } bm[4096];
+    int nbm;
+    struct {                    /* fields that point at a bookmark, put right once all are read */
+        char name[32];
+        pd_block_id para;
+        uint32_t off;
+        int field;
+    } refs[2048];
+    int nrefs;
 } dxi;
 
 static const char* rel_target(const dxi* X, const char* id, int* external) {
@@ -4784,18 +4892,68 @@ static int page_field(const char* instr) {
 
     word[k] = '\0';
     return strcmp(word, "PAGE") == 0 ? PD_FIELD_PAGE + 1 : strcmp(word, "NUMPAGES") == 0 ? PD_FIELD_PAGES + 1 :
-           strcmp(word, "SECTIONPAGES") == 0 ? PD_FIELD_SECTION_PAGE + 1 : 0;
+           strcmp(word, "SECTIONPAGES") == 0 ? PD_FIELD_SECTION_PAGE + 1 : strcmp(word, "PAGEREF") == 0 ?
+           PD_FIELD_REF_PAGE + 1 : strcmp(word, "SEQ") == 0 ? PD_FIELD_SEQ + 1 : strcmp(word, "DATE") == 0 ?
+           PD_FIELD_DATE + 1 : 0;
 }
 
-static void dw_field(dw* w, int kind) {
+/* the instruction's first argument: a bookmark (PAGEREF), a sequence (SEQ) */
+static void field_arg(const char* instr, char* out, size_t cap) {
+    const char* p = instr;
+    size_t k = 0;
+
+    while (*p == ' ') {
+        p++;
+    }
+
+    while (*p && *p != ' ') {   /* the field's name */
+        p++;
+    }
+
+    while (*p == ' ') {
+        p++;
+    }
+
+    if (*p == '"') {
+        p++;
+    }
+
+    while (*p && *p != ' ' && *p != '"' && *p != '\\' && k + 1 < cap) {
+        out[k++] = *p++;
+    }
+
+    out[k] = '\0';
+}
+
+static void dw_field(dw* w, int kind, const char* instr) {
     pd_inline o;
+    pd_bld* b = w->X->b;
+    char arg[64];
 
     memset(&o, 0, sizeof(o));
     o.kind = PD_INLINE_FIELD;
     o.field = kind - 1;
+    field_arg(instr, arg, sizeof(arg));
+
+    if (o.field == PD_FIELD_SEQ) {
+        snprintf(o.name, sizeof(o.name), "%.31s", arg[0] ? arg : "Figure");
+    }
+
     dw_begin_para(w);
     dw_apply_run(w);
-    bld_inline(w->X->b, &o);
+    bld_inline(b, &o);
+
+    if (o.field == PD_FIELD_REF_PAGE && arg[0] && w->X->nrefs < 2048) {
+        pd_block_info bi;   /* its target once every bookmark is known: the field is the paragraph's last 3 bytes */
+
+        if (b->para && pd_doc_block_info(b->d, b->para, &bi) == PD_OK && bi.text_length >= 3) {
+            snprintf(w->X->refs[w->X->nrefs].name, sizeof(w->X->refs[0].name), "%.31s", arg);
+            w->X->refs[w->X->nrefs].para = b->para;
+            w->X->refs[w->X->nrefs].off = bi.text_length - 3;
+            w->X->refs[w->X->nrefs].field = o.field;
+            w->X->nrefs++;
+        }
+    }
 }
 
 /* the story of a header or footer part, read once however many sections use it */
@@ -5119,14 +5277,19 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     dw_text(w, "\n", 1);
                 }
             } else if (strcmp(t, "bookmarkStart") == 0 && w->in_p && mu_attr(&m, "w:name", v, sizeof(v)) && v[0] &&
-                       strcmp(v, "_GoBack") != 0 && strncmp(v, "_Toc", 4) != 0) {
-                pd_inline o;    /* a named place: Word's own hidden ones are left out */
+                       strcmp(v, "_GoBack") != 0) {
+                pd_inline o;    /* a named place (a heading's _Toc, a caption's _Ref: references point there) */
 
                 memset(&o, 0, sizeof(o));
                 o.kind = PD_INLINE_BOOKMARK;
                 snprintf(o.name, sizeof(o.name), "%.31s", v);
                 dw_begin_para(w);
                 bld_inline(X->b, &o);
+
+                if (X->nbm < 4096) {
+                    snprintf(X->bm[X->nbm].name, sizeof(X->bm[0].name), "%.31s", v);
+                    X->bm[X->nbm++].para = X->b->para;
+                }
             } else if (strcmp(t, "noBreakHyphen") == 0) {
                 dw_text(w, "\xE2\x80\x91", 3);
             } else if (strcmp(t, "softHyphen") == 0) {
@@ -5202,8 +5365,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 if (url && w->nlinks < 16 && m.type == MT_OPEN) {
                     dw_link(w, url, strlen(url));
                     w->link_depth[w->nlinks++] = 1;
+                } else if (m.type == MT_OPEN && w->nlinks < 16 && mu_attr(&m, "w:anchor", v + 1, sizeof(v) - 1) && v[1]) {
+                    v[0] = '#';     /* a place in the document: its bookmark, as a fragment */
+                    dw_link(w, v, strlen(v));
+                    w->link_depth[w->nlinks++] = 1;
                 } else if (m.type == MT_OPEN && w->nlinks < 16) {
-                    w->link_depth[w->nlinks++] = 0;     /* internal anchor: no link */
+                    w->link_depth[w->nlinks++] = 0;
                 }
             } else if (strcmp(t, "fldSimple") == 0) {
                 int kind;
@@ -5211,7 +5378,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->simple_link = 0;
 
                 if (mu_attr(&m, "w:instr", v, sizeof(v)) && (kind = page_field(v)) != 0) {
-                    dw_field(w, kind);  /* computed here; Word's last result is not kept */
+                    dw_field(w, kind, v);   /* computed here; Word's last result is not kept */
 
                     if (m.type == MT_OPEN) {
                         w->skip = 1;
@@ -5237,16 +5404,27 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->fld = 2;
 
                     if ((w->fld_kind = page_field(w->instr)) != 0) {
-                        dw_field(w, w->fld_kind);   /* and its cached result is dropped */
+                        dw_field(w, w->fld_kind, w->instr);     /* and its cached result is dropped */
                     }
 
                     if (q && e && e > q + 1) {
                         dw_link(w, q + 1, (size_t)(e - q - 1));
                         w->fld_link = 1;
+                    } else if (!w->fld_kind && (!strncmp(w->instr + strspn(w->instr, " "), "REF ", 4) ||
+                                                !strncmp(w->instr + strspn(w->instr, " "), "NOTEREF ", 8))) {
+                        char arg[64];   /* a reference: Word's text kept, a link to the place it names */
+
+                        arg[0] = '#';
+                        field_arg(w->instr, arg + 1, sizeof(arg) - 1);
+
+                        if (arg[1]) {
+                            dw_link(w, arg, strlen(arg));
+                            w->fld_link = 1;
+                        }
                     }
                 } else if (strcmp(v, "end") == 0) {
                     if (w->fld == 1 && page_field(w->instr)) {     /* no result part at all */
-                        dw_field(w, page_field(w->instr));
+                        dw_field(w, page_field(w->instr), w->instr);
                     }
 
                     w->fld_kind = 0;
@@ -5634,6 +5812,46 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     }
 
     st = bld_finish(&b);
+
+    /* fields pointing at bookmarks: at the bookmarks' paragraphs */
+    {
+        int i, k;
+
+        for (i = 0; i < X.nrefs; i++) {
+            for (k = 0; k < X.nbm && strcmp(X.bm[k].name, X.refs[i].name) != 0; k++) {
+            }
+
+            if (k < X.nbm) {
+                pd_pos at;
+                pd_range r;
+                pd_inline o;
+
+                at.block = X.refs[i].para;
+                at.offset = X.refs[i].off;
+
+                if (pd_doc_inline_at(d, at, &o) == PD_OK && o.kind == PD_INLINE_FIELD) {
+                    char name[32];
+
+                    snprintf(name, sizeof(name), "%s", o.name);
+                    r.start = at;
+                    r.end = at;
+                    r.end.offset += 3;
+                    o.target = X.bm[k].para;
+                    o.source = NULL;
+                    o.source_len = 0;
+                    o.title = o.alt = NULL;
+                    o.title_len = o.alt_len = 0;
+                    snprintf(o.name, sizeof(o.name), "%s", name);
+
+                    if (pd_doc_delete(d, r, NULL) == PD_OK) {
+                        pd_doc_insert_inline(d, at, &o, NULL);
+                    }
+                }
+            }
+        }
+
+        pd_doc_clear_undo(d);
+    }
 
     /* a trailing empty section (from a sectPr in the last paragraph) goes */
     {
