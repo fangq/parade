@@ -1563,6 +1563,148 @@ static void test_docx_tabs(void) {
     pd_doc_free(d);
 }
 
+static pd_doc* md_doc(const char* md) {
+    pd_doc* d = NULL;
+
+    return pd_doc_import(md, strlen(md), PD_CONV_MARKDOWN, &d) == PD_OK ? d : NULL;
+}
+
+/* the Markdown a document writes, NUL-terminated (caller frees) */
+static char* md_of(const pd_doc* d) {
+    buf_t b;
+
+    memset(&b, 0, sizeof(b));
+
+    if (pd_doc_export(d, PD_CONV_MARKDOWN, to_buf, &b) != PD_OK) {
+        free(b.p);
+        return NULL;
+    }
+
+    return b.p;
+}
+
+/* the n-th paragraph of the first section, in reading order of its top-level blocks */
+static pd_block_id nth_para(const pd_doc* d, int32_t n) {
+    return pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), n);
+}
+
+static int para_is(const pd_doc* d, pd_block_id p, const char* s) {
+    const char* t;
+    uint32_t n;
+
+    return pd_doc_para_text(d, p, &t, &n) == PD_OK && n == strlen(s) && memcmp(t, s, n) == 0;
+}
+
+/* Markdown import: every list numbered from its own first item, nested
+   lists restarting under each item; reference links and images; table
+   column alignment; heading ids. And back out again. */
+static void test_md_import(void) {
+    pd_doc* d = md_doc("3. three\n4. four\n   1. sub one\n   2. sub two\n5. five\n   1. again one\n\n"
+                       "- bullet\n\n7) other\n\n"
+                       "See [the site][Site] and [Site][] and [site], not [nothing].\n\n"
+                       "[site]:  <http://example.org/a b>  \"Title\"\n\n"
+                       "| L | C | R | N |\n|:--|:-:|--:|---|\n| a | b | c | d |\n\n"
+                       "## Section {#sec-1}\n\nSetext {#set}\n------\n\n<http://x.org> and [y](http://y.org)\n");
+    pd_block_id p;
+    char lab[32], *md;
+    pd_para_props pp;
+    pd_inline o;
+    pd_block_id t;
+    int i;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    {
+        static const char* want[] = { "3.", "4.", "1.", "2.", "5.", "1.", "\xE2\x80\xA2", "7." };
+
+        for (i = 0; i < 8; i++) {
+            label_of(d, nth_para(d, i), lab);
+            CHECK(strcmp(lab, want[i]) == 0);
+        }
+    }
+
+    /* the references: three forms of one, case and spacing aside; the undefined one stays text */
+    p = nth_para(d, 8);
+    CHECK(pd_doc_inline_at(d, at(p, 4), &o) == PD_OK && o.kind == PD_INLINE_LINK && o.source &&
+          o.source_len == 22 && memcmp(o.source, "http://example.org/a b", 22) == 0);
+    {
+        const char* tx;
+        uint32_t n, k, links = 0;
+
+        pd_doc_para_text(d, p, &tx, &n);
+
+        for (k = 0; k + 2 < n; k++) {
+            if (memcmp(tx + k, "\xEF\xBF\xBC", 3) == 0 && pd_doc_inline_at(d, at(p, k), &o) == PD_OK &&
+                    o.kind == PD_INLINE_LINK && o.source_len > 0) {
+                links++;
+            }
+        }
+
+        CHECK(links == 3);
+        for (k = 0; k + 9 <= n && memcmp(tx + k, "[nothing]", 9) != 0; k++) {
+        }
+
+        CHECK(k + 9 <= n);
+    }
+
+    t = first_table(d);
+    {
+        static const int want[] = { PD_ALIGN_LEFT, PD_ALIGN_CENTER, PD_ALIGN_RIGHT };
+
+        for (i = 0; i < 3; i++) {
+            pd_doc_para_props(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 1), i), 0), &pp);
+            CHECK((pp.mask & PD_PP_ALIGN) && pp.align == want[i]);
+        }
+
+        pd_doc_para_props(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 1), 3), 0), &pp);
+        CHECK(!(pp.mask & PD_PP_ALIGN));
+    }
+
+    /* the headings: the id an anchor at the start, not text */
+    for (i = 0; i < 20 && !para_is(d, nth_para(d, i), "\xEF\xBF\xBCSection"); i++) {
+    }
+
+    p = nth_para(d, i);
+    CHECK(i < 20 && pd_doc_inline_at(d, at(p, 0), &o) == PD_OK && o.kind == PD_INLINE_BOOKMARK &&
+          strcmp(o.name, "sec-1") == 0);
+    CHECK(para_is(d, nth_para(d, i + 1), "\xEF\xBF\xBCSetext"));
+
+    /* and back out */
+    md = md_of(d);
+    CHECK(md && strstr(md, "3. three\n4. four\n   1. sub one\n   2. sub two\n5. five\n   1. again one") != NULL);
+    CHECK(md && strstr(md, "7. other") != NULL);
+    CHECK(md && strstr(md, "| :-- | :-: | --: | --- |") != NULL);
+    CHECK(md && strstr(md, "## Section {#sec-1}") != NULL && strstr(md, "## Setext {#set}") != NULL);
+    CHECK(md && strstr(md, "<http://x.org> and [y](http://y.org)") != NULL);
+
+    if (md) {   /* which reads back the same */
+        pd_doc* d2 = md_doc(md);
+        char* md2 = d2 ? md_of(d2) : NULL;
+
+        CHECK(md2 && strcmp(md, md2) == 0);
+        free(md2);
+        pd_doc_free(d2);
+    }
+
+    free(md);
+    pd_doc_free(d);
+
+    /* two lists of one kind side by side stay two */
+    d = md_doc("- a\n- b\n\n<!-- -->\n\n- c\n");
+
+    if (d) {
+        md = md_of(d);
+        label_of(d, nth_para(d, 2), lab);
+        CHECK(md && strstr(md, "- a\n- b") && (strstr(md, "* c") || strstr(md, "\n\n- c")));
+        free(md);
+        pd_doc_free(d);
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -1590,6 +1732,8 @@ int main(void) {
     test_docx_endnotes();
     printf("docx tab stops\n");
     test_docx_tabs();
+    printf("markdown import\n");
+    test_md_import();
     printf("malformed input\n");
     test_fuzz();
     printf("%d checks, %d failures\n", checks, failures);

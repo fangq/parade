@@ -28,12 +28,16 @@ typedef struct {
     int open[8];                /* stack of open MF_ flags */
     int nopen;
     char link[2048];            /* URL of the open link */
+    size_t link_at;             /* where its text starts in the output */
     int in_link, in_table, in_code;
     pd_block_id notes[4096];
     int32_t nnotes;
     /* lists: marker widths of the enclosing items */
     int lw[10];
     int lnum[10];
+    pd_list_id lid[10];         /* the list each level's last item was in */
+    int lalt[10];               /* that list's marker is the other one: '*' for '-', ')' for '.' */
+    int lkind[10];
     int32_t ldepth;
     int prev_block;             /* 0 none, 1 list item, 2 other */
     int code_open;
@@ -166,6 +170,21 @@ static void code_span(pd_buf* o, const char* s, size_t n) {
     }
 }
 
+/* the end of a link: ](url), or the whole link as <url> when its text is the address */
+static void mx_end_link(mx* x) {
+    pd_buf* o = x->o;
+    size_t tl = o->n - x->link_at, ul = strlen(x->link);
+
+    if (tl == ul && memcmp(o->p + x->link_at, x->link, ul) == 0 && strchr(x->link, ':') && !strpbrk(x->link, "<> ")) {
+        o->p[x->link_at - 1] = '<';
+        pb_putc(o, '>');
+    } else {
+        pb_printf(o, "](%s)", x->link);
+    }
+
+    x->in_link = 0;
+}
+
 static int mx_span(void* user, const pd_span* sp) {
     mx* x = (mx*)user;
     pd_buf* o = x->o;
@@ -223,8 +242,7 @@ static int mx_span(void* user, const pd_span* sp) {
                 fmt_to(x, 0);
 
                 if (x->in_link) {
-                    pb_printf(o, "](%s)", x->link);
-                    x->in_link = 0;
+                    mx_end_link(x);
                 }
 
                 if (ob->source && ob->source_len > 0 && (size_t)ob->source_len < sizeof(x->link)) {
@@ -240,6 +258,7 @@ static int mx_span(void* user, const pd_span* sp) {
 
                     x->link[k] = '\0';
                     pb_putc(o, '[');
+                    x->link_at = o->n;
                     x->in_link = 1;
                 }
 
@@ -300,8 +319,7 @@ static void mx_inline(mx* x, pd_block_id p) {
     fmt_to(x, 0);
 
     if (x->in_link) {
-        pb_printf(x->o, "](%s)", x->link);
-        x->in_link = 0;
+        mx_end_link(x);
     }
 }
 
@@ -352,6 +370,8 @@ static void mx_para(mx* x, pd_block_id p) {
 
     if (kind) {
         char marker[16];
+        pd_list_level lv[9];
+        int32_t nlv = 0, start = 1;
 
         if (x->prev_block == 2) {
             pb_putc(x->o, '\n');
@@ -361,9 +381,27 @@ static void mx_para(mx* x, pd_block_id p) {
             level = x->ldepth;  /* a level can only go one deeper than the last item */
         }
 
-        x->lnum[level] = level < x->ldepth && x->prev_block == 1 && x->ldepth > level ? x->lnum[level] + 1 :
-                         (level == x->ldepth ? 1 : x->lnum[level] + 1);
-        snprintf(marker, sizeof(marker), kind == 1 ? "- " : "%d. ", x->lnum[level]);
+        if (pd_doc_list_info(x->d, bi.list, &nlv, lv) == PD_OK && level < nlv && lv[level].start >= 0) {
+            start = lv[level].start;
+        }
+
+        if (level >= x->ldepth || x->lid[level] != bi.list) {
+            /* a list of its own: counted from its start; right after another of the same kind at this
+               level it takes the other marker, or Markdown would read the two as one */
+            x->lalt[level] = level < x->ldepth && x->lid[level] != bi.list && x->lkind[level] == kind ?
+                             !x->lalt[level] : 0;
+            x->lnum[level] = start;
+            x->lid[level] = bi.list;
+            x->lkind[level] = kind;
+        } else {
+            x->lnum[level]++;
+        }
+
+        if (kind == 1) {
+            snprintf(marker, sizeof(marker), "%c ", x->lalt[level] ? '*' : '-');
+        } else {
+            snprintf(marker, sizeof(marker), "%d%c ", x->lnum[level], x->lalt[level] ? ')' : '.');
+        }
 
         for (i = 0; i < level; i++) {
             pb_printf(x->o, "%*s", i == 0 ? x->lw[0] : x->lw[i] - x->lw[i - 1], "");
@@ -427,6 +465,19 @@ static void mx_para(mx* x, pd_block_id p) {
     }
 
     mx_inline(x, p);
+
+    if (bi.role == PD_ROLE_HEADING || bi.role == PD_ROLE_TITLE) {    /* an anchor at its start: {#id} */
+        pd_inline o;
+        pd_pos at0;
+
+        at0.block = p;
+        at0.offset = 0;
+
+        if (pd_doc_inline_at(x->d, at0, &o) == PD_OK && o.kind == PD_INLINE_BOOKMARK && o.name[0]) {
+            pb_printf(x->o, " {#%s}", o.name);
+        }
+    }
+
     x->prefix[0] = '\0';
     pb_putc(x->o, '\n');
     x->prev_block = 2;
@@ -499,10 +550,30 @@ static void mx_table(mx* x, pd_block_id t) {
 
         pb_putc(x->o, '\n');
 
-        if (r == 0) {
+        if (r == 0) {   /* each column's alignment, from its header cell */
+            int32_t col = 0;
+
             pb_putc(x->o, '|');
 
-            for (c = 0; c < ncols; c++) {
+            for (c = 0; c < ri.child_count && col < ncols; c++) {
+                pd_block_id cell = pd_doc_child(x->d, row, c);
+                pd_cell_props cp;
+                pd_para_props pp;
+                int al = -1;
+
+                pd_doc_cell_props(x->d, cell, &cp);
+
+                if (pd_doc_para_props(x->d, pd_doc_child(x->d, cell, 0), &pp) == PD_OK && (pp.mask & PD_PP_ALIGN)) {
+                    al = pp.align;
+                }
+
+                for (k = 0; k < cp.col_span && col < ncols; k++, col++) {
+                    pb_puts(x->o, al == PD_ALIGN_CENTER ? " :-: |" : al == PD_ALIGN_RIGHT ? " --: |" :
+                            al == PD_ALIGN_LEFT ? " :-- |" : " --- |");
+                }
+            }
+
+            for (; col < ncols; col++) {
                 pb_puts(x->o, " --- |");
             }
 
@@ -601,7 +672,21 @@ typedef struct {
     int nev;
     int tag;                    /* N_TAG: +flag opens, -flag closes */
     pd_sp w, h;                 /* images */
+    const char* url;            /* links and images by reference: the destination, in place of a..b */
+    size_t ulen;
 } mnode;
+
+/* a link reference definition: [label]: destination "title" */
+typedef struct {
+    char label[128];            /* normalized: case folded, inner whitespace collapsed */
+    char* url;
+    size_t ulen;
+} mref;
+
+typedef struct {
+    mref* v;
+    int32_t n, cap;
+} mrefs;
 
 typedef struct {
     char label[64];
@@ -618,8 +703,52 @@ typedef struct {
     const char* s;              /* the text being parsed */
     const char* doc;            /* the whole document (footnote definitions) */
     mnote_list* notes;
+    const mrefs* refs;
     int depth;
 } mctx;
+
+/* a label as CommonMark matches them: ASCII case folded, whitespace runs one space, trimmed */
+static void ref_label(const char* s, size_t n, char* out, size_t cap) {
+    size_t i, k = 0;
+    int sp = 0;
+
+    for (i = 0; i < n && k + 1 < cap; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            sp = k > 0;
+            continue;
+        }
+
+        if (sp && k + 2 < cap) {
+            out[k++] = ' ';
+        }
+
+        sp = 0;
+        out[k++] = (char)tolower(c);
+    }
+
+    out[k] = '\0';
+}
+
+static const mref* find_ref(const mrefs* r, const char* s, size_t n) {
+    char key[128];
+    int32_t i;
+
+    if (!r || n == 0 || n > 999) {
+        return NULL;
+    }
+
+    ref_label(s, n, key, sizeof(key));
+
+    for (i = 0; key[0] && i < r->n; i++) {
+        if (strcmp(r->v[i].label, key) == 0) {
+            return &r->v[i];
+        }
+    }
+
+    return NULL;
+}
 
 static int is_punct(int c) {
     return c >= 0 && c < 128 && ispunct(c);
@@ -744,7 +873,7 @@ static const struct {
 };
 
 /* tokenize inline content of s[a..b) into nodes */
-static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, int32_t* cap) {
+static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, int32_t* cap, const mrefs* refs) {
     size_t i = a, t = a;
 
     while (i < b) {
@@ -914,6 +1043,33 @@ static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, 
         if (c == '!' && i + 1 < b && s[i + 1] == '[') {     /* image */
             size_t rb = close_bracket(s, i + 1, b), ua = 0, ub = 0, e;
 
+            if (rb && refs && !link_dest(s, rb + 1, b, &ua, &ub)) {     /* by reference */
+                size_t la = i + 2, lb = rb, r2;
+                const mref* r;
+
+                e = rb + 1;
+
+                if (rb + 1 < b && s[rb + 1] == '[' && (r2 = close_bracket(s, rb + 1, b)) != 0) {
+                    if (r2 > rb + 2) {
+                        la = rb + 2;
+                        lb = r2;
+                    }
+
+                    e = r2 + 1;
+                }
+
+                if ((r = find_ref(refs, s + la, lb - la)) != NULL) {
+                    FLUSH();
+                    x.type = N_IMAGE;
+                    x.url = r->url;
+                    x.ulen = r->ulen;
+                    push_node(v, nv, cap, &x);
+                    i = e;
+                    t = i;
+                    continue;
+                }
+            }
+
             if (rb && (e = link_dest(s, rb + 1, b, &ua, &ub)) != 0) {
                 FLUSH();
                 x.type = N_IMAGE;
@@ -984,13 +1140,44 @@ static void tokenize(const char* s, size_t a, size_t b, mnode** v, int32_t* nv, 
                 x.a = ua;
                 x.b = ub;
                 push_node(v, nv, cap, &x);
-                tokenize(s, i + 1, rb, v, nv, cap);
+                tokenize(s, i + 1, rb, v, nv, cap, refs);
                 memset(&x, 0, sizeof(x));
                 x.type = N_LINK_CLOSE;
                 push_node(v, nv, cap, &x);
                 i = e;
                 t = i;
                 continue;
+            }
+
+            if (rb && refs) {   /* by reference: [text][label], [text][], [label] */
+                size_t la = i + 1, lb = rb, r2;
+                const mref* r;
+
+                e = rb + 1;
+
+                if (rb + 1 < b && s[rb + 1] == '[' && (r2 = close_bracket(s, rb + 1, b)) != 0) {
+                    if (r2 > rb + 2) {
+                        la = rb + 2;
+                        lb = r2;
+                    }
+
+                    e = r2 + 1;
+                }
+
+                if ((r = find_ref(refs, s + la, lb - la)) != NULL) {
+                    FLUSH();
+                    x.type = N_LINK_OPEN;
+                    x.url = r->url;
+                    x.ulen = r->ulen;
+                    push_node(v, nv, cap, &x);
+                    tokenize(s, i + 1, rb, v, nv, cap, refs);
+                    memset(&x, 0, sizeof(x));
+                    x.type = N_LINK_CLOSE;
+                    push_node(v, nv, cap, &x);
+                    i = e;
+                    t = i;
+                    continue;
+                }
             }
         }
 
@@ -1206,22 +1393,21 @@ static void decoded_text(pd_bld* b, const char* s, size_t n) {
 }
 
 static void add_image(mctx* m, const mnode* x) {
-    const char* s = m->s;
+    const char* u = x->url ? x->url : m->s + x->a;
+    size_t un = x->url ? x->ulen : x->b - x->a;
     char mime[64];
     const char* semi, *data;
 
-    if (x->b - x->a > 5 && strncmp(s + x->a, "data:", 5) == 0 &&
-            (semi = (const char*)memchr(s + x->a, ';', x->b - x->a)) != NULL &&
-            (size_t)(semi - (s + x->a)) - 5 < sizeof(mime) && x->b - (size_t)(semi - s) > 8 &&
-            strncmp(semi, ";base64,", 8) == 0) {
-        size_t ml = (size_t)(semi - (s + x->a)) - 5, dl;
+    if (un > 5 && strncmp(u, "data:", 5) == 0 && (semi = (const char*)memchr(u, ';', un)) != NULL &&
+            (size_t)(semi - u) - 5 < sizeof(mime) && un - (size_t)(semi - u) > 8 && strncmp(semi, ";base64,", 8) == 0) {
+        size_t ml = (size_t)(semi - u) - 5, dl;
         unsigned char* bytes;
         pd_inline o;
 
-        memcpy(mime, s + x->a + 5, ml);
+        memcpy(mime, u + 5, ml);
         mime[ml] = '\0';
         data = semi + 8;
-        dl = (size_t)(s + x->b - data);
+        dl = (size_t)(u + un - data);
 
         if ((bytes = (unsigned char*)malloc(dl + 4)) != NULL) {
             size_t nb = pd_base64_decode(data, dl, bytes);
@@ -1319,7 +1505,7 @@ static void md_inline(mctx* m, size_t a, size_t b) {
     mstate st;
     pd_char_props saved = m->b->cp;
 
-    tokenize(m->s, a, b, &v, &n, &cap);
+    tokenize(m->s, a, b, &v, &n, &cap, m->refs);
     emphasis(v, n);
 
     if ((role = (int (*)[6])calloc((size_t)n + 1, sizeof(int[6]))) == NULL) {
@@ -1414,7 +1600,7 @@ static void md_inline(mctx* m, size_t a, size_t b) {
                 size_t r, w = 0;
 
                 memset(&url, 0, sizeof(url));
-                mu_decode(m->s + x->a, x->b - x->a, &url);
+                mu_decode(x->url ? x->url : m->s + x->a, x->url ? x->ulen : x->b - x->a, &url);
 
                 for (r = 0; r < url.n; r++) {   /* undo what the exporter encoded, and escapes */
                     unsigned hx;
@@ -1531,7 +1717,17 @@ static int blank_line(const char* s, size_t a, size_t b) {
 }
 
 /* a list marker at i: returns its length incl. the following space, kind 1 bullet / 2 ordered */
+static size_t list_marker_c(const char* s, size_t i, size_t b, int* kind, int* number, char* mark);
+
 static size_t list_marker(const char* s, size_t i, size_t b, int* kind, int* number) {
+    char mark;
+
+    return list_marker_c(s, i, b, kind, number, &mark);
+}
+
+/* a list item's marker: its length with the space after it, 0 if none; mark is the bullet
+   character or the delimiter after the number, which tells one list from the next */
+static size_t list_marker_c(const char* s, size_t i, size_t b, int* kind, int* number, char* mark) {
     if (i < b && (s[i] == '-' || s[i] == '*' || s[i] == '+') && (i + 1 == b || s[i + 1] == ' ' || s[i + 1] == '\t')) {
         /* not a thematic break */
         size_t k = i, cnt = 0;
@@ -1546,6 +1742,7 @@ static size_t list_marker(const char* s, size_t i, size_t b, int* kind, int* num
         }
 
         *kind = 1;
+        *mark = s[i];
         return i + 1 == b ? 1 : 2;
     }
 
@@ -1559,6 +1756,7 @@ static size_t list_marker(const char* s, size_t i, size_t b, int* kind, int* num
         if (k < b && (s[k] == '.' || s[k] == ')') && (k + 1 == b || s[k + 1] == ' ')) {
             *kind = 2;
             *number = atoi(s + i);
+            *mark = s[k];
             return k + 1 - i + (k + 1 < b);
         }
     }
@@ -1675,7 +1873,167 @@ static int fence_start(const char* s, size_t a, size_t b, char* fc, size_t* flen
 typedef struct {
     size_t content;             /* column where the item's content starts */
     int kind;
+    pd_list_id id;
 } mlist;
+
+/* A heading's {#id} at the end of s[a..e): a bookmark of that name at the
+   heading's start, and the end of the heading's text before it */
+static size_t heading_id(pd_bld* b, const char* s, size_t a, size_t e) {
+    size_t te = e, k;
+    pd_inline o;
+
+    while (te > a && (s[te - 1] == ' ' || s[te - 1] == '\t')) {
+        te--;
+    }
+
+    if (te < a + 3 || s[te - 1] != '}') {
+        return e;
+    }
+
+    for (k = te - 1; k > a && s[k] != '{'; k--) {
+    }
+
+    if (s[k] != '{' || s[k + 1] != '#' || te - k - 3 >= sizeof(o.name) || te - k - 3 == 0) {
+        return e;
+    }
+
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_BOOKMARK;
+    memcpy(o.name, s + k + 2, te - k - 3);
+
+    if (strpbrk(o.name, " \t}{")) {    /* {#id .class}: only the id */
+        o.name[strcspn(o.name, " \t}{")] = '\0';
+    }
+
+    bld_inline(b, &o);
+
+    while (k > a && (s[k - 1] == ' ' || s[k - 1] == '\t')) {
+        k--;
+    }
+
+    return k;
+}
+
+/* A link reference definition on one line: [label]: destination "title",
+   up to three spaces in. Added to refs (the first of a label wins); 0 when
+   the line is not one. */
+static int ref_def(const char* s, size_t a, size_t e, mrefs* refs) {
+    size_t i = skip_ws(s, a, e), k, ua, ub;
+    char key[128];
+    int32_t q, cap = refs->cap;
+
+    if (i - a > 3 || i + 3 >= e || s[i] != '[' || s[i + 1] == '^') {
+        return 0;
+    }
+
+    for (k = i + 1; k < e && s[k] != ']'; k++) {
+        if (s[k] == '[' || (s[k] == '\\' && ++k >= e)) {
+            return 0;
+        }
+    }
+
+    if (k + 1 >= e || s[k + 1] != ':' || k == i + 1 || k - i - 1 > 999) {
+        return 0;
+    }
+
+    ref_label(s + i + 1, k - i - 1, key, sizeof(key));
+    k = skip_ws(s, k + 2, e);
+
+    if (k >= e) {
+        return 0;
+    }
+
+    if (s[k] == '<') {
+        ua = ++k;
+
+        while (k < e && s[k] != '>') {
+            k++;
+        }
+
+        if (k >= e) {
+            return 0;
+        }
+
+        ub = k++;
+    } else {
+        ua = k;
+
+        while (k < e && s[k] != ' ' && s[k] != '\t') {
+            k++;
+        }
+
+        ub = k;
+    }
+
+    k = skip_ws(s, k, e);
+
+    if (k < e) {    /* a title, then nothing */
+        char q0 = s[k], q1 = q0 == '(' ? ')' : q0;
+
+        if (q0 != '"' && q0 != '\'' && q0 != '(') {
+            return 0;
+        }
+
+        for (k++; k < e && s[k] != q1; k++) {
+        }
+
+        if (k >= e || skip_ws(s, k + 1, e) != e) {
+            return 0;
+        }
+    }
+
+    for (q = 0; q < refs->n; q++) {
+        if (strcmp(refs->v[q].label, key) == 0) {
+            return 1;
+        }
+    }
+
+    if (!key[0] || pd_grow((void**)&refs->v, &cap, (int64_t)refs->n + 1, sizeof(mref))) {
+        return 1;
+    }
+
+    refs->cap = cap;
+    memset(&refs->v[refs->n], 0, sizeof(mref));
+    strcpy(refs->v[refs->n].label, key);
+
+    if ((refs->v[refs->n].url = (char*)malloc(ub - ua + 1)) != NULL) {
+        memcpy(refs->v[refs->n].url, s + ua, ub - ua);
+        refs->v[refs->n].url[ub - ua] = '\0';
+        refs->v[refs->n].ulen = ub - ua;
+        refs->n++;
+    }
+
+    return 1;
+}
+
+/* The list one list in the text is. Markdown numbers each list from its own
+   first item and starts a new count in every list nested under an item, so
+   each gets a definition of its own; its levels are all of one kind, and
+   the level it sits at starts where its first item does. */
+static pd_list_id md_list(pd_bld* b, int kind, int32_t level, int start) {
+    static const char* bullets[] = { "\xE2\x80\xA2", "\xE2\x97\xA6", "\xE2\x96\xAA" };
+    pd_list_level lv[9];
+    pd_list_id id = 0;
+    int32_t i;
+
+    memset(lv, 0, sizeof(lv));
+
+    for (i = 0; i < 9; i++) {
+        lv[i].format = kind == 1 ? PD_NUM_BULLET : PD_NUM_DECIMAL;
+        lv[i].start = i == level && start >= 0 ? start : 1;
+        lv[i].indent = PD_PT(18) * (i + 1);
+        lv[i].hanging = PD_PT(18);
+
+        if (kind == 1) {
+            strcpy(lv[i].text, bullets[i % 3]);
+        } else {
+            snprintf(lv[i].text, sizeof(lv[i].text), "%%%d.", (int)i + 1);
+        }
+    }
+
+    pd_doc_list_define(b->d, 9, lv, &id);
+    return id;
+}
 
 pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
     pd_bld b;
@@ -1683,14 +2041,19 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
     mline* lines = NULL;
     int32_t nl = 0, capl = 0, i;
     mnote_list notes;
+    mrefs refs;
     uint8_t* skip;
     mlist ls[10];
-    int32_t nls = 0;
+    mlist last[10];             /* the list last open at each level, which a next item continues */
+    char lmark[10];
+    int32_t nls = 0, seen = 0;  /* seen: levels of last[] still current */
+    char mark = 0;
     pd_buf para;                /* the paragraph's lines, joined with \n */
     int para_kind = 0;          /* 0 body, 1 quote */
     size_t i0 = 0;
 
     memset(&notes, 0, sizeof(notes));
+    memset(&refs, 0, sizeof(refs));
     memset(&para, 0, sizeof(para));
 
     /* lines */
@@ -1759,11 +2122,45 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
         }
     }
 
+    /* link reference definitions: where a paragraph could start, outside code */
+    {
+        int fenced = 0, can = 1;
+        char f0;
+        size_t fl;
+
+        for (i = 0; i < nl; i++) {
+            size_t a = lines[i].a, e = lines[i].b;
+
+            if (skip[i]) {
+                continue;
+            }
+
+            if (fence_start(s, a, e, &f0, &fl)) {
+                fenced = !fenced;
+                can = 0;
+                continue;
+            }
+
+            if (fenced) {
+                continue;
+            }
+
+            if (blank_line(s, a, e)) {
+                can = 1;
+            } else if (can && ref_def(s, a, e, &refs)) {
+                skip[i] = 1;
+            } else {
+                can = s[skip_ws(s, a, e)] == '#';   /* after a heading, a definition may follow */
+            }
+        }
+    }
+
     bld_init(&b, d);
     m.b = &b;
     m.s = s;
     m.doc = s;
     m.notes = &notes;
+    m.refs = &refs;
     m.depth = 0;
 
     for (i = 0; i < nl; i++) {
@@ -1811,6 +2208,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
 
                     if (nls > 0) {
                         bld_list(&b, ls[nls - 1].kind, nls - 1);
+                        b.list_id = ls[nls - 1].id;
                     }
 
                     if (para_kind == 2) {
@@ -1822,11 +2220,18 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                         char* text = (char*)malloc(para.n + 1);
 
                         if (text) {
+                            size_t te = para.n;
+
                             memcpy(text, para.p, para.n);
                             text[para.n] = '\0';
                             pm.s = text;
                             bld_begin_para(&b);
-                            md_inline(&pm, 0, para.n);
+
+                            if (para_kind == 2) {
+                                te = heading_id(&b, text, 0, te);
+                            }
+
+                            md_inline(&pm, 0, te);
                             bld_end_para(&b);
                             free(text);
                         }
@@ -1859,8 +2264,11 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                                   nind >= (nls > 1 ? ls[nls - 2].content : 0))) {
                             nls--;
                         }
+
+                        seen = nls < seen ? nls + (j < nl && list_marker(s, skip_ws(s, lines[j].a, lines[j].b),
+                                                   lines[j].b, &k2, &n2) ? 1 : 0) : seen;
                     } else if (j >= nl) {
-                        nls = 0;
+                        nls = seen = 0;
                     }
 
                     continue;
@@ -1911,7 +2319,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
             bld_end_para(&b);
             pb_free(&code);
             i = j;
-            nls = 0;
+            nls = seen = 0;
             continue;
         }
 
@@ -1961,7 +2369,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
             bld_end_para(&b);
             pb_free(&tex);
             i = j;
-            nls = 0;
+            nls = seen = 0;
             continue;
         }
 
@@ -1985,15 +2393,16 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                 snprintf(st, sizeof(st), "Heading %d", lvl);
                 bld_para_style(&b, st, PD_ROLE_HEADING, lvl);
                 bld_begin_para(&b);
+                te = heading_id(&b, s, skip_ws(s, k, te), te);
                 md_inline(&m, skip_ws(s, k, te), te);
                 bld_end_para(&b);
-                nls = 0;
+                nls = seen = 0;
                 continue;
             }
         }
 
         if (thematic(s, a, e) && !para.n) {
-            nls = 0;
+            nls = seen = 0;
             continue;
         }
 
@@ -2005,8 +2414,18 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
 
         /* GFM table */
         if (!para.n && c < e && memchr(s + c, '|', e - c) && i + 1 < nl && table_delim(s, lines[i + 1].a, lines[i + 1].b)) {
-            int32_t j = i;
+            int32_t j = i, na, q0;
             size_t ca[64], cb[64];
+            int align[64];
+
+            /* the delimiter row's colons: :-- left, :-: centre, --: right */
+            na = table_cells(s, lines[i + 1].a, lines[i + 1].b, ca, cb, 64);
+
+            for (q0 = 0; q0 < na; q0++) {
+                int l = cb[q0] > ca[q0] && s[ca[q0]] == ':', r = cb[q0] > ca[q0] && s[cb[q0] - 1] == ':';
+
+                align[q0] = l && r ? PD_ALIGN_CENTER : r ? PD_ALIGN_RIGHT : l ? PD_ALIGN_LEFT : -1;
+            }
 
             bld_table_begin(&b);
 
@@ -2043,6 +2462,11 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
                     bld_cell_begin(&b, 1, 0);
 
                     if (w) {
+                        if (q < na && align[q] >= 0) {
+                            b.pp.mask |= PD_PP_ALIGN;
+                            b.pp.align = align[q];
+                        }
+
                         bld_begin_para(&b);
                         md_inline(&pm, 0, w);
                         bld_end_para(&b);
@@ -2055,7 +2479,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
 
             bld_table_end(&b);
             i = j - 1;
-            nls = 0;
+            nls = seen = 0;
             continue;
         }
 
@@ -2091,17 +2515,31 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
         }
 
         /* list item */
-        if ((ml = list_marker(s, c, e, &kind, &number)) != 0 && (nls > 0 || !para.n)) {
+        if ((ml = list_marker_c(s, c, e, &kind, &number, &mark)) != 0 && (nls > 0 || !para.n)) {
             size_t col = ind;
+            int32_t k;
 
             while (nls > 0 && col < ls[nls - 1].content) {
                 nls--;
             }
 
             if (nls < 10) {
+                /* the next item of the list at this level, or the first of a new one */
+                if (!(nls < seen && last[nls].id && last[nls].kind == kind && lmark[nls] == mark)) {
+                    last[nls].id = md_list(&b, kind, nls, kind == 2 ? number : 1);
+                    last[nls].kind = kind;
+                    lmark[nls] = mark;
+                }
+
                 ls[nls].content = col + ml;
                 ls[nls].kind = kind;
+                ls[nls].id = last[nls].id;
                 nls++;
+                seen = nls;
+
+                for (k = nls; k < 10; k++) {    /* a list under this item is a new one */
+                    last[k].id = 0;
+                }
             }
 
             pb_put(&para, s + c + ml, e - c - ml);
@@ -2129,7 +2567,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
         if (para.n) {
             pb_putc(&para, '\n');
         } else if (nls > 0 && ind < ls[nls - 1].content) {
-            nls = 0;    /* a paragraph not indented into the list ends it */
+            nls = seen = 0;     /* a paragraph not indented into the list ends it */
         }
 
         pb_put(&para, s + c, e - c);
@@ -2145,6 +2583,7 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
 
         if (nls > 0) {
             bld_list(&b, ls[nls - 1].kind, nls - 1);
+            b.list_id = ls[nls - 1].id;
         }
 
         if (text) {
@@ -2162,5 +2601,11 @@ pd_status pd_md_import(pd_doc* d, const char* s, size_t n) {
     free(lines);
     free(skip);
     free(notes.v);
+
+    for (i = 0; i < refs.n; i++) {
+        free(refs.v[i].url);
+    }
+
+    free(refs.v);
     return bld_finish(&b);
 }
