@@ -25,7 +25,8 @@ unit paradesync;
 interface
 
 uses
-  Classes, SysUtils, SyncObjs, ExtCtrls, ctypes, fphttpclient, fpjson, jsonparser, base64, parade, paradeedit;
+  Classes, SysUtils, SyncObjs, ExtCtrls, ctypes, fphttpclient, ssockets, sockets, fpjson, jsonparser, base64, parade,
+  paradeedit;
 
 {$LINKLIB yrs}
 {$LINKLIB pthread}
@@ -100,10 +101,32 @@ type
     property Owner: TParadeSync read FOwner;
   end;
 
+  { An HTTP client whose request another thread can cut short.  Terminate alone
+    is looked at only between reads, so a long poll would wait out the relay
+    (25 seconds, or the read timeout when the relay is gone); Abort also shuts
+    the connection down, which returns a read under way at once. }
+  TParadeHttp = class(TFPHTTPClient)
+  private
+    FSockLock: TCriticalSection;
+    FHandler: TSocketHandler;   { the connection being made: this thread's alone }
+    FHandle: THandle;
+    FLive: Boolean;             { FHandle is a connection open now }
+    FAborted: Boolean;
+  protected
+    function GetSocketHandler(const UseSSL: Boolean): TSocketHandler; override;
+    procedure ConnectToServer(const AHost: String; APort: Integer; UseSSL: Boolean = False); override;
+    procedure DisconnectFromServer; override;
+  public
+    constructor Create(AOwner: TComponent); override;
+    destructor Destroy; override;
+    { from any thread: the request under way ends now, and those after it do not start }
+    procedure Abort;
+  end;
+
   TParadeSyncThread = class(TThread)
   protected
     FOwner: TParadeSync;
-    FHttp: TFPHTTPClient;
+    FHttp: TParadeHttp;
   public
     constructor Create(AOwner: TParadeSync);
     destructor Destroy; override;
@@ -542,12 +565,76 @@ begin
   FEdit.SetRemoteCarets(C);
 end;
 
+{ TParadeHttp }
+
+constructor TParadeHttp.Create(AOwner: TComponent);
+begin
+  inherited Create(AOwner);
+  FSockLock := TCriticalSection.Create;
+end;
+
+destructor TParadeHttp.Destroy;
+begin
+  inherited Destroy;
+  FSockLock.Free;
+end;
+
+function TParadeHttp.GetSocketHandler(const UseSSL: Boolean): TSocketHandler;
+begin
+  Result := inherited GetSocketHandler(UseSSL);
+  FHandler := Result;
+end;
+
+procedure TParadeHttp.ConnectToServer(const AHost: String; APort: Integer; UseSSL: Boolean);
+begin
+  if FAborted then
+    raise ESocketError.Create('aborted');
+  FHandler := nil;
+  inherited ConnectToServer(AHost, APort, UseSSL);
+  FSockLock.Enter;
+  try
+    if (FHandler <> nil) and (FHandler.Socket <> nil) then
+    begin
+      FHandle := FHandler.Socket.Handle;
+      FLive := True;
+      if FAborted then      { aborted while it connected }
+        fpshutdown(FHandle, 2);
+    end;
+  finally
+    FSockLock.Leave;
+  end;
+end;
+
+procedure TParadeHttp.DisconnectFromServer;
+begin
+  FSockLock.Enter;
+  try
+    FLive := False;     { not shut down by Abort once it may be closed and its number reused }
+  finally
+    FSockLock.Leave;
+  end;
+  inherited DisconnectFromServer;
+end;
+
+procedure TParadeHttp.Abort;
+begin
+  FSockLock.Enter;
+  try
+    FAborted := True;
+    Terminate;
+    if FLive then
+      fpshutdown(FHandle, 2);   { both ways: the read under way returns }
+  finally
+    FSockLock.Leave;
+  end;
+end;
+
 { TParadeSyncThread }
 
 constructor TParadeSyncThread.Create(AOwner: TParadeSync);
 begin
   FOwner := AOwner;
-  FHttp := TFPHTTPClient.Create(nil);
+  FHttp := TParadeHttp.Create(nil);
   FHttp.ConnectTimeout := 5000;
   FHttp.IOTimeout := (LONG_POLL + 15) * 1000;
   FHttp.KeepConnection := False;   { a connection kept to a relay that went away would fail every request after }
@@ -563,7 +650,7 @@ end;
 procedure TParadeSyncThread.Abort;
 begin
   Terminate;
-  FHttp.Terminate;      { a long poll under way returns now }
+  FHttp.Abort;          { a long poll under way returns now }
 end;
 
 { the outbox, oldest first, to the relay; presence alongside }

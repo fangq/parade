@@ -165,6 +165,7 @@ var
   C: pd_pos;
   J: TJSONObject;
   F, Server, DocName, Token: string;
+  T0, T1, T2: QWord;
 
 function Same: Boolean;
 begin
@@ -432,8 +433,15 @@ begin
       { the others' carets, where they are }
       TParadeStringsTarget(TB.Target).SetCaretAt(2, 4);
       Check(WaitFor(@BobCaretSeen, 15), 'Bob''s caret where he left it');
+      { leaving is at once, though a long poll is waiting on the relay }
+      Sleep(300);
+      T0 := GetTickCount64;
       TA.Stop;
+      T1 := GetTickCount64;
       TB.Stop;
+      T2 := GetTickCount64;
+      WriteLn('  leaving took ', T1 - T0, ' and ', T2 - T1, ' ms');
+      Check((T1 - T0 < 2000) and (T2 - T1 < 2000), 'leaving does not wait for the long poll');
     finally
       LA.Free;
       LB.Free;
