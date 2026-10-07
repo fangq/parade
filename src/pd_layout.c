@@ -138,6 +138,8 @@ typedef struct {
     pd_block_id block;          /* floats, rows */
     int32_t brk;
     int32_t tbl;                /* rows: table index */
+    int32_t part;               /* rows: 0 whole; a slice of a row taller than a column: 1 first, 2 middle, 3 last */
+    pd_sp from;                 /* rows, a slice: where in the row it starts */
     pd_sp fn_h;                 /* footnote bodies referenced here */
     int32_t fn_first, fn_n;     /* their stories in filler.notes */
 } vitem;
@@ -740,6 +742,71 @@ static void place_stack(pd_layout* L, pd_block_id container, pd_sp width, int32_
     }
 }
 
+/* the lines of a container whose tops are in [lo, hi) of it (a slice of a table row): placed with the
+   container's top at y */
+static void place_stack_clip(pd_layout* L, pd_block_id container, pd_sp width, int32_t page, pd_sp x, pd_sp y,
+                             pd_sp lo, pd_sp hi) {
+    pd_block_id ids[512];
+    int32_t n = 0, i, k;
+    pd_sp prev_after = 0, py = 0;
+    pd_status st;
+
+    collect_paras(L->doc, container, ids, &n, 512);
+
+    for (i = 0; i < n && i < 512; i++) {
+        pcache* c = layout_para(L, ids[i], width, &st);
+
+        if (!c) {
+            return;
+        }
+
+        if (i > 0) {
+            py += para_gap(L->doc, ids[i - 1], prev_after, ids[i], &c->pp);
+        }
+
+        for (k = 0; k < c->nlines; k++) {
+            if (py + c->top[k] >= lo && py + c->top[k] < hi) {
+                add_line(L, page, c, k, x, y + py, 0);
+            }
+        }
+
+        py += c->height;
+        prev_after = c->pp.space_after;
+    }
+}
+
+/* the line boxes of a container, from its top: tops and bottoms into lt/lb, *n of them (at most cap) */
+static void stack_lines(pd_layout* L, pd_block_id container, pd_sp width, pd_sp* lt, pd_sp* lb, int32_t* n,
+                        int32_t cap) {
+    pd_block_id ids[512];
+    int32_t np = 0, i, k;
+    pd_sp prev_after = 0, py = 0;
+    pd_status st;
+
+    *n = 0;
+    collect_paras(L->doc, container, ids, &np, 512);
+
+    for (i = 0; i < np && i < 512; i++) {
+        pcache* c = layout_para(L, ids[i], width, &st);
+
+        if (!c) {
+            return;
+        }
+
+        if (i > 0) {
+            py += para_gap(L->doc, ids[i - 1], prev_after, ids[i], &c->pp);
+        }
+
+        for (k = 0; k < c->nlines && *n < cap; k++, (*n)++) {
+            lt[*n] = py + c->top[k];
+            lb[*n] = py + c->top[k + 1];
+        }
+
+        py += c->height;
+        prev_after = c->pp.space_after;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* fields, counters, labels                                           */
 /* ------------------------------------------------------------------ */
@@ -1039,6 +1106,96 @@ static int32_t merge_rows(const pd_doc* d, const ptable* T, const blk* t, int32_
 }
 
 /* a table: column widths from the content (CSS automatic layout), then one box per row */
+/* no cell of row r of t reaches into another row (merged down) */
+static int row_alone(const pd_doc* d, const ptable* T, const blk* t, int32_t r) {
+    int32_t c;
+
+    for (c = 0; c < T->ncols; c++) {
+        if (merge_rows(d, T, t, r, c) > 1) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/* Where a row of height rowh may be cut: the ends of its tallest cell's lines (from the row's top) that no line of
+   another cell runs across, increasing; *n of them. malloc'ed. */
+static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd_sp padv, pd_sp rowh, int32_t* n) {
+    const pd_doc* d = F->L->doc;
+    enum { CAP = 4096 };
+    pd_sp* lt = (pd_sp*)malloc(CAP * sizeof(pd_sp) * 4), *lb = lt ? lt + CAP : NULL, *ot = lb ? lb + CAP : NULL;
+    pd_sp* ob = ot ? ot + CAP : NULL, *cuts;
+    int32_t k, c = 0, best = -1, nl = 0, i, j, no;
+    pd_sp besth = -1;
+
+    *n = 0;
+
+    if (!lt || (cuts = (pd_sp*)malloc(CAP * sizeof(pd_sp))) == NULL) {
+        free(lt);
+        return NULL;
+    }
+
+    for (k = 0, c = 0; k < row->nkids && c < T->ncols; k++) {  /* the tallest cell */
+        const blk* cell = d->tab[row->kids[k]];
+        int32_t span = cell_span(T, cell, c);
+        pd_sp inner = T->colx[c + span] - T->colx[c] - 2 * pad;
+        pd_status st;
+        pd_sp h = stack_height(F->L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, &st);
+
+        if (h > besth) {
+            besth = h;
+            best = k;
+        }
+
+        c += span;
+    }
+
+    for (k = 0, c = 0; best >= 0 && k < row->nkids && c < T->ncols; k++) {
+        const blk* cell = d->tab[row->kids[k]];
+        int32_t span = cell_span(T, cell, c);
+        pd_sp inner = T->colx[c + span] - T->colx[c] - 2 * pad;
+
+        inner = inner < PD_PT(1) ? PD_PT(1) : inner;
+        c += span;
+
+        if (k == best) {
+            stack_lines(F->L, cell->id, inner, lt, lb, &nl, CAP);
+        }
+    }
+
+    for (i = 0; i < nl; i++) {      /* a cut at each of its lines' ends, unless another cell's line is across it */
+        pd_sp at = padv + lb[i];
+        int ok = at > 0 && at < rowh;
+
+        for (k = 0, c = 0; ok && k < row->nkids && c < T->ncols; k++) {
+            const blk* cell = d->tab[row->kids[k]];
+            int32_t span = cell_span(T, cell, c);
+            pd_sp inner = T->colx[c + span] - T->colx[c] - 2 * pad;
+
+            inner = inner < PD_PT(1) ? PD_PT(1) : inner;
+            c += span;
+
+            if (k == best) {
+                continue;
+            }
+
+            stack_lines(F->L, cell->id, inner, ot, ob, &no, CAP);
+
+            for (j = 0; ok && j < no; j++) {
+                ok = !(padv + ot[j] < at && at < padv + ob[j]);
+            }
+        }
+
+        if (ok && *n < CAP) {
+            cuts[(*n)++] = at;
+        }
+    }
+
+    free(lt);
+    return cuts;
+}
+
 static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* prev_keep, int* first) {
     const pd_doc* d = F->L->doc;
     const pd_table_props* tp = &t->st.tp;
@@ -1252,11 +1409,45 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
             push(F, VI_PEN, 0, merged || r <= F->tb[ti].header_rows ? INF_PEN : 0, NULL, 0, 0);
         }
 
-        if (push(F, VI_ROW, rowh, 0, NULL, r, row->id)) {
-            return PD_ERR_NOMEM;
-        }
+        if (rowh > F->colh && F->colh > 0 && !merged && r >= F->tb[ti].header_rows && row_alone(d, &T, t, r)) {
+            /* taller than a column: in slices that break across columns and pages, cut where no cell has a line */
+            int32_t ncut = 0, j2;
+            pd_sp* cuts = row_cuts(F, &T, row, pad, padv, rowh, &ncut), at = 0;
 
-        F->it[F->n - 1].tbl = ti;
+            if (!cuts) {
+                return PD_ERR_NOMEM;
+            }
+
+            for (j2 = 0; j2 <= ncut; j2++) {
+                pd_sp to = j2 < ncut ? cuts[j2] : rowh;
+
+                if (to <= at) {
+                    continue;
+                }
+
+                if (at > 0) {
+                    push(F, VI_PEN, 0, 0, NULL, 0, 0);
+                }
+
+                if (push(F, VI_ROW, to - at, 0, NULL, r, row->id)) {
+                    free(cuts);
+                    return PD_ERR_NOMEM;
+                }
+
+                F->it[F->n - 1].tbl = ti;
+                F->it[F->n - 1].part = at == 0 ? 1 : to >= rowh ? 3 : 2;
+                F->it[F->n - 1].from = at;
+                at = to;
+            }
+
+            free(cuts);
+        } else {
+            if (push(F, VI_ROW, rowh, 0, NULL, r, row->id)) {
+                return PD_ERR_NOMEM;
+            }
+
+            F->it[F->n - 1].tbl = ti;
+        }
 
         for (k = 0; k < row->nkids; k++) {
             pd_block_id ids[256];
@@ -1654,7 +1845,14 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
         ch = down > 1 && ch > 0 ? ch : v->h;
         inner = inner < PD_PT(1) ? PD_PT(1) : inner;
 
-        if (!cell->st.cell.merge_up) {
+        if (v->part && !cell->st.cell.merge_up) {     /* a slice: the lines that start in it, from the top */
+            if (cell->st.cell.background) {
+                add_rule(F->L, F->page, cx, y, cw, v->h, cell->st.cell.background, 0, cell->id);
+            }
+
+            place_stack_clip(F->L, cell->id, inner, F->page, cx + pad, y - v->from + padv, v->from - padv,
+                             v->from - padv + v->h);
+        } else if (!cell->st.cell.merge_up) {
             if (cell->st.cell.background) {
                 add_rule(F->L, F->page, cx, y, cw, ch, cell->st.cell.background, 0, cell->id);
             }
@@ -1687,7 +1885,7 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
             }
         }
 
-        if (!cell->st.cell.merge_up) {      /* no rule inside a merged cell */
+        if (!cell->st.cell.merge_up && v->part <= 1) {      /* no rule inside a merged cell, or a sliced row */
             bw = edge_rule(T, cell, PD_BORDER_TOP, prev ? cell_over(d, T, prev, c) : NULL, PD_BORDER_BOTTOM,
                            PD_TBORDER_TOP, PD_TBORDER_INSIDE_H, v->line == 0, &bc);
 
@@ -1696,7 +1894,7 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
             }
         }
 
-        if (!below || !below->st.cell.merge_up) {
+        if ((!below || !below->st.cell.merge_up) && (v->part == 0 || v->part == 3)) {
             bw = edge_rule(T, cell, PD_BORDER_BOTTOM, next ? cell_over(d, T, next, c) : NULL, PD_BORDER_TOP,
                            PD_TBORDER_BOTTOM, PD_TBORDER_INSIDE_H, !next, &bc);
 

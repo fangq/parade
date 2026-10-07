@@ -520,10 +520,27 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
         prm->expansion = d->expansion;
     }
 
+    if (column <= 0) {
+        return PD_ERR_RANGE;
+    }
+
     w = column - pp.indent_left - pp.indent_right;
 
-    if (w <= 0 || w - pp.indent_first <= 0) {
-        return PD_ERR_RANGE;
+    {   /* indents wider than the column (a narrow table cell): squeezed, as Word does, to leave the text some room */
+        pd_sp minw = column < PD_PT(24) ? column : PD_PT(12);
+
+        if (w < minw) {
+            pd_sp over = minw - w, cut = pp.indent_right > 0 ? (pp.indent_right < over ? pp.indent_right : over) : 0;
+
+            pp.indent_right -= cut;
+            over -= cut;
+            pp.indent_left -= over;
+            w = minw;
+        }
+
+        if (w - pp.indent_first < minw) {
+            pp.indent_first = w - minw;
+        }
     }
 
     prm->width = w;

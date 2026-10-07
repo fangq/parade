@@ -970,6 +970,82 @@ static void test_tables(void) {
     pd_doc_free(d);
 }
 
+static pd_range PdRange_c(pd_pos a, pd_pos b) {
+    pd_range r;
+
+    r.start = a;
+    r.end = b;
+    return r;
+}
+
+/* A row taller than a page (a CV's publications in one cell): it goes on over the pages, broken between lines,
+   nothing of it lost; its neighbour cell's lines where they are; the rule above it once, below it once. */
+static void test_tall_row(void) {
+    pd_block_id sec, t, cell, side, p, after;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    int32_t i, pg, last_pg = -1, pages, ok = 1, n, k, missing = 0;
+    pd_sp y;
+    char buf[64];
+
+    add_para(d, sec, frog);
+    t = add_table(d, sec, 1, 2, 0, cell_text);
+    side = cell_para(d, t, 0, 0);
+    cell = pd_doc_child(d, pd_doc_child(d, t, 0), 1);
+    p = pd_doc_child(d, cell, 0);
+
+    for (i = 0; i < 200; i++) {     /* 200 numbered paragraphs in the second cell */
+        pd_block_id q;
+
+        snprintf(buf, sizeof(buf), "item %d of the long list", i);
+
+        if (i == 0) {
+            const char* tx;
+            uint32_t len;
+
+            pd_doc_para_text(d, p, &tx, &len);
+            pd_doc_delete(d, PdRange_c(at(p, 0), at(p, len)), NULL);
+            q = p;
+        } else {
+            pd_doc_insert_block(d, cell, -1, PD_BLOCK_PARAGRAPH, &q);
+        }
+
+        pd_doc_insert_text(d, at(q, 0), buf, strlen(buf), PD_FORMAT_INHERIT, NULL);
+    }
+
+    after = add_para(d, sec, frog);
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    pages = pd_layout_page_count(L);
+    CHECK(pages >= 4);
+
+    for (i = 0; i < 200; i++) {     /* every item placed, in order, down the pages */
+        pg = page_of(L, pd_doc_child(d, cell, i), 0, &y);
+        ok &= pg >= 0 && pg >= last_pg;
+        last_pg = pg;
+    }
+
+    CHECK(ok && last_pg >= 3);
+    CHECK(page_of(L, side, 0, &y) == page_of(L, pd_doc_child(d, cell, 0), 0, &y));   /* the side cell at its top */
+    CHECK(page_of(L, after, 0, &y) >= last_pg);                                       /* the text after it, after */
+
+    for (pg = 0; pg < pages; pg++) {    /* each item's glyphs drawn once */
+        pd_draw* it = items(L, pg, &n);
+
+        for (k = 0; k < n; k++) {
+            missing += it[k].kind == PD_DRAW_GLYPH && it[k].block == pd_doc_child(d, cell, 199);
+        }
+
+        free(it);
+    }
+
+    CHECK(missing == (int32_t)strlen("item199ofthelonglist"));
+    printf("  a 200-paragraph cell over %d pages\n", pages);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static void test_wrap(void) {
     pd_block_id sec, fl, p1, p2;
     pd_doc* d = new_doc(&sec);
@@ -2074,6 +2150,7 @@ int main(void) {
     test_footnotes();
     printf("tables\n");
     test_tables();
+    test_tall_row();
     printf("wrap beside floats\n");
     test_wrap();
     printf("continuous sections\n");
