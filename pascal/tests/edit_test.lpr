@@ -450,6 +450,36 @@ begin
   E.ProcessKey(VK_HOME, []);
   Check(E.CurrentCharProps.italic = 0, 'formatting waiting at the caret goes when it moves');
 
+  { the format painter: the look at the caret, onto the next selection }
+  E.NewDocument;
+  E.InsertText('Plain and plain');
+  E.ProcessKey(VK_HOME, []);
+  for I := 1 to 5 do
+    E.ProcessKey(VK_RIGHT, [ssShift]);
+  E.SetFontSize(20);
+  E.ToggleItalic;
+  E.ProcessKey(VK_HOME, []);
+  E.ProcessKey(VK_RIGHT, []);
+  E.StartFormatPainter;
+  Check(E.FormatPainterOn, 'the painter on');
+  E.ProcessKey(VK_END, []);
+  for I := 1 to 5 do
+    E.ProcessKey(VK_LEFT, [ssShift]);
+  E.ApplyFormatPainter;
+  Props := E.CurrentCharProps;
+  Check((Props.size = 20 * PD_SP_PER_PT) and (Props.italic <> 0), 'the selection painted');
+  Check(not E.FormatPainterOn, 'and the painter off after one');
+  Check(E.PropsAt(PdPos(E.CaretPos.block, 7)).size <> 20 * PD_SP_PER_PT, 'the text between untouched');
+  E.StartFormatPainter(True);
+  E.ProcessKey(VK_HOME, []);
+  E.ProcessKey(VK_RIGHT, [ssShift]);
+  E.ApplyFormatPainter;
+  Check(E.FormatPainterOn, 'a sticky painter stays on');
+  E.StopFormatPainter;
+  Check(not E.FormatPainterOn, 'until stopped');
+  E.NewDocument;
+  E.InsertText('Plain text here');
+
   { paragraphs }
   E.SetAlignment(PD_ALIGN_CENTER);
   Check(E.CurrentParaProps.align = PD_ALIGN_CENTER, 'centred');

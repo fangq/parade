@@ -107,7 +107,9 @@ type
     FPending: pd_char_props;       { formatting chosen with nothing selected: for what is typed next, here }
     FPendingAt: pd_pos;
     FShowMarks: Boolean;
-    FCursorShown: Boolean;         { the I-beam put on the window once it exists (see MouseEnter) }
+    FCursorShown: Boolean;
+    FPainter, FPainterSticky: Boolean;   { the format painter is on: the next selection takes FPainterProps }
+    FPainterProps: pd_char_props;         { the I-beam put on the window once it exists (see MouseEnter) }
     FModified: Boolean;
     FPageGap: Integer;
     FBack: TBitmap;                { the pages as last drawn, on the display's side: a paint copies from it }
@@ -257,6 +259,13 @@ type
     function ParaText(Block: pd_block_id): string;
     { the formatting of the character at a position }
     function PropsAt(const P: pd_pos): pd_char_props;
+    { the format painter: the formatting at the caret copied, for the next selection made with the mouse
+      (Sticky: every selection until stopped -- Escape, or StopFormatPainter) }
+    procedure StartFormatPainter(Sticky: Boolean = False);
+    procedure StopFormatPainter;
+    { the copied formatting put on the selection now; the painter off unless sticky }
+    procedure ApplyFormatPainter;
+    function FormatPainterOn: Boolean;
     { the formatting where the selection starts (with none: what typing at the caret gets) }
     function CurrentCharProps: pd_char_props;
     procedure SetFontFamily(const Family: string);
@@ -2073,6 +2082,47 @@ function TParadeEdit.PendingHere: Boolean;
 begin
   Result := (FPending.mask <> 0) and not HasSelection and (FPendingAt.block = CaretPos.block) and
     (FPendingAt.offset = CaretPos.offset);
+end;
+
+procedure TParadeEdit.StartFormatPainter(Sticky: Boolean);
+begin
+  FPainterProps := CurrentCharProps;
+  { what a reader means by "the look": the font, its size and weight and slant, colours, lines, shift }
+  FPainterProps.mask := PD_CP_FAMILY or PD_CP_SIZE or PD_CP_WEIGHT or PD_CP_ITALIC or PD_CP_COLOR or
+    PD_CP_BACKGROUND or PD_CP_UNDERLINE or PD_CP_STRIKE or PD_CP_SHIFT;
+  FPainter := True;
+  FPainterSticky := Sticky;
+  Cursor := crHandPoint;     { as long as it is on: a selection made now is painted }
+  SetTempCursor(crIBeam);
+  SetTempCursor(Cursor);
+  FSelSig := '';
+  CheckSelection;
+end;
+
+procedure TParadeEdit.StopFormatPainter;
+begin
+  if not FPainter then
+    Exit;
+  FPainter := False;
+  Cursor := crIBeam;
+  SetTempCursor(crArrow);
+  SetTempCursor(Cursor);
+  FSelSig := '';
+  CheckSelection;
+end;
+
+procedure TParadeEdit.ApplyFormatPainter;
+begin
+  if not FPainter or not HasSelection then
+    Exit;
+  ApplyCharProps(FPainterProps);
+  if not FPainterSticky then
+    StopFormatPainter;
+end;
+
+function TParadeEdit.FormatPainterOn: Boolean;
+begin
+  Result := FPainter;
 end;
 
 procedure TParadeEdit.ApplyCharProps(const Props: pd_char_props);
@@ -4129,8 +4179,8 @@ var
 begin
   if not Assigned(FOnSelectionChange) or FSelQueued then
     Exit;
-  Sig := SysUtils.Format('%d:%d %d:%d %d %d %d', [CaretPos.block, CaretPos.offset, AnchorPos.block,
-    AnchorPos.offset, pd_doc_revision(FDoc), FPending.mask, Ord(PendingHere)]);
+  Sig := SysUtils.Format('%d:%d %d:%d %d %d %d %d', [CaretPos.block, CaretPos.offset, AnchorPos.block,
+    AnchorPos.offset, pd_doc_revision(FDoc), FPending.mask, Ord(PendingHere), Ord(FPainter)]);
   if Sig = FSelSig then
     Exit;
   FSelSig := Sig;
@@ -4466,6 +4516,12 @@ end;
 procedure TParadeEdit.KeyDown(var Key: Word; Shift: TShiftState);
 begin
   inherited KeyDown(Key, Shift);
+  if (Key = VK_ESCAPE) and FPainter then
+  begin
+    StopFormatPainter;
+    Key := 0;
+    Exit;
+  end;
   if Key in [VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_RETURN, VK_BACK,
              VK_DELETE, VK_TAB] then
   begin
@@ -4528,6 +4584,8 @@ procedure TParadeEdit.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: In
 begin
   inherited MouseUp(Button, Shift, X, Y);
   FDragging := False;
+  if FPainter and (Button = mbLeft) and HasSelection then
+    ApplyFormatPainter;     { the selection just made takes the copied look }
 end;
 
 procedure TParadeEdit.DblClick;
