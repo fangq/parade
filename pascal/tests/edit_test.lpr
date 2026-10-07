@@ -95,6 +95,10 @@ var
   Obj: pd_inline;
   Tb, Rw: pd_block_info;
   Pages: Integer;
+  Sp: pd_section_props;
+  Tp: pd_table_props;
+  Cp: pd_cell_props;
+  Cell, Row, Tbl: pd_block_id;
   Lst: TStringList;
   Lbl: array[0..63] of AnsiChar;
   Counter: TCounter;
@@ -121,6 +125,15 @@ begin
   Result := Walk(pd_doc_root(Doc));
   for I := 0 to pd_doc_story_count(Doc) - 1 do
     Inc(Result, Walk(pd_doc_story_at(Doc, I)));
+end;
+
+function ChildCountOf(Doc: Ppd_doc; B: pd_block_id): Integer;
+var
+  Info: pd_block_info;
+begin
+  Result := -1;
+  if pd_doc_block_info(Doc, B, Info) = PD_OK then
+    Result := Info.child_count;
 end;
 
 procedure Fail(E: Exception);
@@ -585,6 +598,101 @@ begin
     end;
   Check(N = 1, 'the equation comes back from .docx');
   SavePage(E, 0, Dir + 'edit_insert.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+
+  { 8d. the Layout tab: page setup, sections, header and footer }
+  Step('layout');
+  E.NewDocument;
+  for I := 1 to 6 do
+    E.InsertText('The first section has its own page settings, header and footer. ');
+  E.InsertText('First section.');
+  Sp := E.CurrentSectionProps;
+  Check(Sp.page_width < Sp.page_height, 'portrait to start');
+  E.SetOrientation(True);
+  Sp := E.CurrentSectionProps;
+  Check(Sp.page_width > Sp.page_height, 'landscape');
+  E.SetPageSize(595.28, 841.89);
+  Sp := E.CurrentSectionProps;
+  Check((Abs(Sp.page_width - Round(841.89 * PD_SP_PER_PT)) < 2) and (Sp.page_height < Sp.page_width), 'A4, still turned');
+  E.SetOrientation(False);
+  E.SetMargins(36, 36, 54, 54);
+  Sp := E.CurrentSectionProps;
+  Check((Sp.margin_top = 36 * PD_SP_PER_PT) and (Sp.margin_left = 54 * PD_SP_PER_PT), 'margins');
+  E.SetColumns(2);
+  Check(E.CurrentSectionProps.columns = 2, 'two columns');
+  E.Undo;
+  Check(E.CurrentSectionProps.columns <= 1, 'undone');
+  E.SetHeaderFooter(False, 'My report', PD_ALIGN_LEFT);
+  E.SetHeaderFooter(True, 'Page {page} of {pages}');
+  Check(E.HeaderFooterText(False) = 'My report', 'header: ' + E.HeaderFooterText(False));
+  Check(E.HeaderFooterText(True) = 'Page {page} of {pages}', 'footer with fields: ' + E.HeaderFooterText(True));
+  SavePage(E, 0, Dir + 'edit_layout.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+  Pages := E.PageCount;
+  E.ProcessKey(VK_END, []);
+  E.InsertSectionBreak(False);
+  Check(pd_doc_story_count(E.Doc) >= 0, 'section break');
+  Check(E.PageCount = Pages + 1, 'a section on a new page');
+  E.InsertText('Second section.');
+  E.SetOrientation(True);
+  Sp := E.CurrentSectionProps;
+  Check((Sp.page_width > Sp.page_height) and (Sp.margin_left = 54 * PD_SP_PER_PT) and (Sp.footer <> 0),
+    'the new section turned, the rest as before');
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  Sp := E.CurrentSectionProps;
+  Check(Sp.page_width < Sp.page_height, 'the first section still portrait');
+  E.SaveToFile(Dir + 'edit_layout.docx');
+  E.LoadFromFile(Dir + 'edit_layout.docx');
+  Check(E.PageCount = 2, 'two pages back from .docx');
+  Check(E.HeaderFooterText(True) = 'Page {page} of {pages}', 'the footer back from .docx: ' + E.HeaderFooterText(True));
+
+  { 8e. the Table tab }
+  Step('table');
+  E.NewDocument;
+  E.InsertTable(2, 2);
+  Check(E.InTable, 'in a table');
+  E.InsertText('a');
+  E.TableInsertColumn(True);
+  E.InsertText('b');
+  Check(E.CellAt(E.CaretPos, Cell, Row, Tbl), 'in a cell');
+  Check(ChildCountOf(E.Doc, Row) = 3, 'a column to the right: three cells');
+  Tp := E.CurrentTableProps;
+  Check((Tp.ncols = 3) and (Abs(Tp.col_width[0] - Tp.col_width[2]) <= Tp.col_width[0] div 10 + 2),
+    Format('three columns, about as wide (%d %d %d)', [Tp.col_width[0], Tp.col_width[1], Tp.col_width[2]]));
+  E.TableInsertRow(True);
+  Check(ChildCountOf(E.Doc, Tbl) = 3, 'a row below: three rows');
+  Check(ChildCountOf(E.Doc, pd_doc_child(E.Doc, Tbl, 1)) = 3, 'of three cells');
+  E.TableDeleteRow;
+  Check(ChildCountOf(E.Doc, Tbl) = 2, 'deleted again');
+  { merge the first row's first two cells: a + (empty) }
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  E.TableMergeRight;
+  Cp := E.CurrentCellProps;
+  Check((Cp.col_span = 2) and (ChildCountOf(E.Doc, pd_doc_child(E.Doc, Tbl, 0)) = 2), 'merged across');
+  E.TableSplitCell;
+  Check((E.CurrentCellProps.col_span = 1) and (ChildCountOf(E.Doc, pd_doc_child(E.Doc, Tbl, 0)) = 3), 'split again');
+  E.TableMergeDown;
+  E.CellAt(PdPos(pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_child(E.Doc, Tbl, 1), 0), 0), 0), Cell, Row, Tbl);
+  pd_doc_cell_props(E.Doc, Cell, Cp);
+  Check(Cp.merge_up = 1, 'merged down: the cell below continues it');
+  E.TableSplitCell;
+  pd_doc_cell_props(E.Doc, Cell, Cp);
+  Check(Cp.merge_up = 0, 'split again');
+  E.SetCellShading($D9E2F3);
+  Check(E.CurrentCellProps.background and $FFFFFF = $D9E2F3, 'shading');
+  E.SetTableBorders(1.5);
+  Check(E.CurrentTableProps.border = Round(1.5 * PD_SP_PER_PT), 'borders');
+  E.SetHeaderRow(True);
+  Check(E.CurrentTableProps.header_rows = 1, 'header row');
+  E.DistributeColumns;
+  Tp := E.CurrentTableProps;
+  Check((Tp.col_width[0] = Tp.col_width[1]) and (Tp.col_width[1] = Tp.col_width[2]), 'columns even');
+  E.TableDeleteColumn;
+  Check(ChildCountOf(E.Doc, pd_doc_child(E.Doc, Tbl, 0)) = 2, 'a column deleted');
+  Check(E.CurrentTableProps.ncols = 2, 'and its width');
+  SavePage(E, 0, Dir + 'edit_table.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+  E.TableDelete;
+  Check(not E.InTable and (CountKind(E.Doc, PD_BLOCK_TABLE) = 0), 'the table deleted, the caret out of it');
+  E.Undo;
+  Check(CountKind(E.Doc, PD_BLOCK_TABLE) = 1, 'and back');
 
   { 9. review: tracked changes and comments }
   Step('review');

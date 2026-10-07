@@ -17,7 +17,7 @@ interface
 
 uses
   Classes, SysUtils, Controls, Graphics, LCLType, LCLIntf, ExtCtrls, StdCtrls, Forms, Clipbrd,
-  IntfGraphics, GraphType, FPImage, LazFileUtils, ctypes, parade;
+  IntfGraphics, GraphType, FPImage, LazFileUtils, Math, ctypes, parade;
 
 type
   TParadeFontEntry = record
@@ -158,6 +158,14 @@ type
     procedure InsertObject(const Obj: pd_inline);
     function TextWidthAt(Block: pd_block_id): pd_sp;
     function BlockSlot(out AParent: pd_block_id; out AIndex: Integer): Boolean;
+    function CellSpan(Cell: pd_block_id): Integer;
+    function GridColumn(Row: pd_block_id; Index: Integer): Integer;
+    function CellAtColumn(Row: pd_block_id; Col: Integer): Integer;
+    procedure CaretToCell(Cell: pd_block_id);
+    procedure ResizeColumns(Table: pd_block_id; At, Count: Integer);
+    function ChildCount(Block: pd_block_id): Integer;
+    procedure MoveCellContent(From, Into: pd_block_id);
+    function SelectedCells: TParadeBlockArray;
     function FormatAt(const P: pd_pos): pd_format_id;
     procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
     procedure UseDocumentFonts;
@@ -269,6 +277,54 @@ type
     procedure InsertNote(const ANote: string; Endnote: Boolean = False);
     { a field: PD_FIELD_PAGE, PD_FIELD_PAGES or PD_FIELD_DATE }
     procedure InsertField(Kind: Integer);
+
+    { ---- the Layout tab: the caret's section (its pages) ---- }
+    function CurrentSection: pd_block_id;
+    function CurrentSectionProps: pd_section_props;
+    { the section's page settings replaced by Props (one undo) }
+    procedure ApplySectionProps(const Props: pd_section_props);
+    procedure SetMargins(ATop, ABottom, ALeft, ARight: Double);    { points }
+    procedure SetOrientation(Landscape: Boolean);
+    { the paper, in points, turned to the section's orientation }
+    procedure SetPageSize(AWidth, AHeight: Double);
+    procedure SetColumns(Count: Integer);
+    { a new section from the caret on (on a new page, or on the same one when Continuous), with the same
+      page settings, so they can differ from here }
+    procedure InsertSectionBreak(Continuous: Boolean);
+    { the header's (or footer's) text: fields as {page}, {pages}, {date} }
+    function HeaderFooterText(Footer: Boolean): string;
+    { the header (or footer) of every page of the section: Text with {page}, {pages} and {date} becoming fields,
+      aligned AAlign; '' removes it }
+    procedure SetHeaderFooter(Footer: Boolean; const AText: string; AAlign: Integer = PD_ALIGN_CENTER);
+    { the number the section's first page has (0: on from the section before) }
+    procedure SetFirstPageNumber(N: Integer);
+    { lines numbered in the margin, every Every lines (0: none) }
+    procedure SetLineNumbers(Every: Integer);
+
+    { ---- the Table tab: the table the caret is in ---- }
+    { the cell, row and table around a position; False when it is not in a table }
+    function CellAt(const P: pd_pos; out Cell, Row, Table: pd_block_id): Boolean;
+    function InTable: Boolean;
+    procedure TableInsertRow(Below: Boolean);
+    procedure TableInsertColumn(Right: Boolean);
+    procedure TableDeleteRow;
+    procedure TableDeleteColumn;
+    procedure TableDelete;
+    { the cell joined with the one to its right (or below), their contents together }
+    procedure TableMergeRight;
+    procedure TableMergeDown;
+    { a merged cell back into cells }
+    procedure TableSplitCell;
+    { $RRGGBB behind the selected cells (-1: none) }
+    procedure SetCellShading(RGB: Integer);
+    { the grid's rules, in points (0: none) }
+    procedure SetTableBorders(Points: Double);
+    { the first row repeated at the top of every page the table runs onto }
+    procedure SetHeaderRow(Repeated: Boolean);
+    { every column as wide as the others, the table as wide as it was }
+    procedure DistributeColumns;
+    function CurrentTableProps: pd_table_props;
+    function CurrentCellProps: pd_cell_props;
     function SelectedText: string;
     procedure CopyToClipboard;
     procedure CutToClipboard;
@@ -2600,6 +2656,865 @@ begin
   O.field := Kind;
   pd_doc_begin_group(FDoc, 'Insert field');
   InsertObject(O);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+{ ---- the Layout tab: sections ---- }
+
+function TParadeEdit.CurrentSection: pd_block_id;
+var
+  Info: pd_block_info;
+  B: pd_block_id;
+begin
+  Result := 0;
+  B := CaretPos.block;
+  while (B <> 0) and (pd_doc_block_info(FDoc, B, Info) = PD_OK) do
+  begin
+    if Info.kind = PD_BLOCK_SECTION then
+      Exit(B);
+    B := Info.parent;
+  end;
+end;
+
+function TParadeEdit.CurrentSectionProps: pd_section_props;
+begin
+  pd_section_props_init(Result);
+  if CurrentSection <> 0 then
+    pd_doc_section_props(FDoc, CurrentSection, Result);
+end;
+
+procedure TParadeEdit.ApplySectionProps(const Props: pd_section_props);
+var
+  S: pd_block_id;
+begin
+  S := CurrentSection;
+  if FReadOnly or (S = 0) then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Page setup');
+  pd_doc_set_section_props(FDoc, S, Props);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.SetMargins(ATop, ABottom, ALeft, ARight: Double);
+var
+  P: pd_section_props;
+begin
+  P := CurrentSectionProps;
+  P.margin_top := Round(ATop * PD_SP_PER_PT);
+  P.margin_bottom := Round(ABottom * PD_SP_PER_PT);
+  P.margin_left := Round(ALeft * PD_SP_PER_PT);
+  P.margin_right := Round(ARight * PD_SP_PER_PT);
+  ApplySectionProps(P);
+end;
+
+procedure TParadeEdit.SetOrientation(Landscape: Boolean);
+var
+  P: pd_section_props;
+  T: pd_sp;
+begin
+  P := CurrentSectionProps;
+  if (P.page_width > P.page_height) <> Landscape then
+  begin
+    T := P.page_width;
+    P.page_width := P.page_height;
+    P.page_height := T;
+    ApplySectionProps(P);
+  end;
+end;
+
+procedure TParadeEdit.SetPageSize(AWidth, AHeight: Double);
+var
+  P: pd_section_props;
+  W, H, T: pd_sp;
+begin
+  P := CurrentSectionProps;
+  W := Round(AWidth * PD_SP_PER_PT);
+  H := Round(AHeight * PD_SP_PER_PT);
+  if (W > H) <> (P.page_width > P.page_height) then
+  begin   { turned as the section is }
+    T := W;
+    W := H;
+    H := T;
+  end;
+  P.page_width := W;
+  P.page_height := H;
+  ApplySectionProps(P);
+end;
+
+procedure TParadeEdit.SetColumns(Count: Integer);
+var
+  P: pd_section_props;
+begin
+  if (Count < 1) or (Count > 9) then
+    Exit;
+  P := CurrentSectionProps;
+  P.columns := Count;
+  if P.column_gap <= 0 then
+    P.column_gap := 36 * PD_SP_PER_PT;
+  ApplySectionProps(P);
+end;
+
+procedure TParadeEdit.InsertSectionBreak(Continuous: Boolean);
+var
+  Sec, NewSec, Par, First: pd_block_id;
+  Info: pd_block_info;
+  Index, I, N: Integer;
+  P: pd_section_props;
+begin
+  Sec := CurrentSection;
+  if FReadOnly or (Sec = 0) then
+    Exit;
+  P := CurrentSectionProps;
+  pd_doc_begin_group(FDoc, 'Section break');
+  { the caret's paragraph split; it and what follows it go to the new section }
+  if BlockSlot(Par, Index) and (Par = Sec) and (pd_doc_block_info(FDoc, Sec, Info) = PD_OK) and
+     (pd_doc_insert_block(FDoc, pd_doc_root(FDoc), Info.index + 1, PD_BLOCK_SECTION, NewSec) = PD_OK) then
+  begin
+    First := pd_doc_child(FDoc, NewSec, 0);    { a section starts with an empty paragraph }
+    N := Info.child_count - Index;
+    for I := 0 to N - 1 do
+      pd_doc_move_block(FDoc, pd_doc_child(FDoc, Sec, Index), NewSec, -1);
+    if (N > 0) and (First <> 0) then
+      pd_doc_remove_block(FDoc, First);
+    P.continuous := Ord(Continuous);
+    P.first_page_number := 0;      { the page numbers go on }
+    pd_doc_set_section_props(FDoc, NewSec, P);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+function TParadeEdit.HeaderFooterText(Footer: Boolean): string;
+var
+  P: pd_section_props;
+  Story, B: pd_block_id;
+  T: string;
+  I: Integer;
+  O: pd_inline;
+begin
+  Result := '';
+  P := CurrentSectionProps;
+  if Footer then Story := P.footer else Story := P.header;
+  if Story = 0 then
+    Exit;
+  B := pd_doc_child(FDoc, Story, 0);
+  if B = 0 then
+    Exit;
+  T := ParaText(B);
+  I := 1;
+  while I <= Length(T) do
+  begin
+    if (Copy(T, I, 3) = #$EF#$BF#$BC) and (pd_doc_inline_at(FDoc, PdPos(B, I - 1), O) = PD_OK) then
+    begin
+      if O.kind = PD_INLINE_FIELD then
+        case O.field of
+          PD_FIELD_PAGE: Result := Result + '{page}';
+          PD_FIELD_PAGES: Result := Result + '{pages}';
+          PD_FIELD_DATE: Result := Result + '{date}';
+        end;
+      Inc(I, 3);
+    end
+    else
+    begin
+      Result := Result + T[I];
+      Inc(I);
+    end;
+  end;
+end;
+
+procedure TParadeEdit.SetHeaderFooter(Footer: Boolean; const AText: string; AAlign: Integer);
+const
+  FIELDS: array[0..2] of string = ('{page}', '{pages}', '{date}');
+  KINDS: array[0..2] of Integer = (PD_FIELD_PAGE, PD_FIELD_PAGES, PD_FIELD_DATE);
+var
+  Sec, Story, B: pd_block_id;
+  P: pd_section_props;
+  At: pd_pos;
+  Rest: string;
+  I, K, Best, BestAt, Q: Integer;
+  O: pd_inline;
+  Pp: pd_para_props;
+begin
+  Sec := CurrentSection;
+  if FReadOnly or (Sec = 0) then
+    Exit;
+  P := CurrentSectionProps;
+  pd_doc_begin_group(FDoc, 'Header and footer');
+  if AText = '' then
+  begin
+    if Footer then P.footer := 0 else P.header := 0;
+  end
+  else
+  begin
+    if pd_doc_insert_block(FDoc, 0, -1, PD_BLOCK_STORY, Story) = PD_OK then
+    begin
+      B := pd_doc_child(FDoc, Story, 0);
+      At := PdPos(B, 0);
+      Rest := AText;
+      { the text, its {page}, {pages} and {date} as fields }
+      while Rest <> '' do
+      begin
+        Best := -1;
+        BestAt := MaxInt;
+        for K := 0 to High(FIELDS) do
+        begin
+          Q := Pos(FIELDS[K], Rest);
+          if (Q > 0) and (Q < BestAt) then
+          begin
+            Best := K;
+            BestAt := Q;
+          end;
+        end;
+        if Best < 0 then
+          I := Length(Rest)
+        else
+          I := BestAt - 1;
+        if I > 0 then
+          pd_doc_insert_text(FDoc, At, PAnsiChar(Rest), I, PD_FORMAT_INHERIT, @At);
+        if Best < 0 then
+          Break;
+        FillChar(O, SizeOf(O), 0);
+        O.kind := PD_INLINE_FIELD;
+        O.field := KINDS[Best];
+        pd_doc_insert_inline(FDoc, At, O, @At);
+        Delete(Rest, 1, I + Length(FIELDS[Best]));
+      end;
+      FillChar(Pp, SizeOf(Pp), 0);
+      Pp.mask := PD_PP_ALIGN;
+      Pp.align := AAlign;
+      pd_doc_set_para_props(FDoc, B, Pp);
+      if Footer then P.footer := Story else P.header := Story;
+    end;
+  end;
+  pd_doc_set_section_props(FDoc, Sec, P);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.SetFirstPageNumber(N: Integer);
+var
+  P: pd_section_props;
+begin
+  P := CurrentSectionProps;
+  P.first_page_number := N;
+  ApplySectionProps(P);
+end;
+
+procedure TParadeEdit.SetLineNumbers(Every: Integer);
+var
+  P: pd_section_props;
+begin
+  P := CurrentSectionProps;
+  P.line_numbers := Every;
+  ApplySectionProps(P);
+end;
+
+{ ---- the Table tab ---- }
+
+function TParadeEdit.CellAt(const P: pd_pos; out Cell, Row, Table: pd_block_id): Boolean;
+var
+  Info: pd_block_info;
+  B: pd_block_id;
+begin
+  Result := False;
+  Cell := 0;
+  Row := 0;
+  Table := 0;
+  B := P.block;
+  while (B <> 0) and (pd_doc_block_info(FDoc, B, Info) = PD_OK) do
+  begin
+    if Info.kind = PD_BLOCK_CELL then
+    begin
+      Cell := B;
+      Row := Info.parent;
+      if pd_doc_block_info(FDoc, Row, Info) <> PD_OK then
+        Exit;
+      Table := Info.parent;
+      Exit(True);
+    end;
+    B := Info.parent;
+  end;
+end;
+
+function TParadeEdit.InTable: Boolean;
+var
+  C, R, T: pd_block_id;
+begin
+  Result := CellAt(CaretPos, C, R, T);
+end;
+
+function TParadeEdit.CurrentTableProps: pd_table_props;
+var
+  C, R, T: pd_block_id;
+begin
+  pd_table_props_init(Result);
+  if CellAt(CaretPos, C, R, T) then
+    pd_doc_table_props(FDoc, T, Result);
+end;
+
+function TParadeEdit.CurrentCellProps: pd_cell_props;
+var
+  C, R, T: pd_block_id;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.col_span := 1;
+  if CellAt(CaretPos, C, R, T) then
+    pd_doc_cell_props(FDoc, C, Result);
+end;
+
+function TParadeEdit.CellSpan(Cell: pd_block_id): Integer;
+var
+  Cp: pd_cell_props;
+begin
+  Result := 1;
+  if (pd_doc_cell_props(FDoc, Cell, Cp) = PD_OK) and (Cp.col_span > 1) then
+    Result := Cp.col_span;
+end;
+
+{ the grid column a cell starts at: the spans of the cells before it }
+function TParadeEdit.GridColumn(Row: pd_block_id; Index: Integer): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 0 to Index - 1 do
+    Inc(Result, CellSpan(pd_doc_child(FDoc, Row, I)));
+end;
+
+{ the index of the cell of a row covering a grid column (-1: the row ends before it) }
+function TParadeEdit.CellAtColumn(Row: pd_block_id; Col: Integer): Integer;
+var
+  Info: pd_block_info;
+  I, G: Integer;
+begin
+  Result := -1;
+  if pd_doc_block_info(FDoc, Row, Info) <> PD_OK then
+    Exit;
+  G := 0;
+  for I := 0 to Info.child_count - 1 do
+  begin
+    Inc(G, CellSpan(pd_doc_child(FDoc, Row, I)));
+    if G > Col then
+      Exit(I);
+  end;
+end;
+
+{ the caret into a cell's first paragraph }
+procedure TParadeEdit.CaretToCell(Cell: pd_block_id);
+var
+  B: pd_block_id;
+  Info: pd_block_info;
+begin
+  B := Cell;
+  while (B <> 0) and (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.kind <> PD_BLOCK_PARAGRAPH) do
+    B := pd_doc_child(FDoc, B, 0);
+  if B <> 0 then
+  begin
+    pd_doc_marker_set(FDoc, FCaret, PdPos(B, 0));
+    pd_doc_marker_set(FDoc, FAnchor, PdPos(B, 0));
+  end;
+end;
+
+{ column widths kept adding up to the table's width when one is added (At, Count 1) or removed (Count -1) }
+procedure TParadeEdit.ResizeColumns(Table: pd_block_id; At, Count: Integer);
+var
+  Tp: pd_table_props;
+  Total, Sum: Int64;
+  I: Integer;
+begin
+  if (pd_doc_table_props(FDoc, Table, Tp) <> PD_OK) or (Tp.ncols <= 0) then
+    Exit;
+  Total := 0;
+  for I := 0 to Tp.ncols - 1 do
+    Inc(Total, Tp.col_width[I]);
+  if Count > 0 then
+  begin
+    if Tp.ncols >= PD_TABLE_MAX_COLS then
+      Exit;
+    if At > Tp.ncols then At := Tp.ncols;
+    for I := Tp.ncols downto At + 1 do
+      Tp.col_width[I] := Tp.col_width[I - 1];
+    Tp.col_width[At] := Total div Tp.ncols;    { as wide as the others are on average }
+    Inc(Tp.ncols);
+  end
+  else
+  begin
+    if (At < 0) or (At >= Tp.ncols) then
+      Exit;
+    for I := At to Tp.ncols - 2 do
+      Tp.col_width[I] := Tp.col_width[I + 1];
+    Dec(Tp.ncols);
+  end;
+  Sum := 0;
+  for I := 0 to Tp.ncols - 1 do
+    Inc(Sum, Tp.col_width[I]);
+  if (Sum > 0) and (Total > 0) then
+    for I := 0 to Tp.ncols - 1 do
+      Tp.col_width[I] := Tp.col_width[I] * Total div Sum;
+  pd_doc_set_table_props(FDoc, Table, Tp);
+end;
+
+procedure TParadeEdit.TableInsertRow(Below: Boolean);
+var
+  C, R, T, NewRow, Cell: pd_block_id;
+  Info: pd_block_info;
+  I: Integer;
+  Cp: pd_cell_props;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, R, Info) <> PD_OK) then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Insert row');
+  if pd_doc_insert_block(FDoc, T, Info.index + Ord(Below), PD_BLOCK_ROW, NewRow) = PD_OK then
+  begin
+    { as many cells as this row, as wide }
+    for I := 0 to Info.child_count - 1 do
+    begin
+      if I = 0 then
+        Cell := pd_doc_child(FDoc, NewRow, 0)
+      else
+        pd_doc_insert_block(FDoc, NewRow, -1, PD_BLOCK_CELL, Cell);
+      if CellSpan(pd_doc_child(FDoc, R, I)) > 1 then
+      begin
+        pd_doc_cell_props(FDoc, Cell, Cp);
+        Cp.col_span := CellSpan(pd_doc_child(FDoc, R, I));
+        pd_doc_set_cell_props(FDoc, Cell, Cp);
+      end;
+    end;
+    pd_doc_block_info(FDoc, C, Info);
+    CaretToCell(pd_doc_child(FDoc, NewRow, Info.index));
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.TableInsertColumn(Right: Boolean);
+var
+  C, R, T, Row, Cell: pd_block_id;
+  Info, Ti: pd_block_info;
+  Col, I, K, G, J: Integer;
+  Cp: pd_cell_props;
+  Done: Boolean;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+    Exit;
+  Col := GridColumn(R, Info.index);
+  if Right then
+    Inc(Col, CellSpan(C));
+  pd_doc_block_info(FDoc, T, Ti);
+  pd_doc_begin_group(FDoc, 'Insert column');
+  for I := 0 to Ti.child_count - 1 do
+  begin
+    Row := pd_doc_child(FDoc, T, I);
+    pd_doc_block_info(FDoc, Row, Info);
+    { a new cell where the grid column begins; inside a merged cell, the merge grows }
+    G := 0;
+    Done := False;
+    for K := 0 to Info.child_count - 1 do
+    begin
+      if G = Col then
+      begin
+        pd_doc_insert_block(FDoc, Row, K, PD_BLOCK_CELL, Cell);
+        Done := True;
+        Break;
+      end;
+      J := CellSpan(pd_doc_child(FDoc, Row, K));
+      if G + J > Col then
+      begin
+        pd_doc_cell_props(FDoc, pd_doc_child(FDoc, Row, K), Cp);
+        Cp.col_span := J + 1;
+        pd_doc_set_cell_props(FDoc, pd_doc_child(FDoc, Row, K), Cp);
+        Done := True;
+        Break;
+      end;
+      Inc(G, J);
+    end;
+    if not Done then
+      pd_doc_insert_block(FDoc, Row, -1, PD_BLOCK_CELL, Cell);
+  end;
+  ResizeColumns(T, Col, 1);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.TableDeleteRow;
+var
+  C, R, T: pd_block_id;
+  Info, Ri: pd_block_info;
+  Next: pd_block_id;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+    Exit;
+  pd_doc_block_info(FDoc, T, Info);
+  if Info.child_count <= 1 then
+  begin
+    TableDelete;
+    Exit;
+  end;
+  pd_doc_block_info(FDoc, R, Ri);
+  pd_doc_begin_group(FDoc, 'Delete row');
+  if Ri.index + 1 < Info.child_count then
+    Next := pd_doc_child(FDoc, T, Ri.index + 1)
+  else
+    Next := pd_doc_child(FDoc, T, Ri.index - 1);
+  CaretToCell(pd_doc_child(FDoc, Next, 0));
+  pd_doc_remove_block(FDoc, R);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.TableDeleteColumn;
+var
+  C, R, T, Row, Cell, Keep: pd_block_id;
+  Info, Ti: pd_block_info;
+  Col, I, K: Integer;
+  Cp: pd_cell_props;
+  Empty: Boolean;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+    Exit;
+  Col := GridColumn(R, Info.index);
+  { the last column: the table goes }
+  Empty := True;
+  pd_doc_block_info(FDoc, T, Ti);
+  for I := 0 to Ti.child_count - 1 do
+  begin
+    pd_doc_block_info(FDoc, pd_doc_child(FDoc, T, I), Info);
+    if (Info.child_count > 1) or (CellSpan(pd_doc_child(FDoc, pd_doc_child(FDoc, T, I), 0)) > 1) then
+      Empty := False;
+  end;
+  if Empty then
+  begin
+    TableDelete;
+    Exit;
+  end;
+  pd_doc_begin_group(FDoc, 'Delete column');
+  { the caret to a neighbour in this row }
+  pd_doc_block_info(FDoc, C, Info);
+  pd_doc_block_info(FDoc, R, Ti);
+  if Info.index + 1 < Ti.child_count then
+    Keep := pd_doc_child(FDoc, R, Info.index + 1)
+  else if Info.index > 0 then
+    Keep := pd_doc_child(FDoc, R, Info.index - 1)
+  else
+    Keep := 0;
+  if Keep <> 0 then
+    CaretToCell(Keep);
+  pd_doc_block_info(FDoc, T, Ti);
+  for I := 0 to Ti.child_count - 1 do
+  begin
+    Row := pd_doc_child(FDoc, T, I);
+    K := CellAtColumn(Row, Col);
+    if K < 0 then
+      Continue;
+    Cell := pd_doc_child(FDoc, Row, K);
+    pd_doc_block_info(FDoc, Row, Info);
+    if CellSpan(Cell) > 1 then
+    begin   { a merged cell over it: narrower }
+      pd_doc_cell_props(FDoc, Cell, Cp);
+      Dec(Cp.col_span);
+      pd_doc_set_cell_props(FDoc, Cell, Cp);
+    end
+    else if Info.child_count > 1 then
+      pd_doc_remove_block(FDoc, Cell);
+  end;
+  ResizeColumns(T, Col, -1);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.TableDelete;
+var
+  C, R, T, Next: pd_block_id;
+  Info: pd_block_info;
+  After: pd_pos;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, T, Info) <> PD_OK) then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Delete table');
+  { the caret to the paragraph after the table, or before it; one is made when there is neither }
+  Next := 0;
+  if Info.index + 1 < ChildCount(Info.parent) then
+    Next := pd_doc_child(FDoc, Info.parent, Info.index + 1)
+  else if Info.index > 0 then
+    Next := pd_doc_child(FDoc, Info.parent, Info.index - 1);
+  if Next = 0 then
+    pd_doc_insert_block(FDoc, Info.parent, Info.index + 1, PD_BLOCK_PARAGRAPH, Next);
+  pd_doc_remove_block(FDoc, T);
+  CaretToCell(Next);
+  After := CaretPos;
+  pd_doc_marker_set(FDoc, FAnchor, After);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+function TParadeEdit.ChildCount(Block: pd_block_id): Integer;
+var
+  Info: pd_block_info;
+begin
+  Result := 0;
+  if pd_doc_block_info(FDoc, Block, Info) = PD_OK then
+    Result := Info.child_count;
+end;
+
+{ what is in cell From put at the end of cell Into (an empty paragraph left behind in From) }
+procedure TParadeEdit.MoveCellContent(From, Into: pd_block_id);
+var
+  Info: pd_block_info;
+  B, Fresh: pd_block_id;
+  I: Integer;
+begin
+  if pd_doc_block_info(FDoc, From, Info) <> PD_OK then
+    Exit;
+  { nothing to move when it holds one empty paragraph }
+  if Info.child_count = 1 then
+  begin
+    B := pd_doc_child(FDoc, From, 0);
+    if (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.kind = PD_BLOCK_PARAGRAPH) and (Info.text_length = 0) then
+      Exit;
+    pd_doc_block_info(FDoc, From, Info);
+  end;
+  pd_doc_insert_block(FDoc, From, 0, PD_BLOCK_PARAGRAPH, Fresh);
+  for I := 1 to Info.child_count do
+    pd_doc_move_block(FDoc, pd_doc_child(FDoc, From, 1), Into, -1);
+end;
+
+procedure TParadeEdit.TableMergeRight;
+var
+  C, R, T, Next: pd_block_id;
+  Info, Ri: pd_block_info;
+  Cp: pd_cell_props;
+  Span: Integer;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+    Exit;
+  pd_doc_block_info(FDoc, R, Ri);
+  if Info.index + 1 >= Ri.child_count then
+    Exit;
+  Next := pd_doc_child(FDoc, R, Info.index + 1);
+  Span := CellSpan(Next);
+  pd_doc_begin_group(FDoc, 'Merge cells');
+  MoveCellContent(Next, C);
+  pd_doc_remove_block(FDoc, Next);
+  pd_doc_cell_props(FDoc, C, Cp);
+  if Cp.col_span < 1 then Cp.col_span := 1;
+  Inc(Cp.col_span, Span);
+  pd_doc_set_cell_props(FDoc, C, Cp);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.TableMergeDown;
+var
+  C, R, T, Below, BelowRow: pd_block_id;
+  Info, Ri, Ti: pd_block_info;
+  Cp: pd_cell_props;
+  Col, K, I: Integer;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+    Exit;
+  Col := GridColumn(R, Info.index);
+  pd_doc_block_info(FDoc, R, Ri);
+  pd_doc_block_info(FDoc, T, Ti);
+  { the first row below not already continuing this cell }
+  Below := 0;
+  for I := Ri.index + 1 to Ti.child_count - 1 do
+  begin
+    BelowRow := pd_doc_child(FDoc, T, I);
+    K := CellAtColumn(BelowRow, Col);
+    if K < 0 then
+      Exit;
+    Below := pd_doc_child(FDoc, BelowRow, K);
+    pd_doc_cell_props(FDoc, Below, Cp);
+    if Cp.merge_up = 0 then
+      Break;
+    Below := 0;
+  end;
+  if Below = 0 then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Merge cells');
+  MoveCellContent(Below, C);
+  pd_doc_cell_props(FDoc, Below, Cp);
+  Cp.merge_up := 1;
+  pd_doc_set_cell_props(FDoc, Below, Cp);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.TableSplitCell;
+var
+  C, R, T, Row, Cell: pd_block_id;
+  Info, Ri, Ti: pd_block_info;
+  Cp: pd_cell_props;
+  I, K, Col: Integer;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Split cell');
+  pd_doc_cell_props(FDoc, C, Cp);
+  { across: cells again for the columns it spans }
+  if Cp.col_span > 1 then
+  begin
+    for I := 2 to Cp.col_span do
+      pd_doc_insert_block(FDoc, R, Info.index + 1, PD_BLOCK_CELL, Cell);
+    Cp.col_span := 1;
+    pd_doc_set_cell_props(FDoc, C, Cp);
+  end;
+  { down: the cells below that continue it are cells of their own }
+  Col := GridColumn(R, Info.index);
+  pd_doc_block_info(FDoc, R, Ri);
+  pd_doc_block_info(FDoc, T, Ti);
+  for I := Ri.index + 1 to Ti.child_count - 1 do
+  begin
+    Row := pd_doc_child(FDoc, T, I);
+    K := CellAtColumn(Row, Col);
+    if K < 0 then
+      Break;
+    Cell := pd_doc_child(FDoc, Row, K);
+    pd_doc_cell_props(FDoc, Cell, Cp);
+    if Cp.merge_up = 0 then
+      Break;
+    Cp.merge_up := 0;
+    pd_doc_set_cell_props(FDoc, Cell, Cp);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+{ the cells between the selection's ends (a rectangle in the grid), or the caret's }
+function TParadeEdit.SelectedCells: TParadeBlockArray;
+var
+  C1, R1, T1, C2, R2, T2, Row: pd_block_id;
+  I1, I2: pd_block_info;
+  RowA, RowB, ColA, ColB, I, K, G: Integer;
+  Info: pd_block_info;
+begin
+  Result := nil;
+  if not CellAt(SelStart, C1, R1, T1) then
+    Exit;
+  if not CellAt(SelEnd, C2, R2, T2) or (T2 <> T1) then
+  begin
+    SetLength(Result, 1);
+    Result[0] := C1;
+    Exit;
+  end;
+  pd_doc_block_info(FDoc, R1, I1);
+  pd_doc_block_info(FDoc, R2, I2);
+  RowA := Min(I1.index, I2.index);
+  RowB := Max(I1.index, I2.index);
+  pd_doc_block_info(FDoc, C1, I1);
+  pd_doc_block_info(FDoc, C2, I2);
+  ColA := Min(GridColumn(R1, I1.index), GridColumn(R2, I2.index));
+  ColB := Max(GridColumn(R1, I1.index), GridColumn(R2, I2.index));
+  for I := RowA to RowB do
+  begin
+    Row := pd_doc_child(FDoc, T1, I);
+    pd_doc_block_info(FDoc, Row, Info);
+    G := 0;
+    for K := 0 to Info.child_count - 1 do
+    begin
+      if (G + CellSpan(pd_doc_child(FDoc, Row, K)) > ColA) and (G <= ColB) then
+      begin
+        SetLength(Result, Length(Result) + 1);
+        Result[High(Result)] := pd_doc_child(FDoc, Row, K);
+      end;
+      Inc(G, CellSpan(pd_doc_child(FDoc, Row, K)));
+    end;
+  end;
+end;
+
+procedure TParadeEdit.SetCellShading(RGB: Integer);
+var
+  Cells: TParadeBlockArray;
+  Cp: pd_cell_props;
+  I: Integer;
+begin
+  if FReadOnly then
+    Exit;
+  Cells := SelectedCells;
+  if Cells = nil then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Shading');
+  for I := 0 to High(Cells) do
+  begin
+    pd_doc_cell_props(FDoc, Cells[I], Cp);
+    if RGB < 0 then
+      Cp.background := 0
+    else
+      Cp.background := $FF000000 or UInt32(RGB and $FFFFFF);
+    pd_doc_set_cell_props(FDoc, Cells[I], Cp);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.SetTableBorders(Points: Double);
+var
+  C, R, T: pd_block_id;
+  Tp: pd_table_props;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+    Exit;
+  pd_doc_table_props(FDoc, T, Tp);
+  Tp.border := Round(Points * PD_SP_PER_PT);
+  if Tp.border_color = 0 then
+    Tp.border_color := $FF000000;
+  Tp.border_sides := 0;
+  pd_doc_begin_group(FDoc, 'Borders');
+  pd_doc_set_table_props(FDoc, T, Tp);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.SetHeaderRow(Repeated: Boolean);
+var
+  C, R, T: pd_block_id;
+  Tp: pd_table_props;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+    Exit;
+  pd_doc_table_props(FDoc, T, Tp);
+  Tp.header_rows := Ord(Repeated);
+  pd_doc_begin_group(FDoc, 'Header row');
+  pd_doc_set_table_props(FDoc, T, Tp);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.DistributeColumns;
+var
+  C, R, T, Row: pd_block_id;
+  Tp: pd_table_props;
+  Info: pd_block_info;
+  Total: Int64;
+  I, N: Integer;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+    Exit;
+  pd_doc_table_props(FDoc, T, Tp);
+  { the grid's columns: the widest row's }
+  N := 0;
+  pd_doc_block_info(FDoc, T, Info);
+  for I := 0 to Info.child_count - 1 do
+  begin
+    Row := pd_doc_child(FDoc, T, I);
+    N := Max(N, GridColumn(Row, ChildCount(Row)));
+  end;
+  if (N < 1) or (N > PD_TABLE_MAX_COLS) then
+    Exit;
+  Total := 0;
+  for I := 0 to Tp.ncols - 1 do
+    Inc(Total, Tp.col_width[I]);
+  if Total <= 0 then
+    Total := TextWidthAt(T);
+  if Total <= 0 then
+    Exit;
+  Tp.ncols := N;
+  for I := 0 to N - 1 do
+    Tp.col_width[I] := Total div N;
+  pd_doc_begin_group(FDoc, 'Distribute columns');
+  pd_doc_set_table_props(FDoc, T, Tp);
   pd_doc_end_group(FDoc);
   Changed;
 end;

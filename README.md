@@ -260,7 +260,11 @@ how to join). File > Join Shared Document takes the link.
   numbering, the current character/paragraph properties and style, and
   an OnSelectionChange event to show them by; and inserting a table,
   picture, link, page/column break or rule, equation (LaTeX), footnote or
-  endnote, or field (page number, pages, date). Copy puts the selection on the
+  endnote, or field (page number, pages, date); page setup of the
+  caret's section (margins, orientation, paper, columns, a section break,
+  header and footer with page-number fields, first page number, line
+  numbers); and table editing (rows and columns in or out, merging and
+  splitting cells, shading, borders, a repeated header row, even columns). Copy puts the selection on the
   clipboard as Parade JData, HTML (CF_HTML on Windows), RTF and text;
   paste takes the richest. Load/save by extension: .pdoc/.bpdoc, .docx,
   .rtf, .html, .md, .tex (save), .txt, .pdf (save).
