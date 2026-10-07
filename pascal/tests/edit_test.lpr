@@ -87,6 +87,9 @@ var
   N: Int32;
   Runs: array of pd_run;
   Ms: TMemoryStream;
+  P, Q, A, B: pd_pos;
+  Names: TStringList;
+  Kind, Spec: string;
   Items: array of pd_draw;
   Pic: Integer;
   Bmp: TBitmap;
@@ -982,6 +985,57 @@ begin
   Check(E.DocumentText = 'quick brown fox', 'accept all: ' + E.DocumentText);
   E.DeleteComment(1);
   Check(pd_doc_comment_get(E.Doc, 2, Cm) <> PD_OK, 'comment and reply deleted');
+
+  { 10. content controls: a check box ticked, a list's choice, a date; kept through DOCX }
+  Step('content controls');
+  E.TrackChanges := False;
+  E.NewDocument;
+  E.InsertText('Agree ');
+  E.InsertControl('checkbox', []);
+  P := E.CaretPos;
+  Check(Pos(#$E2#$98#$90, E.DocumentText) > 0, 'a check box, clear: ' + E.DocumentText);
+  Check(E.ToggleCheckBox(P) and (Pos(#$E2#$98#$92, E.DocumentText) > 0), 'ticked: ' + E.DocumentText);
+  E.Undo;
+  Check(Pos(#$E2#$98#$90, E.DocumentText) > 0, 'and undone in one step: ' + E.DocumentText);
+  E.ToggleCheckBox(P);
+  E.ProcessKey(VK_END, []);
+  E.InsertText(' colour ');
+  E.InsertControl('dropdown', ['Red', 'Green', 'Blue']);
+  Q := E.CaretPos;
+  Check(Pos('Choose an item.', E.DocumentText) > 0, 'a list, its prompt: ' + E.DocumentText);
+  Names := TStringList.Create;
+  try
+    Check(E.ControlItems(Q, Names) and (Names.Count = 3) and (Names[1] = 'Green'), 'its choices');
+  finally
+    Names.Free;
+  end;
+  E.ChooseControlItem(Q, 1);
+  Check((Pos('colour ' + #$EF#$BF#$BC + 'Green', E.DocumentText) > 0) and (Pos('Choose', E.DocumentText) = 0),
+    'chosen: ' + E.DocumentText);
+  Check(E.ControlAt(E.CaretPos, Kind, Spec, A, B) and (Kind = 'dropdown') and (Pos('"value" : "Green"', Spec) > 0) and
+    (Pos('placeholder', Spec) = 0), 'and it says so: ' + Spec);
+  E.ProcessKey(VK_END, []);
+  E.InsertText(' on ');
+  E.InsertControl('date', []);
+  E.SetControlDate(E.CaretPos, EncodeDate(2026, 10, 7));
+  Check(Pos('on ' + #$EF#$BF#$BC + '10/7/2026', E.DocumentText) > 0, 'a date: ' + E.DocumentText);
+  Ms := TMemoryStream.Create;
+  try
+    E.SaveToStream(Ms, PD_CONV_DOCX);
+    Ms.Position := 0;
+    E.LoadFromStream(Ms, PD_CONV_DOCX);
+  finally
+    Ms.Free;
+  end;
+  Check((Pos(#$E2#$98#$92, E.DocumentText) > 0) and (Pos('Green', E.DocumentText) > 0) and
+    (Pos('10/7/2026', E.DocumentText) > 0), 'and read back: ' + E.DocumentText);
+  Check(E.ControlAt(PdPos(E.CaretPos.block, 10), Kind, Spec, A, B) and (Kind = 'checkbox'), 'the box still a box');
+  { the caret in the list: framed }
+  E.ChooseControlItem(PdPos(E.CaretPos.block, Pos('Green', E.DocumentText) + 1), 1);
+  E.Invalidate;
+  E.Update;
+  Application.ProcessMessages;
+  ExecuteProcess('/usr/bin/import', ['-window', 'root', Dir + 'edit_controls.png']);
 
   { a real reviewed document, with the balloons in view }
   if FileExists(ParamStr(2)) then

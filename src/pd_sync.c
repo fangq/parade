@@ -791,7 +791,7 @@ static void ymapin_free(ymapin* m) {
 /* ------------------------------------------------------------------ */
 
 static const char* const obj_kind[] = { "image", "equation", "field", "footnote", "link", "bookmark", "tab", "user",
-                                        "raw"
+                                        "raw", "control"
                                       };
 
 /* the hash a picture is shared under; stored in the shared state when t can write */

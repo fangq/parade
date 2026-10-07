@@ -500,6 +500,7 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                     case PD_INLINE_LINK:
                     case PD_INLINE_BOOKMARK:
                     case PD_INLINE_RAW:
+                    case PD_INLINE_CONTROL:
                         ow = oh = od = 0;
                         break;
                 }

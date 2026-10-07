@@ -194,6 +194,7 @@ const
   PD_INLINE_TAB = 6;
   PD_INLINE_USER = 7;
   PD_INLINE_RAW = 8;
+  PD_INLINE_CONTROL = 9;      { a content control starts (name: its kind; source: JSON); an empty name ends it }
 
   PD_FIELD_PAGE = 0;
   PD_FIELD_PAGES = 1;
@@ -685,6 +686,7 @@ function pd_doc_list_label(doc: Ppd_doc; paragraph: pd_block_id; buf: PAnsiChar;
 function pd_doc_para_text(doc: Ppd_doc; paragraph: pd_block_id; out utf8: PAnsiChar; out len: UInt32): pd_status; cdecl; PDEXT;
 function pd_doc_para_runs(doc: Ppd_doc; paragraph: pd_block_id; buf: Ppd_run; cap: Int32; out count: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_inline_at(doc: Ppd_doc; pos: pd_pos; out obj: pd_inline): pd_status; cdecl; PDEXT;
+function pd_doc_control_at(doc: Ppd_doc; pos: pd_pos; out start, finish: pd_pos): pd_status; cdecl; PDEXT;
 function pd_doc_add_resource(doc: Ppd_doc; mime: PAnsiChar; data: Pointer; len: csize_t; out res: pd_res_id): pd_status; cdecl; PDEXT;
 function pd_doc_resource(doc: Ppd_doc; res: pd_res_id; mime: PPAnsiChar; data: PPointer; len: pcsize_t): pd_status; cdecl; PDEXT;
 

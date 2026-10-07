@@ -308,6 +308,7 @@ typedef struct {
     pd_block_id para;
     pd_char_props base;
     int in_link, in_note;
+    int nctl, nctl_ids;         /* content controls open in the paragraph; ids given */
     pd_buf rels;                /* document.xml.rels entries beyond the fixed ones */
     pd_buf notes;               /* footnotes.xml body */
     pd_buf endnotes;            /* endnotes.xml body */
@@ -1162,6 +1163,157 @@ static int dx_comments(const pd_doc* d, pd_buf* o, pd_buf* ex) {
     return n;
 }
 
+/* a string member of a control's JSON as an attribute value: name="value", nothing when absent */
+static void dx_jattr(pd_buf* o, const pj_node* root, const char* key, const char* attr) {
+    const pj_node* n = pj_get(root, key);
+
+    if (n && n->type == PJ_STR) {
+        pb_printf(o, " %s=\"", attr);
+        xesc(o, n->s, n->len);
+        pb_putc(o, '"');
+    }
+}
+
+/* an element with one value from the control's JSON: <name w:val="..."/> */
+static void dx_jval(pd_buf* o, const pj_node* root, const char* key, const char* elem) {
+    const pj_node* n = pj_get(root, key);
+
+    if (n && n->type == PJ_STR) {
+        pb_printf(o, "<%s w:val=\"", elem);
+        xesc(o, n->s, n->len);
+        pb_puts(o, "\"/>");
+    }
+}
+
+/* a content control's start: w:sdt, its properties, the content opened */
+static void dx_control_start(dxo* x, const pd_inline* ob) {
+    pd_buf* o = x->o;
+    pj_doc* doc = ob->source_len > 0 ? pj_parse(ob->source, (size_t)ob->source_len, 0, NULL) : NULL;
+    const pj_node* r = doc ? pj_root(doc) : NULL, *n;
+    const char* kind = ob->name;
+
+    if (r && r->type != PJ_OBJ) {
+        r = NULL;
+    }
+
+    pb_puts(o, "<w:sdt><w:sdtPr>");
+
+    if (r) {
+        dx_jval(o, r, "title", "w:alias");
+        dx_jval(o, r, "tag", "w:tag");
+        pb_printf(o, "<w:id w:val=\"%d\"/>", 0x4C000000 + ++x->nctl_ids);
+        dx_jval(o, r, "lock", "w:lock");
+
+        if ((n = pj_get(r, "prompt")) != NULL && n->type == PJ_STR) {
+            pb_puts(o, "<w:placeholder><w:docPart w:val=\"");
+            xesc(o, n->s, n->len);
+            pb_puts(o, "\"/></w:placeholder>");
+        }
+
+        if (pj_int_or(pj_get(r, "placeholder"), 0)) {
+            pb_puts(o, "<w:showingPlcHdr/>");
+        }
+    }
+
+    if (!strcmp(kind, "checkbox")) {
+        const pj_node* on = r ? pj_get(r, "on") : NULL, *off = r ? pj_get(r, "off") : NULL;
+
+        pb_printf(o, "<w14:checkbox><w14:checked w14:val=\"%d\"/>", r && pj_int_or(pj_get(r, "checked"), 0) ? 1 : 0);
+        pb_puts(o, "<w14:checkedState w14:val=\"");
+        xesc(o, on && on->type == PJ_STR ? on->s : "2612", on && on->type == PJ_STR ? on->len : 4);
+        pb_putc(o, '"');
+
+        if (r) {
+            dx_jattr(o, r, "onfont", "w14:font");
+        }
+
+        pb_puts(o, "/><w14:uncheckedState w14:val=\"");
+        xesc(o, off && off->type == PJ_STR ? off->s : "2610", off && off->type == PJ_STR ? off->len : 4);
+        pb_putc(o, '"');
+
+        if (r) {
+            dx_jattr(o, r, "offfont", "w14:font");
+        }
+
+        pb_puts(o, "/></w14:checkbox>");
+    } else if (!strcmp(kind, "dropdown") || !strcmp(kind, "combobox")) {
+        const pj_node* items = r ? pj_get(r, "items") : NULL, *it;
+
+        pb_puts(o, kind[0] == 'd' ? "<w:dropDownList" : "<w:comboBox");
+
+        if (r) {
+            dx_jattr(o, r, "value", "w:lastValue");
+        }
+
+        pb_putc(o, '>');
+
+        for (it = items && items->type == PJ_ARR ? items->child : NULL; it; it = it->next) {
+            const pj_node* dt = pj_at(it, 0), *vl = pj_at(it, 1);
+
+            if (!dt || dt->type != PJ_STR) {
+                continue;
+            }
+
+            pb_puts(o, "<w:listItem w:displayText=\"");
+            xesc(o, dt->s, dt->len);
+            pb_puts(o, "\" w:value=\"");
+            xesc(o, vl && vl->type == PJ_STR ? vl->s : dt->s, vl && vl->type == PJ_STR ? vl->len : dt->len);
+            pb_puts(o, "\"/>");
+        }
+
+        pb_puts(o, kind[0] == 'd' ? "</w:dropDownList>" : "</w:comboBox>");
+    } else if (!strcmp(kind, "date")) {
+        pb_puts(o, "<w:date");
+
+        if (r) {
+            dx_jattr(o, r, "date", "w:fullDate");
+        }
+
+        pb_putc(o, '>');
+
+        if (r) {
+            dx_jval(o, r, "format", "w:dateFormat");
+            dx_jval(o, r, "lid", "w:lid");
+        }
+
+        pb_puts(o, "<w:storeMappedDataAs w:val=\"dateTime\"/><w:calendar w:val=\"gregorian\"/></w:date>");
+    } else if (!strcmp(kind, "text")) {
+        pb_puts(o, r && pj_int_or(pj_get(r, "multiline"), 0) ? "<w:text w:multiLine=\"1\"/>" : "<w:text/>");
+    } else if (!strcmp(kind, "picture") || !strcmp(kind, "group") || !strcmp(kind, "citation") ||
+               !strcmp(kind, "bibliography") || !strcmp(kind, "equation")) {
+        pb_printf(o, "<w:%s/>", kind);
+    } else if (!strcmp(kind, "docpart")) {
+        pb_puts(o, "<w:docPartObj>");
+
+        if (r) {
+            dx_jval(o, r, "gallery", "w:docPartGallery");
+        }
+
+        pb_puts(o, "<w:docPartUnique/></w:docPartObj>");
+    }
+
+    pb_puts(o, "</w:sdtPr><w:sdtContent>");
+    x->nctl++;
+    pj_free(doc);
+}
+
+/* the innermost control's end, or every one still open (at a paragraph's end) */
+static void dx_control_end(dxo* x, int all) {
+    while (x->nctl > 0) {
+        if (x->in_link) {   /* a link opened inside it ends with it */
+            pb_puts(x->o, "</w:hyperlink>");
+            x->in_link = 0;
+        }
+
+        pb_puts(x->o, "</w:sdtContent></w:sdt>");
+        x->nctl--;
+
+        if (!all) {
+            break;
+        }
+    }
+}
+
 static int dx_span(void* user, const pd_span* sp) {
     dxo* x = (dxo*)user;
     pd_buf* o = x->o;
@@ -1267,7 +1419,7 @@ static int dx_span(void* user, const pd_span* sp) {
                 int32_t k, id = endnote ? ++x->nendnotes : ++x->nnotes;
                 pd_block_id spara = x->para;
                 pd_char_props sbase = x->base;
-                int slink = x->in_link, sncb = x->ncb, scbi = x->cbi;
+                int slink = x->in_link, sncb = x->ncb, scbi = x->cbi, sctl = x->nctl;
                 void* scb = malloc(sizeof(x->cb));
 
                 if (scb) {
@@ -1300,6 +1452,7 @@ static int dx_span(void* user, const pd_span* sp) {
                 x->para = spara;
                 x->base = sbase;
                 x->in_link = slink;
+                x->nctl = sctl;
 
                 if (scb) {
                     memcpy(x->cb, scb, sizeof(x->cb));
@@ -1330,6 +1483,20 @@ static int dx_span(void* user, const pd_span* sp) {
                     pb_puts(&x->rels, "\" TargetMode=\"External\"/>");
                     pb_printf(o, "<w:hyperlink r:id=\"rIdl%d\">", x->nlinks);
                     x->in_link = 1;
+                }
+
+                break;
+
+            case PD_INLINE_CONTROL:
+                if (x->in_link) {   /* w:sdt and w:hyperlink nest: the link ends here */
+                    pb_puts(o, "</w:hyperlink>");
+                    x->in_link = 0;
+                }
+
+                if (ob->name[0]) {
+                    dx_control_start(x, ob);
+                } else {
+                    dx_control_end(x, 0);
                 }
 
                 break;
@@ -1563,6 +1730,7 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
 
     x->para = p;
     x->in_link = 0;
+    x->nctl = 0;
     pd_conv_base_props(x->d, p, &x->base);
     dx_comment_bounds(x, p);
     pd_conv_spans_all(x->d, p, dx_span, x);
@@ -1571,6 +1739,8 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
         pb_puts(x->o, "</w:hyperlink>");
         x->in_link = 0;
     }
+
+    dx_control_end(x, 1);
 
     dx_marks(x, UINT32_MAX);
     x->ncb = x->cbi = 0;
@@ -4228,6 +4398,8 @@ typedef struct {
     int note;                   /* parsing a footnote body */
     int after_ref;              /* just after the note's own number: drop the space that follows it */
     pd_rev_id rev;              /* inside w:ins or w:del: the tracked change the text is */
+    unsigned sdt_inline;        /* the w:sdt being read, a bit each level: 1 a control in a paragraph's text */
+    int sdt_depth;
 } dw;
 
 /* the run's format: what the document says about its characters, less what
@@ -5837,6 +6009,154 @@ static void dw_section_hf(dw* w) {
     w->sp.facing_pages = X->even_odd && (w->sp.header_even || w->sp.footer_even);
 }
 
+
+/* an attribute in either of the namespaces a check box's are written in */
+static int attr_w14(const pd_markup* m, const char* name, char* v, size_t cap) {
+    char q[48];
+
+    snprintf(q, sizeof(q), "w14:%s", name);
+
+    if (mu_attr(m, q, v, cap)) {
+        return 1;
+    }
+
+    snprintf(q, sizeof(q), "w:%s", name);
+    return mu_attr(m, q, v, cap);
+}
+
+/* a JSON member: ,"key":"value" */
+static void json_member(pd_buf* o, const char* key, const char* v) {
+    pb_printf(o, "%s\"%s\":", o->n > 1 ? "," : "", key);
+    json_str(o, v, strlen(v));
+}
+
+/* A w:sdtPr: the control's kind into kind (dropdown, checkbox, ...), the rest as the JSON object
+   pd_doc_control_at describes into o. m is at its opening tag; it is left after the closing one. */
+static void dw_sdt_props(pd_markup* m, char* kind, size_t kcap, pd_buf* o) {
+    pd_markup g;
+    int depth = 1, nitems = 0, in_rpr = 0;
+    char v[300], v2[300];
+
+    snprintf(kind, kcap, "richtext");
+    pb_putc(o, '{');
+    mu_init(&g, m->s + m->pos, m->n - m->pos, 0);
+
+    while (depth > 0 && mu_next(&g) != MT_END) {
+        const char* t = mu_local(g.name);
+        int open = g.type == MT_OPEN || g.type == MT_EMPTY;
+
+        if (g.type == MT_OPEN) {
+            depth++;
+        } else if (g.type == MT_CLOSE && --depth == 0) {
+            break;
+        }
+
+        if (!strcmp(t, "rPr")) {
+            in_rpr = g.type == MT_OPEN;     /* the format new content takes: not the control's own */
+            continue;
+        }
+
+        if (!open || in_rpr) {
+            continue;
+        }
+
+        if (!strcmp(t, "alias") && mu_attr(&g, "w:val", v, sizeof(v))) {
+            json_member(o, "title", v);
+        } else if (!strcmp(t, "tag") && mu_attr(&g, "w:val", v, sizeof(v))) {
+            json_member(o, "tag", v);
+        } else if (!strcmp(t, "lock") && mu_attr(&g, "w:val", v, sizeof(v))) {
+            json_member(o, "lock", v);
+        } else if (!strcmp(t, "showingPlcHdr") && attr_on(&g)) {
+            pb_printf(o, "%s\"placeholder\":1", o->n > 1 ? "," : "");
+        } else if (!strcmp(t, "docPart") && mu_attr(&g, "w:val", v, sizeof(v))) {
+            json_member(o, "prompt", v);    /* the glossary entry its placeholder text is */
+        } else if (!strcmp(t, "checkbox")) {
+            snprintf(kind, kcap, "checkbox");
+        } else if (!strcmp(t, "checked")) {
+            pb_printf(o, "%s\"checked\":%d", o->n > 1 ? "," : "", attr_w14(&g, "val", v, sizeof(v)) ?
+                      (!strcmp(v, "1") || !strcmp(v, "true")) : 1);
+        } else if ((!strcmp(t, "checkedState") || !strcmp(t, "uncheckedState")) && attr_w14(&g, "val", v, sizeof(v))) {
+            json_member(o, t[0] == 'c' ? "on" : "off", v);
+
+            if (attr_w14(&g, "font", v2, sizeof(v2))) {
+                json_member(o, t[0] == 'c' ? "onfont" : "offfont", v2);
+            }
+        } else if (!strcmp(t, "dropDownList") || !strcmp(t, "comboBox")) {
+            snprintf(kind, kcap, "%s", t[0] == 'd' ? "dropdown" : "combobox");
+
+            if (mu_attr(&g, "w:lastValue", v, sizeof(v))) {
+                json_member(o, "value", v);
+            }
+        } else if (!strcmp(t, "listItem")) {
+            if (!mu_attr(&g, "w:displayText", v, sizeof(v))) {
+                v[0] = '\0';
+            }
+
+            if (!mu_attr(&g, "w:value", v2, sizeof(v2))) {
+                snprintf(v2, sizeof(v2), "%s", v);
+            }
+
+            pb_printf(o, nitems++ ? ",[" : "%s\"items\":[[", o->n > 1 ? "," : "");
+            json_str(o, v[0] ? v : v2, strlen(v[0] ? v : v2));
+            pb_putc(o, ',');
+            json_str(o, v2, strlen(v2));
+            pb_putc(o, ']');
+        } else if (!strcmp(t, "date")) {
+            snprintf(kind, kcap, "date");
+
+            if (mu_attr(&g, "w:fullDate", v, sizeof(v))) {
+                json_member(o, "date", v);
+            }
+        } else if (!strcmp(t, "dateFormat") && mu_attr(&g, "w:val", v, sizeof(v))) {
+            json_member(o, "format", v);
+        } else if (!strcmp(t, "lid") && mu_attr(&g, "w:val", v, sizeof(v))) {
+            json_member(o, "lid", v);
+        } else if (!strcmp(t, "text")) {
+            snprintf(kind, kcap, "text");
+
+            if (mu_attr(&g, "w:multiLine", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"))) {
+                pb_printf(o, "%s\"multiline\":1", o->n > 1 ? "," : "");
+            }
+        } else if (!strcmp(t, "picture") || !strcmp(t, "group") || !strcmp(t, "citation") ||
+                   !strcmp(t, "bibliography") || !strcmp(t, "equation")) {
+            snprintf(kind, kcap, "%s", t);
+        } else if (!strcmp(t, "docPartObj") || !strcmp(t, "docPartList")) {
+            snprintf(kind, kcap, "docpart");
+        } else if (!strcmp(t, "docPartGallery") && mu_attr(&g, "w:val", v, sizeof(v))) {
+            json_member(o, "gallery", v);
+        }
+
+        if (nitems && strcmp(t, "listItem") != 0) {
+            pb_putc(o, ']');    /* the list's items end with the first thing that is not one */
+            nitems = 0;
+        }
+    }
+
+    if (nitems) {
+        pb_putc(o, ']');
+    }
+
+    pb_putc(o, '}');
+    m->pos += g.pos;
+}
+
+/* a content control's start (kind and JSON) or, kind NULL, its end, where the paragraph is */
+static void dw_control(dw* w, const char* kind, const pd_buf* spec) {
+    pd_inline o;
+
+    dw_begin_para(w);
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_CONTROL;
+
+    if (kind) {
+        snprintf(o.name, sizeof(o.name), "%s", kind);
+        o.source = spec->p;
+        o.source_len = (int32_t)spec->n;
+    }
+
+    bld_inline(w->X->b, &o);
+}
+
 static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
     pd_markup m;
     dw* w = (dw*)calloc(1, sizeof(dw));
@@ -5976,6 +6296,51 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             w->tbx = m.s + m.pos;
             w->tbn = end;
             m.pos += g.pos;
+            continue;
+        }
+
+        if (m.type == MT_OPEN && strcmp(t, "sdt") == 0) {
+            if (w->sdt_depth < 30) {
+                w->sdt_inline &= ~(1u << w->sdt_depth);
+            }
+
+            w->sdt_depth++;
+            continue;
+        }
+
+        if (m.type == MT_OPEN && strcmp(t, "sdtPr") == 0 && w->sdt_depth > 0) {
+            char kind[32];
+            pd_buf spec;
+
+            memset(&spec, 0, sizeof(spec));
+            dw_sdt_props(&m, kind, sizeof(kind), &spec);
+
+            /* in a paragraph's text: a control, from here to the w:sdt's end; around paragraphs, rows or cells,
+               only its content is kept */
+            if (w->in_p && !w->in_drawing && w->sdt_depth <= 30 && !spec.err) {
+                w->sdt_inline |= 1u << (w->sdt_depth - 1);
+                dw_control(w, kind, &spec);
+            }
+
+            pb_free(&spec);
+            continue;
+        }
+
+        if (m.type == MT_CLOSE && strcmp(t, "sdt") == 0 && w->sdt_depth > 0) {
+            w->sdt_depth--;
+
+            if (w->sdt_depth < 30 && (w->sdt_inline & (1u << w->sdt_depth)) && w->in_p) {
+                dw_control(w, NULL, NULL);
+            }
+
+            continue;
+        }
+
+        if (open && strcmp(t, "sdtEndPr") == 0) {
+            if (m.type == MT_OPEN) {
+                w->skip = 1;
+            }
+
             continue;
         }
 

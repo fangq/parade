@@ -17,7 +17,8 @@ interface
 
 uses
   Classes, SysUtils, Controls, Graphics, LCLType, LCLIntf, ExtCtrls, StdCtrls, Forms, Clipbrd,
-  IntfGraphics, GraphType, FPImage, LazFileUtils, Math, ctypes, parade, paradefonts;
+  IntfGraphics, GraphType, FPImage, LazFileUtils, LazUTF8, Math, ctypes, Menus, ExtDlgs, fpjson, jsonparser, parade,
+  paradefonts;
 
 type
   TParadeFontEntry = record
@@ -83,6 +84,8 @@ type
     FLayout: Ppd_layout;
     FFonts: array of TParadeFontEntry;
     FMathFont: Ppd_font;        { equations are typeset with it }
+    FFallback: array of Ppd_font;   { for characters a run's font lacks: symbols, CJK }
+    FFallbackDone: Boolean;
     FCaret, FAnchor: pd_marker_id;
     FDesiredX: Double;
     FHasDesiredX: Boolean;
@@ -125,6 +128,11 @@ type
     FReadOnly: Boolean;
     FRemote: array of TParadeRemoteCaret;
     FRemoteRev: Integer;
+    FControlMenu: TPopupMenu;      { a drop-down control's choices }
+    FMenuAt: pd_pos;
+    procedure UseFallbackFonts;
+    procedure ControlMenuClick(Sender: TObject);
+    function PastEnds(const P: pd_pos): pd_pos;
     function GetPageCount: Integer;
     function MarkupWidth: Integer;
     function HiddenAt(const P: pd_pos): Boolean;
@@ -195,7 +203,9 @@ type
     procedure SetShowMarks(AValue: Boolean);
     procedure PaintMarks(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double);
     function FormatAt(const P: pd_pos): pd_format_id;
-    procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
+    { OnScreen: the editor's view, with what only it shows (the frame of the control the caret is in) }
+    procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean;
+      OnScreen: Boolean = False);
     procedure UseDocumentFonts;
     function BackSignature: string;
     procedure RebuildBack;
@@ -319,6 +329,24 @@ type
     procedure InsertNote(const ANote: string; Endnote: Boolean = False);
     { a field: PD_FIELD_PAGE, PD_FIELD_PAGES or PD_FIELD_DATE }
     procedure InsertField(Kind: Integer);
+    { a content control at the caret: Kind 'checkbox', 'dropdown' or 'combobox' (with Items), 'date', 'text';
+      its prompt selected }
+    procedure InsertControl(const Kind: string; const Items: array of string);
+
+    { ---- content controls (a Word form's fields) ---- }
+    { the innermost control around P: its kind, its JSON (pd_doc_control_at), where it starts and ends }
+    function ControlAt(const P: pd_pos; out Kind, Spec: string; out AStart, AEnd: pd_pos): Boolean;
+    { the control from AStart to AEnd now says Spec and holds Content (one undo) }
+    procedure SetControl(const AStart, AEnd: pd_pos; const Spec, Content: string);
+    { the check box around P ticked or cleared; False when there is none (or it is locked) }
+    function ToggleCheckBox(const P: pd_pos): Boolean;
+    { a drop-down's (or combo box's) choices, what each shows }
+    function ControlItems(const P: pd_pos; Items: TStrings): Boolean;
+    procedure ChooseControlItem(const P: pd_pos; Index: Integer);
+    function ControlDate(const P: pd_pos; out ADate: TDateTime): Boolean;
+    procedure SetControlDate(const P: pd_pos; ADate: TDateTime);
+    { what a click on a control does: tick, drop the list down, a calendar; True when it did }
+    function ClickControl(const P: pd_pos; X, Y: Integer): Boolean;
 
     { ---- the Layout tab: the caret's section (its pages) ---- }
     function CurrentSection: pd_block_id;
@@ -1075,6 +1103,44 @@ begin
   FFonts[High(FFonts)].Cls := pd_font_family_class(PAnsiChar(Family));
 end;
 
+{ the fonts tried for a character the run's font does not have (a check box's, CJK, arrows), those of them the
+  system has: loaded once, the first time a document needs them }
+procedure TParadeEdit.UseFallbackFonts;
+const
+  Families: array[0..8] of string = ('dejavu sans', 'noto sans symbols2', 'noto sans symbols', 'noto sans cjk sc',
+    'noto sans cjk jp', 'wenquanyi micro hei', 'droid sans fallback', 'freeserif', 'symbola');
+var
+  I, K: Integer;
+  F: Ppd_font;
+begin
+  if not FFallbackDone then
+  begin
+    FFallbackDone := True;
+    SetLength(FFallback, 0);
+    for K := 0 to High(Families) do
+      for I := 0 to High(FFonts) do
+        if (FFonts[I].Key = Families[K]) and (FFonts[I].Weight = 400) and (FFonts[I].Italic = 0) and
+          not FFonts[I].Failed and not FFonts[I].FromDoc then
+        begin
+          if FFonts[I].Font = nil then
+          begin
+            if pd_font_load_file(PAnsiChar(FFonts[I].FileName), FFonts[I].FaceIndex, F) = PD_OK then
+              FFonts[I].Font := F
+            else
+              FFonts[I].Failed := True;
+          end;
+          if FFonts[I].Font <> nil then
+          begin
+            SetLength(FFallback, Length(FFallback) + 1);
+            FFallback[High(FFallback)] := FFonts[I].Font;
+          end;
+          Break;
+        end;
+  end;
+  if (FDoc <> nil) and (Length(FFallback) > 0) then
+    pd_doc_set_fallback_fonts(FDoc, @FFallback[0], Length(FFallback));
+end;
+
 function TParadeEdit.AddSystemFonts: Integer;
 var
   Faces: TParadeSystemFaces;
@@ -1110,6 +1176,8 @@ begin
   finally
     Have.Free;
   end;
+  FFallbackDone := False;   { looked for again, among these }
+  UseFallbackFonts;
 end;
 
 { the fonts the document carries, ahead of the registered ones of the same family; the last document's go }
@@ -1208,6 +1276,7 @@ begin
   FDoc := D;
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
   pd_doc_set_math_font(FDoc, FMathFont);
+  UseFallbackFonts;
   if FTrack then
     pd_doc_set_tracking(FDoc, PAnsiChar(FAuthor));
   ParadeCheck(pd_layout_new(FDoc, FLayout), 'layout');
@@ -1266,6 +1335,7 @@ begin
   pd_doc_load_images(FDoc, @FetchFile, @Base);
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
   pd_doc_set_math_font(FDoc, FMathFont);
+  UseFallbackFonts;
   if FTrack then
     pd_doc_set_tracking(FDoc, PAnsiChar(FAuthor));
   ParadeCheck(pd_layout_new(FDoc, FLayout), 'layout');
@@ -1906,7 +1976,25 @@ begin
   pd_layout_page_info(FLayout, Page, Info);
   if ToEnd then X := Info.width else X := 0;
   if pd_layout_hit_test(FLayout, Page, X, Base - Asc div 2, P) = PD_OK then
+  begin
+    if ToEnd then
+      P := PastEnds(P);
     SetCaret(P, Extend);
+  end;
+end;
+
+{ past the ends of controls and links right after P, which take no room: where End and typing after them go }
+function TParadeEdit.PastEnds(const P: pd_pos): pd_pos;
+var
+  S: string;
+  O: pd_inline;
+begin
+  Result := P;
+  S := ParaText(P.block);
+  while (Result.offset + 3 <= UInt32(Length(S))) and (Copy(S, Result.offset + 1, 3) = #$EF#$BF#$BC) and
+    (pd_doc_inline_at(FDoc, Result, O) = PD_OK) and
+    (((O.kind = PD_INLINE_CONTROL) and (O.name[0] = #0)) or ((O.kind = PD_INLINE_LINK) and (O.source_len = 0))) do
+    Inc(Result.offset, 3);
 end;
 
 { ---------------- editing ---------------- }
@@ -2868,6 +2956,355 @@ begin
   InsertObject(O);
   pd_doc_end_group(FDoc);
   Changed;
+end;
+
+{ ---- content controls ---- }
+
+function TParadeEdit.ControlAt(const P: pd_pos; out Kind, Spec: string; out AStart, AEnd: pd_pos): Boolean;
+var
+  O: pd_inline;
+begin
+  Kind := '';
+  Spec := '';
+  Result := (FDoc <> nil) and (pd_doc_control_at(FDoc, P, AStart, AEnd) = PD_OK) and
+    (pd_doc_inline_at(FDoc, AStart, O) = PD_OK);
+  if Result then
+  begin
+    Kind := StrPas(PAnsiChar(@O.name[0]));
+    if (O.source <> nil) and (O.source_len > 0) then
+      SetString(Spec, O.source, O.source_len);
+  end;
+end;
+
+function ControlJson(const Spec: string): TJSONObject;
+var
+  D: TJSONData;
+begin
+  Result := nil;
+  if Spec <> '' then
+    try
+      D := GetJSON(Spec);
+      if D is TJSONObject then
+        Result := TJSONObject(D)
+      else
+        D.Free;
+    except
+      Result := nil;
+    end;
+  if Result = nil then
+    Result := TJSONObject.Create;
+end;
+
+{ a check box's character: hex code point as Word writes it, UTF-8 }
+function HexChar(const Hex, Default: string): string;
+var
+  C: LongInt;
+begin
+  C := StrToIntDef('$' + Hex, -1);
+  if (C <= 0) or (C > $10FFFF) then
+    C := StrToInt('$' + Default);
+  Result := UnicodeToUTF8(C);
+end;
+
+procedure TParadeEdit.SetControl(const AStart, AEnd: pd_pos; const Spec, Content: string);
+var
+  O: pd_inline;
+  Kind: array[0..31] of AnsiChar;
+  C, After: pd_pos;
+  Fmt: pd_format_id;
+begin
+  if FReadOnly or (pd_doc_inline_at(FDoc, AStart, O) <> PD_OK) then
+    Exit;
+  Move(O.name, Kind, SizeOf(Kind));
+  C := PdPos(AStart.block, AStart.offset + 3);
+  Fmt := PD_FORMAT_INHERIT;
+  if AEnd.offset > C.offset then
+    Fmt := StripRevision(FormatAt(C));
+  pd_doc_begin_group(FDoc, 'Content control');
+  if AEnd.offset > C.offset then
+    pd_doc_delete(FDoc, PdRange(C, AEnd), nil);
+  After := C;
+  if Content <> '' then
+    pd_doc_insert_text(FDoc, C, PAnsiChar(Content), Length(Content), Fmt, @After);
+  { the start object, saying what the control holds now }
+  pd_doc_delete(FDoc, PdRange(AStart, C), nil);
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_CONTROL;
+  Move(Kind, O.name, SizeOf(Kind));
+  O.source := PAnsiChar(Spec);
+  O.source_len := Length(Spec);
+  pd_doc_insert_inline(FDoc, AStart, O, nil);
+  pd_doc_end_group(FDoc);
+  pd_doc_marker_set(FDoc, FCaret, After);
+  pd_doc_marker_set(FDoc, FAnchor, After);
+  Changed;
+end;
+
+function TParadeEdit.ToggleCheckBox(const P: pd_pos): Boolean;
+var
+  Kind, Spec: string;
+  A, B: pd_pos;
+  J: TJSONObject;
+  On: Boolean;
+begin
+  Result := ControlAt(P, Kind, Spec, A, B) and (Kind = 'checkbox') and not FReadOnly;
+  if not Result then
+    Exit;
+  J := ControlJson(Spec);
+  try
+    if J.Get('lock', '') = 'contentLocked' then
+      Exit(False);
+    On := J.Get('checked', 0) = 0;
+    J.Integers['checked'] := Ord(On);
+    if J.IndexOfName('placeholder') >= 0 then
+      J.Delete('placeholder');
+    if On then
+      SetControl(A, B, J.AsJSON, HexChar(J.Get('on', ''), '2612'))
+    else
+      SetControl(A, B, J.AsJSON, HexChar(J.Get('off', ''), '2610'));
+  finally
+    J.Free;
+  end;
+end;
+
+function TParadeEdit.ControlItems(const P: pd_pos; Items: TStrings): Boolean;
+var
+  Kind, Spec: string;
+  A, B: pd_pos;
+  J: TJSONObject;
+  L: TJSONArray;
+  I: Integer;
+begin
+  Items.Clear;
+  Result := ControlAt(P, Kind, Spec, A, B) and ((Kind = 'dropdown') or (Kind = 'combobox'));
+  if not Result then
+    Exit;
+  J := ControlJson(Spec);
+  try
+    L := J.Get('items', TJSONArray(nil));
+    if L <> nil then
+      for I := 0 to L.Count - 1 do
+        if (L.Items[I] is TJSONArray) and (TJSONArray(L.Items[I]).Count > 0) then
+          Items.Add(TJSONArray(L.Items[I]).Strings[0]);
+  finally
+    J.Free;
+  end;
+end;
+
+procedure TParadeEdit.ChooseControlItem(const P: pd_pos; Index: Integer);
+var
+  Kind, Spec: string;
+  A, B: pd_pos;
+  J: TJSONObject;
+  L, It: TJSONArray;
+begin
+  if not ControlAt(P, Kind, Spec, A, B) then
+    Exit;
+  J := ControlJson(Spec);
+  try
+    L := J.Get('items', TJSONArray(nil));
+    if (L = nil) or (Index < 0) or (Index >= L.Count) or not (L.Items[Index] is TJSONArray) then
+      Exit;
+    It := TJSONArray(L.Items[Index]);
+    if It.Count > 1 then
+      J.Strings['value'] := It.Strings[1]
+    else
+      J.Strings['value'] := It.Strings[0];
+    if J.IndexOfName('placeholder') >= 0 then
+      J.Delete('placeholder');
+    SetControl(A, B, J.AsJSON, It.Strings[0]);
+  finally
+    J.Free;
+  end;
+end;
+
+{ Word's date pictures (M/d/yyyy, MMMM d, yyyy, dddd) as FormatDateTime's: M month, m minute, H hour }
+function WordDateFormat(const F: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to Length(F) do
+    case F[I] of
+      'M': Result := Result + 'm';
+      'm': Result := Result + 'n';
+      'H': Result := Result + 'h';
+      'y', 'd', 'h', 's': Result := Result + F[I];
+      #39: Result := Result + '"';
+    else
+      if F[I] = ' ' then
+        Result := Result + F[I]
+      else
+        Result := Result + '"' + F[I] + '"';  { a separator as it is, not the locale's (/ is its date one) }
+    end;
+  if Result = '' then
+    Result := 'm/d/yyyy';
+end;
+
+procedure TParadeEdit.SetControlDate(const P: pd_pos; ADate: TDateTime);
+var
+  Kind, Spec: string;
+  A, B: pd_pos;
+  J: TJSONObject;
+begin
+  if not ControlAt(P, Kind, Spec, A, B) or (Kind <> 'date') then
+    Exit;
+  J := ControlJson(Spec);
+  try
+    J.Strings['date'] := FormatDateTime('yyyy"-"mm"-"dd"T00:00:00Z"', ADate);
+    if J.IndexOfName('placeholder') >= 0 then
+      J.Delete('placeholder');
+    SetControl(A, B, J.AsJSON, FormatDateTime(WordDateFormat(J.Get('format', 'M/d/yyyy')), ADate));
+  finally
+    J.Free;
+  end;
+end;
+
+function TParadeEdit.ControlDate(const P: pd_pos; out ADate: TDateTime): Boolean;
+var
+  Kind, Spec, S: string;
+  A, B: pd_pos;
+  J: TJSONObject;
+begin
+  ADate := Date;
+  Result := ControlAt(P, Kind, Spec, A, B) and (Kind = 'date');
+  if not Result then
+    Exit;
+  J := ControlJson(Spec);
+  try
+    S := J.Get('date', '');
+    if Length(S) >= 10 then
+      ADate := EncodeDate(StrToIntDef(Copy(S, 1, 4), 2000), StrToIntDef(Copy(S, 6, 2), 1), StrToIntDef(Copy(S, 9, 2), 1));
+  finally
+    J.Free;
+  end;
+end;
+
+procedure TParadeEdit.InsertControl(const Kind: string; const Items: array of string);
+var
+  O: pd_inline;
+  J: TJSONObject;
+  L: TJSONArray;
+  S, Content: string;
+  I: Integer;
+  P, After: pd_pos;
+begin
+  if FReadOnly then
+    Exit;
+  J := TJSONObject.Create;
+  try
+    Content := '';
+    if Kind = 'checkbox' then
+    begin
+      J.Integers['checked'] := 0;
+      J.Strings['on'] := '2612';
+      J.Strings['off'] := '2610';
+      Content := HexChar('2610', '2610');
+    end
+    else if (Kind = 'dropdown') or (Kind = 'combobox') then
+    begin
+      L := TJSONArray.Create;
+      for I := 0 to High(Items) do
+        L.Add(TJSONArray.Create([Items[I], Items[I]]));
+      J.Add('items', L);
+      J.Integers['placeholder'] := 1;
+      Content := 'Choose an item.';
+    end
+    else if Kind = 'date' then
+    begin
+      J.Strings['format'] := 'M/d/yyyy';
+      J.Integers['placeholder'] := 1;
+      Content := 'Click to enter a date.';
+    end
+    else
+    begin
+      J.Integers['placeholder'] := 1;
+      Content := 'Click here to enter text.';
+    end;
+    S := J.AsJSON;
+  finally
+    J.Free;
+  end;
+  pd_doc_begin_group(FDoc, 'Insert content control');
+  DeleteSelection;
+  P := CaretPos;
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_CONTROL;
+  StrPLCopy(PAnsiChar(@O.name[0]), Kind, High(O.name));
+  O.source := PAnsiChar(S);
+  O.source_len := Length(S);
+  pd_doc_insert_inline(FDoc, P, O, @After);
+  pd_doc_insert_text(FDoc, After, PAnsiChar(Content), Length(Content), PD_FORMAT_INHERIT, @After);
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_CONTROL;      { no name: where it ends }
+  pd_doc_insert_inline(FDoc, After, O, @After);
+  pd_doc_end_group(FDoc);
+  { the caret on its content, to type over (a text box) or click (the others) }
+  pd_doc_marker_set(FDoc, FAnchor, PdPos(P.block, P.offset + 3));
+  pd_doc_marker_set(FDoc, FCaret, PdPos(P.block, P.offset + 3 + UInt32(Length(Content))));
+  Changed;
+end;
+
+procedure TParadeEdit.ControlMenuClick(Sender: TObject);
+begin
+  ChooseControlItem(FMenuAt, TMenuItem(Sender).Tag);
+end;
+
+{ a click on a check box ticks it; on a list, the list drops down; on a date, a calendar; True when it was one }
+function TParadeEdit.ClickControl(const P: pd_pos; X, Y: Integer): Boolean;
+var
+  Kind, Spec: string;
+  A, B: pd_pos;
+  Items: TStringList;
+  I: Integer;
+  Mi: TMenuItem;
+  D: TDateTime;
+  Dlg: TCalendarDialog;
+  Pt: TPoint;
+begin
+  Result := False;
+  if FReadOnly or not ControlAt(P, Kind, Spec, A, B) then
+    Exit;
+  if Kind = 'checkbox' then
+    Exit(ToggleCheckBox(P));
+  if (Kind = 'dropdown') or (Kind = 'combobox') then
+  begin
+    Items := TStringList.Create;
+    try
+      if not ControlItems(P, Items) or (Items.Count = 0) then
+        Exit;
+      if FControlMenu = nil then
+        FControlMenu := TPopupMenu.Create(Self);
+      FControlMenu.Items.Clear;
+      for I := 0 to Items.Count - 1 do
+      begin
+        Mi := TMenuItem.Create(FControlMenu);
+        Mi.Caption := Items[I];
+        Mi.Tag := I;
+        Mi.OnClick := @ControlMenuClick;
+        FControlMenu.Items.Add(Mi);
+      end;
+      FMenuAt := P;
+      Pt := ClientToScreen(Point(X, Y));
+      FControlMenu.PopUp(Pt.X, Pt.Y);
+      Result := True;
+    finally
+      Items.Free;
+    end;
+  end
+  else if Kind = 'date' then
+  begin
+    ControlDate(P, D);
+    Dlg := TCalendarDialog.Create(nil);
+    try
+      Dlg.Date := D;
+      if Dlg.Execute then
+        SetControlDate(P, Dlg.Date);
+      Result := True;
+    finally
+      Dlg.Free;
+    end;
+  end;
 end;
 
 { ---- the Layout tab: sections ---- }
@@ -4572,6 +5009,8 @@ begin
   begin
     FHasDesiredX := False;
     SetCaret(P, ssShift in Shift);
+    if (Shift * [ssShift, ssCtrl, ssDouble] = []) and ClickControl(P, X, Y) then
+      Exit;     { a check box ticked, a list or a calendar shown: not the start of a drag }
     FDragging := True;
   end;
 end;
@@ -4674,7 +5113,8 @@ type
     LastSel: Boolean;
   end;
 
-procedure TParadeEdit.PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
+procedure TParadeEdit.PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean;
+  OnScreen: Boolean);
 var
   Bands: array of TSelBand;
   NB, K: Integer;
@@ -4686,10 +5126,13 @@ var
   Q: pd_pos;
   G: PGlyphBmp;
   Pic: TLazIntfImage;
-  CPage: Int32;
-  CX, CBase, CAsc, CDesc: pd_sp;
+  CPage, CPage2: Int32;
+  CX, CBase, CAsc, CDesc, CX2, CBase2: pd_sp;
   CI: Int32;
   Cm: pd_comment;
+  CKind, CSpec: string;
+  CA, CB: pd_pos;
+  IX2, IY2: Integer;
 
   { a range behind the text: one band per line, the line's full height, from
     the first character in it to the last -- the spaces between them too --
@@ -4870,6 +5313,22 @@ begin
         end;
       end;
 
+  { the content control the caret is in, framed as Word frames it: where a form's field is, and how far }
+  if OnScreen and ControlAt(CaretPos, CKind, CSpec, CA, CB) and
+    (pd_layout_caret(FLayout, PdPos(CA.block, CA.offset + 3), CPage, CX, CBase, CAsc, CDesc) = PD_OK) and
+    (CPage = Page) and (pd_layout_caret(FLayout, CB, CPage2, CX2, CBase2, CAsc, CDesc) = PD_OK) and (CPage2 = Page) and
+    (CBase2 = CBase) then
+  begin
+    IX := OX + Round(CX * PxScale) - 2;
+    IX2 := OX + Round(CX2 * PxScale) + 2;
+    IY := OY + Round((CBase - CAsc) * PxScale) - 1;
+    IY2 := OY + Round((CBase + CDesc) * PxScale) + 1;
+    FillRectImg(Img, IX, IY, IX2, IY + 1, $007DA7D9, 255);
+    FillRectImg(Img, IX, IY2 - 1, IX2, IY2, $007DA7D9, 255);
+    FillRectImg(Img, IX, IY, IX + 1, IY2, $007DA7D9, 255);
+    FillRectImg(Img, IX2 - 1, IY, IX2, IY2, $007DA7D9, 255);
+  end;
+
   if DrawCaret and (pd_layout_caret(FLayout, CaretPos, CPage, CX, CBase, CAsc, CDesc) = PD_OK) and (CPage = Page) then
     FillRectImg(Img, OX + Round(CX * PxScale), OY + Round((CBase - CAsc) * PxScale), OX + Round(CX * PxScale) + 2,
       OY + Round((CBase + CDesc) * PxScale), $00000000, 255);
@@ -4934,7 +5393,7 @@ begin
       Continue;
     if PTop > H then
       Break;
-    PaintPage(Img, Page, PageLeft(Page), PTop, PxPerSp, False);
+    PaintPage(Img, Page, PageLeft(Page), PTop, PxPerSp, False, True);
     if FHasMarkup then
       PaintMarkup(Img, Page, PageLeft(Page), PTop, PxPerSp);
   end;

@@ -1825,6 +1825,113 @@ static void test_docx_font_table(void) {
     pd_doc_free(d);
 }
 
+/* the byte offset of the n-th inline object (U+FFFC) of a paragraph, or UINT32_MAX */
+static uint32_t nth_object(const pd_doc* d, pd_block_id p, int n) {
+    const char* s;
+    uint32_t len, i;
+
+    if (pd_doc_para_text(d, p, &s, &len) != PD_OK) {
+        return UINT32_MAX;
+    }
+
+    for (i = 0; i + 3 <= len; i++) {
+        if ((unsigned char)s[i] == 0xEF && (unsigned char)s[i + 1] == 0xBF && (unsigned char)s[i + 2] == 0xBC && n-- == 0) {
+            return i;
+        }
+    }
+
+    return UINT32_MAX;
+}
+
+/* Content controls: a check box, a drop-down list, a date and a plain text box in a paragraph, one inside
+   another; one around paragraphs keeps its content only. Read as controls with what they hold, and kept
+   through DOCX; exports that have no such thing keep the content. */
+static void test_docx_controls(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:w14=\"w14\"><w:body>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">Agree </w:t></w:r>"
+        "<w:sdt><w:sdtPr><w:alias w:val=\"Agree\"/><w:tag w:val=\"ok\"/><w:id w:val=\"7\"/><w14:checkbox>"
+        "<w14:checked w14:val=\"1\"/><w14:checkedState w14:val=\"2612\" w14:font=\"MS Gothic\"/>"
+        "<w14:uncheckedState w14:val=\"2610\" w14:font=\"MS Gothic\"/></w14:checkbox></w:sdtPr><w:sdtEndPr/>"
+        "<w:sdtContent><w:r><w:t>\xe2\x98\x92</w:t></w:r></w:sdtContent></w:sdt>"
+        "<w:r><w:t xml:space=\"preserve\"> colour </w:t></w:r>"
+        "<w:sdt><w:sdtPr><w:tag w:val=\"col\"/><w:dropDownList w:lastValue=\"g\"><w:listItem w:displayText=\"Red\" "
+        "w:value=\"r\"/><w:listItem w:displayText=\"Green\" w:value=\"g\"/></w:dropDownList></w:sdtPr>"
+        "<w:sdtContent><w:r><w:t>Green</w:t></w:r></w:sdtContent></w:sdt>"
+        "<w:r><w:t xml:space=\"preserve\"> on </w:t></w:r>"
+        "<w:sdt><w:sdtPr><w:date w:fullDate=\"2026-10-07T00:00:00Z\"><w:dateFormat w:val=\"M/d/yyyy\"/>"
+        "<w:lid w:val=\"en-US\"/></w:date></w:sdtPr><w:sdtContent><w:r><w:t>10/7/2026</w:t></w:r></w:sdtContent></w:sdt>"
+        "<w:r><w:t xml:space=\"preserve\"> by </w:t></w:r>"
+        "<w:sdt><w:sdtPr><w:showingPlcHdr/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>name: </w:t></w:r>"
+        "<w:sdt><w:sdtPr><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>inner</w:t></w:r></w:sdtContent></w:sdt>"
+        "</w:sdtContent></w:sdt></w:p>"
+        "<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val=\"Cover Pages\"/></w:docPartObj></w:sdtPr>"
+        "<w:sdtContent><w:p><w:r><w:t>Cover</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec, p;
+        pd_inline o;
+        pd_pos a, b;
+        const char* s;
+        uint32_t n, k;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        p = pd_doc_child(d, sec, 0);
+        CHECK(pd_doc_para_text(d, p, &s, &n) == PD_OK);
+        k = nth_object(d, p, 0);
+        CHECK(k == 6 && pd_doc_inline_at(d, at(p, k), &o) == PD_OK && o.kind == PD_INLINE_CONTROL);
+        CHECK(!strcmp(o.name, "checkbox") && o.source_len > 0);
+        CHECK(strstr(o.source, "\"checked\":1") && strstr(o.source, "\"on\":\"2612\"") && strstr(o.source, "\"tag\":\"ok\""));
+        CHECK(strstr(o.source, "\"onfont\":\"MS Gothic\"") && strstr(o.source, "\"title\":\"Agree\""));
+        CHECK(pd_doc_control_at(d, at(p, k + 3), &a, &b) == PD_OK && a.offset == k && b.offset == k + 6);  /* ☒ */
+        CHECK(memcmp(s + k + 3, "\xe2\x98\x92", 3) == 0);
+        CHECK(pd_doc_control_at(d, at(p, k), &a, &b) == PD_ERR_RANGE);          /* before it */
+        CHECK(pd_doc_control_at(d, at(p, k + 9), &a, &b) == PD_ERR_RANGE);      /* after its end */
+        k = nth_object(d, p, 2);
+        CHECK(pd_doc_inline_at(d, at(p, k), &o) == PD_OK && !strcmp(o.name, "dropdown"));
+        CHECK(strstr(o.source, "\"items\":[[\"Red\",\"r\"],[\"Green\",\"g\"]]") && strstr(o.source, "\"value\":\"g\""));
+        CHECK(pd_doc_control_at(d, at(p, k + 5), &a, &b) == PD_OK && b.offset - a.offset - 3 == 5);   /* Green */
+        k = nth_object(d, p, 4);
+        CHECK(pd_doc_inline_at(d, at(p, k), &o) == PD_OK && !strcmp(o.name, "date"));
+        CHECK(strstr(o.source, "\"date\":\"2026-10-07T00:00:00Z\"") && strstr(o.source, "\"format\":\"M/d/yyyy\""));
+        k = nth_object(d, p, 6);
+        CHECK(pd_doc_inline_at(d, at(p, k), &o) == PD_OK && !strcmp(o.name, "text") && strstr(o.source, "\"placeholder\":1"));
+        /* inside the inner box: the inner one; after it, the outer one */
+        CHECK(pd_doc_control_at(d, at(p, nth_object(d, p, 7) + 4), &a, &b) == PD_OK && a.offset == nth_object(d, p, 7));
+        CHECK(b.offset == nth_object(d, p, 8));
+        CHECK(pd_doc_control_at(d, at(p, nth_object(d, p, 8) + 3), &a, &b) == PD_OK && a.offset == k);
+        CHECK(b.offset == nth_object(d, p, 9) && nth_object(d, p, 10) == UINT32_MAX);
+        /* around a paragraph: its content, no control */
+        p = pd_doc_child(d, sec, 1);
+        CHECK(pd_doc_para_text(d, p, &s, &n) == PD_OK && n == 5 && memcmp(s, "Cover", 5) == 0);
+    }
+
+    if (d) {
+        buf_t t = { NULL, 0 };
+
+        CHECK(pd_doc_export(d, PD_CONV_TEXT, to_buf, &t) == PD_OK);
+        CHECK(t.p && strstr(t.p, "Agree \xe2\x98\x92 colour Green on 10/7/2026 by name: inner") != NULL);
+        free(t.p);
+        t.p = NULL;
+        t.n = 0;
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &t) == PD_OK);
+        CHECK(t.p && strstr(t.p, "colour Green on") != NULL);
+        free(t.p);
+    }
+
+    pd_doc_free(d);
+}
+
 /* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
 static int near_color(uint32_t got, uint32_t want) {
     int k;
@@ -3448,6 +3555,7 @@ int main(void) {
     test_docx_review();
     test_docx_theme_colors();
     test_docx_font_table();
+    test_docx_controls();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

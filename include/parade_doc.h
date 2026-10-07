@@ -403,7 +403,11 @@ typedef enum {
     PD_INLINE_BOOKMARK = 5,     /**< named anchor for cross-references */
     PD_INLINE_TAB = 6,          /**< tab stop (positions from the paragraph style) */
     PD_INLINE_USER = 7,         /**< host-defined object of the given size */
-    PD_INLINE_RAW = 8           /**< markup passed through untouched (inline HTML in Markdown), in source: no size */
+    PD_INLINE_RAW = 8,          /**< markup passed through untouched (inline HTML in Markdown), in source: no size */
+    PD_INLINE_CONTROL = 9       /**< start of a content control (a form field: a check box, a drop-down list, a date,
+                                     a plain or rich text box): its kind in name, what else it has in source (a JSON
+                                     object, see pd_doc_control_at); the text up to the next one with an empty name,
+                                     which ends it, is its content. No size */
 } pd_inline_kind;
 
 typedef enum {
@@ -438,6 +442,20 @@ typedef struct {
 
 /** the inline object at a byte offset (which must hold U+FFFC) */
 PD_API pd_status pd_doc_inline_at(const pd_doc* doc, pd_pos pos, pd_inline* out);
+
+/**
+ * The innermost content control around a position of a paragraph: where its
+ * start object is and where its end object is (the end of the paragraph when
+ * it has none); PD_ERR_RANGE when there is none. The start object's name is
+ * its kind -- "checkbox", "dropdown", "combobox", "date", "text", "richtext",
+ * "picture", "group", "docpart" -- and its source a JSON object of the rest:
+ * "tag", "title", "lock"; a check box's "checked" (0/1) and the characters it
+ * shows, "on" and "off" (hex code points) in "onfont" and "offfont"; a list's
+ * "items" ([display, value] pairs) and "value"; a date's "date" (ISO 8601),
+ * "format" and "lid"; "placeholder": 1 when the content is the prompt shown
+ * in place of a value.
+ */
+PD_API pd_status pd_doc_control_at(const pd_doc* doc, pd_pos pos, pd_pos* start, pd_pos* end);
 
 /**
  * The size an image inline is shown at: its own when set, else the

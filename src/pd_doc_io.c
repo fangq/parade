@@ -34,7 +34,7 @@ static const char* const role_names[] = { "body", "title", "heading", "caption",
                                         };
 static const char* const align_names[] = { "justify", "left", "right", "center" };
 static const char* const inline_names[] = { "image", "equation", "field", "footnote", "link", "bookmark", "tab",
-                                            "user", "raw"
+                                            "user", "raw", "control"
                                           };
 static const char* const field_names[] = { "page", "pages", "sectionpage", "refnumber", "refpage", "seq",
                                            "heading", "date"

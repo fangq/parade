@@ -2469,7 +2469,7 @@ pd_status pd_doc_insert_inline(pd_doc* d, pd_pos at, const pd_inline* obj, pd_po
         return PD_ERR_RANGE;
     }
 
-    if (obj->kind < PD_INLINE_IMAGE || obj->kind > PD_INLINE_RAW || obj->width < 0 ||
+    if (obj->kind < PD_INLINE_IMAGE || obj->kind > PD_INLINE_CONTROL || obj->width < 0 ||
             (obj->kind == PD_INLINE_IMAGE && (obj->resource < (obj->source_len > 0 ? 0u : 1u) ||
                     (int32_t)obj->resource > d->nres)) ||    /* embedded, or by address */
             obj->title_len < 0 || (obj->title_len && !obj->title) || obj->alt_len < 0 || (obj->alt_len && !obj->alt) ||
@@ -3596,6 +3596,74 @@ int32_t pd_doc_font_class(const pd_doc* d, const char* family) {
     }
 
     return PD_FAMILY_SERIF;
+}
+
+pd_status pd_doc_control_at(const pd_doc* d, pd_pos pos, pd_pos* start, pd_pos* end) {
+    const char* s;
+    uint32_t n, i, open[32];
+    int depth = 0;
+
+    if (!d || !start || !end || pd_doc_para_text(d, pos.block, &s, &n) != PD_OK || pos.offset > n) {
+        return d && start && end ? PD_ERR_RANGE : PD_ERR_ARG;
+    }
+
+    /* the controls open at pos: each start pushed, each end popping the latest */
+    for (i = 0; i + 3 <= pos.offset; i++) {
+        pd_inline o;
+        pd_pos at;
+
+        if ((unsigned char)s[i] != 0xEF || (unsigned char)s[i + 1] != 0xBF || (unsigned char)s[i + 2] != 0xBC) {
+            continue;
+        }
+
+        at.block = pos.block;
+        at.offset = i;
+
+        if (pd_doc_inline_at(d, at, &o) == PD_OK && o.kind == PD_INLINE_CONTROL) {
+            if (o.name[0] && depth < 32) {
+                open[depth++] = i;
+            } else if (!o.name[0] && depth > 0) {
+                depth--;
+            }
+        }
+
+        i += 2;
+    }
+
+    if (depth == 0) {
+        return PD_ERR_RANGE;
+    }
+
+    start->block = end->block = pos.block;
+    start->offset = open[depth - 1];
+    end->offset = n;
+    depth = 0;
+
+    /* its end: the end object that closes it, counting those of controls inside */
+    for (i = start->offset + 3; i + 3 <= n; i++) {
+        pd_inline o;
+        pd_pos at;
+
+        if ((unsigned char)s[i] != 0xEF || (unsigned char)s[i + 1] != 0xBF || (unsigned char)s[i + 2] != 0xBC) {
+            continue;
+        }
+
+        at.block = pos.block;
+        at.offset = i;
+
+        if (pd_doc_inline_at(d, at, &o) == PD_OK && o.kind == PD_INLINE_CONTROL) {
+            if (o.name[0]) {
+                depth++;
+            } else if (depth-- == 0) {
+                end->offset = i;
+                break;
+            }
+        }
+
+        i += 2;
+    }
+
+    return PD_OK;
 }
 
 /* a picture's type and pixel size from its first bytes: PNG, JPEG, GIF */
