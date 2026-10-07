@@ -101,6 +101,7 @@ type
     FPending: pd_char_props;       { formatting chosen with nothing selected: for what is typed next, here }
     FPendingAt: pd_pos;
     FShowMarks: Boolean;
+    FCursorShown: Boolean;         { the I-beam put on the window once it exists (see MouseEnter) }
     FModified: Boolean;
     FPageGap: Integer;
     FBack: TBitmap;                { the pages as last drawn, on the display's side: a paint copies from it }
@@ -201,6 +202,7 @@ type
     procedure MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
     function DoMouseWheel(Shift: TShiftState; WheelDelta: Integer; MousePos: TPoint): Boolean; override;
     procedure DblClick; override;
+    procedure MouseEnter; override;
     procedure DoEnter; override;
     procedure DoExit; override;
   public
@@ -425,6 +427,8 @@ type
     property OnChange: TNotifyEvent read FOnChange write FOnChange;
     { the caret moved, the selection changed or the document did: for a toolbar showing what is here }
     property OnSelectionChange: TNotifyEvent read FOnSelectionChange write FOnSelectionChange;
+    { the control's size changed: for a zoom that follows the width }
+    property OnResize;
     { formatting marks: a pilcrow at each paragraph's end }
     property ShowMarks: Boolean read FShowMarks write SetShowMarks;
     property TabStop default True;
@@ -930,6 +934,16 @@ begin
 end;
 
 { TParadeEdit }
+
+{ the I-beam set again each time the pointer comes in. Set only when the control is made, GTK2 applies it
+  before the control's window exists and it is lost -- an arrow over the text -- and since LCL keeps the
+  cursor it last set and skips setting the same one again, it has to be another one first. }
+procedure TParadeEdit.MouseEnter;
+begin
+  inherited MouseEnter;
+  SetTempCursor(crArrow);
+  SetTempCursor(Cursor);
+end;
 
 constructor TParadeEdit.Create(AOwner: TComponent);
 begin
@@ -4827,6 +4841,12 @@ var
   R: TRect;
 begin
   CheckSelection;     { every move of the caret and every edit is followed by a paint }
+  if not FCursorShown then
+  begin   { the first paint: the window exists now, so the cursor takes }
+    FCursorShown := True;
+    SetTempCursor(crArrow);
+    SetTempCursor(Cursor);
+  end;
   if (ClientWidth - FScrollBar.Width <= 0) or (ClientHeight <= 0) then
     Exit;
   Sig := BackSignature;
