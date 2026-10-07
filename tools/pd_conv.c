@@ -7,7 +7,7 @@
  * PDF output lays the document out with Parade itself (Liberation Serif, and
  * Liberation Sans for sans-serif families such as Arial, its narrow faces for
  * Arial Narrow and the like; Carlito and Caladea for Calibri and Cambria,
- * whose metrics they share; DejaVu Sans Mono for code, Noto CJK as a fallback
+ * whose metrics they share; DejaVu Sans Mono for code, Noto CJK and DejaVu Sans as fallbacks
  * when installed).
  */
 
@@ -17,7 +17,7 @@
 #include "parade_convert.h"
 #include "parade_layout.h"
 
-#define NFONTS 22                   /* serif x4, sans x4, mono, CJK, narrow sans x4, Carlito x4, Caladea x4 */
+#define NFONTS 23                   /* serif x4, sans x4, mono, CJK, narrow sans x4, Carlito x4, Caladea x4, DejaVu Sans */
 static pd_font* fonts[NFONTS];
 static pd_font* mathf;
 
@@ -211,7 +211,8 @@ int main(int argc, char** argv) {
         "/usr/share/fonts/truetype/crosextra/Caladea-Regular.ttf",
         "/usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf",
         "/usr/share/fonts/truetype/crosextra/Caladea-Italic.ttf",
-        "/usr/share/fonts/truetype/crosextra/Caladea-BoldItalic.ttf"
+        "/usr/share/fonts/truetype/crosextra/Caladea-BoldItalic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     };
     FILE* f;
     char* data;
@@ -272,7 +273,8 @@ int main(int argc, char** argv) {
     if (!strcmp(oext, "pdf")) {
         pd_layout* L;
         pd_layout_info info;
-        const pd_font* fb[1];
+        const pd_font* fb[2];
+        int nfb = 0;
 
         for (i = 0; i < NFONTS; i++) {     /* all but the serif faces and the mono face are optional */
             if (pd_font_load_file(paths[i], 0, &fonts[i]) != PD_OK && (i < 4 || i == 8)) {
@@ -288,9 +290,16 @@ int main(int argc, char** argv) {
             pd_doc_set_math_font(d, mathf);
         }
 
-        if (fonts[9]) {
-            fb[0] = fonts[9];
-            pd_doc_set_fallback_fonts(d, fb, 1);
+        if (fonts[9]) {     /* CJK, then the scripts DejaVu Sans has (Arabic, Hebrew, Greek, Cyrillic, symbols) */
+            fb[nfb++] = fonts[9];
+        }
+
+        if (fonts[22]) {
+            fb[nfb++] = fonts[22];
+        }
+
+        if (nfb) {
+            pd_doc_set_fallback_fonts(d, fb, nfb);
         }
 
         pd_layout_new(d, &L);

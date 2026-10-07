@@ -314,6 +314,7 @@ typedef struct {
     pd_char_props base;
     int in_link, in_note;
     int nctl, nctl_ids;         /* content controls open in the paragraph; ids given */
+    int nruby;                  /* phonetic guides open in the paragraph */
     struct {                    /* charts written: their parts, the workbook each has */
         pd_res_id chart, data;
         char rid[64];
@@ -394,12 +395,33 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
 
     if (mono) {
         pb_puts(o, "<w:rFonts w:ascii=\"Courier New\" w:hAnsi=\"Courier New\" w:cs=\"Courier New\"/>");
-    } else if (strcmp(c->family, b->family) && c->family[0]) {
-        pb_puts(o, "<w:rFonts w:ascii=\"");
-        xesc(o, c->family, strlen(c->family));
-        pb_puts(o, "\" w:hAnsi=\"");
-        xesc(o, c->family, strlen(c->family));
-        pb_puts(o, "\"/>");
+    } else if ((strcmp(c->family, b->family) && c->family[0]) || strcmp(c->family_ea, b->family_ea) ||
+               strcmp(c->family_cs, b->family_cs)) {
+        int lat = strcmp(c->family, b->family) && c->family[0];
+
+        pb_puts(o, "<w:rFonts");
+
+        if (lat) {
+            pb_puts(o, " w:ascii=\"");
+            xesc(o, c->family, strlen(c->family));
+            pb_puts(o, "\" w:hAnsi=\"");
+            xesc(o, c->family, strlen(c->family));
+            pb_putc(o, '"');
+        }
+
+        if (strcmp(c->family_ea, b->family_ea) && c->family_ea[0]) {
+            pb_puts(o, " w:eastAsia=\"");
+            xesc(o, c->family_ea, strlen(c->family_ea));
+            pb_putc(o, '"');
+        }
+
+        if (strcmp(c->family_cs, b->family_cs) && c->family_cs[0]) {
+            pb_puts(o, " w:cs=\"");
+            xesc(o, c->family_cs, strlen(c->family_cs));
+            pb_putc(o, '"');
+        }
+
+        pb_puts(o, "/>");
     }
 
     if (c->weight >= 600 && b->weight < 600) {
@@ -408,8 +430,16 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_puts(o, "<w:b w:val=\"0\"/>");
     }
 
+    if (c->weight_cs != b->weight_cs && c->weight_cs) {
+        pb_puts(o, c->weight_cs >= 600 ? "<w:bCs/>" : "<w:bCs w:val=\"0\"/>");
+    }
+
     if (c->italic && !b->italic) {
         pb_puts(o, "<w:i/>");
+    }
+
+    if (c->italic_cs != b->italic_cs && c->italic_cs >= 0) {
+        pb_puts(o, c->italic_cs ? "<w:iCs/>" : "<w:iCs w:val=\"0\"/>");
     }
 
     if (!c->caps != !b->caps) {
@@ -446,6 +476,10 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
 
     if (c->size != b->size) {
         pb_printf(o, "<w:sz w:val=\"%d\"/>", (int)SCALE(c->size, 2, 65536));
+    }
+
+    if (c->size_cs != b->size_cs && c->size_cs > 0) {
+        pb_printf(o, "<w:szCs w:val=\"%d\"/>", (int)SCALE(c->size_cs, 2, 65536));
     }
 
     if (c->underline != b->underline) {
@@ -1525,6 +1559,32 @@ static int dx_span(void* user, const pd_span* sp) {
 
                 break;
 
+            case PD_INLINE_RUBY:
+                if (x->in_link) {   /* inside a run: no link around it */
+                    pb_puts(o, "</w:hyperlink>");
+                    x->in_link = 0;
+                }
+
+                if (ob->source && ob->source_len > 0) {
+                    int base = (int)SCALE(sp->cp.size, 2, 65536), hps = ob->height > 0 ? (int)SCALE(ob->height, 2, 65536) :
+                               base / 2, raise = ob->depth > 0 ? (int)SCALE(ob->depth, 2, 65536) : base;
+                    const char* lid = !strncmp(sp->cp.lang, "zh", 2) || !strncmp(sp->cp.lang, "ko", 2) ||
+                                      !strncmp(sp->cp.lang, "ja", 2) ? sp->cp.lang : "ja-JP";
+
+                    pb_printf(o, "<w:r><w:ruby><w:rubyPr><w:rubyAlign w:val=\"center\"/><w:hps w:val=\"%d\"/>"
+                              "<w:hpsRaise w:val=\"%d\"/><w:hpsBaseText w:val=\"%d\"/><w:lid w:val=\"", hps, raise, base);
+                    xesc(o, lid, strlen(lid));
+                    pb_printf(o, "\"/></w:rubyPr><w:rt><w:r><w:rPr><w:sz w:val=\"%d\"/></w:rPr>", hps);
+                    dx_text(o, ob->source, (size_t)ob->source_len);
+                    pb_puts(o, "</w:r></w:rt><w:rubyBase>");
+                    x->nruby++;
+                } else if (x->nruby > 0) {
+                    pb_puts(o, "</w:rubyBase></w:ruby></w:r>");
+                    x->nruby--;
+                }
+
+                break;
+
             case PD_INLINE_CONTROL:
                 if (x->in_link) {   /* w:sdt and w:hyperlink nest: the link ends here */
                     pb_puts(o, "</w:hyperlink>");
@@ -1769,6 +1829,7 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
     x->para = p;
     x->in_link = 0;
     x->nctl = 0;
+    x->nruby = 0;
     pd_conv_base_props(x->d, p, &x->base);
     dx_comment_bounds(x, p);
     pd_conv_spans_all(x->d, p, dx_span, x);
@@ -1776,6 +1837,11 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
     if (x->in_link) {
         pb_puts(x->o, "</w:hyperlink>");
         x->in_link = 0;
+    }
+
+    while (x->nruby > 0) {      /* a guide the paragraph does not end: ended with it */
+        pb_puts(x->o, "</w:rubyBase></w:ruby></w:r>");
+        x->nruby--;
     }
 
     dx_control_end(x, 1);
@@ -2186,6 +2252,10 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
         pb_puts(o, "<w:titlePg/>");
     }
 
+    if (sp->line_pitch > 0) {
+        pb_printf(o, "<w:docGrid w:type=\"lines\" w:linePitch=\"%d\"/>", TW(sp->line_pitch));
+    }
+
     pb_puts(o, "</w:sectPr>");
 }
 
@@ -2232,16 +2302,40 @@ static void dx_style_name(pd_buf* o, const char* n) {
 }
 
 /* a family for Word: the generic monospace one as a face it has */
-static void dx_fonts(pd_buf* o, const char* family) {
-    const char* f = !strcmp(family, "monospace") ? "Courier New" : family;
+/* w:rFonts: the text's family (NULL: not said) in the Latin slots, East Asian and complex-script ones (NULL or
+   "": the text's, when it is said) */
+static void dx_fonts3(pd_buf* o, const char* family, const char* ea, const char* cs) {
+    const char* f = family && !strcmp(family, "monospace") ? "Courier New" : family;
 
-    pb_puts(o, "<w:rFonts w:ascii=\"");
-    xesc(o, f, strlen(f));
-    pb_puts(o, "\" w:hAnsi=\"");
-    xesc(o, f, strlen(f));
-    pb_puts(o, "\" w:cs=\"");
-    xesc(o, f, strlen(f));
-    pb_puts(o, "\"/>");
+    cs = cs && cs[0] ? cs : f;
+    ea = ea && ea[0] ? ea : NULL;
+    pb_puts(o, "<w:rFonts");
+
+    if (f) {
+        pb_puts(o, " w:ascii=\"");
+        xesc(o, f, strlen(f));
+        pb_puts(o, "\" w:hAnsi=\"");
+        xesc(o, f, strlen(f));
+        pb_putc(o, '"');
+    }
+
+    if (ea) {
+        pb_puts(o, " w:eastAsia=\"");
+        xesc(o, ea, strlen(ea));
+        pb_putc(o, '"');
+    }
+
+    if (cs) {
+        pb_puts(o, " w:cs=\"");
+        xesc(o, cs, strlen(cs));
+        pb_putc(o, '"');
+    }
+
+    pb_puts(o, "/>");
+}
+
+static void dx_fonts(pd_buf* o, const char* family) {
+    dx_fonts3(o, family, NULL, NULL);
 }
 
 /* the paragraph properties before w:numPr in a w:pPr, of those mask sets */
@@ -2367,6 +2461,10 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
         pb_puts(o, "/>");
     }
 
+    if ((m & PD_PP_SNAP_GRID) && !pp->snap_grid) {
+        pb_puts(o, "<w:snapToGrid w:val=\"0\"/>");
+    }
+
     if (m & PD_PP_CONTEXTUAL) {
         pb_puts(o, pp->contextual ? "<w:contextualSpacing/>" : "<w:contextualSpacing w:val=\"0\"/>");
     }
@@ -2381,16 +2479,26 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
 static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
     uint32_t m = c->mask;
 
-    if ((m & PD_CP_FAMILY) && c->family[0]) {
-        dx_fonts(o, c->family);
+    if (((m & PD_CP_FAMILY) && c->family[0]) || ((m & PD_CP_FAMILY_EA) && c->family_ea[0]) ||
+            ((m & PD_CP_FAMILY_CS) && c->family_cs[0])) {
+        dx_fonts3(o, (m & PD_CP_FAMILY) && c->family[0] ? c->family : NULL, m & PD_CP_FAMILY_EA ? c->family_ea : NULL,
+                  m & PD_CP_FAMILY_CS ? c->family_cs : NULL);
     }
 
     if (m & PD_CP_WEIGHT) {
         pb_puts(o, c->weight >= 600 ? "<w:b/>" : "<w:b w:val=\"0\"/>");
     }
 
+    if ((m & PD_CP_WEIGHT_CS) && c->weight_cs) {
+        pb_puts(o, c->weight_cs >= 600 ? "<w:bCs/>" : "<w:bCs w:val=\"0\"/>");
+    }
+
     if (m & PD_CP_ITALIC) {
         pb_puts(o, c->italic ? "<w:i/>" : "<w:i w:val=\"0\"/>");
+    }
+
+    if ((m & PD_CP_ITALIC_CS) && c->italic_cs >= 0) {
+        pb_puts(o, c->italic_cs ? "<w:iCs/>" : "<w:iCs w:val=\"0\"/>");
     }
 
     if (m & PD_CP_CAPS) {
@@ -2426,8 +2534,13 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
     }
 
     if (m & PD_CP_SIZE) {
-        pb_printf(o, "<w:sz w:val=\"%d\"/><w:szCs w:val=\"%d\"/>", (int)SCALE(c->size, 2, 65536),
-                  (int)SCALE(c->size, 2, 65536));
+        pb_printf(o, "<w:sz w:val=\"%d\"/>", (int)SCALE(c->size, 2, 65536));
+    }
+
+    if ((m & PD_CP_SIZE_CS) && c->size_cs > 0) {
+        pb_printf(o, "<w:szCs w:val=\"%d\"/>", (int)SCALE(c->size_cs, 2, 65536));
+    } else if (m & PD_CP_SIZE) {
+        pb_printf(o, "<w:szCs w:val=\"%d\"/>", (int)SCALE(c->size, 2, 65536));  /* the same, as Word writes it */
     }
 
     if (m & PD_CP_UNDERLINE) {
@@ -3308,6 +3421,7 @@ typedef struct {
     pd_block_id hf_last[6];     /* the previous section's: header default/first/even, footer the same */
     char def_pstyle[64];        /* the paragraph style of a paragraph that names none */
     char theme_major[64], theme_minor[64];  /* the theme's heading and body fonts */
+    char theme_major_ea[64], theme_minor_ea[64], theme_major_cs[64], theme_minor_cs[64];  /* other scripts' */
     uint32_t theme_clr[12];     /* the theme's colours: dk1 lt1 dk2 lt2 accent1..6 hlink folHlink */
     pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
     struct {                    /* bookmarks read: where they are */
@@ -3557,6 +3671,25 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "i") == 0) {
         cp->mask |= PD_CP_ITALIC;
         cp->italic = attr_on(m);
+    } else if (strcmp(t, "bCs") == 0) {
+        /* the complex scripts' own, when it is not what the rPr says for the text (b with bCs: both bold) */
+        if (!(cp->mask & PD_CP_WEIGHT) || cp->weight != (attr_on(m) ? 700 : 400)) {
+            cp->mask |= PD_CP_WEIGHT_CS;
+            cp->weight_cs = attr_on(m) ? 700 : 400;
+        }
+    } else if (strcmp(t, "iCs") == 0) {
+        if (!(cp->mask & PD_CP_ITALIC) || cp->italic != attr_on(m)) {
+            cp->mask |= PD_CP_ITALIC_CS;
+            cp->italic_cs = attr_on(m);
+        }
+    } else if (strcmp(t, "szCs") == 0) {
+        int hp = attr_int(m, "w:val", 0);
+        pd_sp z = (pd_sp)((int64_t)hp * 65536 / 2);
+
+        if (hp > 0 && (!(cp->mask & PD_CP_SIZE) || cp->size != z)) {
+            cp->mask |= PD_CP_SIZE_CS;
+            cp->size_cs = z;
+        }
     } else if (strcmp(t, "u") == 0) {
         cp->mask |= PD_CP_UNDERLINE;
         cp->underline = !attr_on(m) ? 0 : !mu_attr(m, "w:val", v, sizeof(v)) ? PD_UNDERLINE_SINGLE :
@@ -3592,6 +3725,21 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
             cp->mask |= PD_CP_FAMILY;
             snprintf(cp->family, sizeof(cp->family), "%s", strncmp(v, "major", 5) == 0 ? X->theme_major :
                      X->theme_minor);
+        }
+
+        /* the East Asian and complex-script slots: named, else the theme's for those scripts */
+        if ((mu_attr(m, "w:eastAsia", v, sizeof(v)) || (mu_attr(m, "w:eastAsiaTheme", v, sizeof(v)) &&
+                snprintf(v, sizeof(v), "%s", strncmp(v, "major", 5) == 0 ? X->theme_major_ea : X->theme_minor_ea) >= 0 &&
+                v[0])) && !((cp->mask & PD_CP_FAMILY) && !strcmp(v, cp->family))) {
+            cp->mask |= PD_CP_FAMILY_EA;
+            snprintf(cp->family_ea, sizeof(cp->family_ea), "%.63s", v);
+        }
+
+        if ((mu_attr(m, "w:cs", v, sizeof(v)) || (mu_attr(m, "w:cstheme", v, sizeof(v)) &&
+                snprintf(v, sizeof(v), "%s", strncmp(v, "major", 5) == 0 ? X->theme_major_cs : X->theme_minor_cs) >= 0 &&
+                v[0])) && !((cp->mask & PD_CP_FAMILY) && !strcmp(v, cp->family))) {   /* the same face: nothing apart */
+            cp->mask |= PD_CP_FAMILY_CS;
+            snprintf(cp->family_cs, sizeof(cp->family_cs), "%.63s", v);
         }
     } else if (strcmp(t, "sz") == 0) {
         int hp = attr_int(m, "w:val", 0);       /* half-points */
@@ -3683,6 +3831,9 @@ static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr
     } else if (strcmp(t, "contextualSpacing") == 0) {
         pp->mask |= PD_PP_CONTEXTUAL;
         pp->contextual = attr_on(m);
+    } else if (strcmp(t, "snapToGrid") == 0) {
+        pp->mask |= PD_PP_SNAP_GRID;
+        pp->snap_grid = attr_on(m);
     } else if (strcmp(t, "keepNext") == 0) {
         pp->mask |= PD_PP_KEEP_NEXT;
         pp->keep_with_next = attr_on(m);
@@ -3772,6 +3923,7 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sp->mask & PD_PP_BREAK_BEFORE) dp->page_break_before = sp->page_break_before;
     if (sp->mask & PD_PP_HYPHENATE) dp->hyphenate = sp->hyphenate;
     if (sp->mask & PD_PP_CONTEXTUAL) dp->contextual = sp->contextual;
+    if (sp->mask & PD_PP_SNAP_GRID) dp->snap_grid = sp->snap_grid;
     if (sp->mask & PD_PP_DIRECTION) dp->direction = sp->direction;
     if (sp->mask & PD_PP_SHADING) dp->shading = sp->shading;
 
@@ -3838,6 +3990,11 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sc->mask & PD_CP_LETTERSPACE) dc->letter_space = sc->letter_space;
     if (sc->mask & PD_CP_POSITION) dc->position = sc->position;
     if (sc->mask & PD_CP_KERNING) dc->kerning = sc->kerning;
+    if (sc->mask & PD_CP_FAMILY_EA) memcpy(dc->family_ea, sc->family_ea, sizeof(dc->family_ea));
+    if (sc->mask & PD_CP_FAMILY_CS) memcpy(dc->family_cs, sc->family_cs, sizeof(dc->family_cs));
+    if (sc->mask & PD_CP_SIZE_CS) dc->size_cs = sc->size_cs;
+    if (sc->mask & PD_CP_WEIGHT_CS) dc->weight_cs = sc->weight_cs;
+    if (sc->mask & PD_CP_ITALIC_CS) dc->italic_cs = sc->italic_cs;
 
     dc->mask |= sc->mask;
 }
@@ -4172,6 +4329,11 @@ static void read_theme(dxi* X, const char* xml, size_t n) {
             which = NULL;
         } else if (which && !which[0] && (m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(t, "latin") == 0) {
             mu_attr(&m, "typeface", which, 64);
+        } else if (which && (m.type == MT_OPEN || m.type == MT_EMPTY) && (strcmp(t, "ea") == 0 || strcmp(t, "cs") == 0)) {
+            int major = which == X->theme_major;
+
+            mu_attr(&m, "typeface", t[0] == 'e' ? (major ? X->theme_major_ea : X->theme_minor_ea) :
+                    (major ? X->theme_major_cs : X->theme_minor_cs), 64);
         }
     }
 }
@@ -4519,6 +4681,9 @@ typedef struct {
     int note;                   /* parsing a footnote body */
     int after_ref;              /* just after the note's own number: drop the space that follows it */
     pd_rev_id rev;              /* inside w:ins or w:del: the tracked change the text is */
+    int in_ruby, ruby_started;  /* a w:ruby: its guide's text, size and raise, read before its base */
+    char ruby_text[256];
+    pd_sp ruby_size, ruby_raise;
     unsigned sdt_inline;        /* the w:sdt being read, a bit each level: 1 a control in a paragraph's text */
     int sdt_depth;
 } dw;
@@ -4572,7 +4737,20 @@ static void dw_apply_run(dw* w) {
     DW_DIFF(PD_CP_LETTERSPACE, letter_space)
     DW_DIFF(PD_CP_POSITION, position)
     DW_DIFF(PD_CP_KERNING, kerning)
+    DW_DIFF(PD_CP_SIZE_CS, size_cs)
+    DW_DIFF(PD_CP_WEIGHT_CS, weight_cs)
+    DW_DIFF(PD_CP_ITALIC_CS, italic_cs)
 #undef DW_DIFF
+
+    if ((f->mask & PD_CP_FAMILY_EA) && !same_ci(f->family_ea, t->family_ea)) {
+        cp.mask |= PD_CP_FAMILY_EA;
+        memcpy(cp.family_ea, f->family_ea, sizeof(cp.family_ea));
+    }
+
+    if ((f->mask & PD_CP_FAMILY_CS) && !same_ci(f->family_cs, t->family_cs)) {
+        cp.mask |= PD_CP_FAMILY_CS;
+        memcpy(cp.family_cs, f->family_cs, sizeof(cp.family_cs));
+    }
 
     if (w->rev) {
         cp.mask |= PD_CP_REVISION;
@@ -4805,6 +4983,7 @@ static void dw_custom_style(dw* w, pd_bld* b) {
         SAME_P(PD_PP_BREAK_BEFORE, page_break_before)
         SAME_P(PD_PP_HYPHENATE, hyphenate)
         SAME_P(PD_PP_CONTEXTUAL, contextual)
+        SAME_P(PD_PP_SNAP_GRID, snap_grid)
         SAME_P(PD_PP_SHADING, shading)
         SAME_C(PD_CP_SIZE, size)
         SAME_C(PD_CP_WEIGHT, weight)
@@ -4820,8 +4999,19 @@ static void dw_custom_style(dw* w, pd_bld* b) {
         SAME_C(PD_CP_LETTERSPACE, letter_space)
         SAME_C(PD_CP_POSITION, position)
         SAME_C(PD_CP_KERNING, kerning)
+        SAME_C(PD_CP_SIZE_CS, size_cs)
+        SAME_C(PD_CP_WEIGHT_CS, weight_cs)
+        SAME_C(PD_CP_ITALIC_CS, italic_cs)
 #undef SAME_P
 #undef SAME_C
+
+        if ((sty.cp.mask & PD_CP_FAMILY_EA) && same_ci(sty.cp.family_ea, rc.family_ea)) {
+            sty.cp.mask &= ~PD_CP_FAMILY_EA;
+        }
+
+        if ((sty.cp.mask & PD_CP_FAMILY_CS) && same_ci(sty.cp.family_cs, rc.family_cs)) {
+            sty.cp.mask &= ~PD_CP_FAMILY_CS;
+        }
 
         if ((sty.cp.mask & PD_CP_FAMILY) && same_ci(sty.cp.family, rc.family)) {
             sty.cp.mask &= ~PD_CP_FAMILY;
@@ -4972,6 +5162,7 @@ static void dw_begin_para(dw* w) {
         DW_DIFF(PD_PP_BREAK_BEFORE, page_break_before)
         DW_DIFF(PD_PP_HYPHENATE, hyphenate)
         DW_DIFF(PD_PP_CONTEXTUAL, contextual)
+        DW_DIFF(PD_PP_SNAP_GRID, snap_grid)
         DW_DIFF(PD_PP_DIRECTION, direction)
         DW_DIFF(PD_PP_SHADING, shading)
 #undef DW_DIFF
@@ -6596,6 +6787,90 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
+        if (strcmp(t, "ruby") == 0 && w->in_p) {
+            if (m.type == MT_OPEN) {
+                w->in_ruby = 1;
+                w->ruby_started = 0;
+                w->ruby_text[0] = '\0';
+                w->ruby_size = w->ruby_raise = 0;
+            } else if (m.type == MT_CLOSE && w->in_ruby) {
+                if (w->ruby_started) {
+                    pd_inline o;
+
+                    memset(&o, 0, sizeof(o));
+                    o.kind = PD_INLINE_RUBY;    /* no source: where it ends */
+                    bld_inline(X->b, &o);
+                }
+
+                w->in_ruby = 0;
+            }
+
+            continue;
+        }
+
+        if (w->in_ruby && (m.type == MT_OPEN || m.type == MT_EMPTY) && (strcmp(t, "hps") == 0 ||
+                strcmp(t, "hpsRaise") == 0)) {
+            int hp = attr_int(&m, "w:val", 0);
+
+            if (hp > 0 && hp < 2000) {
+                *(t[3] == 'R' ? &w->ruby_raise : &w->ruby_size) = (pd_sp)((int64_t)hp * 65536 / 2);
+            }
+
+            continue;
+        }
+
+        if (w->in_ruby && m.type == MT_OPEN && strcmp(t, "rt") == 0) {    /* the guide's text, kept aside */
+            pd_markup g;
+            int depth = 1, in_t = 0;
+
+            mu_init(&g, m.s + m.pos, m.n - m.pos, 0);
+
+            while (depth > 0 && mu_next(&g) != MT_END) {
+                if (g.type == MT_OPEN) {
+                    depth++;
+                    in_t = !strcmp(mu_local(g.name), "t");
+                } else if (g.type == MT_CLOSE) {
+                    depth--;
+                    in_t = 0;
+                } else if (g.type == MT_TEXT && in_t) {
+                    pd_buf txt;
+
+                    memset(&txt, 0, sizeof(txt));
+                    mu_decode(g.text, g.tlen, &txt);
+
+                    if (txt.p) {
+                        size_t k = strlen(w->ruby_text);
+
+                        snprintf(w->ruby_text + k, sizeof(w->ruby_text) - k, "%.*s", (int)txt.n, txt.p);
+                    }
+
+                    pb_free(&txt);
+                }
+            }
+
+            m.pos += g.pos;
+            continue;
+        }
+
+        if (w->in_ruby && m.type == MT_OPEN && strcmp(t, "rubyBase") == 0 && w->ruby_text[0]) {
+            pd_inline o;
+
+            dw_begin_para(w);
+            memset(&o, 0, sizeof(o));
+            o.kind = PD_INLINE_RUBY;
+            o.source = w->ruby_text;
+            o.source_len = (int32_t)strlen(w->ruby_text);
+            o.height = w->ruby_size;
+            o.depth = w->ruby_raise;
+            bld_inline(X->b, &o);
+            w->ruby_started = 1;
+            continue;
+        }
+
+        if (w->in_ruby && strcmp(t, "rubyPr") == 0) {
+            continue;
+        }
+
         if (m.type == MT_OPEN && strcmp(t, "sdt") == 0) {
             if (w->sdt_depth < 30) {
                 w->sdt_inline &= ~(1u << w->sdt_depth);
@@ -6728,6 +7003,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->sp.title_page = attr_on(&m);
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->sp.page_valign = !strcmp(v, "center") ? 1 : !strcmp(v, "bottom") ? 2 : 0;
+                } else if (strcmp(t, "docGrid") == 0) {     /* a grid of lines: not the default one, which is none */
+                    char ty[24] = "default";
+
+                    mu_attr(&m, "w:type", ty, sizeof(ty));
+                    w->sp.line_pitch = strcmp(ty, "default") != 0 && attr_int(&m, "w:linePitch", 0) > 0 ?
+                                       twips(attr_int(&m, "w:linePitch", 0)) : 0;
                 } else if (strcmp(t, "lnNumType") == 0) {
                     int by = attr_int(&m, "w:countBy", 0);
                     char rs[16] = "";

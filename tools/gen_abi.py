@@ -11,7 +11,7 @@ STRUCTS = {
     "pd_style": "font size space_stretch space_shrink kerning color user hyph text_case letter_space hidden",
     "pd_params": "mode align width indent line_penalty adj_demerits double_hyphen_demerits final_hyphen_demerits "
                  "hyphen_penalty ex_hyphen_penalty tex_badness rag_stretch baseline_skip line_spacing hysteresis "
-                 "freeze_offset direction looseness protrusion expansion full_lines",
+                 "freeze_offset direction looseness protrusion expansion full_lines line_grid",
     "pd_break_info": "lines demerits overfull underfull reused_breakpoints frozen_lines height",
     "pd_line": "text_start text_end x baseline width ascent descent ratio badness hyphenated overfull underfull",
     "pd_glyph": "glyph cluster x y advance style kind user scale",
@@ -20,12 +20,14 @@ STRUCTS = {
     "pd_block_info": "kind id parent child_count index role level list_level style list break_kind text_length "
                      "revision",
     "pd_char_props": "mask family size weight italic color background underline strike shift letter_space kerning "
-                     "lang small_caps link_target caps hidden position revision",
+                     "lang small_caps link_target caps hidden position revision family_ea family_cs size_cs weight_cs "
+                     "italic_cs",
     "pd_revision": "kind author date",
     "pd_comment": "author date text text_len parent resolved range",
     "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
-                     "border_color border_width shading direction ntabs tabs tab_interval contextual border_sides border_space",
+                     "border_color border_width shading direction ntabs tabs tab_interval contextual border_sides border_space "
+                     "snap_grid",
     "pd_tab_stop": "position align leader",
     "pd_list_level": "format start text indent hanging restart_after label_family label_size label_weight "
                      "label_italic label_color",
@@ -39,7 +41,7 @@ STRUCTS = {
                         "footer_distance columns column_gap first_page_number page_number_format title_page "
                         "facing_pages header header_first header_even footer footer_first footer_even continuous page_breaking "
                         "footnote_skip add_spacing line_numbers line_number_start line_number_distance "
-                        "line_number_restart mirror_margins gutter page_valign",
+                        "line_number_restart mirror_margins gutter page_valign line_pitch",
     "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width indent width_pct "
                       "border_sides cell_padding_v",
     "pd_cell_props": "col_span valign background merge_up min_height border_set border_on border_width border_color",

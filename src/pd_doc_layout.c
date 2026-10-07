@@ -155,6 +155,7 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
     OVER(PD_PP_BREAK_MODE, break_mode);
     OVER(PD_PP_DIRECTION, direction);
     OVER(PD_PP_CONTEXTUAL, contextual);
+    OVER(PD_PP_SNAP_GRID, snap_grid);
     OVER(PD_PP_SHADING, shading);
 
     if (s->pp.mask & PD_PP_BORDER) {
@@ -287,6 +288,78 @@ static pd_status add_with_fallback(const pd_doc* d, pd_para* out, const char* te
     return st;
 }
 
+/* the script slot a character's face comes from: 1 East Asian (CJK ideographs, kana, hangul, bopomofo,
+   full-width forms), 2 complex (right-to-left, Indic, Southeast Asian), 0 the rest; -1 neutral (spaces,
+   digits, punctuation of the basic Latin block), which goes with what is around it */
+static int script_slot(uint32_t c) {
+    if (c < 0x80) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ? 0 : -1;
+    }
+
+    if ((c >= 0x1100 && c <= 0x11FF) || (c >= 0x2E80 && c <= 0x2FDF) || (c >= 0x2FF0 && c <= 0x9FFF) ||
+            (c >= 0xA960 && c <= 0xA97F) || (c >= 0xAC00 && c <= 0xD7FF) || (c >= 0xF900 && c <= 0xFAFF) ||
+            (c >= 0xFE30 && c <= 0xFE4F) || (c >= 0xFF00 && c <= 0xFFEF) || (c >= 0x20000 && c <= 0x3FFFF)) {
+        return 1;
+    }
+
+    if ((c >= 0x0590 && c <= 0x08FF) || (c >= 0x0900 && c <= 0x0DFF) || (c >= 0x0E00 && c <= 0x0FFF) ||
+            (c >= 0x1000 && c <= 0x109F) || (c >= 0x1780 && c <= 0x17FF) || (c >= 0xFB1D && c <= 0xFDFF) ||
+            (c >= 0xFE70 && c <= 0xFEFF)) {
+        return 2;
+    }
+
+    return 0;
+}
+
+/* the style of a run's text in another script: its own face (and, complex scripts, size, weight, italic), the
+   rest of the run's style kept; 0 when the run says nothing for the script */
+static int script_style(const pd_doc* d, const pd_char_props* cp, const pd_style* ps, int slot, pd_style* out) {
+    pd_char_props c = *cp;
+    const pd_font* f;
+    pd_sp size;
+
+    if (slot == 1) {
+        if (!cp->family_ea[0] || !strcmp(cp->family_ea, cp->family)) {
+            return 0;
+        }
+
+        memcpy(c.family, cp->family_ea, sizeof(c.family));
+    } else {
+        if ((!cp->family_cs[0] || !strcmp(cp->family_cs, cp->family)) && (!cp->size_cs || cp->size_cs == cp->size) &&
+                (!cp->weight_cs || cp->weight_cs == cp->weight) && (cp->italic_cs < 0 || cp->italic_cs == cp->italic)) {
+            return 0;
+        }
+
+        if (cp->family_cs[0]) {
+            memcpy(c.family, cp->family_cs, sizeof(c.family));
+        }
+
+        c.weight = cp->weight_cs ? cp->weight_cs : cp->weight;
+        c.italic = cp->italic_cs >= 0 ? cp->italic_cs : cp->italic;
+        c.size = cp->size_cs ? cp->size_cs : cp->size;
+    }
+
+    if ((f = resolve_font(d, &c)) == NULL) {
+        return 0;
+    }
+
+    size = c.shift == PD_SHIFT_SUPER || c.shift == PD_SHIFT_SUB ? c.size * 7 / 10 : c.size;
+    pd_style_init(out, f, size);
+    out->kerning = ps->kerning;
+    out->color = ps->color;
+    out->user = ps->user;
+    out->text_case = ps->text_case;
+    out->letter_space = ps->letter_space;
+    out->hidden = ps->hidden;
+    out->hyph = ps->hyph;
+    return 1;
+}
+
+/* Add a run's text, its East Asian and complex-script stretches in their own faces when the run names them
+   (Word's font slots); the rest as small capitals or plainly */
+static pd_status add_scripts(const pd_doc* d, pd_para* out, const char* text, uint32_t len, const pd_style* ps,
+                             const pd_char_props* cp, int small_caps);
+
 /* Add text in small capitals: the lowercase letters as capitals at 4/5 of
    the size (the text itself keeps its case), the rest at full size. */
 static pd_status add_small_caps(const pd_doc* d, pd_para* out, const char* text, uint32_t len, const pd_style* ps) {
@@ -323,6 +396,52 @@ static pd_status add_small_caps(const pd_doc* d, pd_para* out, const char* text,
     free(cps);
     free(offs);
     return st;
+}
+
+static pd_status add_scripts(const pd_doc* d, pd_para* out, const char* text, uint32_t len, const pd_style* ps,
+                             const pd_char_props* cp, int small_caps) {
+    pd_style st[3];
+    int have[3] = { 1, 0, 0 };
+    uint32_t* cps, *offs, seg = 0;
+    int32_t n, i, cur = 0;
+    pd_status r = PD_OK;
+
+    st[0] = *ps;
+    have[1] = script_style(d, cp, ps, 1, &st[1]);
+    have[2] = script_style(d, cp, ps, 2, &st[2]);
+
+    if (!have[1] && !have[2]) {     /* one face for all of it */
+        return small_caps ? add_small_caps(d, out, text, len, ps) : add_with_fallback(d, out, text, len, ps);
+    }
+
+    if ((n = pd_text_decode(text, len, &cps, &offs)) < 0) {
+        return PD_ERR_NOMEM;
+    }
+
+    for (i = 0; i <= n && r == PD_OK; i++) {
+        int want = cur;
+
+        if (i < n) {
+            int sl = script_slot(cps[i]);
+
+            want = sl < 0 ? cur : have[sl] ? sl : 0;
+        }
+
+        if (i == n || (want != cur && i > 0)) {
+            if (offs[i] > seg) {
+                r = cur == 0 && small_caps ? add_small_caps(d, out, text + seg, offs[i] - seg, &st[0]) :
+                    add_with_fallback(d, out, text + seg, offs[i] - seg, &st[cur]);
+            }
+
+            seg = offs[i < n ? i : n];
+        }
+
+        cur = want;
+    }
+
+    free(cps);
+    free(offs);
+    return r;
 }
 
 /* the registered patterns whose language prefix best matches a tag */
@@ -389,6 +508,7 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
         }
 
         prm->full_lines = sb && sb->kind == PD_BLOCK_SECTION && sb->st.sp.add_spacing;
+        prm->line_grid = sb && sb->kind == PD_BLOCK_SECTION && pp.snap_grid ? sb->st.sp.line_pitch : 0;
     }
 
     if (s->role == PD_ROLE_EQUATION && !(s->pp.mask & PD_PP_ALIGN)) {
@@ -441,9 +561,8 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                 stop = s->inl[k].offset;
             }
 
-            if (stop > pos && (st = cp.small_caps && !cp.caps && !cp.hidden ?
-                               add_small_caps(d, out, s->text + pos, stop - pos, &ps) :
-                               add_with_fallback(d, out, s->text + pos, stop - pos, &ps)) != PD_OK) {
+            if (stop > pos && (st = add_scripts(d, out, s->text + pos, stop - pos, &ps, &cp,
+                                                cp.small_caps && !cp.caps && !cp.hidden)) != PD_OK) {
                 return st;
             }
 
@@ -502,6 +621,12 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                     case PD_INLINE_RAW:
                     case PD_INLINE_CONTROL:
                         ow = oh = od = 0;
+                        break;
+
+                    case PD_INLINE_RUBY:    /* no width; the room above the line its guide needs */
+                        ow = od = 0;
+                        oh = o->source_len > 0 ? (o->depth > 0 ? o->depth : cp.size) +
+                             (o->height > 0 ? o->height : cp.size / 2) * 9 / 10 : 0;
                         break;
                 }
 

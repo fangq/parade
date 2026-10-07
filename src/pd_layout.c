@@ -4193,6 +4193,66 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
             } else if (q->obj.kind == PD_INLINE_EQUATION || q->obj.kind == PD_INLINE_USER) {
                 a.kind = PD_DRAW_BOX;
                 emit(D, &a);
+            } else if (q->obj.kind == PD_INLINE_RUBY && q->obj.source && q->obj.source_len > 0) {
+                /* the guide above the text it is over, to its end or the line's, centred */
+                char text[256];
+                pd_style fs;
+                pd_char_props fcp;
+                pd_format_id ff = b->st.empty_format;
+                pd_sp x1 = g[n - 1].x + g[n - 1].advance, w;
+                int32_t j, r, depth = 0;
+                dlist_t T;
+                uint32_t c0;
+
+                for (j = i + 1; j < n; j++) {
+                    const dinline* e = g[j].kind == PD_OBJECT && g[j].user >= 0 && g[j].user < b->st.ninl ?
+                                       &b->st.inl[g[j].user] : NULL;
+
+                    if (e && e->obj.kind == PD_INLINE_RUBY) {
+                        if (e->obj.source_len > 0) {
+                            depth++;
+                        } else if (depth-- == 0) {
+                            x1 = g[j].x;
+                            break;
+                        }
+                    }
+                }
+
+                for (r = 0; r < b->st.nruns; r++) {     /* the style of the text it is over */
+                    if (b->st.runs[r].start <= q->offset + 3 && q->offset + 3 < b->st.runs[r].end) {
+                        ff = b->st.runs[r].format;
+                    }
+                }
+
+                if (pd_doc_run_style(d, b->id, ff, &fs, &fcp) != PD_OK) {
+                    continue;
+                }
+
+                snprintf(text, sizeof(text), "%.*s", q->obj.source_len < 255 ? (int)q->obj.source_len : 255, q->obj.source);
+                c0 = (unsigned char)text[0] < 0x80 ? (unsigned char)text[0] : (unsigned char)text[0] < 0xE0 ?
+                     ((uint32_t)(text[0] & 0x1F) << 6 | (text[1] & 0x3F)) : (unsigned char)text[0] < 0xF0 ?
+                     ((uint32_t)(text[0] & 0x0F) << 12 | (uint32_t)(text[1] & 0x3F) << 6 | (text[2] & 0x3F)) : 0;
+
+                if (c0 && !pd_font_glyph_index(fs.font, c0)) {     /* kana a Latin face lacks: a fallback's */
+                    int32_t k;
+
+                    for (k = 0; k < d->nfallback; k++) {
+                        if (pd_font_glyph_index(d->fallback[k], c0)) {
+                            fs.font = d->fallback[k];
+                            break;
+                        }
+                    }
+                }
+
+                fs.size = q->obj.height > 0 ? q->obj.height : fcp.size / 2;
+                memset(&T, 0, sizeof(T));
+                w = emit_text(L, &T, text, &fs, 0, 0, b->id, g[i].cluster, l->region);  /* measured */
+                free(T.d);
+                free(T.pts);
+                emit_text(L, D, text, &fs, l->ox + (g[i].x + x1) / 2 - w / 2, l->oy + g[i].y -
+                          (q->obj.depth > 0 ? q->obj.depth : fcp.size), b->id, g[i].cluster, l->region);
+                ps = fs;
+                cached_style = -1;
             } else if (q->obj.kind == PD_INLINE_FIELD || q->obj.kind == PD_INLINE_FOOTNOTE) {
                 char text[96];
                 pd_style fs;

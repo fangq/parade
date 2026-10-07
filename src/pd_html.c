@@ -27,6 +27,8 @@ typedef struct {
     pd_block_id para;
     pd_char_props base;
     int in_link, in_code;
+    char ruby[8][256];          /* phonetic guides open: their text, written after the base */
+    int nruby;
     int quote_open, code_open;  /* quote_open: <blockquote>s open */
     int code_multi;             /* the open <pre> holds a block of several lines */
     char code_lang[32];
@@ -244,6 +246,20 @@ static int hx_span(void* user, const pd_span* sp) {
                 pb_printf(o, "<a id=\"%s\"></a>", ob->name);
                 break;
 
+            case PD_INLINE_RUBY:    /* <ruby>base<rt>guide</rt></ruby> */
+                if (ob->source && ob->source_len > 0 && x->nruby < 8) {
+                    snprintf(x->ruby[x->nruby++], sizeof(x->ruby[0]), "%.*s", ob->source_len < 255 ? (int)ob->source_len :
+                             255, ob->source);
+                    pb_puts(o, "<ruby>");
+                } else if (!ob->source_len && x->nruby > 0) {
+                    x->nruby--;
+                    pb_puts(o, "<rt>");
+                    esc(o, x->ruby[x->nruby], strlen(x->ruby[x->nruby]), 0);
+                    pb_puts(o, "</rt></ruby>");
+                }
+
+                break;
+
             case PD_INLINE_TAB:
                 pb_putc(o, '\t');
                 break;
@@ -396,12 +412,20 @@ static int hx_span(void* user, const pd_span* sp) {
 static void hx_inline(hx* x, pd_block_id p) {
     x->para = p;
     x->in_link = 0;
+    x->nruby = 0;
     pd_conv_base_props(x->d, p, &x->base);
     pd_conv_spans(x->d, p, hx_span, x);
 
     if (x->in_link) {
         pb_puts(x->o, "</a>");
         x->in_link = 0;
+    }
+
+    while (x->nruby > 0) {      /* a guide the paragraph does not end */
+        x->nruby--;
+        pb_puts(x->o, "<rt>");
+        esc(x->o, x->ruby[x->nruby], strlen(x->ruby[x->nruby]), 0);
+        pb_puts(x->o, "</rt></ruby>");
     }
 }
 

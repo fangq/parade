@@ -594,7 +594,18 @@ static void fmt_attrs(pd_sync* s, pd_format_id f, attrs* a, int* has_link) {
     AI(PD_CP_CAPS, "caps", caps)
     AI(PD_CP_HIDDEN, "hid", hidden)
     AI(PD_CP_POSITION, "pos", position)
+    AI(PD_CP_SIZE_CS, "szcs", size_cs)
+    AI(PD_CP_WEIGHT_CS, "wcs", weight_cs)
+    AI(PD_CP_ITALIC_CS, "ics", italic_cs)
 #undef AI
+
+    if (m & PD_CP_FAMILY_EA) {
+        at_str(a, "fea", cp.family_ea, slen(cp.family_ea, sizeof(cp.family_ea)));
+    }
+
+    if (m & PD_CP_FAMILY_CS) {
+        at_str(a, "fcs", cp.family_cs, slen(cp.family_cs, sizeof(cp.family_cs)));
+    }
 
     if (m & PD_CP_LANG) {
         at_str(a, "lang", cp.lang, slen(cp.lang, sizeof(cp.lang)));
@@ -691,7 +702,20 @@ static pd_format_id sig_fmt(pd_sync* s, int32_t sig) {
     AG(PD_CP_CAPS, "caps", caps, int32_t)
     AG(PD_CP_HIDDEN, "hid", hidden, int32_t)
     AG(PD_CP_POSITION, "pos", position, pd_sp)
+    AG(PD_CP_SIZE_CS, "szcs", size_cs, pd_sp)
+    AG(PD_CP_WEIGHT_CS, "wcs", weight_cs, int32_t)
+    AG(PD_CP_ITALIC_CS, "ics", italic_cs, int32_t)
 #undef AG
+
+    if ((x = at_get(&a, "fea")) != NULL) {
+        cp.mask |= PD_CP_FAMILY_EA;
+        snprintf(cp.family_ea, sizeof(cp.family_ea), "%.*s", (int)x->sl, x->s);
+    }
+
+    if ((x = at_get(&a, "fcs")) != NULL) {
+        cp.mask |= PD_CP_FAMILY_CS;
+        snprintf(cp.family_cs, sizeof(cp.family_cs), "%.*s", (int)x->sl, x->s);
+    }
 
     if ((x = at_get(&a, "lang")) != NULL) {
         cp.mask |= PD_CP_LANG;
@@ -791,7 +815,7 @@ static void ymapin_free(ymapin* m) {
 /* ------------------------------------------------------------------ */
 
 static const char* const obj_kind[] = { "image", "equation", "field", "footnote", "link", "bookmark", "tab", "user",
-                                        "raw", "control"
+                                        "raw", "control", "ruby"
                                       };
 
 /* the hash a picture is shared under; stored in the shared state when t can write */

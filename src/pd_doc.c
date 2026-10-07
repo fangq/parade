@@ -168,6 +168,27 @@ void pd_doc_cp_normalize(pd_char_props* cp) {
         z.revision = cp->revision;
     }
 
+    if (m & PD_CP_FAMILY_EA) {
+        memcpy(z.family_ea, cp->family_ea, sizeof(z.family_ea));
+        z.family_ea[sizeof(z.family_ea) - 1] = '\0';
+        memset(z.family_ea + strlen(z.family_ea), 0, sizeof(z.family_ea) - strlen(z.family_ea));
+    }
+
+    if (m & PD_CP_FAMILY_CS) {
+        memcpy(z.family_cs, cp->family_cs, sizeof(z.family_cs));
+        z.family_cs[sizeof(z.family_cs) - 1] = '\0';
+        memset(z.family_cs + strlen(z.family_cs), 0, sizeof(z.family_cs) - strlen(z.family_cs));
+    }
+
+    if (m & PD_CP_SIZE_CS) {
+        z.size_cs = cp->size_cs;
+    }
+
+    if (m & PD_CP_WEIGHT_CS) {
+        z.weight_cs = cp->weight_cs;
+    }
+
+    z.italic_cs = m & PD_CP_ITALIC_CS ? cp->italic_cs : -1;     /* unset: as the text */
     *cp = z;
 }
 
@@ -204,6 +225,7 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
     KEEP(PD_PP_SHADING, shading);
     KEEP(PD_PP_DIRECTION, direction);
     KEEP(PD_PP_CONTEXTUAL, contextual);
+    KEEP(PD_PP_SNAP_GRID, snap_grid);
 
     if (m & PD_PP_TABS) {
         int32_t i;
@@ -294,6 +316,26 @@ static void cp_apply(pd_char_props* dst, const pd_char_props* src) {
         dst->revision = src->revision;
     }
 
+    if (m & PD_CP_FAMILY_EA) {
+        memcpy(dst->family_ea, src->family_ea, sizeof(dst->family_ea));
+    }
+
+    if (m & PD_CP_FAMILY_CS) {
+        memcpy(dst->family_cs, src->family_cs, sizeof(dst->family_cs));
+    }
+
+    if (m & PD_CP_SIZE_CS) {
+        dst->size_cs = src->size_cs;
+    }
+
+    if (m & PD_CP_WEIGHT_CS) {
+        dst->weight_cs = src->weight_cs;
+    }
+
+    if (m & PD_CP_ITALIC_CS) {
+        dst->italic_cs = src->italic_cs;
+    }
+
     dst->mask |= m;
 }
 
@@ -326,6 +368,7 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
     SET(PD_PP_SHADING, shading);
     SET(PD_PP_DIRECTION, direction);
     SET(PD_PP_CONTEXTUAL, contextual);
+    SET(PD_PP_SNAP_GRID, snap_grid);
 
     if (m & PD_PP_TABS) {
         dst->ntabs = src->ntabs;
@@ -345,6 +388,7 @@ static void default_props(pd_para_props* pp, pd_char_props* cp) {
         pp->widows = 2;
         pp->orphans = 2;
         pp->hyphenate = 1;
+        pp->snap_grid = 1;
         pp->break_mode = PD_BREAK_OPTIMAL;
     }
 
@@ -355,6 +399,7 @@ static void default_props(pd_para_props* pp, pd_char_props* cp) {
         cp->weight = 400;
         cp->color = 0xFF000000u;
         cp->kerning = 1;
+        cp->italic_cs = -1;
         strcpy(cp->lang, "en-US");
     }
 }
@@ -2469,7 +2514,7 @@ pd_status pd_doc_insert_inline(pd_doc* d, pd_pos at, const pd_inline* obj, pd_po
         return PD_ERR_RANGE;
     }
 
-    if (obj->kind < PD_INLINE_IMAGE || obj->kind > PD_INLINE_CONTROL || obj->width < 0 ||
+    if (obj->kind < PD_INLINE_IMAGE || obj->kind > PD_INLINE_RUBY || obj->width < 0 ||
             (obj->kind == PD_INLINE_IMAGE && (obj->resource < (obj->source_len > 0 ? 0u : 1u) ||
                     (int32_t)obj->resource > d->nres)) ||    /* embedded, or by address */
             obj->title_len < 0 || (obj->title_len && !obj->title) || obj->alt_len < 0 || (obj->alt_len && !obj->alt) ||

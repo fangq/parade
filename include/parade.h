@@ -257,6 +257,7 @@ typedef struct {
     int32_t expansion;      /**< font expansion limit in per-mille of glyph width (20 = 2%), 0 = off */
     int32_t full_lines;     /**< 1: every line, the first too, is a full line high, its leading above it (word
                                  processors); 0: the paragraph starts at its first line's ascent (TeX) */
+    pd_sp line_grid;        /**< every line's height rounded up to a whole number of this (a document grid; 0 off) */
 } pd_params;
 
 PD_API void pd_params_init(pd_params* params);

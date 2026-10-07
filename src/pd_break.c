@@ -718,6 +718,14 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
                 int64_t step = ((int64_t)desc + asc + gap) * prm->line_spacing / 1000;
 
                 step = step < prm->baseline_skip ? prm->baseline_skip : step;
+
+                if (prm->line_grid > 0) {   /* whole grid lines, the text in the middle of them */
+                    int64_t snapped = (step + prm->line_grid - 1) / prm->line_grid * prm->line_grid;
+
+                    y += (pd_sp)((snapped - step) / 2);
+                    step = snapped - (snapped - step) / 2;
+                }
+
                 y += step > asc + desc ? (pd_sp)(step - asc - desc) : 0;
             }
         } else {
@@ -725,6 +733,10 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
 
             if (step < prm->baseline_skip) {
                 step = prm->baseline_skip;
+            }
+
+            if (prm->line_grid > 0) {
+                step = (step + prm->line_grid - 1) / prm->line_grid * prm->line_grid;
             }
 
             y += (pd_sp)step;

@@ -270,8 +270,8 @@ void pd_doc_markup_props(const pd_doc* d, pd_char_props* cp);
 /* the style of the document's Normal text */
 pd_status pd_doc_default_style(const pd_doc* d, pd_style* st);
 
-#define PD_CP_ALL ((1u << 18) - 1)
-#define PD_PP_ALL ((1u << 20) - 1)
+#define PD_CP_ALL ((1u << 23) - 1)
+#define PD_PP_ALL ((1u << 21) - 1)
 
 /* a picture's MIME type and pixel size from its first bytes (PNG, JPEG, GIF), NULL if none of those */
 const char* pd_doc_image_info(const unsigned char* p, size_t n, int32_t* w, int32_t* h);

@@ -56,6 +56,7 @@ int main(void) {
     printf("pd_params.protrusion %zu\n", offsetof(pd_params, protrusion));
     printf("pd_params.expansion %zu\n", offsetof(pd_params, expansion));
     printf("pd_params.full_lines %zu\n", offsetof(pd_params, full_lines));
+    printf("pd_params.line_grid %zu\n", offsetof(pd_params, line_grid));
     printf("pd_break_info %zu\n", sizeof(pd_break_info));
     printf("pd_break_info.lines %zu\n", offsetof(pd_break_info, lines));
     printf("pd_break_info.demerits %zu\n", offsetof(pd_break_info, demerits));
@@ -127,6 +128,11 @@ int main(void) {
     printf("pd_char_props.hidden %zu\n", offsetof(pd_char_props, hidden));
     printf("pd_char_props.position %zu\n", offsetof(pd_char_props, position));
     printf("pd_char_props.revision %zu\n", offsetof(pd_char_props, revision));
+    printf("pd_char_props.family_ea %zu\n", offsetof(pd_char_props, family_ea));
+    printf("pd_char_props.family_cs %zu\n", offsetof(pd_char_props, family_cs));
+    printf("pd_char_props.size_cs %zu\n", offsetof(pd_char_props, size_cs));
+    printf("pd_char_props.weight_cs %zu\n", offsetof(pd_char_props, weight_cs));
+    printf("pd_char_props.italic_cs %zu\n", offsetof(pd_char_props, italic_cs));
     printf("pd_revision %zu\n", sizeof(pd_revision));
     printf("pd_revision.kind %zu\n", offsetof(pd_revision, kind));
     printf("pd_revision.author %zu\n", offsetof(pd_revision, author));
@@ -166,6 +172,7 @@ int main(void) {
     printf("pd_para_props.contextual %zu\n", offsetof(pd_para_props, contextual));
     printf("pd_para_props.border_sides %zu\n", offsetof(pd_para_props, border_sides));
     printf("pd_para_props.border_space %zu\n", offsetof(pd_para_props, border_space));
+    printf("pd_para_props.snap_grid %zu\n", offsetof(pd_para_props, snap_grid));
     printf("pd_tab_stop %zu\n", sizeof(pd_tab_stop));
     printf("pd_tab_stop.position %zu\n", offsetof(pd_tab_stop, position));
     printf("pd_tab_stop.align %zu\n", offsetof(pd_tab_stop, align));
@@ -257,6 +264,7 @@ int main(void) {
     printf("pd_section_props.mirror_margins %zu\n", offsetof(pd_section_props, mirror_margins));
     printf("pd_section_props.gutter %zu\n", offsetof(pd_section_props, gutter));
     printf("pd_section_props.page_valign %zu\n", offsetof(pd_section_props, page_valign));
+    printf("pd_section_props.line_pitch %zu\n", offsetof(pd_section_props, line_pitch));
     printf("pd_table_props %zu\n", sizeof(pd_table_props));
     printf("pd_table_props.width %zu\n", offsetof(pd_table_props, width));
     printf("pd_table_props.align %zu\n", offsetof(pd_table_props, align));

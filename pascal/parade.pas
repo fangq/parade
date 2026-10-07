@@ -132,6 +132,11 @@ const
   PD_CP_HIDDEN = 1 shl 15;
   PD_CP_POSITION = 1 shl 16;
   PD_CP_REVISION = 1 shl 17;
+  PD_CP_FAMILY_EA = 1 shl 18;
+  PD_CP_FAMILY_CS = 1 shl 19;
+  PD_CP_SIZE_CS = 1 shl 20;
+  PD_CP_WEIGHT_CS = 1 shl 21;
+  PD_CP_ITALIC_CS = 1 shl 22;
   PD_REV_INSERT = 1;
   PD_REV_DELETE = 2;
   PD_MARKUP_BALLOONS = 0;
@@ -194,6 +199,7 @@ const
   PD_INLINE_TAB = 6;
   PD_INLINE_USER = 7;
   PD_INLINE_RAW = 8;
+  PD_INLINE_RUBY = 10;        { a phonetic guide starts (source: its text; height: its size; depth: its raise) }
   PD_INLINE_CONTROL = 9;      { a content control starts (name: its kind; source: JSON); an empty name ends it }
 
   PD_FIELD_PAGE = 0;
@@ -230,6 +236,7 @@ const
   PD_LEADER_UNDERSCORE = 3;
   PD_PP_TABS = 1 shl 18;
   PD_PP_CONTEXTUAL = 1 shl 19;
+  PD_PP_SNAP_GRID = 1 shl 20;
   PD_BORDER_TOP = 1;
   PD_BORDER_RIGHT = 2;
   PD_BORDER_BOTTOM = 4;
@@ -319,6 +326,7 @@ type
     looseness: Int32;
     protrusion, expansion: Int32;
     full_lines: Int32;
+    line_grid: pd_sp;
   end;
   Ppd_params = ^pd_params;
 
@@ -385,6 +393,11 @@ type
     caps, hidden: Int32;
     position: pd_sp;
     revision: pd_rev_id;
+    family_ea: array[0..63] of AnsiChar;   { East Asian text's family; '' = family }
+    family_cs: array[0..63] of AnsiChar;   { complex scripts' family; '' = family }
+    size_cs: pd_sp;           { 0 = size }
+    weight_cs: Int32;         { 0 = weight }
+    italic_cs: Int32;         { -1 = italic }
   end;
   Ppd_char_props = ^pd_char_props;
 
@@ -428,6 +441,7 @@ type
     contextual: Int32;
     border_sides: Int32;
     border_space: pd_sp;
+    snap_grid: Int32;         { lines on the section's grid (1) }
   end;
   Ppd_para_props = ^pd_para_props;
 
@@ -511,6 +525,7 @@ type
     mirror_margins: Int32;
     gutter: pd_sp;
     page_valign: Int32;
+    line_pitch: pd_sp;        { the document grid's line pitch; 0 none }
   end;
   Ppd_section_props = ^pd_section_props;
 

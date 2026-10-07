@@ -88,6 +88,7 @@ begin
   WriteLn('pd_params.protrusion ', PtrUInt(@v_pd_params.protrusion) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.expansion ', PtrUInt(@v_pd_params.expansion) - PtrUInt(@v_pd_params));
   WriteLn('pd_params.full_lines ', PtrUInt(@v_pd_params.full_lines) - PtrUInt(@v_pd_params));
+  WriteLn('pd_params.line_grid ', PtrUInt(@v_pd_params.line_grid) - PtrUInt(@v_pd_params));
   WriteLn('pd_break_info ', SizeOf(pd_break_info));
   WriteLn('pd_break_info.lines ', PtrUInt(@v_pd_break_info.lines) - PtrUInt(@v_pd_break_info));
   WriteLn('pd_break_info.demerits ', PtrUInt(@v_pd_break_info.demerits) - PtrUInt(@v_pd_break_info));
@@ -159,6 +160,11 @@ begin
   WriteLn('pd_char_props.hidden ', PtrUInt(@v_pd_char_props.hidden) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_char_props.position ', PtrUInt(@v_pd_char_props.position) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_char_props.revision ', PtrUInt(@v_pd_char_props.revision) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.family_ea ', PtrUInt(@v_pd_char_props.family_ea) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.family_cs ', PtrUInt(@v_pd_char_props.family_cs) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.size_cs ', PtrUInt(@v_pd_char_props.size_cs) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.weight_cs ', PtrUInt(@v_pd_char_props.weight_cs) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.italic_cs ', PtrUInt(@v_pd_char_props.italic_cs) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_revision ', SizeOf(pd_revision));
   WriteLn('pd_revision.kind ', PtrUInt(@v_pd_revision.kind) - PtrUInt(@v_pd_revision));
   WriteLn('pd_revision.author ', PtrUInt(@v_pd_revision.author) - PtrUInt(@v_pd_revision));
@@ -198,6 +204,7 @@ begin
   WriteLn('pd_para_props.contextual ', PtrUInt(@v_pd_para_props.contextual) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.border_sides ', PtrUInt(@v_pd_para_props.border_sides) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.border_space ', PtrUInt(@v_pd_para_props.border_space) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.snap_grid ', PtrUInt(@v_pd_para_props.snap_grid) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_tab_stop ', SizeOf(pd_tab_stop));
   WriteLn('pd_tab_stop.position ', PtrUInt(@v_pd_tab_stop.position) - PtrUInt(@v_pd_tab_stop));
   WriteLn('pd_tab_stop.align ', PtrUInt(@v_pd_tab_stop.align) - PtrUInt(@v_pd_tab_stop));
@@ -289,6 +296,7 @@ begin
   WriteLn('pd_section_props.mirror_margins ', PtrUInt(@v_pd_section_props.mirror_margins) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.gutter ', PtrUInt(@v_pd_section_props.gutter) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.page_valign ', PtrUInt(@v_pd_section_props.page_valign) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.line_pitch ', PtrUInt(@v_pd_section_props.line_pitch) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_table_props ', SizeOf(pd_table_props));
   WriteLn('pd_table_props.width ', PtrUInt(@v_pd_table_props.width) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.align ', PtrUInt(@v_pd_table_props.align) - PtrUInt(@v_pd_table_props));

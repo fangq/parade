@@ -34,7 +34,7 @@ static const char* const role_names[] = { "body", "title", "heading", "caption",
                                         };
 static const char* const align_names[] = { "justify", "left", "right", "center" };
 static const char* const inline_names[] = { "image", "equation", "field", "footnote", "link", "bookmark", "tab",
-                                            "user", "raw", "control"
+                                            "user", "raw", "control", "ruby"
                                           };
 static const char* const field_names[] = { "page", "pages", "sectionpage", "refnumber", "refpage", "seq",
                                            "heading", "date"
@@ -181,6 +181,10 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
         put_bool(w, "Contextual", p->contextual);
     }
 
+    if (m & PD_PP_SNAP_GRID) {
+        put_bool(w, "SnapToGrid", p->snap_grid);
+    }
+
     if (m & PD_PP_TABS) {   /* [[position, align, leader], ...] */
         int32_t i;
 
@@ -277,6 +281,26 @@ static void save_cp(pj_writer* w, const pd_char_props* c) {
 
     if (m & PD_CP_REVISION) {
         put_int(w, "Revision", c->revision);
+    }
+
+    if (m & PD_CP_FAMILY_EA) {
+        put_str(w, "FamilyEastAsian", c->family_ea);
+    }
+
+    if (m & PD_CP_FAMILY_CS) {
+        put_str(w, "FamilyComplex", c->family_cs);
+    }
+
+    if (m & PD_CP_SIZE_CS) {
+        put_int(w, "SizeComplex", c->size_cs);
+    }
+
+    if (m & PD_CP_WEIGHT_CS) {
+        put_int(w, "WeightComplex", c->weight_cs);
+    }
+
+    if (m & PD_CP_ITALIC_CS) {
+        put_int(w, "ItalicComplex", c->italic_cs);
     }
 
     pj_obj_end(w);
@@ -521,6 +545,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
             if (p->page_valign) {
                 put_int(w, "PageVAlign", p->page_valign);
+            }
+
+            if (p->line_pitch) {
+                put_int(w, "LinePitch", p->line_pitch);
             }
 
             if (p->line_numbers) {
@@ -1110,6 +1138,11 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
         p->contextual = (int32_t)int_or(x, 0, 0, 1, L);
     }
 
+    if ((x = pj_get(o, "SnapToGrid"))) {
+        p->mask |= PD_PP_SNAP_GRID;
+        p->snap_grid = (int32_t)int_or(x, 0, 0, 1, L);
+    }
+
     if ((x = pj_get(o, "Tabs"))) {
         int32_t i;
 
@@ -1176,6 +1209,20 @@ static void load_cp(const pj_node* o, pd_char_props* c, loader* L) {
     F("Hidden", PD_CP_HIDDEN, hidden, 0, 1);
     F("Position", PD_CP_POSITION, position, SP_MIN, SP_MAX);
     F("Revision", PD_CP_REVISION, revision, 1, 0xFFFFFF);
+
+    if ((x = pj_get(o, "FamilyEastAsian"))) {
+        c->mask |= PD_CP_FAMILY_EA;
+        copy_name(x, c->family_ea, sizeof(c->family_ea), L);
+    }
+
+    if ((x = pj_get(o, "FamilyComplex"))) {
+        c->mask |= PD_CP_FAMILY_CS;
+        copy_name(x, c->family_cs, sizeof(c->family_cs), L);
+    }
+
+    F("SizeComplex", PD_CP_SIZE_CS, size_cs, 0, SP_MAX);
+    F("WeightComplex", PD_CP_WEIGHT_CS, weight_cs, 0, 1000);
+    F("ItalicComplex", PD_CP_ITALIC_CS, italic_cs, -1, 1);
 #undef F
     pd_doc_cp_normalize(c);
 }
@@ -1416,6 +1463,7 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->mirror_margins = (int32_t)int_or(pj_get(x, "MirrorMargins"), 0, -1, 1, L);
     p->gutter = (pd_sp)int_or(pj_get(x, "Gutter"), 0, 0, PD_PT(1000), L);
     p->page_valign = (int32_t)int_or(pj_get(x, "PageVAlign"), 0, 0, 2, L);
+    p->line_pitch = (pd_sp)int_or(pj_get(x, "LinePitch"), 0, 0, PD_PT(1000), L);
     p->line_number_start = (int32_t)int_or(pj_get(x, "LineNumberStart"), 0, 0, 1000000, L);
     p->line_number_distance = (pd_sp)int_or(pj_get(x, "LineNumberDistance"), 0, 0, PD_PT(1000), L);
     p->line_number_restart = (int32_t)int_or(pj_get(x, "LineNumberRestart"), 0, 0, 2, L);

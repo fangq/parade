@@ -880,6 +880,7 @@ static pd_para_props para_resolved(const pd_doc* d, pd_block_id p) {
     if (o.mask & PD_PP_KEEP_NEXT) r.keep_with_next = o.keep_with_next;
     if (o.mask & PD_PP_KEEP_LINES) r.keep_lines = o.keep_lines;
     if (o.mask & PD_PP_HYPHENATE) r.hyphenate = o.hyphenate;
+    if (o.mask & PD_PP_SNAP_GRID) r.snap_grid = o.snap_grid;
     return r;
 }
 
@@ -2057,6 +2058,78 @@ static void test_docx_charts(void) {
         free(z.p);
         pd_doc_free(d);
     }
+}
+
+/* East Asian and complex-script fonts (named, and the theme's), complex scripts' size, bold and italic; a ruby
+   over its base; the document grid and a paragraph off it. Read, and kept through DOCX. */
+static void test_docx_east_asian(void) {
+    pd_doc* d = docx_doc(
+        "word/theme/theme1.xml",
+        "<a:theme xmlns:a=\"a\"><a:themeElements><a:fontScheme name=\"F\"><a:majorFont><a:latin typeface=\"Cambria\"/>"
+        "<a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:majorFont><a:minorFont><a:latin typeface=\"Calibri\"/>"
+        "<a:ea typeface=\"MS Mincho\"/><a:cs typeface=\"Arial\"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:r><w:rPr><w:rFonts w:ascii=\"Times New Roman\" w:hAnsi=\"Times New Roman\" w:eastAsia=\"SimSun\" "
+        "w:cs=\"Traditional Arabic\"/><w:b/><w:bCs w:val=\"0\"/><w:iCs/><w:sz w:val=\"24\"/><w:szCs w:val=\"32\"/></w:rPr>"
+        "<w:t>abc</w:t></w:r><w:r><w:rPr><w:rFonts w:eastAsiaTheme=\"minorEastAsia\" w:cstheme=\"minorBidi\"/></w:rPr>"
+        "<w:t>def</w:t></w:r>"
+        "<w:r><w:ruby><w:rubyPr><w:rubyAlign w:val=\"distributeSpace\"/><w:hps w:val=\"10\"/><w:hpsRaise w:val=\"18\"/>"
+        "<w:hpsBaseText w:val=\"21\"/><w:lid w:val=\"ja-JP\"/></w:rubyPr><w:rt><w:r><w:rPr><w:sz w:val=\"10\"/></w:rPr>"
+        "<w:t>\xe3\x81\x8b\xe3\x82\x93</w:t></w:r></w:rt><w:rubyBase><w:r><w:t>\xe6\xbc\xa2</w:t></w:r></w:rubyBase></w:ruby></w:r>"
+        "<w:r><w:t>!</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:snapToGrid w:val=\"0\"/></w:pPr><w:r><w:t>off</w:t></w:r></w:p>"
+        "<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:docGrid w:type=\"lines\" w:linePitch=\"312\"/></w:sectPr>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec, p;
+        pd_char_props cp;
+        pd_para_props pp;
+        pd_section_props sp;
+        pd_inline o;
+        uint32_t k;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        p = pd_doc_child(d, sec, 0);
+        cp = chars_at(d, p, 0);
+        CHECK(!strcmp(cp.family, "Times New Roman") && !strcmp(cp.family_ea, "SimSun") &&
+              !strcmp(cp.family_cs, "Traditional Arabic"));
+        CHECK(cp.weight == 700 && cp.weight_cs == 400 && cp.italic == 0 && cp.italic_cs == 1);
+        CHECK(cp.size == PD_PT(12) && cp.size_cs == PD_PT(16));
+        cp = chars_at(d, p, 3);
+        CHECK(!strcmp(cp.family_ea, "MS Mincho") && !strcmp(cp.family_cs, "Arial"));      /* the theme's */
+        k = nth_object(d, p, 0);
+        CHECK(k == 6 && pd_doc_inline_at(d, at(p, k), &o) == PD_OK && o.kind == PD_INLINE_RUBY);
+        CHECK(o.source_len == 6 && !memcmp(o.source, "\xe3\x81\x8b\xe3\x82\x93", 6));
+        CHECK(o.height == PD_PT(5) && o.depth == PD_PT(9));
+        CHECK(pd_doc_inline_at(d, at(p, k + 6), &o) == PD_OK && o.kind == PD_INLINE_RUBY && o.source_len == 0);
+        CHECK(pd_doc_section_props(d, sec, &sp) == PD_OK && sp.line_pitch == PD_PT(15.6));
+        pp = para_resolved(d, pd_doc_child(d, sec, 1));
+        CHECK(pp.snap_grid == 0 && para_resolved(d, p).snap_grid == 1);
+    }
+
+    if (d) {    /* the guide in a text export: the base only; in HTML, its own markup */
+        buf_t t = { NULL, 0 };
+
+        CHECK(pd_doc_export(d, PD_CONV_TEXT, to_buf, &t) == PD_OK && t.p && strstr(t.p, "abcdef\xe6\xbc\xa2!"));
+        free(t.p);
+        t.p = NULL;
+        t.n = 0;
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &t) == PD_OK && t.p &&
+              strstr(t.p, "<ruby>\xe6\xbc\xa2<rt>\xe3\x81\x8b\xe3\x82\x93</rt></ruby>"));
+        free(t.p);
+    }
+
+    pd_doc_free(d);
 }
 
 /* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
@@ -3684,6 +3757,7 @@ int main(void) {
     test_docx_font_table();
     test_docx_controls();
     test_docx_charts();
+    test_docx_east_asian();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

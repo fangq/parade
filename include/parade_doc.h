@@ -204,6 +204,11 @@ typedef enum {
 #define PD_CP_HIDDEN      (1u << 15)
 #define PD_CP_POSITION    (1u << 16)
 #define PD_CP_REVISION    (1u << 17)
+#define PD_CP_FAMILY_EA   (1u << 18)
+#define PD_CP_FAMILY_CS   (1u << 19)
+#define PD_CP_SIZE_CS     (1u << 20)
+#define PD_CP_WEIGHT_CS   (1u << 21)
+#define PD_CP_ITALIC_CS   (1u << 22)
 
 typedef enum {
     PD_UNDERLINE_NONE = 0,
@@ -242,6 +247,13 @@ typedef struct {
     int32_t hidden;             /**< kept in the text, not shown and taking no room */
     pd_sp position;             /**< baseline raised (positive) or lowered, at full size (not a super/subscript) */
     pd_rev_id revision;         /**< tracked insertion or deletion the text belongs to (0: none) */
+    /* the faces of the other scripts in the run (Word's font slots): East Asian text (CJK ideographs, kana,
+       hangul) and complex scripts (Arabic, Hebrew, Indic, Thai, ...); unset: the same as the text's */
+    char family_ea[64];         /**< East Asian text's family, UTF-8; "" = family */
+    char family_cs[64];         /**< complex scripts' family; "" = family */
+    pd_sp size_cs;              /**< complex scripts' size; 0 = size */
+    int32_t weight_cs;          /**< complex scripts' weight; 0 = weight */
+    int32_t italic_cs;          /**< complex scripts' italic; -1 = italic */
 } pd_char_props;
 
 /* paragraph property mask bits */
@@ -265,6 +277,7 @@ typedef struct {
 #define PD_PP_DIRECTION    (1u << 17)
 #define PD_PP_TABS         (1u << 18) /**< tab stops and the default interval, together */
 #define PD_PP_CONTEXTUAL   (1u << 19) /**< no space between this and a neighbour of the same style */
+#define PD_PP_SNAP_GRID    (1u << 20) /**< lines on the section's grid (pd_section_props.line_pitch) */
 
 typedef struct {
     uint32_t mask;              /**< PD_PP_* bits that are set */
@@ -293,6 +306,7 @@ typedef struct {
     int32_t contextual;         /**< its space before and after left out next to a paragraph of the same style */
     int32_t border_sides;       /**< PD_BORDER_* edges the border has (with PD_PP_BORDER); 0 = all four */
     pd_sp border_space;         /**< between the text and the border */
+    int32_t snap_grid;          /**< its lines on the section's grid, when it has one (1, the default) */
 } pd_para_props;
 
 /* the edges of a paragraph border; paragraphs one after another with the
@@ -404,10 +418,13 @@ typedef enum {
     PD_INLINE_TAB = 6,          /**< tab stop (positions from the paragraph style) */
     PD_INLINE_USER = 7,         /**< host-defined object of the given size */
     PD_INLINE_RAW = 8,          /**< markup passed through untouched (inline HTML in Markdown), in source: no size */
-    PD_INLINE_CONTROL = 9       /**< start of a content control (a form field: a check box, a drop-down list, a date,
+    PD_INLINE_CONTROL = 9,      /**< start of a content control (a form field: a check box, a drop-down list, a date,
                                      a plain or rich text box): its kind in name, what else it has in source (a JSON
                                      object, see pd_doc_control_at); the text up to the next one with an empty name,
                                      which ends it, is its content. No size */
+    PD_INLINE_RUBY = 10         /**< start of a phonetic guide (ruby) over the text up to the next one with no source,
+                                     which ends it: the guide's text in source, its size in height (0: half the
+                                     text's), how far its baseline is above the text's in depth (0: the text's size) */
 } pd_inline_kind;
 
 typedef enum {
@@ -523,6 +540,8 @@ typedef struct {
     int32_t mirror_margins;     /**< 1: left and right margins swap on even pages; -1: never; 0: as facing_pages */
     pd_sp gutter;               /**< room for the binding, on the inside of the page */
     int32_t page_valign;        /**< text on the page: 0 at the top, 1 centred, 2 at the bottom */
+    pd_sp line_pitch;           /**< the document grid (East Asian layout): every line a whole number of this high,
+                                     in paragraphs that snap to it (0 = no grid) */
 } pd_section_props;
 
 typedef enum {

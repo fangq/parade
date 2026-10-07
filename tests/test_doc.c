@@ -954,6 +954,126 @@ static void test_layout_bridge(void) {
     pd_font_free(font);
 }
 
+static const pd_font* script_fonts[2];
+
+/* "Sans" one face, anything else the other */
+static const pd_font* script_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
+    (void)user;
+    (void)weight;
+    (void)italic;
+    return script_fonts[family && !strcmp(family, "Sans")];
+}
+
+/* the style of the glyph for the character at a byte offset on line 0 */
+static int glyph_style_at(const pd_para* para, uint32_t off, pd_style* st) {
+    pd_glyph g[256];
+    int32_t n = 0, k;
+
+    pd_para_get_glyphs(para, 0, g, 256, &n);
+
+    for (k = 0; k < n; k++) {
+        if (g[k].kind == PD_GLYPH && g[k].cluster == off) {
+            return pd_para_get_style(para, g[k].style, st) == PD_OK;
+        }
+    }
+
+    return 0;
+}
+
+/* Word's font slots: East Asian and complex-script text in their own faces (and complex scripts' own size);
+   the document grid: lines a whole number of pitches high, unless a paragraph opts out; a ruby's room. */
+static void test_scripts_and_grid(void) {
+    const char* dir = "/usr/share/fonts/truetype/liberation/";
+    char a[256], b[256];
+    pd_font* fa = NULL, *fb = NULL;
+    pd_doc* d;
+    pd_para* para;
+    pd_params prm;
+    pd_break_info bi;
+    pd_block_id p, sec;
+    pd_char_props cp;
+    pd_para_props pp;
+    pd_section_props sp;
+    pd_style st;
+    pd_line L0, L1;
+    pd_inline o;
+    pd_pos c;
+    pd_sp plain_asc;
+
+    snprintf(a, sizeof(a), "%sLiberationSerif-Regular.ttf", dir);
+    snprintf(b, sizeof(b), "%sLiberationSans-Regular.ttf", dir);
+
+    if (pd_font_load_file(a, 0, &fa) != PD_OK || pd_font_load_file(b, 0, &fb) != PD_OK) {
+        printf("  (no test fonts, skipped)\n");
+        pd_font_free(fa);
+        return;
+    }
+
+    script_fonts[0] = fa;
+    script_fonts[1] = fb;
+    pd_doc_new(&d);
+    pd_doc_set_font_resolver(d, script_resolver, NULL);
+    p = first_para(d);
+    pd_doc_insert_text(d, at(p, 0), "Abc \xe6\xbc\xa2\xe5\xad\x97 \xd8\xa7\xd8\xa8 def", 19, PD_FORMAT_INHERIT, NULL);
+    memset(&cp, 0, sizeof(cp));
+    cp.mask = PD_CP_FAMILY | PD_CP_FAMILY_EA | PD_CP_FAMILY_CS | PD_CP_SIZE_CS;
+    strcpy(cp.family, "Serif");
+    strcpy(cp.family_ea, "Sans");
+    strcpy(cp.family_cs, "Sans");
+    cp.size_cs = PD_PT(14);
+    pd_doc_set_char_props(d, rng(p, 0, p, 19), &cp);
+    CHECK(pd_para_new(&para) == PD_OK);
+    CHECK(pd_doc_para_build(d, p, PD_PT(400), para, &prm) == PD_OK && pd_para_break(para, &prm, &bi) == PD_OK);
+    CHECK(glyph_style_at(para, 0, &st) && st.font == fa && st.size == PD_PT(10));      /* Latin: the text's */
+    CHECK(glyph_style_at(para, 4, &st) && st.font == fb);                               /* 漢: East Asian */
+    CHECK(glyph_style_at(para, 11, &st) && st.font == fb && st.size == PD_PT(14));     /* Arabic: its own size */
+    CHECK(glyph_style_at(para, 16, &st) && st.font == fa);                              /* Latin again */
+    pd_doc_format_info(d, pd_doc_format(d, 0, &cp), NULL, &cp);
+    CHECK(!strcmp(cp.family_ea, "Sans") && cp.size_cs == PD_PT(14) && cp.italic_cs == -1);   /* unset: as the text */
+
+    /* a grid of 18pt: two lines of 10pt text, 18pt apart; a paragraph that opts out keeps its own */
+    pd_doc_delete(d, rng(p, 0, p, 19), NULL);
+    pd_doc_insert_text(d, at(p, 0), "one two three four five six seven eight nine ten eleven twelve", 62,
+                       PD_FORMAT_INHERIT, NULL);
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+    pd_doc_section_props(d, sec, &sp);
+    sp.line_pitch = PD_PT(18);
+    CHECK(pd_doc_set_section_props(d, sec, &sp) == PD_OK);
+    CHECK(pd_doc_para_build(d, p, PD_PT(150), para, &prm) == PD_OK && pd_para_break(para, &prm, &bi) == PD_OK);
+    CHECK(bi.lines >= 2 && prm.line_grid == PD_PT(18));
+    pd_para_get_line(para, 0, &L0);
+    pd_para_get_line(para, 1, &L1);
+    CHECK(L1.baseline - L0.baseline == PD_PT(18));
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_SNAP_GRID;
+    pp.snap_grid = 0;
+    pd_doc_set_para_props(d, p, &pp);
+    CHECK(pd_doc_para_build(d, p, PD_PT(150), para, &prm) == PD_OK && pd_para_break(para, &prm, &bi) == PD_OK);
+    pd_para_get_line(para, 0, &L0);
+    pd_para_get_line(para, 1, &L1);
+    CHECK(prm.line_grid == 0 && L1.baseline - L0.baseline < PD_PT(18));
+
+    /* a ruby over "one": room above the line for its guide */
+    plain_asc = L0.ascent;
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_RUBY;
+    o.source = "wan";
+    o.source_len = 3;
+    o.height = PD_PT(5);
+    CHECK(pd_doc_insert_inline(d, at(p, 0), &o, &c) == PD_OK);
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_RUBY;
+    CHECK(pd_doc_insert_inline(d, at(p, 6), &o, NULL) == PD_OK);
+    CHECK(pd_doc_para_build(d, p, PD_PT(150), para, &prm) == PD_OK && pd_para_break(para, &prm, &bi) == PD_OK);
+    pd_para_get_line(para, 0, &L0);
+    CHECK(L0.ascent >= PD_PT(10) + PD_PT(4) && L0.ascent > plain_asc);
+
+    pd_para_free(para);
+    pd_doc_free(d);
+    pd_font_free(fa);
+    pd_font_free(fb);
+}
+
 /* the revision of the text at an offset (0: none) */
 static pd_rev_id rev_at(const pd_doc* d, pd_block_id b, uint32_t off) {
     pd_run runs[64];
@@ -1266,6 +1386,7 @@ int main(void) {
     test_jdata();
     printf("layout bridge\n");
     test_layout_bridge();
+    test_scripts_and_grid();
     printf("tracked changes, comments\n");
     test_track_changes();
     printf("deltas: follower and journal\n");
