@@ -754,6 +754,30 @@ static pd_doc* rich_doc(void) {
     return d;
 }
 
+/* the line-breaking setting: hybrid unless set otherwise, and kept by a save */
+static void test_line_breaking_saved(void) {
+    pd_doc* d = NULL, *e = NULL;
+    buf_t b;
+
+    CHECK(pd_doc_new(&d) == PD_OK);
+    CHECK(pd_doc_stable_breaks(d) == 1);
+    b = save(d, PD_JDATA_TEXT);
+    CHECK(contains(b, "\"LineBreaking\": \"hybrid\"", 24));
+    free(b.p);
+    pd_doc_set_stable_breaks(d, 0);
+    b = save(d, PD_JDATA_TEXT);
+    CHECK(contains(b, "\"LineBreaking\": \"optimal\"", 25));
+    CHECK(pd_doc_load(b.p, b.n, PD_JDATA_TEXT, &e) == PD_OK && pd_doc_stable_breaks(e) == 0);
+    free(b.p);
+    pd_doc_free(e);
+    b = save(d, PD_JDATA_BINARY);
+    e = NULL;
+    CHECK(pd_doc_load(b.p, b.n, PD_JDATA_BINARY, &e) == PD_OK && pd_doc_stable_breaks(e) == 0);
+    free(b.p);
+    pd_doc_free(e);
+    pd_doc_free(d);
+}
+
 static void test_jdata(void) {
     pd_doc* d = rich_doc(), *t = NULL, *b = NULL;
     buf_t txt = save(d, PD_JDATA_TEXT), bin = save(d, PD_JDATA_BINARY), txt2, txt3;
@@ -1384,6 +1408,7 @@ int main(void) {
     test_random_undo();
     printf("JData / BJData\n");
     test_jdata();
+    test_line_breaking_saved();
     printf("layout bridge\n");
     test_layout_bridge();
     test_scripts_and_grid();

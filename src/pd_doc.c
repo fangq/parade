@@ -655,6 +655,7 @@ pd_doc* pd_doc_alloc(void) {
     if (d) {
         d->next_id = 1;
         d->undo_limit = 1000;
+        d->stable_breaks = 1;
     }
 
     return d;
@@ -935,6 +936,16 @@ pd_status pd_doc_set_microtype(pd_doc* d, int32_t protrusion, int32_t expansion)
     d->expansion = expansion;
     d->style_rev++;
     return PD_OK;
+}
+
+void pd_doc_set_stable_breaks(pd_doc* d, int32_t on) {
+    if (d) {
+        d->stable_breaks = on != 0;
+    }
+}
+
+int32_t pd_doc_stable_breaks(const pd_doc* d) {
+    return d ? d->stable_breaks : 0;
 }
 
 pd_status pd_doc_set_hyphenator(pd_doc* d, const char* lang, const pd_hyph* hyph) {

@@ -675,6 +675,8 @@ procedure pd_doc_set_default_font(doc: Ppd_doc; font: Ppd_font); cdecl; PDEXT;
 function pd_doc_set_fallback_fonts(doc: Ppd_doc; fonts: PPointer; n: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_set_hyphenator(doc: Ppd_doc; lang: PAnsiChar; hyph: Pointer): pd_status; cdecl; PDEXT;
 function pd_doc_set_microtype(doc: Ppd_doc; protrusion, expansion: Int32): pd_status; cdecl; PDEXT;
+procedure pd_doc_set_stable_breaks(doc: Ppd_doc; on_: Int32); cdecl; PDEXT;
+function pd_doc_stable_breaks(doc: Ppd_doc): Int32; cdecl; PDEXT;
 procedure pd_doc_set_math_font(doc: Ppd_doc; font: Ppd_font); cdecl; PDEXT;
 function pd_doc_revision(doc: Ppd_doc): UInt64; cdecl; PDEXT;
 
@@ -796,6 +798,7 @@ function pd_layout_new(doc: Ppd_doc; out layout: Ppd_layout): pd_status; cdecl; 
 procedure pd_layout_free(layout: Ppd_layout); cdecl; PDEXT;
 function pd_layout_update(layout: Ppd_layout; info: Ppd_layout_info): pd_status; cdecl; PDEXT;
 procedure pd_layout_invalidate(layout: Ppd_layout); cdecl; PDEXT;
+procedure pd_layout_set_stable_breaks(layout: Ppd_layout; mode: Int32); cdecl; PDEXT;
 function pd_layout_page_count(layout: Ppd_layout): Int32; cdecl; PDEXT;
 function pd_layout_page_info(layout: Ppd_layout; page: Int32; out info: pd_page_info): pd_status; cdecl; PDEXT;
 function pd_layout_page_items(layout: Ppd_layout; page: Int32; buf: Ppd_draw; cap: Int32; out count: Int32): pd_status; cdecl; PDEXT;

@@ -50,6 +50,12 @@ typedef struct {
 PD_API pd_status pd_layout_update(pd_layout* layout, pd_layout_info* info);
 /** drop all cached paragraph layouts, e.g. after changing the font resolver */
 PD_API void      pd_layout_invalidate(pd_layout* layout);
+/**
+ * Hybrid line breaking for this layout: -1 as the document says
+ * (pd_doc_stable_breaks, the default), 0 off (every paragraph broken as if
+ * fresh, e.g. for export), 1 on. Takes effect as paragraphs are next broken.
+ */
+PD_API void      pd_layout_set_stable_breaks(pd_layout* layout, int32_t mode);
 
 PD_API int32_t   pd_layout_page_count(const pd_layout* layout);
 

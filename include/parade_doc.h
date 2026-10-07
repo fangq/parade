@@ -89,6 +89,16 @@ PD_API void      pd_doc_set_math_font(pd_doc* doc, const pd_font* font);
  * width (pdfTeX's \pdfprotrudechars and \pdfadjustspacing). 0, 0 = off.
  */
 PD_API pd_status pd_doc_set_microtype(pd_doc* doc, int32_t protrusion, int32_t expansion);
+/**
+ * Line breaking as the document is edited. Hybrid (1, the default): a
+ * paragraph is broken optimally (Knuth-Plass) when first laid out, and after
+ * an edit its lines before the change are kept and those after it move only
+ * when that is much better, so text away from the caret holds still. Optimal
+ * (0): every paragraph re-broken as if fresh. Saved with the document
+ * ("LineBreaking"); layouts follow it unless told otherwise.
+ */
+PD_API void      pd_doc_set_stable_breaks(pd_doc* doc, int32_t on);
+PD_API int32_t   pd_doc_stable_breaks(const pd_doc* doc);
 /** font used when the resolver returns NULL or none is set */
 PD_API void      pd_doc_set_default_font(pd_doc* doc, const pd_font* font);
 

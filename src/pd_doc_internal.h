@@ -165,6 +165,7 @@ struct pd_doc {
     }* hyphs;                   /* hyphenation patterns by language tag prefix */
     int32_t nhyphs;
     int32_t protrusion, expansion;  /* microtypography for the layout bridge */
+    int32_t stable_breaks;      /* line breaking while editing: 1 hybrid (lines away from an edit kept), 0 optimal */
     const pd_font* math_font;   /* equations are typeset with it when set */
     void* resolver_user;
     const pd_font* default_font;

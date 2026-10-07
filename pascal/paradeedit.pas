@@ -145,6 +145,8 @@ type
     procedure SetTrackChanges(AValue: Boolean);
     procedure SetMarkupMode(AValue: Integer);
     function GetMarkupMode: Integer;
+    procedure SetHybridBreaking(AValue: Boolean);
+    function GetHybridBreaking: Boolean;
     procedure SelectRange(const R: pd_range);
     function ChangeAt(const P: pd_pos; out R: pd_range): Boolean;
     function BalloonHeight(const Segs: array of string; W: Integer; PxScale: Double; Draw: TLazIntfImage;
@@ -467,6 +469,9 @@ type
     property Author: string read FAuthor write SetAuthor;
     { PD_MARKUP_*: balloons, inline, final or original }
     property MarkupMode: Integer read GetMarkupMode write SetMarkupMode;
+    { line breaking as one types: hybrid (lines away from the edit hold still) or optimal (every edited
+      paragraph re-broken as if fresh); saved with the document }
+    property HybridBreaking: Boolean read GetHybridBreaking write SetHybridBreaking;
     { Undo/Redo go here when set (a shared document undoes one's own edits only) }
     property OnUndo: TParadeUndoEvent read FOnUndo write FOnUndo;
     { the document is about to be replaced (new, loaded): whatever holds it lets go }
@@ -1442,13 +1447,21 @@ procedure TParadeEdit.ExportPDF(const FileName: string);
 var
   Fs: TFileStream;
   Opt: pd_pdf_options;
+  Fresh: Ppd_layout;
 begin
   pd_pdf_options_init(Opt);
-  Fs := TFileStream.Create(FileName, fmCreate);
+  { a layout of its own: the document as it lays out when opened, not the line breaks editing left }
+  ParadeCheck(pd_layout_new(FDoc, Fresh), 'layout');
   try
-    ParadeCheck(pd_layout_write_pdf(FLayout, @Opt, @WriteToStream, Fs), 'PDF ' + FileName);
+    ParadeCheck(pd_layout_update(Fresh, nil), 'layout');
+    Fs := TFileStream.Create(FileName, fmCreate);
+    try
+      ParadeCheck(pd_layout_write_pdf(Fresh, @Opt, @WriteToStream, Fs), 'PDF ' + FileName);
+    finally
+      Fs.Free;
+    end;
   finally
-    Fs.Free;
+    pd_layout_free(Fresh);
   end;
 end;
 
@@ -5741,6 +5754,16 @@ begin
     Exit;
   pd_doc_set_markup(FDoc, AValue);
   Relayout;
+end;
+
+function TParadeEdit.GetHybridBreaking: Boolean;
+begin
+  Result := pd_doc_stable_breaks(FDoc) <> 0;
+end;
+
+procedure TParadeEdit.SetHybridBreaking(AValue: Boolean);
+begin
+  pd_doc_set_stable_breaks(FDoc, Ord(AValue));    { paragraphs follow it as they are next edited }
 end;
 
 procedure TParadeEdit.SelectRange(const R: pd_range);

@@ -473,6 +473,121 @@ static uint32_t rnd(uint32_t n) {
     return n ? (rs >> 8) % n : 0;
 }
 
+/* where the glyphs of a paragraph's lines above the one holding an offset are drawn, as one hash (the line
+   itself is re-spaced by whatever goes into it) */
+static uint64_t lines_above(const pd_layout* L, pd_block_id b, uint32_t off) {
+    uint64_t h = 1469598103934665603ULL;
+    int32_t pg, k, n, pass, epg = -1;
+    pd_sp ey = 0;
+    uint32_t best = 0;
+
+    for (pass = 0; pass < 2; pass++) {      /* the line of the last glyph before off; then the glyphs above it */
+        for (pg = 0; pg < pd_layout_page_count(L); pg++) {
+            pd_draw* it;
+
+            pd_layout_page_items(L, pg, NULL, 0, &n);
+            it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+            pd_layout_page_items(L, pg, it, n, &n);
+
+            for (k = 0; k < n; k++) {
+                if (it[k].kind != PD_DRAW_GLYPH || it[k].block != b || it[k].offset >= off) {
+                    continue;
+                }
+
+                if (pass == 0 && it[k].offset >= best) {
+                    best = it[k].offset;
+                    epg = pg;
+                    ey = it[k].y;
+                } else if (pass == 1 && (pg < epg || (pg == epg && it[k].y < ey))) {
+                    int32_t v[4] = { pg, it[k].x, it[k].y, (int32_t)it[k].offset };
+                    size_t q;
+
+                    for (q = 0; q < sizeof(v); q++) {
+                        h = (h ^ ((const unsigned char*)v)[q]) * 1099511628211ULL;
+                    }
+                }
+            }
+
+            free(it);
+        }
+    }
+
+    return h;
+}
+
+/* Hybrid line breaking (the default): words typed into a justified paragraph never move the lines above them;
+   re-broken as if fresh (optimal), they often do. A fresh layout of the edited document is optimal again. */
+static void test_hybrid_breaking(void) {
+    pd_block_id sec, p[6];
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L[2];
+    pd_para_props pp;
+    int i, m, moved[2] = { 0, 0 };
+
+    memset(&pp, 0, sizeof(pp));
+    pp.mask = PD_PP_ALIGN;
+    pp.align = PD_ALIGN_JUSTIFY;
+    pd_doc_style_define(d, "Normal", PD_STYLE_PARAGRAPH, 0, &pp, NULL, NULL);
+    p[0] = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p[0], 0), frog, strlen(frog), PD_FORMAT_INHERIT, NULL);
+
+    for (i = 1; i < 6; i++) {
+        p[i] = add_para(d, sec, frog);
+    }
+
+    CHECK(pd_doc_stable_breaks(d) == 1);
+
+    for (m = 0; m < 2; m++) {
+        pd_layout_new(d, &L[m]);
+        pd_layout_set_stable_breaks(L[m], m == 0 ? -1 : 0);    /* as the document says (hybrid); optimal */
+        pd_layout_update(L[m], NULL);
+    }
+
+    for (i = 0; i < 40; i++) {
+        pd_block_id b = p[rnd(6)];
+        uint32_t off;
+        uint64_t before[2];
+        const char* t;
+        uint32_t n;
+
+        pd_doc_para_text(d, b, &t, &n);
+        off = n / 3 + rnd(n / 2);
+
+        while (off < n && t[off] != ' ') {      /* typed after a word */
+            off++;
+        }
+
+        for (m = 0; m < 2; m++) {
+            before[m] = lines_above(L[m], b, off);
+        }
+
+        pd_doc_insert_text(d, at(b, off), " extraordinarily", 16, PD_FORMAT_INHERIT, NULL);
+
+        for (m = 0; m < 2; m++) {
+            pd_layout_update(L[m], NULL);
+            moved[m] += lines_above(L[m], b, off) != before[m];
+        }
+    }
+
+    CHECK(moved[0] == 0);
+    printf("  40 words typed: lines above them moved %d times (hybrid), %d (optimal)\n", moved[0], moved[1]);
+
+    {   /* the optimal layout is what a fresh layout of the document gives */
+        pd_layout* F;
+
+        pd_layout_new(d, &F);
+        pd_layout_update(F, NULL);
+        CHECK(layout_hash(F) == layout_hash(L[1]));
+        pd_layout_free(F);
+    }
+
+    for (m = 0; m < 2; m++) {
+        pd_layout_free(L[m]);
+    }
+
+    pd_doc_free(d);
+}
+
 static void test_incremental(void) {
     pd_block_id sec, p[25];
     pd_doc* d = new_doc(&sec);
@@ -497,6 +612,7 @@ static void test_incremental(void) {
     lv.hanging = PD_PT(15);
     pd_doc_list_define(d, 1, &lv, &list);
     pd_layout_new(d, &L);
+    pd_layout_set_stable_breaks(L, 0);  /* the cache's own correctness: hybrid breaking depends on history */
     pd_layout_update(L, NULL);
 
     for (i = 0; i < 60; i++) {
@@ -2143,6 +2259,8 @@ int main(void) {
     test_hit_caret();
     printf("incremental updates\n");
     test_incremental();
+    printf("hybrid line breaking\n");
+    test_hybrid_breaking();
     printf("font fallback\n");
     test_fallback();
     test_hyphenation();

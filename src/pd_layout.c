@@ -189,6 +189,7 @@ struct pd_layout {
     char (*prev_labels)[16];
     int32_t prev_npages;
     int want_rerun;
+    int32_t stable;             /* hybrid line breaking: -1 as the document says, 0 off, 1 on */
 };
 
 /* filler state for one section */
@@ -353,6 +354,7 @@ static pd_status build_into(pd_layout* L, pcache* c, pd_block_id id, pd_sp width
     pd_break_info bi;
     pd_status st;
     int32_t i;
+    int again = c->nlines > 0 && c->width == width;     /* laid out before, at this width: an edit */
 
     c->block = id;
     c->width = width;
@@ -377,6 +379,15 @@ static pd_status build_into(pd_layout* L, pcache* c, pd_block_id id, pd_sp width
     }
 
     prm.looseness = c->loose;
+
+    /* hybrid breaking: after an edit, the lines before it as they were, those after it kept unless a new
+       break is much better; a paragraph's first layout (and the looser or tighter variants page breaking
+       tries) optimal */
+    if (again && c->loose == 0 && prm.mode == PD_BREAK_OPTIMAL &&
+            (L->stable < 0 ? pd_doc_stable_breaks(d) : L->stable)) {
+        prm.freeze_offset = INT32_MAX;
+        prm.hysteresis = 5000;
+    }
 
     if (st == PD_OK) {
         st = pd_para_break(c->para, &prm, &bi);
@@ -3073,6 +3084,12 @@ static pd_sp story_height(pd_layout* L, pd_block_id story, pd_sp tw) {
     return h;
 }
 
+void pd_layout_set_stable_breaks(pd_layout* L, int32_t mode) {
+    if (L) {
+        L->stable = mode < 0 ? -1 : mode > 0;
+    }
+}
+
 pd_status pd_layout_new(const pd_doc* doc, pd_layout** out) {
     pd_layout* L;
 
@@ -3086,6 +3103,8 @@ pd_status pd_layout_new(const pd_doc* doc, pd_layout** out) {
         free(L);
         return PD_ERR_NOMEM;
     }
+
+    L->stable = -1;
 
     L->doc = doc;
     *out = L;

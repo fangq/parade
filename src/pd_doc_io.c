@@ -4,6 +4,7 @@
  * {
  *   "_DataInfo_": {"GeneratedBy", "FormatName", "FormatVersion", "LengthUnit"},
  *   "NextID": n,
+ *   "LineBreaking": "hybrid" | "optimal",        (pd_doc_stable_breaks)
  *   "Styles": [ {"Name","Kind","Parent","Para":{...},"Char":{...}} | null ],
  *   "Formats": [ {"Style": id, "Char": {...}} ],
  *   "Lists": [ {"Levels": [ {"Format","Start","Text","Indent","Hanging","RestartAfter","Label*"} ]} ],
@@ -878,6 +879,7 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
     put_str(&w, "LengthUnit", "sp (1/65536 pt)");
     pj_obj_end(&w);
     put_int(&w, "NextID", (int64_t)sv.maxid + 1);
+    put_str(&w, "LineBreaking", d->stable_breaks ? "hybrid" : "optimal");
 
     pj_key(&w, "Styles");
     pj_arr_begin(&w);
@@ -1687,6 +1689,8 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
     }
 
     d->captab = d->next_id = (uint32_t)next;
+    x = pj_get(r, "LineBreaking");
+    d->stable_breaks = !(x && x->type == PJ_STR && x->len == 7 && !memcmp(x->s, "optimal", 7));
 
     /* styles: positions are ids; parents and next styles are checked once all exist */
     x = pj_get(r, "Styles");
