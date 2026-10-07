@@ -1016,6 +1016,25 @@ begin
   raise E;
 end;
 
+function HtmlText(const S: string): string;
+begin
+  Result := StringReplace(StringReplace(StringReplace(S, '&', '&amp;', [rfReplaceAll]), '<', '&lt;', [rfReplaceAll]),
+    '>', '&gt;', [rfReplaceAll]);
+  Result := StringReplace(Result, '"', '&quot;', [rfReplaceAll]);
+end;
+
+{ what a browser opening an invitation link shows }
+function InvitePage(const Doc: string): string;
+begin
+  Result := '<!doctype html><html><head><meta charset="utf-8"><title>Parade: ' + HtmlText(Doc) +
+    '</title></head><body style="font-family:sans-serif;max-width:40em;margin:3em auto;line-height:1.5">' +
+    '<h1>&ldquo;' + HtmlText(Doc) + '&rdquo;</h1>' +
+    '<p>This link is an invitation to edit a shared document with Parade.</p>' +
+    '<p>To join, open LED, choose <b>File &gt; Join Shared Document...</b> and paste the whole link, ' +
+    'with the part after the <code>#</code>: that part is the key, so keep the link to yourself.</p>' +
+    '</body></html>';
+end;
+
 procedure TParadeRelay.Request(Sender: TObject; var ARequest: TFPHTTPConnectionRequest;
   var AResponse: TFPHTTPConnectionResponse);
 var
@@ -1074,6 +1093,11 @@ begin
         Refuse(404, 'not found');
       Delete(Path, 1, 3);
       P := Pos('/', Path);
+      if (P = 0) and (ARequest.Method = 'GET') then
+      begin   { an invitation link opened in a browser }
+        Reply(AResponse, 200, InvitePage(HTTPDecode(Path)), 'text/html; charset=utf-8');
+        Exit;
+      end;
       if P = 0 then
         Refuse(404, 'not found');
       Doc := HTTPDecode(Copy(Path, 1, P - 1));

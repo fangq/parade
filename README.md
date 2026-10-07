@@ -235,7 +235,11 @@ the main thread merges; the others' carets and selections are drawn in their
 colours with their names; Ctrl+Z undoes one's own edits; a viewer's editor
 is read-only. led has Share/Join/Host and a status in the visual editor's
 toolbar when Parade's yrs library is built; Host runs a `TParadeRelay` in
-led itself and shows the address and tokens to send to the others.
+led itself and shows an invitation link for each role to send to the
+others -- `http://host:8765/d/<document>#t=<token>`, everything in one
+(`ParadeInviteLink`/`ParadeParseInvite`; the token after the `#` stays out
+of a browser's requests, and the relay answers the link with a page saying
+how to join). File > Join Shared Document takes the link.
 
 ## Lazarus / Free Pascal (`pascal/`)
 

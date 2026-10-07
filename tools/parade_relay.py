@@ -26,6 +26,8 @@ HTTP API (Authorization: Bearer <token>):
                                      anchor_offset} -> JSON list of the others seen in the last 30 s
     GET  /d/<doc>/info               -> {"last": newest number, "snapshot": what it covers (0: none),
                                          "updates": updates kept after it}
+    GET  /d/<doc>                    -> a page for a browser opening an invitation link
+                                        (http://relay/d/<doc>#t=<token>: the token after the #)
     GET  /health                     -> "ok"
 
 Compaction: with --compactor (pd_compact, built with Parade's SYNC=yrs), once a document has
@@ -44,6 +46,7 @@ or add LISTEN/NOTIFY).
 
 import argparse
 import asyncio
+import html
 import json
 import os
 import secrets
@@ -63,6 +66,11 @@ ROLES = ("viewer", "commenter", "editor")
 MAX_UPDATE = 16 << 20       # bytes in one update
 MAX_BATCH = 4 << 20         # bytes of updates returned by one read
 PRESENCE_TTL = 30.0
+INVITE_PAGE = ('<!doctype html><html><head><meta charset="utf-8"><title>Parade: {doc}</title></head>'
+               '<body style="font-family:sans-serif;max-width:40em;margin:3em auto;line-height:1.5">'
+               '<h1>&ldquo;{doc}&rdquo;</h1><p>This link is an invitation to edit a shared document with Parade.</p>'
+               '<p>To join, open LED, choose <b>File &gt; Join Shared Document...</b> and paste the whole link, with the '
+               'part after the <code>#</code>: that part is the key, so keep the link to yourself.</p></body></html>')
 
 
 class SqliteStore:
@@ -365,6 +373,11 @@ class Relay:
     async def health(self, request):
         return web.Response(text="ok")
 
+    async def invite_page(self, request):
+        """an invitation link (http://relay/d/<doc>#t=<token>) opened in a browser: how to join"""
+        doc = html.escape(self.doc_of(request))
+        return web.Response(content_type="text/html", text=INVITE_PAGE.replace("{doc}", doc))
+
 
 def make_app(relay):
     app = web.Application(client_max_size=MAX_UPDATE + 1024)
@@ -373,6 +386,7 @@ def make_app(relay):
     app.router.add_get("/d/{doc}/updates", relay.get_updates)
     app.router.add_post("/d/{doc}/presence", relay.post_presence)
     app.router.add_get("/d/{doc}/info", relay.get_info)
+    app.router.add_get("/d/{doc}", relay.invite_page)
     return app
 
 

@@ -170,6 +170,15 @@ async def checks(base):
         p = await r.json()
         check(len(p) == 1 and p[0]["name"] == "Ann" and p[0]["user"] == "ann" and p[0]["offset"] == 4, "sees the other")
 
+        # an invitation link opened in a browser: a page, no token needed; names with spaces work
+        r = await s.get(base + "/d/grant%20%3Cdraft%3E")
+        t = await r.text()
+        check(r.status == 200 and "text/html" in r.headers["Content-Type"] and "grant &lt;draft&gt;" in t
+              and "Join Shared Document" in t, "invitation page: %d %s" % (r.status, t[:200]))
+        r = await s.post(base + "/d/grant%20%3Cdraft%3E/updates", data=b"x", headers=ann)
+        r2 = await s.get(base + "/d/grant%20%3Cdraft%3E/updates?after=0", headers=ann)
+        check(r.status == 200 and frames(await r2.read()) == [(1, b"x")], "a document name with a space and <>")
+
 
 FAKE = r"""import struct, sys
 d = sys.stdin.buffer.read(); out = []; i = 0

@@ -142,6 +142,15 @@ type
 function ParadeSyncStateName(S: TParadeSyncState): string;
 { the role a relay token gives ('viewer', 'commenter', 'editor'; '' when it cannot be read) }
 function ParadeTokenRole(const Token: string): string;
+{ one link that carries a relay, a document and a token, to send to whoever is to join:
+  http://host:8765/d/<document>#t=<token> -- the token after the #, which a browser opening
+  the link keeps to itself (the relay answers the link with a page saying how to join) }
+function ParadeInviteLink(const Server, Doc, Token: string): string;
+{ the parts of such a link; False when it is not one }
+function ParadeParseInvite(const Link: string; out Server, Doc, Token: string): Boolean;
+{ a document name as it goes into a URL path (UTF-8, %XX for all but A-Z a-z 0-9 - . _ ~) }
+function ParadeUrlEncode(const S: string): string;
+function ParadeUrlDecode(const S: string): string;
 
 implementation
 
@@ -169,6 +178,77 @@ begin
   else
     Result := 'synced';
   end;
+end;
+
+function ParadeUrlEncode(const S: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to Length(S) do
+    if S[I] in ['A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_', '~'] then
+      Result := Result + S[I]
+    else
+      Result := Result + '%' + IntToHex(Ord(S[I]), 2);
+end;
+
+function ParadeUrlDecode(const S: string): string;
+var
+  I, V: Integer;
+begin
+  Result := '';
+  I := 1;
+  while I <= Length(S) do
+  begin
+    if (S[I] = '%') and (I + 2 <= Length(S)) and TryStrToInt('$' + Copy(S, I + 1, 2), V) then
+    begin
+      Result := Result + Chr(V);
+      Inc(I, 3);
+    end
+    else
+    begin
+      Result := Result + S[I];
+      Inc(I);
+    end;
+  end;
+end;
+
+function ParadeInviteLink(const Server, Doc, Token: string): string;
+begin
+  Result := Server;
+  while (Result <> '') and (Result[Length(Result)] = '/') do
+    Delete(Result, Length(Result), 1);
+  Result := Result + '/d/' + ParadeUrlEncode(Doc) + '#t=' + Token;
+end;
+
+function ParadeParseInvite(const Link: string; out Server, Doc, Token: string): Boolean;
+var
+  L, Base: string;
+  P, Q, I: Integer;
+begin
+  Result := False;
+  Server := '';
+  Doc := '';
+  Token := '';
+  L := Trim(Link);
+  P := Pos('#t=', L);
+  if P = 0 then
+    Exit;
+  Token := Copy(L, P + 3, MaxInt);
+  Base := Copy(L, 1, P - 1);
+  Q := 0;     { the last /d/: a relay may sit under a path of its own }
+  for I := Length(Base) - 2 downto 1 do
+    if Copy(Base, I, 3) = '/d/' then
+    begin
+      Q := I;
+      Break;
+    end;
+  if Q = 0 then
+    Exit;
+  Server := Copy(Base, 1, Q - 1);
+  Doc := ParadeUrlDecode(Copy(Base, Q + 3, MaxInt));
+  Result := ((Pos('http://', LowerCase(Server)) = 1) or (Pos('https://', LowerCase(Server)) = 1)) and (Doc <> '') and
+    (Pos('/', Doc) = 0) and (Token <> '');
 end;
 
 function ParadeTokenRole(const Token: string): string;
@@ -451,7 +531,7 @@ begin
   S := FServer;
   while (S <> '') and (S[Length(S)] = '/') do
     Delete(S, Length(S), 1);
-  Result := S + '/d/' + FDocName + Path;
+  Result := S + '/d/' + ParadeUrlEncode(FDocName) + Path;
 end;
 
 procedure TParadeSync.Authorize(Http: TFPHTTPClient);

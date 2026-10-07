@@ -164,7 +164,7 @@ var
   I: Integer;
   C: pd_pos;
   J: TJSONObject;
-  F: string;
+  F, Server, DocName, Token: string;
 
 function Same: Boolean;
 begin
@@ -264,13 +264,26 @@ begin
     SB := TParadeSync.Create(Form, B);
     SA.OutboxDir := OutboxDir;
 
-    { 1. Ann shares her document; Bob joins and gets it }
+    { 0. invitation links }
+    Step('invitation links');
+    F := ParadeInviteLink(Url + '/', 'grant proposal (v2)', TokB);
+    Check(F = Url + '/d/grant%20proposal%20%28v2%29#t=' + TokB, 'a link: ' + F);
+    Check(ParadeParseInvite('  ' + F + #10, Server, DocName, Token) and (Server = Url) and
+      (DocName = 'grant proposal (v2)') and (Token = TokB), 'and back: ' + Server + ' ' + DocName);
+    Check(ParadeParseInvite('https://example.org/relay/d/a%2Fb/d/x#t=T', Server, DocName, Token) and
+      (Server = 'https://example.org/relay/d/a%2Fb') and (DocName = 'x'), 'the last /d/ counts');
+    Check(not ParadeParseInvite(Url, Server, DocName, Token), 'an address alone is not a link');
+    Check(not ParadeParseInvite(Url + '/d/x#t=', Server, DocName, Token), 'nor one without a token');
+    Check(not ParadeParseInvite('ftp://h/d/x#t=T', Server, DocName, Token), 'nor one not over http');
+
+    { 1. Ann shares her document; Bob joins and gets it, from the link she sends }
     Step('share and join');
     A.InsertText('Hello from Ann.');
     Check(SA.Start(Url, 'proposal', TokA, 'Ann', True), 'share: ' + SA.LastError);
     Check(WaitFor(@ASynced, 15), 'shared: the relay has it');
     Check(not SB.Start(Url, 'proposal', TokB, 'Bob', True), 'sharing a document the relay has is refused');
-    Check(SB.Start(Url, 'proposal', TokB, 'Bob', False), 'join: ' + SB.LastError);
+    Check(ParadeParseInvite(ParadeInviteLink(Url, 'proposal', TokB), Server, DocName, Token), 'Ann''s link');
+    Check(SB.Start(Server, DocName, Token, 'Bob', False), 'join: ' + SB.LastError);
     Check(WaitFor(@BothSynced, 15), 'joined: the same document');
     Check(B.DocumentText = 'Hello from Ann.', 'Bob sees Ann''s text: ' + B.DocumentText);
 
