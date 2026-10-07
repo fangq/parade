@@ -786,14 +786,20 @@ function ResolveFont(user: Pointer; family: PAnsiChar; weight, italic: Int32): P
 var
   E: TParadeEdit;
   I, Best, Score, BestScore, Cls: Integer;
-  Fam: string;
+  Fam, Alts: string;
+  Info: pd_font_info;
   F: Ppd_font;
   P: ^TParadeFontEntry;
 begin
   E := TParadeEdit(user);
   Result := nil;
   Fam := LowerCase(StrPas(family));
-  Cls := pd_font_family_class(family);
+  Cls := pd_doc_font_class(E.FDoc, family);
+  { the names the document's font table says the family also goes by (ＭＳ 明朝 for MS Mincho): a face
+    by one of them is the family itself }
+  Alts := '';
+  if (E.FDoc <> nil) and (family <> nil) and (pd_doc_font_info(E.FDoc, family, Info) = PD_OK) then
+    Alts := ',' + LowerCase(StrPas(PAnsiChar(@Info.alt[0]))) + ',';
   repeat
     Best := -1;
     BestScore := MaxInt;
@@ -806,7 +812,9 @@ begin
         Courier New) and less again for a face loaded already, not one of the system's many; then italic;
         then weight distance; a face not loaded yet loses a tie }
       Score := Abs(P^.Weight - weight) + 1000 * Ord((P^.Italic <> 0) <> (italic <> 0)) + Ord(P^.Lazy);
-      if (Fam <> '') and (P^.Key <> Fam) then
+      if (Fam <> '') and (P^.Key <> Fam) and (Alts <> '') and (Pos(',' + P^.Key + ',', Alts) > 0) then
+        Inc(Score, 10 + 20000 * Ord(P^.Lazy))
+      else if (Fam <> '') and (P^.Key <> Fam) then
         Inc(Score, 100000 - 50000 * Ord(P^.Cls = Cls) + 20000 * Ord(P^.Lazy))
       else if (Fam = '') and (I > 0) and (P^.Key <> E.FFonts[0].Key) then
         Inc(Score, 100000 + 20000 * Ord(P^.Lazy));

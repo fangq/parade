@@ -64,6 +64,13 @@ const
   PD_FAMILY_SERIF = 0;
   PD_FAMILY_SANS = 1;
   PD_FAMILY_MONO = 2;
+  PD_FONT_GENERIC_UNKNOWN = 0;
+  PD_FONT_GENERIC_ROMAN = 1;
+  PD_FONT_GENERIC_SWISS = 2;
+  PD_FONT_GENERIC_MODERN = 3;
+  PD_FONT_GENERIC_SCRIPT = 4;
+  PD_FONT_GENERIC_DECORATIVE = 5;
+  PD_FONT_TABLE_MIME = 'text/vnd.parade.font-table';
 
   PD_ALIGN_JUSTIFY = 0;
   PD_ALIGN_LEFT = 1;
@@ -466,6 +473,14 @@ type
   end;
   Ppd_para_attrs = ^pd_para_attrs;
 
+  pd_font_info = record
+    alt: array[0..127] of AnsiChar;   { other names, comma-separated }
+    generic: Int32;           { PD_FONT_GENERIC_* }
+    pitch: Int32;             { 0 not said, 1 fixed, 2 variable }
+    panose: array[0..9] of Byte;
+    charset: Int32;           { Windows' character set, -1 not said }
+  end;
+
   pd_float_props = record
     placement: UInt32;
     wrap: Int32;
@@ -695,6 +710,8 @@ function pd_doc_set_para_attrs(doc: Ppd_doc; paragraph: pd_block_id; constref at
   PDEXT;
 function pd_doc_set_metadata(doc: Ppd_doc; text: PAnsiChar; len: csize_t): pd_status; cdecl; PDEXT;
 function pd_doc_metadata(doc: Ppd_doc; out len: csize_t): PAnsiChar; cdecl; PDEXT;
+function pd_doc_font_info(doc: Ppd_doc; family: PAnsiChar; out info: pd_font_info): pd_status; cdecl; PDEXT;
+function pd_doc_font_class(doc: Ppd_doc; family: PAnsiChar): Int32; cdecl; PDEXT;
 procedure pd_doc_image_display_size(doc: Ppd_doc; constref image: pd_inline; out width, height: pd_sp); cdecl; PDEXT;
 function pd_doc_set_list(doc: Ppd_doc; paragraph: pd_block_id; list: pd_list_id; level: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_insert_block(doc: Ppd_doc; parent: pd_block_id; index, kind: Int32; out block: pd_block_id): pd_status; cdecl; PDEXT;

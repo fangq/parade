@@ -1774,6 +1774,57 @@ static void test_docx_borders(void) {
 
 static char* drawing_json(const pd_doc* d, pd_res_id r);
 
+/* The font table: alternate names, kind, pitch and PANOSE, kept in the model and written back; a resolver's
+   substitute chosen by them before the name: a sans that is not called one, a fixed-pitch face. */
+static void test_docx_font_table(void) {
+    pd_doc* d = docx_doc(
+        "word/fontTable.xml",
+        "<w:fonts xmlns:w=\"w\">"
+        "<w:font w:name=\"Grotesk Pro\"><w:panose1 w:val=\"020b0604020202020204\"/><w:family w:val=\"roman\"/>"
+        "<w:pitch w:val=\"variable\"/></w:font>"
+        "<w:font w:name=\"Ledger\"><w:family w:val=\"modern\"/><w:pitch w:val=\"fixed\"/></w:font>"
+        "<w:font w:name=\"Plain Helvet\"><w:family w:val=\"swiss\"/></w:font>"
+        "<w:font w:name=\"MS Mincho\"><w:altName w:val=\"\xef\xbc\xad\xef\xbc\xb3 \xe6\x98\x8e\xe6\x9c\x9d\"/>"
+        "<w:panose1 w:val=\"02020609040205080304\"/><w:family w:val=\"modern\"/><w:pitch w:val=\"fixed\"/></w:font>"
+        "<w:font w:name=\"Arial\"/>"
+        "<w:font w:name=\"FreeSans\"><w:family w:val=\"roman\"/></w:font>"
+        "<w:font w:name=\"Kaku\"><w:charset w:val=\"80\"/><w:family w:val=\"modern\"/><w:pitch w:val=\"fixed\"/></w:font>"
+        "<w:font w:name=\"TNRPSMT\"><w:altName w:val=\"Foo,Times New Roman\"/><w:panose1 w:val=\"020b0604020202020204\"/>"
+        "</w:font></w:fonts>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_font_info fi;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        CHECK(pd_doc_font_class(d, "Grotesk Pro") == PD_FAMILY_SANS);   /* PANOSE over w:family and the name */
+        CHECK(pd_doc_font_class(d, "Ledger") == PD_FAMILY_MONO);
+        CHECK(pd_doc_font_class(d, "plain helvet") == PD_FAMILY_SANS);  /* ignoring case */
+        CHECK(pd_doc_font_class(d, "MS Mincho") == PD_FAMILY_SERIF);     /* the name says, not its fixed pitch */
+        CHECK(pd_doc_font_class(d, "FreeSans") == PD_FAMILY_SANS);       /* nor a generator's "roman" */
+        CHECK(pd_doc_font_class(d, "Kaku") == PD_FAMILY_SERIF);          /* a CJK face's fixed pitch: not mono */
+        CHECK(pd_doc_font_class(d, "TNRPSMT") == PD_FAMILY_SERIF);       /* an alternate name that says */
+        CHECK(pd_font_family_class("Arial Unicode MS") == PD_FAMILY_SANS && pd_font_family_class("SimHei") == PD_FAMILY_SANS);
+        CHECK(pd_font_family_class("Fira Code") == PD_FAMILY_MONO && pd_font_family_class("Noto Serif") == PD_FAMILY_SERIF);
+        CHECK(pd_doc_font_class(d, "Unlisted Sans") == PD_FAMILY_SANS && pd_doc_font_class(NULL, "Arial") == PD_FAMILY_SANS);
+        CHECK(pd_doc_font_info(d, "MS Mincho", &fi) == PD_OK && strcmp(fi.alt, "\xef\xbc\xad\xef\xbc\xb3 \xe6\x98\x8e\xe6\x9c\x9d") == 0);
+        CHECK(fi.generic == PD_FONT_GENERIC_MODERN && fi.pitch == 1 && fi.panose[0] == 2 && fi.panose[9] == 4);
+        CHECK(fi.charset == -1 && pd_doc_font_info(d, "Kaku", &fi) == PD_OK && fi.charset == 0x80);
+        CHECK(pd_doc_font_info(d, "Arial", &fi) == PD_OK && fi.generic == 0 && fi.pitch == 0 && fi.panose[0] == 0);
+        CHECK(pd_doc_font_info(d, "Nowhere", &fi) == PD_ERR_RANGE);
+    }
+
+    pd_doc_free(d);
+}
+
 /* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
 static int near_color(uint32_t got, uint32_t want) {
     int k;
@@ -3396,6 +3447,7 @@ int main(void) {
     test_docx_fields();
     test_docx_review();
     test_docx_theme_colors();
+    test_docx_font_table();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

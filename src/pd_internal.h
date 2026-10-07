@@ -184,6 +184,8 @@ typedef struct {
     uint32_t glyph, cluster;
     int32_t advance, xoff, yoff;    /* font units */
 } pd_shaped;
+/* pd_font_family_class, and whether the name said so (0: unknown, a serif by default) */
+int32_t pd_font_name_class(const char* family, int* sure);
 int32_t pd_shape(const pd_font* f, const char* text, uint32_t len, uint32_t from, uint32_t to, pd_shaped** out);
 
 /* text segmentation (pd_text.c), on code points */

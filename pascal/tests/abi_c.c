@@ -210,6 +210,12 @@ int main(void) {
     printf("pd_para_attrs.lang %zu\n", offsetof(pd_para_attrs, lang));
     printf("pd_para_attrs.cont %zu\n", offsetof(pd_para_attrs, cont));
     printf("pd_para_attrs.div_class %zu\n", offsetof(pd_para_attrs, div_class));
+    printf("pd_font_info %zu\n", sizeof(pd_font_info));
+    printf("pd_font_info.alt %zu\n", offsetof(pd_font_info, alt));
+    printf("pd_font_info.generic %zu\n", offsetof(pd_font_info, generic));
+    printf("pd_font_info.pitch %zu\n", offsetof(pd_font_info, pitch));
+    printf("pd_font_info.panose %zu\n", offsetof(pd_font_info, panose));
+    printf("pd_font_info.charset %zu\n", offsetof(pd_font_info, charset));
     printf("pd_float_props %zu\n", sizeof(pd_float_props));
     printf("pd_float_props.placement %zu\n", offsetof(pd_float_props, placement));
     printf("pd_float_props.wrap %zu\n", offsetof(pd_float_props, wrap));

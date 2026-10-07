@@ -3465,6 +3465,139 @@ const char* pd_doc_metadata(const pd_doc* d, size_t* len) {
     return d && d->meta ? d->meta : "";
 }
 
+/* the font table: a line per font, name TAB alternates TAB generic TAB pitch TAB panose */
+static int same_name(const char* a, size_t na, const char* b) {
+    size_t i;
+
+    for (i = 0; i < na && b[i]; i++) {
+        char x = a[i] >= 'A' && a[i] <= 'Z' ? (char)(a[i] + 32) : a[i];
+        char y = b[i] >= 'A' && b[i] <= 'Z' ? (char)(b[i] + 32) : b[i];
+
+        if (x != y) {
+            return 0;
+        }
+    }
+
+    return i == na && !b[i];
+}
+
+pd_status pd_doc_font_info(const pd_doc* d, const char* family, pd_font_info* out) {
+    int32_t r;
+
+    if (!d || !family || !out) {
+        return PD_ERR_ARG;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->charset = -1;
+
+    for (r = d->nres - 1; r >= 0; r--) {    /* the latest table */
+        const char* p, *end;
+
+        if (strcmp(d->res[r].mime, PD_FONT_TABLE_MIME) != 0) {
+            continue;
+        }
+
+        p = (const char*)d->res[r].data;
+        end = p + d->res[r].len;
+
+        while (p < end) {
+            const char* eol = (const char*)memchr(p, '\n', (size_t)(end - p)), *f[6];
+            size_t fl[6];
+            int k;
+
+            eol = eol ? eol : end;
+
+            for (k = 0; k < 6; k++) {   /* the fields */
+                const char* tab = p < eol ? (const char*)memchr(p, '\t', (size_t)(eol - p)) : NULL;
+
+                f[k] = p;
+                fl[k] = (size_t)((tab ? tab : eol) - p);
+                p = tab ? tab + 1 : eol;
+            }
+
+            if (same_name(f[0], fl[0], family)) {
+                snprintf(out->alt, sizeof(out->alt), "%.*s", (int)fl[1], f[1]);
+                out->generic = fl[2] ? f[2][0] - '0' : 0;
+                out->generic = out->generic < 0 || out->generic > 5 ? 0 : out->generic;
+                out->pitch = fl[3] ? f[3][0] - '0' : 0;
+                out->pitch = out->pitch < 0 || out->pitch > 2 ? 0 : out->pitch;
+
+                for (k = 0; k < 10 && fl[4] >= 20; k++) {
+                    char h[3] = { f[4][2 * k], f[4][2 * k + 1], 0 };
+
+                    out->panose[k] = (uint8_t)strtoul(h, NULL, 16);
+                }
+
+                out->charset = fl[5] == 2 ? (int32_t)strtoul(f[5], NULL, 16) : -1;
+
+                return PD_OK;
+            }
+
+            p = eol + 1;
+        }
+
+        break;
+    }
+
+    return PD_ERR_RANGE;
+}
+
+int32_t pd_doc_font_class(const pd_doc* d, const char* family) {
+    pd_font_info fi;
+    int sure, cjk;
+    int32_t cls = pd_font_name_class(family, &sure);
+    const char* p;
+
+    if (sure || !d || !family || pd_doc_font_info(d, family, &fi) != PD_OK) {
+        return cls;     /* a name that says what it is beats a table: generators write roman for anything */
+    }
+
+    for (p = fi.alt; *p;) {     /* a name it also goes by that says */
+        char one[128];
+        size_t n = strcspn(p, ",");
+        int32_t c;
+
+        snprintf(one, sizeof(one), "%.*s", (int)n, p);
+        c = pd_font_name_class(one, &sure);
+
+        if (sure) {
+            return c;
+        }
+
+        p += n + (p[n] == ',');
+    }
+
+    /* a CJK face is fixed pitch for its ideographs, and Word says so: not a typewriter's */
+    cjk = fi.charset == 0x80 || fi.charset == 0x81 || fi.charset == 0x82 || fi.charset == 0x86 || fi.charset == 0x88;
+
+    if (fi.panose[0] == 2 && fi.panose[3] == 9 && !cjk) {
+        return PD_FAMILY_MONO;      /* PANOSE's proportion: monospaced */
+    }
+
+    if (fi.panose[0] == 2 && fi.panose[1] >= 11 && fi.panose[1] <= 15) {
+        return PD_FAMILY_SANS;      /* serif style: normal, obtuse, perpendicular sans; flared; rounded */
+    }
+
+    if (fi.panose[0] == 2 && fi.panose[1] >= 2 && fi.panose[1] <= 10) {
+        return PD_FAMILY_SERIF;
+    }
+
+    if (fi.pitch == 1 && !cjk) {
+        return PD_FAMILY_MONO;
+    }
+
+    if (fi.generic == PD_FONT_GENERIC_SWISS) {
+        return PD_FAMILY_SANS;
+    }
+
+    if (fi.generic == PD_FONT_GENERIC_MODERN && fi.pitch != 2 && !cjk) {
+        return PD_FAMILY_MONO;
+    }
+
+    return PD_FAMILY_SERIF;
+}
+
 /* a picture's type and pixel size from its first bytes: PNG, JPEG, GIF */
 const char* pd_doc_image_info(const unsigned char* p, size_t n, int32_t* w, int32_t* h) {
     *w = *h = 0;

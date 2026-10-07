@@ -627,17 +627,33 @@ void pd_font_free(pd_font* f) {
     }
 }
 
-int32_t pd_font_family_class(const char* family) {
-    static const char* mono[] = { "mono", "courier", "consol", "code", "typewriter", "menlo", "fixed", "terminal",
+/* what kind of face a family name says it is; *sure is 0 when the name says nothing (a serif by default) */
+int32_t pd_font_name_class(const char* family, int* sure) {
+    static const char* mono[] = { "mono", "courier", "consol", " code", "typewriter", "menlo", "fixed", "terminal",
                                   "lucida console", NULL
                                 };
     static const char* sans[] = { "sans", "arial", "helvetica", "calibri", "carlito", "verdana", "tahoma", "segoe",
                                   "gothic", "futura", "gill", "frutiger", "avenir", "roboto", "lato", "ubuntu",
                                   "cantarell", "inter", "aptos", "franklin", "trebuchet", "geneva", "lucida grande",
-                                  "myriad", "optima", "univers", "candara", "corbel", "noto sans", NULL
+                                  "myriad", "optima", "univers", "candara", "corbel", "noto sans", "simhei", "yahei", "jhenghei", "heiti", "dengxian",
+                                  "gulim", "dotum", "malgun", "meiryo",
+                                  "\xe9\xbb\x91",                   /* 黑, hei: the Chinese sans */
+                                  "\xe7\xad\x89\xe7\xba\xbf",       /* 等线, DengXian */
+                                  "\xe3\x82\xb4\xe3\x82\xb7\xe3\x83\x83\xe3\x82\xaf",   /* ゴシック, gothic */
+                                  "\xea\xb3\xa0\xeb\x94\x95",       /* 고딕, gothic */
+                                  NULL
                                 };
-    char low[64];
+    static const char* serif[] = { "serif", "times", "roman", "georgia", "garamond", "cambria", "minion", "palatino",
+                                   "baskerville", "caslon", "book antiqua", "century", "bookman", "charter",
+                                   "mincho", "song", "ming", "batang",
+                                   "\xe6\x98\x8e\xe6\x9c\x9d",      /* 明朝, mincho */
+                                   "\xe5\xae\x8b",                  /* 宋, song */
+                                   NULL
+                                 };
+    char low[128];
     size_t i;
+
+    *sure = 0;
 
     if (!family) {
         return PD_FAMILY_SERIF;
@@ -648,6 +664,7 @@ int32_t pd_font_family_class(const char* family) {
     }
 
     low[i] = '\0';
+    *sure = 1;
 
     for (i = 0; mono[i]; i++) {     /* before sans: "DejaVu Sans Mono" */
         if (strstr(low, mono[i])) {
@@ -655,13 +672,26 @@ int32_t pd_font_family_class(const char* family) {
         }
     }
 
-    for (i = 0; sans[i]; i++) {
-        if (strstr(low, sans[i])) {
+    for (i = 0; sans[i]; i++) {     /* before serif: "Noto Sans", not "Noto Serif"; "PT Sans" */
+        if (strstr(low, sans[i]) && !(i == 0 && strstr(low, "serif"))) {
             return PD_FAMILY_SANS;
         }
     }
 
+    for (i = 0; serif[i]; i++) {
+        if (strstr(low, serif[i])) {
+            return PD_FAMILY_SERIF;
+        }
+    }
+
+    *sure = 0;
     return PD_FAMILY_SERIF;
+}
+
+int32_t pd_font_family_class(const char* family) {
+    int sure;
+
+    return pd_font_name_class(family, &sure);
 }
 
 pd_status pd_font_get_metrics(const pd_font* f, pd_font_metrics* out) {

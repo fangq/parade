@@ -633,6 +633,44 @@ PD_API pd_status pd_doc_set_para_attrs(pd_doc* doc, pd_block_id paragraph, const
 PD_API pd_status pd_doc_set_metadata(pd_doc* doc, const char* text, size_t len);
 PD_API const char* pd_doc_metadata(const pd_doc* doc, size_t* len);
 
+/**
+ * What a document says about a font it names (a Word file's font table), for
+ * a font resolver that does not have the family: the other names it goes by,
+ * its kind, whether it is fixed pitch, its PANOSE classification. Kept with
+ * the document as a resource of type PD_FONT_TABLE_MIME, a line per font:
+ * name, alternate names, generic kind, pitch, PANOSE (20 hex digits) and
+ * character set (2 hex digits), tab-separated.
+ */
+#define PD_FONT_TABLE_MIME "text/vnd.parade.font-table"
+
+typedef enum {
+    PD_FONT_GENERIC_UNKNOWN = 0,
+    PD_FONT_GENERIC_ROMAN = 1,      /**< serif, proportional */
+    PD_FONT_GENERIC_SWISS = 2,      /**< sans serif, proportional */
+    PD_FONT_GENERIC_MODERN = 3,     /**< fixed pitch, with or without serifs */
+    PD_FONT_GENERIC_SCRIPT = 4,
+    PD_FONT_GENERIC_DECORATIVE = 5
+} pd_font_generic;
+
+typedef struct {
+    char alt[128];              /**< other names the font goes by, comma-separated (UTF-8); "" none */
+    int32_t generic;            /**< pd_font_generic */
+    int32_t pitch;              /**< 0 not said, 1 fixed, 2 variable */
+    uint8_t panose[10];         /**< PANOSE 1.0, all zero when not said */
+    int32_t charset;            /**< the character set it is for (Windows', 0x80 Shift-JIS, 0x86 GB2312, ...); -1 not said */
+} pd_font_info;
+
+/** the entry for family (compared ignoring case); PD_ERR_RANGE when the document has none */
+PD_API pd_status pd_doc_font_info(const pd_doc* doc, const char* family, pd_font_info* out);
+/**
+ * pd_font_family_class, with what the document says when the name does not
+ * tell (a name with "Sans", "Times", "Mono", "黑" in it does): the names it
+ * also goes by, then PANOSE (monospaced; serif style), then the pitch and the
+ * generic kind -- a CJK character set's fixed pitch not taken for mono.
+ * doc may be NULL.
+ */
+PD_API int32_t   pd_doc_font_class(const pd_doc* doc, const char* family);
+
 PD_API pd_status pd_doc_set_list(pd_doc* doc, pd_block_id paragraph, pd_list_id list, int32_t level);
 
 /**

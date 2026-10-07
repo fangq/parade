@@ -2416,6 +2416,78 @@ static void dx_numbering(dxo* x, pd_buf* o) {
     pb_puts(o, "</w:numbering>");
 }
 
+/* the document's font table (PD_FONT_TABLE_MIME) as word/fontTable.xml; 0 when it has none */
+static int dx_font_table(const pd_doc* d, pd_buf* o) {
+    static const char* generic[] = { "auto", "roman", "swiss", "modern", "script", "decorative" };
+    static const char* pitch[] = { "default", "fixed", "variable" };
+    const char* table = NULL, *mime, *p, *end;
+    const void* data;
+    size_t len = 0, n;
+    pd_res_id r;
+
+    for (r = 1; pd_doc_resource(d, r, &mime, &data, &n) == PD_OK; r++) {
+        if (strcmp(mime, PD_FONT_TABLE_MIME) == 0) {
+            table = (const char*)data;      /* the latest */
+            len = n;
+        }
+    }
+
+    if (!table) {
+        return 0;
+    }
+
+    pb_puts(o, XML_DECL);
+    pb_printf(o, "<w:fonts %s>", W_NS);
+
+    for (p = table, end = table + len; p < end;) {
+        const char* eol = (const char*)memchr(p, '\n', (size_t)(end - p)), *f[6];
+        size_t fl[6];
+        int k;
+
+        eol = eol ? eol : end;
+
+        for (k = 0; k < 6; k++) {
+            const char* tab = p < eol ? (const char*)memchr(p, '\t', (size_t)(eol - p)) : NULL;
+
+            f[k] = p;
+            fl[k] = (size_t)((tab ? tab : eol) - p);
+            p = tab ? tab + 1 : eol;
+        }
+
+        p = eol + 1;
+
+        if (!fl[0]) {
+            continue;
+        }
+
+        pb_puts(o, "<w:font w:name=\"");
+        xesc(o, f[0], fl[0]);
+        pb_puts(o, "\">");
+
+        if (fl[1]) {
+            pb_puts(o, "<w:altName w:val=\"");
+            xesc(o, f[1], fl[1]);
+            pb_puts(o, "\"/>");
+        }
+
+        if (fl[4] == 20) {
+            pb_printf(o, "<w:panose1 w:val=\"%.20s\"/>", f[4]);
+        }
+
+        if (fl[5] == 2) {
+            pb_printf(o, "<w:charset w:val=\"%.2s\"/>", f[5]);
+        }
+
+        k = fl[2] ? f[2][0] - '0' : 0;
+        pb_printf(o, "<w:family w:val=\"%s\"/>", generic[k >= 0 && k <= 5 ? k : 0]);
+        k = fl[3] ? f[3][0] - '0' : 0;
+        pb_printf(o, "<w:pitch w:val=\"%s\"/></w:font>", pitch[k >= 0 && k <= 2 ? k : 0]);
+    }
+
+    pb_puts(o, "</w:fonts>");
+    return 1;
+}
+
 /* the core properties Word shows (title, author, ...) from the document's metadata, YAML lines of key: value */
 static const struct {
     const char* key;            /* the metadata's */
@@ -2503,7 +2575,8 @@ static void dx_core(const pd_doc* d, pd_buf* o) {
 
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     dxo* x = (dxo*)calloc(1, sizeof(dxo));
-    pd_buf doc, part, cxml, cext;
+    pd_buf doc, part, cxml, cext, fonts;
+    int has_fonts;
     zipw z;
     pd_block_info ri;
     int32_t s, i, ncomments;
@@ -2516,6 +2589,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     memset(&part, 0, sizeof(part));
     memset(&cxml, 0, sizeof(cxml));
     memset(&cext, 0, sizeof(cext));
+    memset(&fonts, 0, sizeof(fonts));
     memset(&z, 0, sizeof(z));
     x->d = d;
     pd_numbers_init(&x->nb, d);
@@ -2607,6 +2681,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
 
     pb_puts(&doc, "</w:body></w:document>");
     ncomments = dx_comments(d, &cxml, &cext);
+    has_fonts = dx_font_table(d, &fonts);
 
     /* the package */
     z.o = out;
@@ -2635,6 +2710,11 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     for (i = 0; i < x->nhf; i++) {
         pb_printf(&part, "<Override PartName=\"/word/hf%d.xml\" ContentType=\"application/vnd.openxmlformats-"
                   "officedocument.wordprocessingml.%s+xml\"/>", (int)i + 1, x->hf_footer[i] ? "footer" : "header");
+    }
+
+    if (has_fonts) {
+        pb_puts(&part, "<Override PartName=\"/word/fontTable.xml\" ContentType=\"application/vnd.openxmlformats-"
+                "officedocument.wordprocessingml.fontTable+xml\"/>");
     }
 
     pb_puts(&part, "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package."
@@ -2720,6 +2800,10 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "w:val=\"15\"/></w:compat></w:settings>");
     zip_add(&z, "word/settings.xml", part.p, part.n);
 
+    if (has_fonts) {
+        zip_add(&z, "word/fontTable.xml", fonts.p, fonts.n);
+    }
+
     /* headers and footers: their own parts (with their own relationships for links) */
     for (i = 0; i < x->nhf; i++) {
         pd_block_info hi;
@@ -2775,6 +2859,11 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "<Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
             "settings\" Target=\"settings.xml\"/>");
 
+    if (has_fonts) {
+        pb_puts(&part, "<Relationship Id=\"rIdFt\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                "relationships/fontTable\" Target=\"fontTable.xml\"/>");
+    }
+
     if (ncomments) {
         pb_puts(&part, "<Relationship Id=\"rIdCm\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
                 "relationships/comments\" Target=\"comments.xml\"/><Relationship Id=\"rIdCx\" Type=\"http://schemas."
@@ -2806,6 +2895,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     zip_finish(&z);
     i = doc.err || part.err || x->rels.err || x->notes.err || x->endnotes.err || cxml.err || cext.err;
     pb_free(&cxml);
+    pb_free(&fonts);
     pb_free(&cext);
     pb_free(&part);
     pb_free(&doc);
@@ -5575,10 +5665,15 @@ static void read_fonts(dxi* X) {
     char family[64] = "";
     int saved_n = 0, swapped;
     drel* saved = NULL;
+    pd_buf tab;                 /* the table as the model keeps it (PD_FONT_TABLE_MIME) */
+    char alt[128] = "", panose[24] = "", charset[8] = "";
+    int generic = 0, pitch = 0;
 
     if ((xml = (char*)zip_read(&X->z, "word/fontTable.xml", &len)) == NULL) {
         return;
     }
+
+    memset(&tab, 0, sizeof(tab));
 
     swapped = part_rels_begin(X, "word/fontTable.xml", &saved, &saved_n);
     mu_init(&m, xml, len, 0);
@@ -5591,6 +5686,51 @@ static void read_fonts(dxi* X) {
             if (!mu_attr(&m, "w:name", family, sizeof(family))) {
                 family[0] = '\0';
             }
+
+            alt[0] = panose[0] = charset[0] = '\0';
+            generic = pitch = 0;
+        }
+
+        if ((m.type == MT_CLOSE || m.type == MT_EMPTY) && !strcmp(t, "font") && family[0] &&
+                !strpbrk(family, "\t\n") && !strpbrk(alt, "\t\n")) {
+            pb_printf(&tab, "%s\t%s\t%d\t%d\t%s\t%s\n", family, alt, generic, pitch, strlen(panose) == 20 ? panose : "",
+                      charset);
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && family[0] && !strcmp(t, "charset")) {
+            unsigned long c = mu_attr(&m, "w:val", charset, sizeof(charset)) ? strtoul(charset, NULL, 16) : 256;
+
+            if (c < 256) {
+                snprintf(charset, sizeof(charset), "%02lX", c);
+            } else {
+                charset[0] = '\0';
+            }
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && family[0] && !strcmp(t, "altName")) {
+            mu_attr(&m, "w:val", alt, sizeof(alt));
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && family[0] && !strcmp(t, "panose1")) {
+            char* q;
+
+            if (!mu_attr(&m, "w:val", panose, sizeof(panose)) || strlen(panose) != 20) {
+                panose[0] = '\0';
+            }
+
+            for (q = panose; *q; q++) {
+                *q = *q >= 'a' && *q <= 'f' ? (char)(*q - 32) : *q;
+
+                if (!((*q >= '0' && *q <= '9') || (*q >= 'A' && *q <= 'F'))) {
+                    panose[0] = '\0';
+                    break;
+                }
+            }
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && family[0] && !strcmp(t, "family")) {
+            char v[32] = "";
+
+            mu_attr(&m, "w:val", v, sizeof(v));
+            generic = !strcmp(v, "roman") ? 1 : !strcmp(v, "swiss") ? 2 : !strcmp(v, "modern") ? 3 :
+                      !strcmp(v, "script") ? 4 : !strcmp(v, "decorative") ? 5 : 0;
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && family[0] && !strcmp(t, "pitch")) {
+            char v[32] = "";
+
+            mu_attr(&m, "w:val", v, sizeof(v));
+            pitch = !strcmp(v, "fixed") ? 1 : !strcmp(v, "variable") ? 2 : 0;
         } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && !strncmp(t, "embed", 5) && family[0] &&
                    mu_attr(&m, "r:id", rid, sizeof(rid)) && mu_attr(&m, "w:fontKey", key, sizeof(key)) && strlen(key) == 38) {
             static const int pos[16] = { 35, 33, 31, 29, 27, 25, 22, 20, 17, 15, 12, 10, 7, 5, 3, 1 };
@@ -5631,6 +5771,14 @@ static void read_fonts(dxi* X) {
 
     part_rels_end(X, swapped, saved, saved_n);
     free(xml);
+
+    if (tab.n && !tab.err) {
+        pd_res_id res;
+
+        pd_doc_add_resource(X->b->d, PD_FONT_TABLE_MIME, tab.p, tab.n, &res);
+    }
+
+    pb_free(&tab);
 }
 
 static pd_block_id hf_story(dxi* X, const char* rid) {

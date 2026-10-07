@@ -54,14 +54,36 @@ static void load_embedded(const pd_doc* d) {
     }
 }
 
+/* name is family, or one of the names the document's font table says it also goes by */
+static int named(const pd_doc* d, const char* family, const char* name) {
+    pd_font_info fi;
+    const char* p;
+    size_t n = strlen(name);
+
+    if (!strcmp(family, name)) {
+        return 1;
+    }
+
+    if (!d || pd_doc_font_info(d, family, &fi) != PD_OK) {
+        return 0;
+    }
+
+    for (p = fi.alt; (p = strstr(p, name)) != NULL; p += n) {
+        if ((p == fi.alt || p[-1] == ',') && (p[n] == ',' || !p[n])) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static const pd_font* resolve(void* user, const char* family, int32_t weight, int32_t italic) {
-    int32_t cls = pd_font_family_class(family);
+    const pd_doc* d = (const pd_doc*)user;
+    int32_t cls = pd_doc_font_class(d, family);
     int face = (weight >= 600 ? 1 : 0) + (italic ? 2 : 0), i, best = -1, bscore = -1;
 
-    (void)user;
-
     for (i = 0; family && i < nembedded; i++) {     /* the document's own font, the closest face */
-        if (!strcmp(embedded[i].family, family)) {
+        if (named(d, family, embedded[i].family)) {
             int score = ((weight >= 600) == (embedded[i].weight >= 600)) * 2 + (!italic == !embedded[i].italic);
 
             if (score > bscore) {
@@ -260,7 +282,7 @@ int main(int argc, char** argv) {
         }
 
         load_embedded(d);
-        pd_doc_set_font_resolver(d, resolve, NULL);
+        pd_doc_set_font_resolver(d, resolve, d);
 
         if (pd_font_load_file("/usr/share/texmf/fonts/opentype/public/lm-math/latinmodern-math.otf", 0, &mathf) == PD_OK) {
             pd_doc_set_math_font(d, mathf);
