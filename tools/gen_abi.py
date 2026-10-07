@@ -44,7 +44,8 @@ STRUCTS = {
                         "line_number_restart mirror_margins gutter page_valign line_pitch",
     "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width indent width_pct "
                       "border_sides cell_padding_v",
-    "pd_cell_props": "col_span valign background merge_up min_height border_set border_on border_width border_color",
+    "pd_cell_props": "col_span valign background merge_up min_height border_set border_on border_width border_color "
+                     "edge_width",
     "pd_change": "kind block style revision",
     "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull variants",
     "pd_page_info": "width height section number label float_page first last",

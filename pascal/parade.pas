@@ -550,6 +550,7 @@ type
     border_set, border_on: Int32;
     border_width: pd_sp;
     border_color: UInt32;
+    edge_width: array[0..3] of pd_sp;   { each edge's width (top, right, bottom, left); 0: border_width }
   end;
   Ppd_cell_props = ^pd_cell_props;
 

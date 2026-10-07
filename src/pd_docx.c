@@ -2023,12 +2023,15 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
             if (cp.border_set) {
                 static const char* edge[] = { "top", "left", "bottom", "right" };
                 static const int bit[] = { PD_BORDER_TOP, PD_BORDER_LEFT, PD_BORDER_BOTTOM, PD_BORDER_RIGHT };
-                int sz = (int)SCALE(cp.border_width, 8, 65536), e;
+                static const int slot[] = { 0, 3, 2, 1 };  /* edge_width's order: top, right, bottom, left */
+                int sz, e;
 
-                sz = sz < 2 ? 2 : sz;
                 pb_puts(o, "<w:tcBorders>");
 
                 for (e = 0; e < 4; e++) {
+                    sz = (int)SCALE(cp.edge_width[slot[e]] > 0 ? cp.edge_width[slot[e]] : cp.border_width, 8, 65536);
+                    sz = sz < 2 ? 2 : sz;
+
                     if (cp.border_on & bit[e]) {
                         pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"/>", edge[e], sz,
                                   (unsigned)(cp.border_color & 0xFFFFFF));
@@ -3362,7 +3365,8 @@ typedef struct {
    bottom, left, inside H, inside V) said, and of those ruled */
 typedef struct {
     int set, on;
-    pd_sp w;
+    pd_sp w;                    /* the widest */
+    pd_sp ew[6];                /* each edge's, by bit */
     uint32_t c;
 } dedges;
 
@@ -3569,6 +3573,41 @@ static int wcolor(const dxi* X, const pd_markup* m, const char* valattr, const c
     return 0;
 }
 
+/* a w:shd as the colour it shows: the pattern (w:val: clear, solid, pctN, stripes...) of its foreground
+   (w:color; auto is black) over its fill (w:fill; auto is none, white under a pattern); 0 when it shows nothing */
+static int shd_color(const dxi* X, const pd_markup* m, uint32_t* out) {
+    char v[32] = "clear";
+    uint32_t fill = 0, fg = 0xFF000000u, base;
+    int has_fill = wcolor(X, m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", &fill);
+    double f = 0;
+    uint32_t r, g, b;
+
+    wcolor(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &fg);
+    mu_attr(m, "w:val", v, sizeof(v));
+
+    if (!strcmp(v, "solid")) {
+        f = 1;
+    } else if (!strncmp(v, "pct", 3)) {
+        f = atoi(v + 3) / 100.0;
+    } else if (strcmp(v, "clear") != 0 && strcmp(v, "nil") != 0 && strcmp(v, "none") != 0) {
+        f = !strncmp(v, "thin", 4) ? 0.25 : 0.5;   /* stripes, crosses: what they come to, seen from afar */
+    }
+
+    f = f < 0 ? 0 : f > 1 ? 1 : f;
+
+    if (f == 0) {
+        *out = has_fill ? fill : 0;
+        return has_fill;
+    }
+
+    base = has_fill ? fill : 0xFFFFFFFFu;
+    r = (uint32_t)(((base >> 16) & 255) * (1 - f) + ((fg >> 16) & 255) * f + 0.5);
+    g = (uint32_t)(((base >> 8) & 255) * (1 - f) + ((fg >> 8) & 255) * f + 0.5);
+    b = (uint32_t)((base & 255) * (1 - f) + (fg & 255) * f + 0.5);
+    *out = 0xFF000000u | r << 16 | g << 8 | b;
+    return 1;
+}
+
 /* a DrawingML colour modifier (a child of srgbClr, schemeClr, sysClr, prstClr) applied to c */
 uint32_t pd_conv_clr_modify(uint32_t c, const char* t, const pd_markup* m) {
     char v[32];
@@ -3707,8 +3746,7 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "color") == 0 && wcolor(X, m, "w:val", "w:themeColor", "w:themeTint", "w:themeShade", &c)) {
         cp->mask |= PD_CP_COLOR;
         cp->color = c;
-    } else if (strcmp(t, "shd") == 0 && wcolor(X, m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade",
-                                               &c)) {
+    } else if (strcmp(t, "shd") == 0 && shd_color(X, m, &c)) {
         cp->mask |= PD_CP_BACKGROUND;
         cp->background = c;
     } else if (strcmp(t, "highlight") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
@@ -3878,7 +3916,7 @@ static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr
         }
     } else if (strcmp(t, "shd") == 0) {
         pp->mask |= PD_PP_SHADING;
-        if (!wcolor(X, m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", &pp->shading)) {
+        if (!shd_color(X, m, &pp->shading)) {
             pp->shading = 0;
         }
     } else if (strcmp(t, "suppressAutoHyphens") == 0) {
@@ -4113,9 +4151,18 @@ static void edge_elem(const dxi* X, const pd_markup* m, const char* t, dedges* e
     if (mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "nil") != 0 && strcmp(v, "none") != 0) {
         pd_sp bw = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
 
+        int k;
+
         e->on |= bit;
         e->w = bw > e->w ? bw : e->w;
         e->w = e->w > 0 ? e->w : PD_PT(0.25);   /* w:sz 0: the thinnest, 2/8 pt */
+
+        for (k = 0; k < 6 && !(bit & (1 << k)); k++) {
+        }
+
+        if (k < 6) {
+            e->ew[k] = bw > 0 ? bw : PD_PT(0.25);
+        }
 
         wcolor(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &e->c);
     } else {
@@ -4125,8 +4172,16 @@ static void edge_elem(const dxi* X, const pd_markup* m, const char* t, dedges* e
 
 /* b's edges over a's: those b says replace a's */
 static void edges_over(dedges* a, const dedges* b) {
+    int k;
+
     a->on = (a->on & ~b->set) | (b->on & b->set);
     a->set |= b->set;
+
+    for (k = 0; k < 6; k++) {
+        if ((b->set & (1 << k)) && b->ew[k]) {
+            a->ew[k] = b->ew[k];
+        }
+    }
 
     if (b->on) {
         a->w = b->w;
@@ -4250,7 +4305,7 @@ static void read_table_styles(dxi* X, const char* xml, size_t n) {
             ts->col_band = attr_int(&m, "w:val", 1);
         } else if (in_tcpr && strcmp(t, "shd") == 0) {
             tp->has_shd = 1;
-            if (!wcolor(X, &m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", &tp->shd)) {
+            if (!shd_color(X, &m, &tp->shd)) {
                 tp->shd = 0;
             }
         } else if (strcmp(t, "basedOn") == 0) {
@@ -4830,6 +4885,14 @@ static void dw_begin_cell(dw* w) {
                 cp.border_on = e.on & e.set & 15;
                 cp.border_width = e.w;
                 cp.border_color = e.c ? e.c : 0xFF000000u;
+
+                {   /* each edge's own, where it is not the widest (PD_TBORDER_ bits 0-3 are PD_BORDER_'s) */
+                    int k2;
+
+                    for (k2 = 0; k2 < 4; k2++) {
+                        cp.edge_width[k2] = (e.on & (1 << k2)) && e.ew[k2] && e.ew[k2] != e.w ? e.ew[k2] : 0;
+                    }
+                }
                 cp.min_height = w->ntab >= 1 && w->ntab <= 8 ? w->tabs[w->ntab - 1].row_h : 0;
                 pd_doc_set_cell_props(b->d, bld_container(b), &cp);
             }
@@ -7380,8 +7443,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->cell_merge = !(mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "restart") == 0);
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->cell_valign = strcmp(v, "center") == 0 ? 1 : strcmp(v, "bottom") == 0 ? 2 : 0;
-                } else if (strcmp(t, "shd") == 0 && wcolor(w->X, &m, "w:fill", "w:themeFill", "w:themeFillTint",
-                           "w:themeFillShade", &w->cell_bg)) {
+                } else if (strcmp(t, "shd") == 0 && shd_color(w->X, &m, &w->cell_bg)) {
                 } else if (strcmp(t, "tcBorders") == 0) {
                     w->in_cb = m.type == MT_OPEN;
                 } else if (w->in_cb) {

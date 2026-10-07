@@ -2132,6 +2132,48 @@ static void test_docx_east_asian(void) {
     pd_doc_free(d);
 }
 
+/* Cell shading by pattern -- solid is the foreground (auto: black), pctN that much of it over the fill -- and each
+   edge of a cell its own width (a timeline whose year columns are ruled heavier than its quarters). Kept. */
+static void test_docx_shading_edges(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body><w:tbl><w:tblGrid><w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/>"
+        "<w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr>"
+        "<w:tc><w:tcPr><w:tcBorders><w:left w:val=\"single\" w:sz=\"12\"/><w:bottom w:val=\"single\" w:sz=\"4\"/></w:tcBorders>"
+        "<w:shd w:val=\"solid\" w:color=\"auto\" w:fill=\"auto\"/></w:tcPr><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:tcPr><w:shd w:val=\"pct20\" w:color=\"auto\" w:fill=\"auto\"/></w:tcPr><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:tcPr><w:shd w:val=\"pct50\" w:color=\"FF0000\" w:fill=\"0000FF\"/></w:tcPr><w:p><w:r><w:t>c</w:t></w:r></w:p>"
+        "</w:tc></w:tr></w:tbl><w:p><w:pPr><w:shd w:val=\"solid\" w:color=\"00FF00\" w:fill=\"auto\"/></w:pPr><w:r><w:t>p</w:t>"
+        "</w:r></w:p></w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec, t, row;
+        pd_cell_props c0, c1, c2;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        t = pd_doc_child(d, sec, 0);
+        row = pd_doc_child(d, t, 0);
+        CHECK(pd_doc_cell_props(d, pd_doc_child(d, row, 0), &c0) == PD_OK && c0.background == 0xFF000000u);
+        CHECK(pd_doc_cell_props(d, pd_doc_child(d, row, 1), &c1) == PD_OK && c1.background == 0xFFCCCCCCu);
+        CHECK(pd_doc_cell_props(d, pd_doc_child(d, row, 2), &c2) == PD_OK && (c2.background & 0xFFFFFF) == 0x800080);
+        /* the left edge 1.5pt, the bottom 0.5pt: not both the widest */
+        CHECK((c0.border_on & PD_BORDER_LEFT) && (c0.border_on & PD_BORDER_BOTTOM));
+        CHECK((c0.edge_width[3] ? c0.edge_width[3] : c0.border_width) == PD_PT(1.5));
+        CHECK((c0.edge_width[2] ? c0.edge_width[2] : c0.border_width) == PD_PT(0.5));
+        CHECK(para_resolved(d, pd_doc_child(d, sec, 1)).shading == 0xFF00FF00u);
+    }
+
+    pd_doc_free(d);
+}
+
 /* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
 static int near_color(uint32_t got, uint32_t want) {
     int k;
@@ -3758,6 +3800,7 @@ int main(void) {
     test_docx_controls();
     test_docx_charts();
     test_docx_east_asian();
+    test_docx_shading_edges();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

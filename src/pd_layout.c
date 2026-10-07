@@ -1793,6 +1793,13 @@ static const blk* cell_over(const pd_doc* d, const ptable* T, const blk* row, in
     return NULL;
 }
 
+/* the width of one edge (a PD_BORDER_* bit) of a cell's own rules */
+static pd_sp cell_edge_width(const pd_cell_props* cp, int edge) {
+    int k = edge == PD_BORDER_TOP ? 0 : edge == PD_BORDER_RIGHT ? 1 : edge == PD_BORDER_BOTTOM ? 2 : 3;
+
+    return cp->edge_width[k] > 0 ? cp->edge_width[k] : cp->border_width;
+}
+
 /* The rule on one edge of a cell: what the cell says of it, else what the
    cell across the edge says of its own side there, else the table's rule
    for an outer edge or one between cells. Returns its width, 0 for none. */
@@ -1802,12 +1809,12 @@ static pd_sp edge_rule(const ptable* T, const blk* cell, int edge, const blk* ac
 
     if (cell && (cell->st.cell.border_set & edge)) {
         *color = cell->st.cell.border_color;
-        return (cell->st.cell.border_on & edge) ? cell->st.cell.border_width : 0;
+        return (cell->st.cell.border_on & edge) ? cell_edge_width(&cell->st.cell, edge) : 0;
     }
 
     if (across && (across->st.cell.border_set & across_edge)) {
         *color = across->st.cell.border_color;
-        return (across->st.cell.border_on & across_edge) ? across->st.cell.border_width : 0;
+        return (across->st.cell.border_on & across_edge) ? cell_edge_width(&across->st.cell, across_edge) : 0;
     }
 
     *color = T->tp.border_color;

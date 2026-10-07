@@ -2996,7 +2996,8 @@ pd_status pd_doc_set_cell_props(pd_doc* d, pd_block_id id, const pd_cell_props* 
 
     BLOCK_OP("Cell", b && b->kind == PD_BLOCK_CELL && cp && cp->col_span >= 1 &&
              cp->col_span <= PD_TABLE_MAX_COLS && cp->valign >= 0 && cp->valign <= 2 && cp->merge_up >= 0 &&
-             cp->merge_up <= 1 && cp->min_height >= 0 && cp->border_width >= 0 && (cp->border_set & ~15) == 0 &&
+             cp->merge_up <= 1 && cp->min_height >= 0 && cp->border_width >= 0 && cp->edge_width[0] >= 0 && cp->edge_width[1] >= 0 &&
+             cp->edge_width[2] >= 0 && cp->edge_width[3] >= 0 && (cp->border_set & ~15) == 0 &&
              (cp->border_on & ~cp->border_set) == 0, b->st.cell = *cp);
 }
 

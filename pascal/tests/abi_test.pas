@@ -320,6 +320,7 @@ begin
   WriteLn('pd_cell_props.border_on ', PtrUInt(@v_pd_cell_props.border_on) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.border_width ', PtrUInt(@v_pd_cell_props.border_width) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.border_color ', PtrUInt(@v_pd_cell_props.border_color) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.edge_width ', PtrUInt(@v_pd_cell_props.edge_width) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_change ', SizeOf(pd_change));
   WriteLn('pd_change.kind ', PtrUInt(@v_pd_change.kind) - PtrUInt(@v_pd_change));
   WriteLn('pd_change.block ', PtrUInt(@v_pd_change.block) - PtrUInt(@v_pd_change));

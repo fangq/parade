@@ -288,6 +288,7 @@ int main(void) {
     printf("pd_cell_props.border_on %zu\n", offsetof(pd_cell_props, border_on));
     printf("pd_cell_props.border_width %zu\n", offsetof(pd_cell_props, border_width));
     printf("pd_cell_props.border_color %zu\n", offsetof(pd_cell_props, border_color));
+    printf("pd_cell_props.edge_width %zu\n", offsetof(pd_cell_props, edge_width));
     printf("pd_change %zu\n", sizeof(pd_change));
     printf("pd_change.kind %zu\n", offsetof(pd_change, kind));
     printf("pd_change.block %zu\n", offsetof(pd_change, block));

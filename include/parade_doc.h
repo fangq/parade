@@ -593,6 +593,8 @@ typedef struct {
     int32_t border_on;          /**< of those, the ones ruled (the others have none) */
     pd_sp border_width;         /**< the cell's own rules */
     uint32_t border_color;
+    pd_sp edge_width[4];        /**< each edge's own width, top, right, bottom, left (the PD_BORDER_* bits' order);
+                                     0: border_width */
 } pd_cell_props;
 
 PD_API pd_status pd_doc_float_props(const pd_doc* doc, pd_block_id flt, pd_float_props* out);

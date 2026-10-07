@@ -628,6 +628,18 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                     put_int(w, "BorderOn", p->border_on);
                     put_int(w, "BorderWidth", p->border_width);
                     put_int(w, "BorderColor", (int64_t)p->border_color);
+
+                    if (p->edge_width[0] || p->edge_width[1] || p->edge_width[2] || p->edge_width[3]) {
+                        int64_t ew[4];
+                        int e;
+
+                        for (e = 0; e < 4; e++) {
+                            ew[e] = p->edge_width[e];
+                        }
+
+                        pj_key(w, "EdgeWidths");
+                        pj_int_matrix(w, ew, 1, 4);
+                    }
                 }
                 pj_obj_end(w);
             }
@@ -1534,6 +1546,19 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     p->border_on = (int32_t)int_or(pj_get(x, "BorderOn"), 0, 0, 15, L) & p->border_set;
     p->border_width = (pd_sp)int_or(pj_get(x, "BorderWidth"), 0, 0, SP_MAX, L);
     p->border_color = (uint32_t)int_or(pj_get(x, "BorderColor"), 0, 0, 0xFFFFFFFFLL, L);
+
+    {
+        const pj_node* ew = pj_get(x, "EdgeWidths");
+        int e;
+
+        if (ew && ew->type == PJ_ARR && ew->n == 1 && pj_at(ew, 0) && pj_at(ew, 0)->type == PJ_ARR) {
+            ew = pj_at(ew, 0);  /* a 1 x 4 matrix as rows */
+        }
+
+        for (e = 0; ew && e < 4; e++) {
+            p->edge_width[e] = (pd_sp)int_or(pj_at(ew, e), 0, 0, SP_MAX, L);
+        }
+    }
 }
 
 static void load_float(loader* L, const pj_node* o, pd_float_props* p) {

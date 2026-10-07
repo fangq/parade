@@ -99,6 +99,8 @@ type
     FPics: array of TLazIntfImage; { by resource id - 1: the picture, decoded once }
     FPicSized: array of TLazIntfImage; { ... and at the size it was last drawn }
     FPicDoc: Ppd_doc;              { the document they are of }
+    FPrefetch: TTimer;             { decoding the pictures while the reader is not doing anything }
+    FPrefetchRes: pd_res_id;
     FOrder: array of Int32;        { block id -> reading-order index, -1 = not in the main flow }
     FOrderRev: UInt64;
     FDragging: Boolean;
@@ -131,6 +133,8 @@ type
     FControlMenu: TPopupMenu;      { a drop-down control's choices }
     FMenuAt: pd_pos;
     procedure UseFallbackFonts;
+    function DecodePicture(Res: pd_res_id): Boolean;
+    procedure PrefetchTick(Sender: TObject);
     procedure ControlMenuClick(Sender: TObject);
     function PastEnds(const P: pd_pos): pd_pos;
     function GetPageCount: Integer;
@@ -1042,6 +1046,10 @@ begin
   FBlink.Interval := 530;
   FBlink.OnTimer := @BlinkTimer;
   FBlink.Enabled := False;
+  FPrefetch := TTimer.Create(Self);
+  FPrefetch.Interval := 30;
+  FPrefetch.OnTimer := @PrefetchTick;
+  FPrefetch.Enabled := False;
   NewDocument;
 end;
 
@@ -1346,6 +1354,35 @@ begin
   FModified := False;
   FOrderRev := High(UInt64);
   Relayout;
+  FPrefetchRes := 1;            { its pictures decoded in the pauses, so that paging to them does not wait }
+  FPrefetch.Interval := 500;    { once the first page is up }
+  FPrefetch.Enabled := True;
+end;
+
+{ one picture of the document decoded, the next one the next time; stopped when they all are }
+procedure TParadeEdit.PrefetchTick(Sender: TObject);
+var
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  M: string;
+begin
+  FPrefetch.Interval := 30;
+  while (FDoc <> nil) and (pd_doc_resource(FDoc, FPrefetchRes, @Mime, @Data, @Len) = PD_OK) do
+  begin
+    M := StrPas(Mime);
+    Inc(FPrefetchRes);
+    if (Pos('image/png', M) = 1) or (Pos('image/jpeg', M) = 1) or (Pos('image/gif', M) = 1) or
+      (Pos('image/bmp', M) = 1) then
+    begin
+      if (Integer(FPrefetchRes) - 1 > Length(FPics)) or (FPics[FPrefetchRes - 2] = nil) then
+      begin
+        DecodePicture(FPrefetchRes - 1);
+        Exit;   { one a tick: a key pressed meanwhile waits for one picture at most }
+      end;
+    end;
+  end;
+  FPrefetch.Enabled := False;
 end;
 
 procedure TParadeEdit.SaveToFile(const FileName: string);
@@ -1479,8 +1516,8 @@ begin
   if FScrollY > Max then
     FScrollY := Max;
   FScrollBar.Max := Max + ClientHeight;
-  FScrollBar.PageSize := ClientHeight;
-  FScrollBar.LargeChange := ClientHeight * 9 div 10;
+  FScrollBar.PageSize := Math.Max(0, ClientHeight);
+  FScrollBar.LargeChange := Math.Min(32767, Math.Max(1, ClientHeight * 9 div 10));   { 1..32767; 0 before it is shown }
   FScrollBar.SmallChange := 40;
   FScrollBar.Position := FScrollY;
 end;
@@ -1573,8 +1610,73 @@ begin
   FPicDoc := nil;
 end;
 
-{ a resource of the document as a picture W x H pixels, nil if it is not one the LCL reads }
-function TParadeEdit.GetPicture(Res: pd_res_id; W, H: Integer): TLazIntfImage;
+{ Src (the page's pixel layout) at W x H: each pixel the mean of the source pixels it covers, alpha-weighted, when
+  smaller; the nearest one when larger }
+function ScalePicture(Src: TLazIntfImage; W, H: Integer): TLazIntfImage;
+var
+  SW, SH, X, Y, SX, SY, X0, X1, Y0, Y1, N: Integer;
+  SR, SG, SB, SA: Int64;
+  Px, Sp: PPixel;
+  Rows: array of PPixel;
+begin
+  Result := NewImage(W, H, 0);
+  SW := Src.Width;
+  SH := Src.Height;
+  if (SW <= 0) or (SH <= 0) then
+    Exit;
+  SetLength(Rows, SH);
+  for Y := 0 to SH - 1 do
+    Rows[Y] := PPixel(Src.GetDataLineStart(Y));
+  for Y := 0 to H - 1 do
+  begin
+    Y0 := Int64(Y) * SH div H;
+    Y1 := Int64(Y + 1) * SH div H;
+    if Y1 <= Y0 then
+      Y1 := Y0 + 1;
+    Px := PPixel(Result.GetDataLineStart(Y));
+    for X := 0 to W - 1 do
+    begin
+      X0 := Int64(X) * SW div W;
+      X1 := Int64(X + 1) * SW div W;
+      if X1 <= X0 then
+        X1 := X0 + 1;
+      if (X1 - X0 = 1) and (Y1 - Y0 = 1) then
+        Px^ := (Rows[Y0] + X0)^
+      else
+      begin
+        SR := 0;
+        SG := 0;
+        SB := 0;
+        SA := 0;
+        N := 0;
+        for SY := Y0 to Y1 - 1 do
+        begin
+          Sp := Rows[SY] + X0;
+          for SX := X0 to X1 - 1 do
+          begin
+            Inc(SR, Sp^.R * Sp^.A);
+            Inc(SG, Sp^.G * Sp^.A);
+            Inc(SB, Sp^.B * Sp^.A);
+            Inc(SA, Sp^.A);
+            Inc(N);
+            Inc(Sp);
+          end;
+        end;
+        if SA > 0 then
+        begin
+          Px^.R := SR div SA;
+          Px^.G := SG div SA;
+          Px^.B := SB div SA;
+        end;
+        Px^.A := SA div N;
+      end;
+      Inc(Px);
+    end;
+  end;
+end;
+
+{ a resource of the document decoded (once) as a picture, False if it is not one the LCL reads }
+function TParadeEdit.DecodePicture(Res: pd_res_id): Boolean;
 var
   Mime: PAnsiChar;
   Data: Pointer;
@@ -1586,8 +1688,8 @@ var
   Px: PPixel;
   C: TFPColor;
 begin
-  Result := nil;
-  if (Res = 0) or (W <= 0) or (H <= 0) or (W > 8000) or (H > 8000) then
+  Result := False;
+  if Res = 0 then
     Exit;
   if FPicDoc <> FDoc then
   begin
@@ -1612,7 +1714,33 @@ begin
         Ms.Position := 0;
         Pic.LoadFromStream(Ms);
         if Pic.Graphic is TRasterImage then
-          FPics[I] := TRasterImage(Pic.Graphic).CreateIntfImage;
+        begin
+          { once, into the page's own pixel layout: scaling then reads memory, not a pixel at a time
+            through the image's colour accessor }
+          Src := TRasterImage(Pic.Graphic).CreateIntfImage;
+          try
+            FPics[I] := NewImage(Src.Width, Src.Height, 0);
+            if Src.DataDescription.Depth = 24 then
+              { no alpha in the picture: opaque, which a copy into a layout with one would not say }
+              for Y := 0 to Src.Height - 1 do
+              begin
+                Px := PPixel(FPics[I].GetDataLineStart(Y));
+                for X := 0 to Src.Width - 1 do
+                begin
+                  C := Src.Colors[X, Y];
+                  Px^.R := C.red shr 8;
+                  Px^.G := C.green shr 8;
+                  Px^.B := C.blue shr 8;
+                  Px^.A := 255;
+                  Inc(Px);
+                end;
+              end
+            else
+              FPics[I].CopyPixels(Src);
+          finally
+            Src.Free;
+          end;
+        end;
       except
         FPics[I] := nil;   { not a picture the LCL can read: the placeholder stays }
       end;
@@ -1623,35 +1751,36 @@ begin
     if FPics[I] = nil then
       Exit;
   end;
-  { scaled once per size, nearest pixel: the page is redrawn far more often than it is zoomed }
+  Result := True;
+end;
+
+{ a resource of the document as a picture W x H pixels, nil if it is not one the LCL reads }
+function TParadeEdit.GetPicture(Res: pd_res_id; W, H: Integer): TLazIntfImage;
+var
+  I: Integer;
+begin
+  Result := nil;
+  if (Res = 0) or (W <= 0) or (H <= 0) or (W > 8000) or (H > 8000) or not DecodePicture(Res) then
+    Exit;
+  I := Integer(Res) - 1;
+  { scaled once per size, the page being redrawn far more often than it is zoomed: smaller by the mean of the
+    pixels each covers (a thin line in a photo stays a line, as other viewers show it), larger by the nearest }
   if (FPicSized[I] = nil) or (FPicSized[I].Width <> W) or (FPicSized[I].Height <> H) then
   begin
     FPicSized[I].Free;
-    Src := FPics[I];
-    FPicSized[I] := NewImage(W, H, 0);     { the page's own pixel layout: drawn by copying bytes }
-    for Y := 0 to H - 1 do
-    begin
-      Px := PPixel(FPicSized[I].GetDataLineStart(Y));
-      for X := 0 to W - 1 do
-      begin
-        C := Src.Colors[X * Src.Width div W, Y * Src.Height div H];
-        Px^.R := C.red shr 8;
-        Px^.G := C.green shr 8;
-        Px^.B := C.blue shr 8;
-        Px^.A := C.alpha shr 8;
-        Inc(Px);
-      end;
-    end;
+    FPicSized[I] := ScalePicture(FPics[I], W, H);
   end;
   Result := FPicSized[I];
 end;
 
+{$PUSH}{$R-}{$Q-}   { the hash multiplies modulo 2^32: checked arithmetic would stop it }
 function GlyphHash(AFont: Pointer; GlyphId: UInt32; PxPerEm: pd_sp; Sub: Integer): UInt32; inline;
 begin
   Result := (UInt32(PtrUInt(AFont) shr 4) * 2654435761) xor (GlyphId * 40503) xor (UInt32(PxPerEm) * 2246822519) xor
             UInt32(Sub);
   Result := Result xor (Result shr 15);
 end;
+{$POP}
 
 function TParadeEdit.GetGlyphBmp(AFont: Ppd_font; GlyphId: UInt32; PxPerEm: pd_sp; Sub: Integer): PGlyphBmp;
 var
@@ -1663,7 +1792,7 @@ begin
   if Length(FGlyphs) > 0 then
   begin
     Mask := High(FGlyphs);
-    I := GlyphHash(AFont, GlyphId, PxPerEm, Sub) and Mask;
+    I := Integer(GlyphHash(AFont, GlyphId, PxPerEm, Sub) and UInt32(Mask));
     while FGlyphs[I] <> nil do
     begin
       G := FGlyphs[I];
@@ -1684,7 +1813,7 @@ begin
     for G in Old do
       if G <> nil then
       begin
-        I := GlyphHash(G^.KFont, G^.KGlyph, G^.KPx, G^.KSub) and Mask;
+        I := Integer(GlyphHash(G^.KFont, G^.KGlyph, G^.KPx, G^.KSub) and UInt32(Mask));
         while FGlyphs[I] <> nil do
           I := (I + 1) and Mask;
         FGlyphs[I] := G;
@@ -1710,7 +1839,7 @@ begin
     end;
   end;
   Mask := High(FGlyphs);
-  I := GlyphHash(AFont, GlyphId, PxPerEm, Sub) and Mask;
+  I := Integer(GlyphHash(AFont, GlyphId, PxPerEm, Sub) and UInt32(Mask));
   while FGlyphs[I] <> nil do
     I := (I + 1) and Mask;
   FGlyphs[I] := Result;
