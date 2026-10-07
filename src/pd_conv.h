@@ -207,6 +207,22 @@ void mu_decode(const char* s, size_t n, pd_buf* out);
 const char* mu_local(const char* name);
 
 /* ------------------------------------------------------------------ */
+/* DrawingML colours and charts (pd_docx.c, pd_chart.c)               */
+/* ------------------------------------------------------------------ */
+
+/* a theme colour's slot (0 dk1, 1 lt1, 2 dk2, 3 lt2, 4-9 accent1-6, 10 hlink, 11 folHlink) by its DrawingML or
+   WordprocessingML name, text1/background1 and the like as Word maps them; -1 if none */
+int pd_conv_theme_slot(const char* name);
+/* a DrawingML colour modifier (lumMod, lumOff, tint, shade: the element m is at, local name t) applied to c */
+uint32_t pd_conv_clr_modify(uint32_t c, const char* t, const pd_markup* m);
+/* A DrawingML chart part (c:chartSpace) as the items of a Parade drawing (application/vnd.parade.drawing+json)
+   of w x h: its bars, lines, areas, wedges or points from the values the part caches, its axes, gridlines,
+   labels, legend and title. theme: the document's twelve theme colours (pd_conv_theme_slot's order); font: the
+   text's family. The items are appended to o, comma-separated, without the brackets around them; 0 when the
+   part holds no chart drawn (an empty plot area), and nothing is appended then. */
+int pd_chart_items(const char* xml, size_t n, pd_sp w, pd_sp h, const uint32_t* theme, const char* font, pd_buf* o);
+
+/* ------------------------------------------------------------------ */
 /* metafiles (pd_emf.c)                                               */
 /* ------------------------------------------------------------------ */
 

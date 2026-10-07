@@ -149,7 +149,7 @@ document API only.
 | Markdown | yes | yes | CommonMark (spec emphasis algorithm), GFM tables/strikethrough/footnotes, `$math$`, `{width=..}` images |
 | LaTeX    | -   | yes | article that compiles with LuaLaTeX/pdfLaTeX: sections, lists, longtable, figures with `\caption`/`\label`/`\ref`, footnotes, equations |
 | RTF      | yes | yes | style sheet, list table, tables (merged cells), footnotes, hyperlink fields, PNG/JPEG |
-| DOCX     | yes | yes | styles (basedOn chains), numbering, tables, footnotes, hyperlinks (also field codes), images, sections, headers/footers, theme colours with tints and shades, the font table (alternate names, PANOSE, pitch: `pd_doc_font_class`), content controls (check boxes, drop-down lists, dates, text: `PD_INLINE_CONTROL`, `pd_doc_control_at`); deterministic zip |
+| DOCX     | yes | yes | styles (basedOn chains), numbering, tables, footnotes, hyperlinks (also field codes), images, sections, headers/footers, theme colours with tints and shades, the font table (alternate names, PANOSE, pitch: `pd_doc_font_class`), content controls (check boxes, drop-down lists, dates, text: `PD_INLINE_CONTROL`, `pd_doc_control_at`), charts (bar, column, line, area, pie, doughnut, scatter, drawn from their cached values by `src/pd_chart.c`; the chart part, its workbook and the theme kept and written back); deterministic zip |
 | text     | yes | yes | one paragraph per line |
 
 `tools/pd_conv in.x out.y` converts between any of them and to PDF via

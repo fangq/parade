@@ -1932,6 +1932,133 @@ static void test_docx_controls(void) {
     pd_doc_free(d);
 }
 
+/* the bytes of needle in the n bytes at p */
+static int has_mem(const char* p, size_t n, const char* needle) {
+    size_t k = strlen(needle), i;
+
+    for (i = 0; p && i + k <= n; i++) {
+        if (!memcmp(p + i, needle, k)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* how many times needle is in s */
+static int count_of(const char* s, const char* needle) {
+    int n = 0;
+
+    for (; s && (s = strstr(s, needle)) != NULL; s += strlen(needle)) {
+        n++;
+    }
+
+    return n;
+}
+
+/* Charts: Word draws them from the values the part caches, and so does Parade -- a column chart's bars,
+   gridlines, labels, legend and title; a pie's wedges and percentages. The part and the workbook it was made
+   from are kept, and go back into the file as a chart. */
+static void test_docx_charts(void) {
+    static const char* ser =
+        "<c:ser><c:idx val=\"%d\"/><c:order val=\"%d\"/><c:tx><c:strRef><c:strCache><c:ptCount val=\"1\"/><c:pt idx=\"0\">"
+        "<c:v>%s</c:v></c:pt></c:strCache></c:strRef></c:tx>%s<c:cat><c:strRef><c:strCache><c:ptCount val=\"3\"/>"
+        "<c:pt idx=\"0\"><c:v>North</c:v></c:pt><c:pt idx=\"1\"><c:v>South</c:v></c:pt><c:pt idx=\"2\"><c:v>West</c:v>"
+        "</c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:formatCode>General</c:formatCode>"
+        "<c:ptCount val=\"3\"/><c:pt idx=\"0\"><c:v>%s</c:v></c:pt><c:pt idx=\"1\"><c:v>%s</c:v></c:pt>"
+        "<c:pt idx=\"2\"><c:v>%s</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>";
+    char s1[2048], s2[2048], col[8192], pie[4096];
+    pd_doc* d;
+    int pass;
+
+    snprintf(s1, sizeof(s1), ser, 0, 0, "2025", "<c:spPr><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></c:spPr>"
+             "<c:dLbls><c:showVal val=\"1\"/></c:dLbls>", "120", "80", "45.5");
+    snprintf(s2, sizeof(s2), ser, 1, 1, "2026", "", "150", "95", "60");
+    snprintf(col, sizeof(col),
+             "<c:chartSpace xmlns:c=\"c\" xmlns:a=\"a\" xmlns:r=\"r\"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Sales"
+             "</a:t></a:r></a:p></c:rich></c:tx></c:title><c:autoTitleDeleted val=\"0\"/><c:plotArea><c:barChart>"
+             "<c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>%s%s<c:gapWidth val=\"100\"/></c:barChart><c:catAx>"
+             "<c:delete val=\"0\"/></c:catAx><c:valAx><c:majorGridlines/><c:numFmt formatCode=\"#,##0\" sourceLinked=\"1\"/>"
+             "</c:valAx></c:plotArea><c:legend><c:legendPos val=\"b\"/></c:legend></c:chart>"
+             "<c:externalData r:id=\"rId1\"><c:autoUpdate val=\"0\"/></c:externalData><c:userShapes r:id=\"rId2\"/>"
+             "</c:chartSpace>", s1, s2);
+    snprintf(pie, sizeof(pie),
+             "<c:chartSpace xmlns:c=\"c\" xmlns:a=\"a\"><c:chart><c:autoTitleDeleted val=\"1\"/><c:plotArea><c:pieChart>"
+             "<c:varyColors val=\"1\"/>%s<c:dLbls><c:showPercent val=\"1\"/></c:dLbls><c:firstSliceAng val=\"0\"/>"
+             "</c:pieChart></c:plotArea><c:legend><c:legendPos val=\"r\"/></c:legend></c:chart></c:chartSpace>", s2);
+    d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId9\" Type=\"t/chart\" Target=\"charts/chart1.xml\"/>"
+        "<Relationship Id=\"rId10\" Type=\"t/chart\" Target=\"charts/chart7.xml\"/></Relationships>",
+        "word/charts/chart1.xml", col,
+        "word/charts/_rels/chart1.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId1\" Type=\"t/package\" "
+        "Target=\"../embeddings/Microsoft_Excel_Worksheet.xlsx\"/><Relationship Id=\"rId2\" Type=\"t/chartUserShapes\" "
+        "Target=\"../drawings/drawing1.xml\"/></Relationships>",
+        "word/embeddings/Microsoft_Excel_Worksheet.xlsx", "PK-the-workbook",
+        "word/charts/chart7.xml", pie,
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:c=\"c\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"5486400\" cy=\"3200400\"/><a:graphic><a:graphicData "
+        "uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"rId9\"/></a:graphicData>"
+        "</a:graphic></wp:inline></w:drawing></w:r></w:p>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"3657600\" cy=\"2743200\"/><a:graphic><a:graphicData "
+        "uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"rId10\"/></a:graphicData>"
+        "</a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>",
+        NULL);
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec;
+        pd_inline o;
+        char* js;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, sec, 0), 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE);
+        CHECK(o.width == PD_PT(432) && o.height == PD_PT(252));
+        js = drawing_json(d, o.resource);
+        CHECK(js != NULL);
+
+        if (js) {
+            CHECK(strstr(js, "\"chart\":") != NULL && strstr(js, "\"data\":") != NULL);    /* the part and its workbook */
+            CHECK(count_of(js, "\"shape\":\"rect\"") >= 6 + 2);                          /* six bars, two legend keys */
+            CHECK(strstr(js, "\"fill\":4294901760") != NULL);                            /* the first series' own red */
+            CHECK(strstr(js, "\"label\":\"Sales\"") && strstr(js, "\"label\":\"North\"") && strstr(js, "\"label\":\"2026\""));
+            CHECK(strstr(js, "\"label\":\"45.5\"") != NULL && strstr(js, "\"label\":\"95\"") == NULL);   /* its labels only */
+            CHECK(strstr(js, "\"label\":\"160\"") != NULL);                              /* the scale, to 160 by 20 */
+            free(js);
+        }
+
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, sec, 1), 0), &o) == PD_OK);
+        js = drawing_json(d, o.resource);
+        CHECK(js != NULL);
+
+        if (js) {   /* three wedges of 150, 95 and 60: 49%, 31%, 20%; a legend of the categories */
+            CHECK(count_of(js, "\"closed\":1") >= 3 && strstr(js, "\"label\":\"49%\"") && strstr(js, "\"label\":\"20%\""));
+            CHECK(strstr(js, "\"label\":\"West\"") != NULL && strstr(js, "\"data\":") == NULL);
+            free(js);
+        }
+    }
+
+    if (d) {    /* written as charts (read back as charts above): the parts, the workbook, its relationship; not the
+                   drawing over the chart, which is not kept */
+        buf_t z = { NULL, 0 };
+
+        CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &z) == PD_OK);
+        CHECK(z.p && has_mem(z.p, z.n, "word/charts/chart1.xml") && has_mem(z.p, z.n, "word/charts/chart2.xml"));
+        CHECK(z.p && has_mem(z.p, z.n, "word/embeddings/Microsoft_Excel_Worksheet1.xlsx") &&
+              has_mem(z.p, z.n, "PK-the-workbook"));
+        CHECK(z.p && has_mem(z.p, z.n, "word/charts/_rels/chart1.xml.rels") && !has_mem(z.p, z.n, "word/drawings/"));
+        free(z.p);
+        pd_doc_free(d);
+    }
+}
+
 /* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
 static int near_color(uint32_t got, uint32_t want) {
     int k;
@@ -3556,6 +3683,7 @@ int main(void) {
     test_docx_theme_colors();
     test_docx_font_table();
     test_docx_controls();
+    test_docx_charts();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

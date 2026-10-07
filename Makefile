@@ -28,7 +28,7 @@ ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
 SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_unidata.c src/pd_text.c src/pd_bidi.c src/pd_shape.c src/pd_hyph.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
            src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c src/pd_conv.c src/pd_markup.c src/pd_html.c \
-           src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c src/pd_math.c src/pd_emf.c src/pd_omml.c
+           src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c src/pd_chart.c src/pd_math.c src/pd_emf.c src/pd_omml.c
 ifeq ($(SYNC),yrs)
 SRC     += src/pd_sync.c src/pd_tsync.c
 endif

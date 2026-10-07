@@ -1114,7 +1114,8 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
         const pfont* cur_font = NULL;
         int32_t cur_chunk = -1;
         pd_sp cur_size = 0, run_y = 0, pen = 0;
-        uint32_t cur_color = 0xFFFFFFFFu;
+        uint32_t cur_color = 0;
+        int have_color = 0;         /* the text colour is set (white is one: no colour value can say "unset") */
         int32_t cur_scale = 65536;  /* Tz, per page content stream */
         int in_text = 0, in_tj = 0;
 
@@ -1150,7 +1151,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                     sb_fmt(&c, "ET\n");
                     in_text = 0;
                     cur_font = NULL;
-                    cur_color = 0xFFFFFFFFu;
+                    have_color = 0;
                 }
 
                 if (a->kind == PD_DRAW_RULE) {
@@ -1241,7 +1242,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                                     a->font->m.units_per_em);
 
                 if (in_tj && (pf != cur_font || chunk != cur_chunk || a->size != cur_size || a->y != run_y ||
-                              a->color != cur_color || (a->scale ? a->scale : 65536) != cur_scale)) {
+                              !have_color || a->color != cur_color || (a->scale ? a->scale : 65536) != cur_scale)) {
                     sb_fmt(&c, "] TJ\n");
                     in_tj = 0;
                 }
@@ -1251,9 +1252,10 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                     in_text = 1;
                 }
 
-                if (a->color != cur_color) {
+                if (!have_color || a->color != cur_color) {
                     sb_rgb(&c, a->color, "rg");
                     cur_color = a->color;
+                    have_color = 1;
                 }
 
                 if (pf != cur_font || chunk != cur_chunk || a->size != cur_size) {

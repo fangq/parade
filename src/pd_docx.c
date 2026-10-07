@@ -18,6 +18,11 @@
 #include "pd_conv.h"
 #include "pd_json.h"
 
+/* parts kept whole with the document, to write again */
+#define CHART_MIME "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+#define THEME_MIME "application/vnd.openxmlformats-officedocument.theme+xml"
+#define XLSX_MIME "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 /* v * m / d, to the nearest: what is read back converts to the same again */
 #define SCALE(v, m, d) ((int64_t)(v) * (m) >= 0 ? ((int64_t)(v) * (m) + (d) / 2) / (d) : \
                         ((int64_t)(v) * (m) - (d) / 2) / (d))
@@ -309,6 +314,12 @@ typedef struct {
     pd_char_props base;
     int in_link, in_note;
     int nctl, nctl_ids;         /* content controls open in the paragraph; ids given */
+    struct {                    /* charts written: their parts, the workbook each has */
+        pd_res_id chart, data;
+        char rid[64];
+        char link[300];
+    } charts[64];
+    int ncharts;
     pd_buf rels;                /* document.xml.rels entries beyond the fixed ones */
     pd_buf notes;               /* footnotes.xml body */
     pd_buf endnotes;            /* endnotes.xml body */
@@ -533,19 +544,38 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     pd_res_id pic = ob->resource;
     int m;
 
-    if (group) {    /* a metafile played into a drawing: the metafile itself goes back */
+    int chart = 0;
+
+    if (group) {    /* a metafile played into a drawing: the metafile itself goes back; a chart: the chart */
         pj_doc* jd = pj_parse(data, len, 0, NULL);
-        pd_res_id src = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
+        const pj_node* jr = jd ? pj_root(jd) : NULL, *n;
+        pd_res_id src = jr ? (pd_res_id)pj_int_or(pj_get(jr, "src"), 0) : 0;
+        pd_res_id cres = jr ? (pd_res_id)pj_int_or(pj_get(jr, "chart"), 0) : 0;
+
+        if (cres && x->ncharts < 64) {
+            chart = ++x->ncharts;
+            x->charts[chart - 1].chart = cres;
+            x->charts[chart - 1].data = (pd_res_id)pj_int_or(pj_get(jr, "data"), 0);
+            n = pj_get(jr, "dataRid");
+            snprintf(x->charts[chart - 1].rid, sizeof(x->charts[0].rid), "%.*s", n && n->type == PJ_STR ? (int)n->len : 0,
+                     n && n->type == PJ_STR ? n->s : "");
+            n = pj_get(jr, "dataLink");
+            snprintf(x->charts[chart - 1].link, sizeof(x->charts[0].link), "%.*s",
+                     n && n->type == PJ_STR ? (int)n->len : 0, n && n->type == PJ_STR ? n->s : "");
+            pb_printf(&x->rels, "<Relationship Id=\"rIdch%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/"
+                      "2006/relationships/chart\" Target=\"charts/chart%d.xml\"/>", chart, chart);
+            group = 0;
+        }
 
         pj_free(jd);
 
-        if (src) {
+        if (src && !chart) {
             group = 0;
             pic = src;
         }
     }
 
-    m = group ? 0 : dx_media(x, pic, &name);
+    m = group || chart ? 0 : dx_media(x, pic, &name);
     pd_sp iw, ih;
     long long cx, cy;
     size_t mark;
@@ -605,6 +635,14 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
         pb_puts(o, " descr=\"");
         xesc(o, ob->alt, (size_t)ob->alt_len);
         pb_putc(o, '"');
+    }
+
+    if (chart) {
+        pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">"
+                  "<c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" r:id=\"rIdch%d\"/>"
+                  "</a:graphicData></a:graphic>%s</w:drawing></w:r>", fp ? "" : "<wp:cNvGraphicFramePr/>", chart,
+                  fp ? "</wp:anchor>" : "</wp:inline>");
+        return;
     }
 
     if (group) {
@@ -2586,6 +2624,25 @@ static void dx_numbering(dxo* x, pd_buf* o) {
     pb_puts(o, "</w:numbering>");
 }
 
+/* the latest resource of a type: a part kept whole (the theme) */
+static int dx_kept(const pd_doc* d, const char* type, const void** data, size_t* len) {
+    const char* mime;
+    const void* p;
+    size_t n;
+    pd_res_id r;
+    int found = 0;
+
+    for (r = 1; pd_doc_resource(d, r, &mime, &p, &n) == PD_OK; r++) {
+        if (strcmp(mime, type) == 0) {
+            *data = p;
+            *len = n;
+            found = 1;
+        }
+    }
+
+    return found;
+}
+
 /* the document's font table (PD_FONT_TABLE_MIME) as word/fontTable.xml; 0 when it has none */
 static int dx_font_table(const pd_doc* d, pd_buf* o) {
     static const char* generic[] = { "auto", "roman", "swiss", "modern", "script", "decorative" };
@@ -2746,7 +2803,9 @@ static void dx_core(const pd_doc* d, pd_buf* o) {
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     dxo* x = (dxo*)calloc(1, sizeof(dxo));
     pd_buf doc, part, cxml, cext, fonts;
-    int has_fonts;
+    int has_fonts, has_theme;
+    const void* theme = NULL;
+    size_t theme_len = 0;
     zipw z;
     pd_block_info ri;
     int32_t s, i, ncomments;
@@ -2852,6 +2911,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     pb_puts(&doc, "</w:body></w:document>");
     ncomments = dx_comments(d, &cxml, &cext);
     has_fonts = dx_font_table(d, &fonts);
+    has_theme = dx_kept(d, THEME_MIME, &theme, &theme_len);
 
     /* the package */
     z.o = out;
@@ -2864,6 +2924,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "<Default Extension=\"gif\" ContentType=\"image/gif\"/>"
             "<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>"
             "<Default Extension=\"wmf\" ContentType=\"image/x-wmf\"/>"
+            "<Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"/>"
             "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "wordprocessingml.document.main+xml\"/>"
             "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
@@ -2880,6 +2941,16 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     for (i = 0; i < x->nhf; i++) {
         pb_printf(&part, "<Override PartName=\"/word/hf%d.xml\" ContentType=\"application/vnd.openxmlformats-"
                   "officedocument.wordprocessingml.%s+xml\"/>", (int)i + 1, x->hf_footer[i] ? "footer" : "header");
+    }
+
+    for (i = 0; i < x->ncharts; i++) {
+        pb_printf(&part, "<Override PartName=\"/word/charts/chart%d.xml\" ContentType=\"application/vnd."
+                  "openxmlformats-officedocument.drawingml.chart+xml\"/>", (int)i + 1);
+    }
+
+    if (has_theme) {
+        pb_puts(&part, "<Override PartName=\"/word/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-"
+                "officedocument.theme+xml\"/>");
     }
 
     if (has_fonts) {
@@ -2974,6 +3045,10 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
         zip_add(&z, "word/fontTable.xml", fonts.p, fonts.n);
     }
 
+    if (has_theme) {
+        zip_add(&z, "word/theme/theme1.xml", theme, theme_len);
+    }
+
     /* headers and footers: their own parts (with their own relationships for links) */
     for (i = 0; i < x->nhf; i++) {
         pd_block_info hi;
@@ -3029,6 +3104,11 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "<Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
             "settings\" Target=\"settings.xml\"/>");
 
+    if (has_theme) {
+        pb_puts(&part, "<Relationship Id=\"rIdTh\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                "relationships/theme\" Target=\"theme/theme1.xml\"/>");
+    }
+
     if (has_fonts) {
         pb_puts(&part, "<Relationship Id=\"rIdFt\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
                 "relationships/fontTable\" Target=\"fontTable.xml\"/>");
@@ -3059,6 +3139,47 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
         if (pd_doc_resource(d, x->media[i].res, &mime, &data, &len) == PD_OK) {
             snprintf(name, sizeof(name), "word/media/%s", x->media[i].name);
             zip_add(&z, name, data, len);
+        }
+    }
+
+    for (i = 0; i < x->ncharts; i++) {  /* the charts' parts, and the workbooks they come from */
+        const char* mime;
+        const void* data;
+        size_t len;
+        char name[64];
+
+        if (pd_doc_resource(d, x->charts[i].chart, &mime, &data, &len) != PD_OK) {
+            continue;
+        }
+
+        snprintf(name, sizeof(name), "word/charts/chart%d.xml", (int)i + 1);
+        zip_add(&z, name, data, len);
+
+        if (x->charts[i].rid[0] && (x->charts[i].data || x->charts[i].link[0])) {
+            part.n = 0;
+            pb_puts(&part, XML_DECL);
+            pb_puts(&part, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                    "<Relationship Id=\"");
+            xesc(&part, x->charts[i].rid, strlen(x->charts[i].rid));
+
+            if (x->charts[i].data) {
+                pb_printf(&part, "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/package\" "
+                          "Target=\"../embeddings/Microsoft_Excel_Worksheet%d.xlsx\"/>", (int)i + 1);
+            } else {
+                pb_puts(&part, "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject\" "
+                        "Target=\"");
+                xesc(&part, x->charts[i].link, strlen(x->charts[i].link));
+                pb_puts(&part, "\" TargetMode=\"External\"/>");
+            }
+
+            pb_puts(&part, "</Relationships>");
+            snprintf(name, sizeof(name), "word/charts/_rels/chart%d.xml.rels", (int)i + 1);
+            zip_add(&z, name, part.p, part.n);
+
+            if (x->charts[i].data && pd_doc_resource(d, x->charts[i].data, &mime, &data, &len) == PD_OK) {
+                snprintf(name, sizeof(name), "word/embeddings/Microsoft_Excel_Worksheet%d.xlsx", (int)i + 1);
+                zip_add(&z, name, data, len);
+            }
         }
     }
 
@@ -3229,7 +3350,7 @@ static void theme_defaults(uint32_t* c) {
 
 /* a theme colour's slot by its name: DrawingML's (dk1, tx1, accent1, hlink) or WordprocessingML's (dark1, text1,
    accent1, hyperlink); text and background as Word maps them (text1 dark1, background1 light1); -1 if none */
-static int theme_slot(const char* n) {
+int pd_conv_theme_slot(const char* n) {
     static const struct {
         const char* n;
         int slot;
@@ -3307,7 +3428,7 @@ static int wcolor(const dxi* X, const pd_markup* m, const char* valattr, const c
     int slot = -1;
 
     if (themeattr && mu_attr(m, themeattr, v, sizeof(v))) {
-        slot = theme_slot(v);
+        slot = pd_conv_theme_slot(v);
     }
 
     if (slot >= 0) {
@@ -3335,7 +3456,7 @@ static int wcolor(const dxi* X, const pd_markup* m, const char* valattr, const c
 }
 
 /* a DrawingML colour modifier (a child of srgbClr, schemeClr, sysClr, prstClr) applied to c */
-static uint32_t clr_modify(uint32_t c, const char* t, const pd_markup* m) {
+uint32_t pd_conv_clr_modify(uint32_t c, const char* t, const pd_markup* m) {
     char v[32];
     double f;
 
@@ -4034,10 +4155,10 @@ static void read_theme(dxi* X, const char* xml, size_t n) {
 
         if (strcmp(t, "clrScheme") == 0) {
             in_scheme = m.type == MT_OPEN;
-        } else if (in_scheme && m.type == MT_OPEN && theme_slot(t) >= 0 && (t[0] == 'd' || t[0] == 'l' ||
+        } else if (in_scheme && m.type == MT_OPEN && pd_conv_theme_slot(t) >= 0 && (t[0] == 'd' || t[0] == 'l' ||
                    t[0] == 'a' || t[0] == 'h' || t[0] == 'f')) {
-            slot = theme_slot(t);   /* dk1 ... folHlink, each holding one colour */
-        } else if (in_scheme && m.type == MT_CLOSE && theme_slot(t) >= 0) {
+            slot = pd_conv_theme_slot(t);   /* dk1 ... folHlink, each holding one colour */
+        } else if (in_scheme && m.type == MT_CLOSE && pd_conv_theme_slot(t) >= 0) {
             slot = -1;
         } else if (slot >= 0 && strcmp(t, "srgbClr") == 0 && mu_attr(&m, "val", v, sizeof(v))) {
             X->theme_clr[slot] = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
@@ -5157,7 +5278,7 @@ static pd_res_id dw_resource(dxi* X, const char* rid) {
 
 /* a DrawingML scheme colour by name, from the document's theme */
 static uint32_t scheme_color(const dxi* X, const char* name) {
-    int slot = theme_slot(name);
+    int slot = pd_conv_theme_slot(name);
 
     return slot >= 0 ? X->theme_clr[slot] : 0xFF000000u;
 }
@@ -5619,7 +5740,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
         } else if (cur_clr && (!strcmp(t, "lumMod") || !strcmp(t, "lumOff") || !strcmp(t, "tint") ||
                                !strcmp(t, "shade"))) {
-            *cur_clr = clr_modify(*cur_clr, t, &g);
+            *cur_clr = pd_conv_clr_modify(*cur_clr, t, &g);
         } else if (in_ln && (!strcmp(t, "headEnd") || !strcmp(t, "tailEnd"))) {
             int arrow = mu_attr(&g, "type", v, sizeof(v)) && strcmp(v, "none") != 0;
 
@@ -6009,6 +6130,182 @@ static void dw_section_hf(dw* w) {
     w->sp.facing_pages = X->even_odd && (w->sp.header_even || w->sp.footer_even);
 }
 
+
+
+/* a part's path in the package from a target relative to the folder of the part that names it */
+static void part_path(const char* from_dir, const char* target, char* out, size_t cap) {
+    char dir[256];
+    size_t n;
+
+    if (target[0] == '/') {
+        snprintf(out, cap, "%s", target + 1);
+        return;
+    }
+
+    snprintf(dir, sizeof(dir), "%s", from_dir);
+
+    while (strncmp(target, "../", 3) == 0) {  /* up a folder for each ../ */
+        n = strlen(dir);
+
+        if (n > 0 && dir[n - 1] == '/') {
+            dir[--n] = '\0';
+        }
+
+        while (n > 0 && dir[n - 1] != '/') {
+            dir[--n] = '\0';
+        }
+
+        target += 3;
+    }
+
+    snprintf(out, cap, "%s%s", dir, target);
+}
+
+/* the element of xml that opens with tag (an empty one, or to its closing tag) cut out */
+static size_t cut_element(char* xml, size_t n, const char* tag) {
+    char open[48], close[48];
+    char* a, *e;
+    size_t k;
+
+    snprintf(open, sizeof(open), "<%s", tag);
+    snprintf(close, sizeof(close), "</%s>", tag);
+
+    if ((a = strstr(xml, open)) == NULL || (a[strlen(open)] != ' ' && a[strlen(open)] != '>' && a[strlen(open)] != '/')) {
+        return n;
+    }
+
+    e = strchr(a, '>');
+
+    if (!e) {
+        return n;
+    }
+
+    if (e[-1] != '/') {     /* not empty: to its end */
+        char* c = strstr(e, close);
+
+        if (!c) {
+            return n;
+        }
+
+        e = c + strlen(close) - 1;
+    }
+
+    k = (size_t)(e + 1 - a);
+    memmove(a, e + 1, n - (size_t)(e + 1 - xml) + 1);
+    return n - k;
+}
+
+/* A chart (c:chart r:id in a drawing): drawn into a drawing resource, the part and its embedded workbook kept with
+   it so that it goes back as a chart. */
+static void dw_chart(dw* w, const char* rid) {
+    dxi* X = w->X;
+    const char* target = rel_target(X, rid, NULL);
+    char path[300], rels[340], data_rid[64] = "", ext_target[300] = "", v[300];
+    char* xml, *rx;
+    size_t len = 0, rlen = 0;
+    pd_res_id chart_res = 0, data_res = 0;
+    pd_buf o, items;
+    pd_sp W = emu_sp((double)w->cx), H = emu_sp((double)w->cy);
+    const char* slash;
+
+    if (!target || W <= 0 || H <= 0) {
+        return;
+    }
+
+    part_path("word/", target, path, sizeof(path));
+
+    if ((xml = (char*)zip_read(&X->z, path, &len)) == NULL) {
+        return;
+    }
+
+    slash = strrchr(path, '/');
+    snprintf(rels, sizeof(rels), "%.*s_rels/%s.rels", slash ? (int)(slash - path + 1) : 0, path, slash ? slash + 1 : path);
+
+    {   /* the workbook its values come from: embedded (kept), or a file it links to (named) */
+        const char* ed = strstr(xml, "externalData");
+        pd_markup m;
+
+        if (ed && (ed = strstr(ed, "r:id=\"")) != NULL) {
+            snprintf(data_rid, sizeof(data_rid), "%.*s", (int)strcspn(ed + 6, "\""), ed + 6);
+        }
+
+        if (data_rid[0] && (rx = (char*)zip_read(&X->z, rels, &rlen)) != NULL) {
+            mu_init(&m, rx, rlen, 0);
+
+            while (mu_next(&m) != MT_END) {
+                if ((m.type == MT_OPEN || m.type == MT_EMPTY) && !strcmp(mu_local(m.name), "Relationship") &&
+                        mu_attr(&m, "Id", v, sizeof(v)) && !strcmp(v, data_rid) && mu_attr(&m, "Target", v, sizeof(v))) {
+                    char mode[32] = "";
+
+                    mu_attr(&m, "TargetMode", mode, sizeof(mode));
+
+                    if (!strcmp(mode, "External")) {
+                        snprintf(ext_target, sizeof(ext_target), "%s", v);
+                    } else {
+                        char dp[300], dir[300];
+                        unsigned char* bytes;
+                        size_t bn = 0;
+
+                        snprintf(dir, sizeof(dir), "%.*s", slash ? (int)(slash - path + 1) : 0, path);
+                        part_path(dir, v, dp, sizeof(dp));
+
+                        if ((bytes = zip_read(&X->z, dp, &bn)) != NULL) {
+                            pd_doc_add_resource(X->b->d, XLSX_MIME, bytes, bn, &data_res);
+                            free(bytes);
+                        }
+                    }
+                }
+            }
+
+            free(rx);
+        }
+    }
+
+    /* what is kept names no other part: its drawing over the chart and an unkept workbook go */
+    len = cut_element(xml, len, "c:userShapes");
+
+    if (!data_res && !ext_target[0]) {
+        len = cut_element(xml, len, "c:externalData");
+    }
+
+    pd_doc_add_resource(X->b->d, CHART_MIME, xml, len, &chart_res);
+    memset(&o, 0, sizeof(o));
+    memset(&items, 0, sizeof(items));
+
+    if (!pd_chart_items(xml, len, W, H, X->theme_clr, X->theme_minor[0] ? X->theme_minor : "Calibri", &items)) {
+        pb_printf(&items, "{\"shape\":\"rect\",\"x\":0,\"y\":0,\"w\":%d,\"h\":%d,\"fill\":0,\"line\":%u,\"lw\":%d}", (int)W,
+                  (int)H, 0xFFBFBFBFu, (int)PD_PT(0.75));
+    }
+
+    pb_printf(&o, "{\"w\":%d,\"h\":%d,\"chart\":%u", (int)W, (int)H, (unsigned)chart_res);
+
+    if (data_res) {
+        pb_printf(&o, ",\"data\":%u", (unsigned)data_res);
+    }
+
+    if (data_rid[0] && (data_res || ext_target[0])) {
+        pb_puts(&o, ",\"dataRid\":");
+        json_str(&o, data_rid, strlen(data_rid));
+    }
+
+    if (ext_target[0]) {
+        pb_puts(&o, ",\"dataLink\":");
+        json_str(&o, ext_target, strlen(ext_target));
+    }
+
+    pb_puts(&o, ",\"items\":[");
+    pb_put(&o, items.p, items.n);
+    pb_puts(&o, "]}");
+
+    if (chart_res && !o.err && pd_doc_add_resource(X->b->d, "application/vnd.parade.drawing+json", o.p, o.n,
+            &w->drawing_res) != PD_OK) {
+        w->drawing_res = 0;
+    }
+
+    pb_free(&o);
+    pb_free(&items);
+    free(xml);
+}
 
 /* an attribute in either of the namespaces a check box's are written in */
 static int attr_w14(const pd_markup* m, const char* name, char* v, size_t cap) {
@@ -6546,6 +6843,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->cy = vml_length(v, "height");
             } else if (w->in_vml && strcmp(t, "imagedata") == 0 && !w->blip[0]) {
                 mu_attr(&m, "r:id", w->blip, sizeof(w->blip));
+            } else if (w->in_drawing && strcmp(t, "chart") == 0 && !w->drawing_res && mu_attr(&m, "r:id", v, sizeof(v))) {
+                dw_chart(w, v);
             } else if (w->in_drawing && m.type == MT_OPEN && (strcmp(t, "wpc") == 0 || strcmp(t, "wgp") == 0)) {
                 dw_drawing_group(w, &m, strcmp(t, "wpc") == 0);   /* reads the group to its end */
             } else if (w->in_drawing && strcmp(t, "anchor") == 0) {
@@ -7084,8 +7383,8 @@ static void read_comments(dxi* X, pd_doc* d) {
 pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     dxi X;
     pd_bld b;
-    char* xml;
-    size_t len = 0;
+    char* xml, *theme_xml = NULL;
+    size_t len = 0, theme_len = 0;
     pd_status st;
 
     memset(&X, 0, sizeof(X));
@@ -7169,7 +7468,8 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
     if ((xml = (char*)zip_read(&X.z, "word/theme/theme1.xml", &len)) != NULL) {
         read_theme(&X, xml, len);
-        free(xml);
+        theme_xml = xml;    /* kept with the document, for what writes it again (charts take their colours there) */
+        theme_len = len;
     }
 
     if ((xml = (char*)zip_read(&X.z, "word/styles.xml", &len)) != NULL) {
@@ -7223,12 +7523,21 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
         free(X.notes);
         free(X.en_xml);
         free(X.en);
+        free(theme_xml);
         return PD_ERR_FORMAT;
     }
 
     bld_init(&b, d);
     X.b = &b;
     read_fonts(&X);
+
+    if (theme_xml) {
+        pd_res_id tr;
+
+        pd_doc_add_resource(d, THEME_MIME, theme_xml, theme_len, &tr);
+        free(theme_xml);
+        theme_xml = NULL;
+    }
     dw_parse(&X, xml, len, 0);
 
     while (b.ntables > 0) {
