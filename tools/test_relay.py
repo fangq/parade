@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Tests for parade_relay.py: tokens and roles, the log's order, catch-up, long polls, presence,
 compaction (with a stand-in compactor that joins its input; pd_compact itself, if built, must refuse
-what is not yrs)."""
+what is not yrs). With RELAY_BIN (the Pascal relay, build-sync/pascal/parade_relay), the same
+HTTP checks run against it too, and tokens are checked across the two."""
 
 import asyncio
 import os
+import socket
+import subprocess
 import struct
 import sys
 import tempfile
@@ -48,7 +51,67 @@ async def main():
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
+    await checks("http://127.0.0.1:%d" % port)
+    await runner.cleanup()
+    await compaction(tmp)
+    if os.environ.get("RELAY_BIN"):
+        await native(os.environ["RELAY_BIN"], tmp)
+    print("relay tests:", "ok" if not fails else "%d failures" % fails)
+    return 1 if fails else 0
+
+
+async def native(binary, tmp):
+    """the Pascal relay: the same checks; its tokens and PyJWT's accepted by both; a log that does
+    not merge is left alone"""
+    secret = os.path.join(tmp, "secret")
+    with open(secret, "wb") as f:
+        f.write(SECRET + b"\n")
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        port = so.getsockname()[1]
+    proc = subprocess.Popen([binary, "serve", "--db", os.path.join(tmp, "n.sqlite"), "--secret-file", secret,
+                             "--port", str(port), "--compact-every", "3"], stderr=subprocess.PIPE)
     base = "http://127.0.0.1:%d" % port
+    try:
+        async with ClientSession() as s:
+            for _ in range(100):
+                try:
+                    async with s.get(base + "/health") as r:
+                        if r.status == 200:
+                            break
+                except OSError:
+                    await asyncio.sleep(0.05)
+        await checks(base)
+        tok = subprocess.run([binary, "token", "--secret-file", secret, "--user", "zed", "--doc", "d", "--role", "viewer"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        c = jwt.decode(tok, SECRET, algorithms=["HS256"])
+        check(c["sub"] == "zed" and c["doc"] == "d" and c["role"] == "viewer" and c["exp"] > time.time(),
+              "PyJWT accepts the Pascal relay's token: %s" % c)
+        async with ClientSession() as s:
+            h = {"Authorization": "Bearer " + tok}
+            check((await s.get(base + "/d/d/info", headers=h)).status == 200, "and so does the relay")
+            check((await s.get(base + "/d/e/info", headers=h)).status == 403, "for its document only")
+            bad = tok[:-2] + ("AA" if tok[-2:] != "AA" else "BB")
+            check((await s.get(base + "/d/d/info", headers={"Authorization": "Bearer " + bad})).status == 401,
+                  "a token with a changed signature: refused")
+            ann = {"Authorization": "Bearer " + token("ann")}
+            for i in range(4):
+                await s.post(base + "/d/junk/updates", data=b"not yrs %d" % i, headers=ann)
+            await asyncio.sleep(0.5)
+            info = await (await s.get(base + "/d/junk/info", headers=ann)).json()
+            check(info == {"last": 4, "snapshot": 0, "updates": 4}, "a log that does not merge is kept: %s" % info)
+    finally:
+        proc.terminate()
+        try:
+            err = proc.communicate(timeout=10)[1]
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            err = proc.communicate()[1]
+            check(False, "the Pascal relay stops on SIGTERM")
+        check(proc.returncode == 0, "the Pascal relay exits cleanly: %s %s" % (proc.returncode, err[-500:]))
+
+
+async def checks(base):
     ann = {"Authorization": "Bearer " + token("ann"), "X-Client": "1"}
     bob = {"Authorization": "Bearer " + token("bob", doc="proposal"), "X-Client": "2"}
     vic = {"Authorization": "Bearer " + token("vic", role="viewer")}
@@ -106,11 +169,6 @@ async def main():
         r = await s.post(base + "/d/proposal/presence", json={"client": "2", "name": "Bob"}, headers=bob)
         p = await r.json()
         check(len(p) == 1 and p[0]["name"] == "Ann" and p[0]["user"] == "ann" and p[0]["offset"] == 4, "sees the other")
-
-    await runner.cleanup()
-    await compaction(tmp)
-    print("relay tests:", "ok" if not fails else "%d failures" % fails)
-    return 1 if fails else 0
 
 
 FAKE = r"""import struct, sys

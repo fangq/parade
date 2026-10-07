@@ -211,6 +211,21 @@ text is kept in the snapshot, so undo across it still works. A refused merge
 leaves the log as it was. `parade_relay.py compact --db ... --compactor ...
 --doc ...` does one by hand; `GET /d/<doc>/info` tells how far it got.
 
+**The relay in Pascal** (`pascal/paraderelay.pas`, `TParadeRelay`) does the
+same without Python or a database server: SQLite through SQLdb (the same
+tables, so either relay serves a file the other wrote), fphttpserver with a
+thread per request, the same tokens (HS256 done in the unit), compaction
+in-process with `pd_sync_merge`. An editor can run it to host the
+documents it shares (led's Host button); `pascal/relay/parade_relay.lpr` is
+the command line one, with the Python relay's arguments:
+
+    make pascal-relay           # build-sync/pascal/parade_relay, and the relay tests run against it too
+    build-sync/pascal/parade_relay secret > relay.secret
+    build-sync/pascal/parade_relay serve --db relay.sqlite --secret-file relay.secret --host 0.0.0.0
+    build-sync/pascal/parade_relay token --secret-file relay.secret --user ann --doc proposal
+    make pascal-sync-native     # the two-editor test through it
+    make pascal-sync-inproc     # ... and with it inside the test program, as an editor hosting runs it
+
 **The editor side** (`pascal/paradesync.pas`, `TParadeSync`): an outbox one
 thread sends in order and retries until the relay takes it, kept on disk
 too when `OutboxDir` is set (what was typed offline survives quitting: the
@@ -218,8 +233,9 @@ next join of that document by that user merges it back and sends it),
 another thread long-polls the log,
 the main thread merges; the others' carets and selections are drawn in their
 colours with their names; Ctrl+Z undoes one's own edits; a viewer's editor
-is read-only. led has Share/Join and a status in the visual editor's
-toolbar when Parade's yrs library is built.
+is read-only. led has Share/Join/Host and a status in the visual editor's
+toolbar when Parade's yrs library is built; Host runs a `TParadeRelay` in
+led itself and shows the address and tokens to send to the others.
 
 ## Lazarus / Free Pascal (`pascal/`)
 

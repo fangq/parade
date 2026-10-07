@@ -153,6 +153,31 @@ pascal-sync:
 	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./build-sync/pascal/sync_test tools/parade_relay.py build-sync/pd_compact \
 	    < /dev/null); rc=$$?; kill `cat build-sync/pascal/xvfb.pid`; exit $$rc
 
+# the relay in Pascal (pascal/paraderelay.pas: SQLdb + fphttpserver, compaction in-process), no Python
+# needed: build-sync/pascal/parade_relay; RELAY=pascal runs pascal-sync and the relay tests against it
+pascal-relay:
+	$(MAKE) SYNC=yrs BUILD=build-sync build-sync/pascal/lib/libparade.a
+	cp $(YRS_DIR)/target/release/libyrs.a build-sync/pascal/lib/
+	mkdir -p build-sync/pascal/relay-units
+	$(FPC) -O2 -Fupascal -Flbuild-sync/pascal/lib -FUbuild-sync/pascal/relay-units -obuild-sync/pascal/parade_relay \
+	    pascal/relay/parade_relay.lpr
+	$(ulimit_cmd) && RELAY_BIN=build-sync/pascal/parade_relay python3 tools/test_relay.py
+
+pascal-sync-native: pascal-relay
+	$(LAZBUILD) pascal/tests/sync_test.lpi
+	Xvfb $(XVFB_DISPLAY) -screen 0 1400x1000x24 >/dev/null 2>&1 & echo $$! > build-sync/pascal/xvfb.pid; sleep 2; \
+	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./build-sync/pascal/sync_test build-sync/pascal/parade_relay \
+	    < /dev/null); rc=$$?; kill `cat build-sync/pascal/xvfb.pid`; exit $$rc
+
+# the same with the relay inside the test program, as an editor hosting a document runs it
+pascal-sync-inproc:
+	$(MAKE) SYNC=yrs BUILD=build-sync build-sync/pascal/lib/libparade.a
+	cp $(YRS_DIR)/target/release/libyrs.a build-sync/pascal/lib/
+	$(LAZBUILD) pascal/tests/sync_test.lpi
+	Xvfb $(XVFB_DISPLAY) -screen 0 1400x1000x24 >/dev/null 2>&1 & echo $$! > build-sync/pascal/xvfb.pid; sleep 2; \
+	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./build-sync/pascal/sync_test inproc \
+	    < /dev/null); rc=$$?; kill `cat build-sync/pascal/xvfb.pid`; exit $$rc
+
 pascal-demo: $(BUILD)/pascal/lib/libparade.a
 	$(LAZBUILD) pascal/demo/paradedemo.lpi
 
@@ -268,4 +293,4 @@ pretty:
 	    --break-blocks \
 	    "include/*.h" "src/*.c" "src/*.h" "tests/*.c" "bench/*.c" "fuzz/*.c" "fuzz/*.h"
 
-.PHONY: all test bench fuzz fuzz-smoke conv-check conformance unidata oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-demo asan clean pretty
+.PHONY: all test bench fuzz fuzz-smoke conv-check conformance unidata oracle oracle-raster pdf-check view pages pascal pascal-edit pascal-sync pascal-relay pascal-sync-native pascal-sync-inproc pascal-demo asan clean pretty

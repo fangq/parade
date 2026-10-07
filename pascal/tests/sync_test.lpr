@@ -3,7 +3,9 @@
   others' carets, undo of one's own edits, the relay going away and
   coming back with edits made meanwhile, edits kept on disk across a quit,
   and joining from a compacted log. Run under a display (xvfb-run);
-  arguments: the path of parade_relay.py, then of pd_compact. }
+  arguments: the relay -- parade_relay.py and pd_compact, the Pascal
+  relay (pascal/relay/parade_relay.lpr) alone, or "inproc": a TParadeRelay
+  in this program, as an editor hosting the document runs it. }
 program sync_test;
 
 {$mode objfpc}{$H+}
@@ -11,15 +13,26 @@ program sync_test;
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, Process, FileUtil, fphttpclient, fpjson, jsonparser,
-  parade, paradeedit, paradesync;
+  parade, paradeedit, paradesync, paraderelay;
 
 type
   TFunc = function: Boolean;
+
+  TLogger = class
+    procedure Log(Sender: TObject; const Msg: string);
+  end;
+
+procedure TLogger.Log(Sender: TObject; const Msg: string);
+begin
+  WriteLn(StdErr, 'relay: ', Msg);
+end;
 
 var
   Failures: Integer = 0;
   Checks: Integer = 0;
   Relay: TProcess;
+  InProc: TParadeRelay;
+  Logger: TLogger;
   RelayPy, Compactor, Dir, SecretFile, DbFile, Url, OutboxDir: string;
   Port: Integer;
 
@@ -39,18 +52,65 @@ begin
   end;
 end;
 
-function Run(const Args: array of string): string;
+function IsPython: Boolean;
 begin
-  if not RunCommand('python3', Args, Result, [poStderrToOutPut]) then
-    raise Exception.Create('python3 failed: ' + Result);
+  Result := ExtractFileExt(RelayPy) = '.py';
+end;
+
+{ the relay's command line tool: Args after the script (Python) or as they are (Pascal) }
+function Run(const Args: array of string): string;
+var
+  A: array of string;
+  I: Integer;
+begin
+  if RelayPy = 'inproc' then
+  begin   { secret, or token --secret-file F --user U --doc D [--role R] }
+    if Args[0] = 'secret' then
+      Exit(ParadeNewSecret);
+    if Length(Args) > 7 then
+      Result := Args[8]
+    else
+      Result := 'editor';
+    Exit(ParadeMakeToken(ParadeReadSecret(Args[2]), Args[4], Args[6], Result, 1));
+  end;
+  if IsPython then
+  begin
+    SetLength(A, Length(Args) + 1);
+    A[0] := RelayPy;
+    for I := 0 to High(Args) do
+      A[I + 1] := Args[I];
+    if not RunCommand('python3', A, Result, [poStderrToOutPut]) then
+      raise Exception.Create('python3 failed: ' + Result);
+  end
+  else if not RunCommand(RelayPy, Args, Result, [poStderrToOutPut]) then
+    raise Exception.Create(RelayPy + ' failed: ' + Result);
   Result := Trim(Result);
 end;
 
 procedure StartRelay;
 begin
+  if RelayPy = 'inproc' then
+  begin
+    InProc := TParadeRelay.Create(nil);
+    InProc.DbFile := DbFile;
+    InProc.Secret := ParadeReadSecret(SecretFile);
+    InProc.Port := Port;
+    InProc.CompactEvery := 5;
+    if Logger = nil then
+      Logger := TLogger.Create;
+    InProc.OnLog := @Logger.Log;
+    if not InProc.Start then
+      raise Exception.Create('relay: ' + InProc.LastError);
+    Exit;
+  end;
   Relay := TProcess.Create(nil);
-  Relay.Executable := 'python3';
-  Relay.Parameters.Add(RelayPy);
+  if IsPython then
+  begin
+    Relay.Executable := 'python3';
+    Relay.Parameters.Add(RelayPy);
+  end
+  else
+    Relay.Executable := RelayPy;
   Relay.Parameters.Add('serve');
   Relay.Parameters.Add('--db');
   Relay.Parameters.Add(DbFile);
@@ -58,8 +118,11 @@ begin
   Relay.Parameters.Add(SecretFile);
   Relay.Parameters.Add('--port');
   Relay.Parameters.Add(IntToStr(Port));
-  Relay.Parameters.Add('--compactor');
-  Relay.Parameters.Add(Compactor);
+  if IsPython then
+  begin
+    Relay.Parameters.Add('--compactor');
+    Relay.Parameters.Add(Compactor);
+  end;
   Relay.Parameters.Add('--compact-every');
   Relay.Parameters.Add('5');
   Relay.Options := [poNoConsole];
@@ -69,6 +132,7 @@ end;
 
 procedure StopRelay;
 begin
+  FreeAndNil(InProc);
   if Relay <> nil then
   begin
     Relay.Terminate(0);
@@ -157,7 +221,9 @@ end;
 begin
   Application.Initialize;
   try
-    RelayPy := ExpandFileName(ParamStr(1));
+    RelayPy := ParamStr(1);
+    if RelayPy <> 'inproc' then
+      RelayPy := ExpandFileName(RelayPy);
     Compactor := ExpandFileName(ParamStr(2));
     Dir := ExtractFilePath(ParamStr(0));
     OutboxDir := Dir + 'sync_test.outbox';
@@ -169,16 +235,16 @@ begin
     DeleteFile(DbFile + '-shm');
     with TStringList.Create do
     try
-      Text := Run([RelayPy, 'secret']);
+      Text := Run(['secret']);
       SaveToFile(SecretFile);
     finally
       Free;
     end;
     Port := 18000 + Random(20000);
     Url := 'http://127.0.0.1:' + IntToStr(Port);
-    TokA := Run([RelayPy, 'token', '--secret-file', SecretFile, '--user', 'ann', '--doc', 'proposal']);
-    TokB := Run([RelayPy, 'token', '--secret-file', SecretFile, '--user', 'bob', '--doc', 'proposal']);
-    TokV := Run([RelayPy, 'token', '--secret-file', SecretFile, '--user', 'vic', '--doc', 'proposal', '--role', 'viewer']);
+    TokA := Run(['token', '--secret-file', SecretFile, '--user', 'ann', '--doc', 'proposal']);
+    TokB := Run(['token', '--secret-file', SecretFile, '--user', 'bob', '--doc', 'proposal']);
+    TokV := Run(['token', '--secret-file', SecretFile, '--user', 'vic', '--doc', 'proposal', '--role', 'viewer']);
     Step('relay');
     StartRelay;
 

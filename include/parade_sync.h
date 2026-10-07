@@ -73,7 +73,15 @@ PD_API int32_t   pd_sync_can_redo(pd_sync* sync);
 PD_API pd_status pd_sync_pos_share(const pd_sync* sync, pd_pos pos, char* key, size_t cap, uint32_t* offset);
 PD_API pd_status pd_sync_pos_local(const pd_sync* sync, const char* key, uint32_t offset, pd_pos* out);
 
-/** release what pd_sync_state_vector, pd_sync_diff or pd_sync_dump returned */
+/**
+ * Updates merged into one, as a relay compacting its log does: applied in
+ * order to an empty yrs document (the first is usually the previous
+ * merge), whose whole state comes out as one update. PD_ERR_FORMAT when one
+ * does not apply or one is missing that another depends on (then *out is
+ * NULL). Release *out with pd_sync_free_data.
+ */
+PD_API pd_status pd_sync_merge(const void* const* updates, const size_t* lens, size_t n, void** out, size_t* len);
+/** release what pd_sync_state_vector, pd_sync_diff, pd_sync_merge or pd_sync_dump returned */
 PD_API void      pd_sync_free_data(void* data);
 /**
  * A canonical text of the document as the replica shares it (from_shared

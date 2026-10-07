@@ -784,6 +784,64 @@ static void test_catch_up(void) {
     pd_doc_free(d);
 }
 
+/* the relay's compaction: the log merged in two steps (the first merge, then it and the rest) gives
+   a newcomer the same document as reading the whole log */
+static void test_merge(void) {
+    const void** u = (const void**)malloc((size_t)(nlog_ + 1) * sizeof(void*));
+    size_t* n = (size_t*)malloc((size_t)(nlog_ + 1) * sizeof(size_t));
+    void* m1, *m2, *bad;
+    size_t n1, n2, nb, total = 0;
+    int k, half = nlog_ / 2;
+    pd_doc* d;
+    pd_sync* s;
+    char* a, *b;
+
+    for (k = 0; k < half; k++) {
+        u[k] = LOG[k].p;
+        n[k] = LOG[k].n;
+    }
+
+    CHECK(pd_sync_merge(u, n, (size_t)half, &m1, &n1) == PD_OK);
+    u[0] = m1;
+    n[0] = n1;
+
+    for (k = half; k < nlog_; k++) {
+        u[k - half + 1] = LOG[k].p;
+        n[k - half + 1] = LOG[k].n;
+        total += LOG[k].n;
+    }
+
+    for (k = 0; k < half; k++) {
+        total += LOG[k].n;
+    }
+
+    CHECK(pd_sync_merge(u, n, (size_t)(nlog_ - half + 1), &m2, &n2) == PD_OK);
+    CHECK(pd_doc_new(&d) == PD_OK);
+    CHECK(pd_sync_new(d, 99001, &s) == PD_OK);
+    CHECK(pd_sync_receive(s, m2, n2) == PD_OK);
+    a = pd_sync_dump(s, 0);
+    b = pd_sync_dump(R[1].s, 0);
+    CHECK(a && b && !strcmp(a, b));
+    printf("  %d updates (%zu bytes) merged into one of %zu bytes\n", nlog_, total, n2);
+    pd_sync_free_data(a);
+    pd_sync_free_data(b);
+    /* the last update without what it builds on, or garbage: refused */
+    u[0] = LOG[nlog_ - 1].p;
+    n[0] = LOG[nlog_ - 1].n;
+    CHECK(pd_sync_merge(u, n, 1, &bad, &nb) == PD_ERR_FORMAT && !bad);
+    u[0] = "\xff\xfe junk";
+    n[0] = 7;
+    CHECK(pd_sync_merge(u, n, 1, &bad, &nb) == PD_ERR_FORMAT && !bad);
+    CHECK(pd_sync_merge(NULL, NULL, 0, &bad, &nb) == PD_OK);
+    pd_sync_free_data(bad);
+    pd_sync_free_data(m1);
+    pd_sync_free_data(m2);
+    pd_sync_free(s);
+    pd_doc_free(d);
+    free(u);
+    free(n);
+}
+
 int main(void) {
     int k;
 
@@ -797,6 +855,8 @@ int main(void) {
     test_random();
     printf("catching up\n");
     test_catch_up();
+    printf("merging the log\n");
+    test_merge();
 
     for (k = 0; k < NREP; k++) {
         pd_sync_free(R[k].s);

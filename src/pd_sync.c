@@ -3556,6 +3556,59 @@ pd_status pd_sync_diff(pd_sync* s, const void* sv, size_t sv_len, void** out, si
     return p ? copy_out(p, n, out, len) : PD_ERR_FORMAT;
 }
 
+pd_status pd_sync_merge(const void* const* updates, const size_t* lens, size_t n, void** out, size_t* len) {
+    YOptions o = yoptions();
+    YDoc* y;
+    YTransaction* t;
+    YPendingUpdate* pu;
+    pd_status st = PD_OK;
+    uint32_t m = 0;
+    char* p;
+    size_t i;
+
+    if (!out || !len || (n && (!updates || !lens))) {
+        return PD_ERR_ARG;
+    }
+
+    *out = NULL;
+    *len = 0;
+    o.flags = Y_OFFSET_UTF16 | Y_SKIP_GC;    /* as every replica: deleted items kept for undo */
+    y = ydoc_new_with_options(o);
+
+    for (i = 0; i < n && st == PD_OK; i++) {
+        if (lens[i] > UINT32_MAX || (lens[i] && !updates[i])) {
+            st = PD_ERR_ARG;
+            break;
+        }
+
+        t = ydoc_write_transaction(y, 0, NULL);
+
+        if (ytransaction_apply(t, (const char*)updates[i], (uint32_t)lens[i]) != 0) {
+            st = PD_ERR_FORMAT;
+        }
+
+        ytransaction_commit(t);
+    }
+
+    if (st == PD_OK) {
+        t = ydoc_read_transaction(y);
+        pu = ytransaction_pending_update(t);
+
+        if (pu) {   /* waiting for an update it depends on: the input has a hole */
+            ypending_update_destroy(pu);
+            st = PD_ERR_FORMAT;
+        } else {
+            p = ytransaction_state_diff_v1(t, NULL, 0, &m);
+            st = p ? copy_out(p, m, out, len) : PD_ERR_FORMAT;
+        }
+
+        ytransaction_commit(t);
+    }
+
+    ydoc_destroy(y);
+    return st;
+}
+
 void pd_sync_free_data(void* data) {
     free(data);
 }
