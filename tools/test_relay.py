@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for parade_relay.py: tokens and roles, the log's order, catch-up, long polls, presence."""
+"""Tests for parade_relay.py: tokens and roles, the log's order, catch-up, long polls, presence,
+compaction (with a stand-in compactor that joins its input; pd_compact itself, if built, must refuse
+what is not yrs)."""
 
 import asyncio
 import os
@@ -106,8 +108,73 @@ async def main():
         check(len(p) == 1 and p[0]["name"] == "Ann" and p[0]["user"] == "ann" and p[0]["offset"] == 4, "sees the other")
 
     await runner.cleanup()
+    await compaction(tmp)
     print("relay tests:", "ok" if not fails else "%d failures" % fails)
     return 1 if fails else 0
+
+
+FAKE = r"""import struct, sys
+d = sys.stdin.buffer.read(); out = []; i = 0
+while i < len(d):
+    n, = struct.unpack(">I", d[i:i + 4]); out.append(d[i + 4:i + 4 + n]); i += 4 + n
+if b"bad" in out: sys.exit(1)
+sys.stdout.buffer.write(b"[" + b"+".join(out) + b"]")
+"""
+
+
+async def compaction(tmp):
+    fake = os.path.join(tmp, "fake_compact")
+    with open(fake, "w") as f:
+        f.write("#!%s\n%s" % (sys.executable, FAKE))
+    os.chmod(fake, 0o755)
+    relay = pr.Relay(pr.SqliteStore(os.path.join(tmp, "c.sqlite")), SECRET, fake, 3)
+    runner = web.AppRunner(pr.make_app(relay))
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    base = "http://127.0.0.1:%d/d/doc" % site._server.sockets[0].getsockname()[1]
+    ann = {"Authorization": "Bearer " + token("ann")}
+
+    async def info():
+        return await (await s.get(base + "/info", headers=ann)).json()
+
+    async def settle():
+        for _ in range(100):
+            if not relay.compacting:
+                return
+            await asyncio.sleep(0.05)
+
+    async with ClientSession() as s:
+        for i in range(1, 3):
+            await s.post(base + "/updates", data=b"u%d" % i, headers=ann)
+        check(await info() == {"last": 2, "snapshot": 0, "updates": 2}, "no compaction below the threshold")
+        await s.post(base + "/updates", data=b"u3", headers=ann)
+        await settle()
+        check(await info() == {"last": 3, "snapshot": 3, "updates": 0}, "compacted: %s" % await info())
+        for i in range(4, 6):
+            await s.post(base + "/updates", data=b"u%d" % i, headers=ann)
+        f = frames(await (await s.get(base + "/updates?after=0", headers=ann)).read())
+        check(f == [(3, b"[u1+u2+u3]"), (4, b"u4"), (5, b"u5")], "a newcomer gets the snapshot, then the rest: %s" % f)
+        f = frames(await (await s.get(base + "/updates?after=1", headers=ann)).read())
+        check([q for q, _ in f] == [3, 4, 5], "a reader inside the snapshot gets it whole")
+        f = frames(await (await s.get(base + "/updates?after=3", headers=ann)).read())
+        check(f == [(4, b"u4"), (5, b"u5")], "a reader past it does not")
+        await s.post(base + "/updates", data=b"u6", headers=ann)
+        await settle()
+        f = frames(await (await s.get(base + "/updates?after=0", headers=ann)).read())
+        check(f == [(6, b"[[u1+u2+u3]+u4+u5+u6]")], "the snapshot folds into the next: %s" % f)
+        r = await s.post(base + "/updates", data=b"u7", headers=ann)
+        check((await r.json())["seq"] == 7, "numbers go on after the dropped updates")
+        await s.post(base + "/updates", data=b"bad", headers=ann)
+        await s.post(base + "/updates", data=b"u9", headers=ann)
+        await settle()
+        check(await info() == {"last": 9, "snapshot": 6, "updates": 3}, "a refused compaction keeps the log")
+    await runner.cleanup()
+
+    real = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build-sync", "pd_compact")
+    if os.path.exists(real):
+        check(await pr.merge(real, [b"not yrs at all"]) is None, "pd_compact refuses garbage")
+        check(await pr.merge(real, []) is not None, "pd_compact: nothing in, an empty document out")
 
 
 if __name__ == "__main__":

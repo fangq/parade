@@ -10,7 +10,12 @@
   reads the relay's log after the last update it has, waiting on a long poll
   for new ones, and the main thread merges what arrives into the document.
   Carets go both ways as presence, and the others' are drawn in the editor
-  with their names. Undo in the editor undoes this editor's own edits only. }
+  with their names. Undo in the editor undoes this editor's own edits only.
+
+  With OutboxDir set, the outbox is also kept on disk (one file per server,
+  document and user, rewritten whole and renamed into place), so what was
+  typed offline outlives the editor: joining the same document later merges
+  it back in and sends it. }
 
 unit paradesync;
 
@@ -82,6 +87,8 @@ type
     FLock: TCriticalSection;
     FWake: TEvent;              { the sender: something to send }
     FOutbox: TStringList;       { updates not yet taken by the relay, oldest first }
+    FOutboxDir, FOutboxFile: string;
+    FOutboxDirty: Boolean;      { the outbox changed since it was last written }
     FInbox: TStringList;        { updates read from the relay, for the main thread }
     FLastSeq: Int64;
     FOnline: Boolean;
@@ -94,6 +101,8 @@ type
     FLastError: string;
     FSent, FReceived: Int64;
     procedure Tick(Sender: TObject);
+    procedure SaveOutbox;
+    function LoadOutbox: TStringList;
     function EditUndo(Sender: TObject; Redo: Boolean): Boolean;
     procedure EditReplacing(Sender: TObject);
     procedure SetState(AState: TParadeSyncState);
@@ -124,6 +133,10 @@ type
     property UpdatesSent: Int64 read FSent;
     property UpdatesReceived: Int64 read FReceived;
     property Color: UInt32 read FColor;
+    { where unsent updates are kept between sessions ('': in memory only); set before Start }
+    property OutboxDir: string read FOutboxDir write FOutboxDir;
+    { the file of the current session ('': none) }
+    property OutboxFile: string read FOutboxFile;
   end;
 
 function ParadeSyncStateName(S: TParadeSyncState): string;
@@ -200,6 +213,7 @@ begin
   S.FLock.Enter;
   try
     S.FOutbox.Add(B);
+    S.FOutboxDirty := True;
   finally
     S.FLock.Leave;
   end;
@@ -243,6 +257,7 @@ begin
   LastPresence := 0;
   while not Terminated do
   begin
+    FOwner.SaveOutbox;      { on disk before it is sent, and again once the relay took it }
     FOwner.FLock.Enter;
     try
       Have := FOwner.FOutbox.Count > 0;
@@ -272,7 +287,10 @@ begin
         FOwner.FLock.Enter;
         try
           if (FOwner.FOutbox.Count > 0) and (FOwner.FOutbox[0] = Item) then
+          begin
             FOwner.FOutbox.Delete(0);
+            FOwner.FOutboxDirty := True;
+          end;
           Inc(FOwner.FSent);
           FOwner.FOnline := True;
         finally
@@ -317,7 +335,10 @@ begin
           FOwner.FLock.Enter;
           try
             if (FOwner.FOutbox.Count > 0) and (FOwner.FOutbox[0] = Item) then
+            begin
               FOwner.FOutbox.Delete(0);
+              FOwner.FOutboxDirty := True;
+            end;
             FOwner.FLastError := 'read only: ' + E.Message;
           finally
             FOwner.FLock.Leave;
@@ -471,14 +492,127 @@ begin
   end;
 end;
 
+const
+  OUTBOX_MAGIC = 'PDOUTBOX1'#10;
+
+{ the outbox to its file, if it changed: written whole beside it, then renamed over it, so a crash
+  leaves the old file or the new one; no file when it is empty. Called by the sender thread, and by
+  Stop once that is gone. }
+procedure TParadeSync.SaveOutbox;
+var
+  Data, Tmp: RawByteString;
+  Empty: Boolean;
+  F: TFileStream;
+  I: Integer;
+  N: Cardinal;
+begin
+  if FOutboxFile = '' then
+    Exit;
+  FLock.Enter;
+  try
+    if not FOutboxDirty then
+      Exit;
+    FOutboxDirty := False;
+    Empty := FOutbox.Count = 0;
+    Data := OUTBOX_MAGIC;
+    for I := 0 to FOutbox.Count - 1 do
+    begin
+      N := Length(FOutbox[I]);
+      Data := Data + Chr(N shr 24) + Chr((N shr 16) and $FF) + Chr((N shr 8) and $FF) + Chr(N and $FF) + FOutbox[I];
+    end;
+  finally
+    FLock.Leave;
+  end;
+  try
+    if Empty then
+    begin
+      if FileExists(FOutboxFile) and not DeleteFile(FOutboxFile) then
+        raise EInOutError.Create('cannot delete ' + FOutboxFile);
+      Exit;
+    end;
+    ForceDirectories(ExtractFileDir(FOutboxFile));
+    Tmp := FOutboxFile + '.tmp';
+    F := TFileStream.Create(Tmp, fmCreate);
+    try
+      F.WriteBuffer(Data[1], Length(Data));
+      FileFlush(F.Handle);
+    finally
+      F.Free;
+    end;
+    if not RenameFile(Tmp, FOutboxFile) then
+      raise EInOutError.Create('cannot write ' + FOutboxFile);
+  except
+    on E: Exception do
+    begin
+      FLock.Enter;
+      try
+        FOutboxDirty := True;     { tried again next time }
+        FLastError := 'outbox: ' + E.Message;
+      finally
+        FLock.Leave;
+      end;
+    end;
+  end;
+end;
+
+{ the updates a previous session left unsent (nil: none, or not a readable outbox) }
+function TParadeSync.LoadOutbox: TStringList;
+var
+  Data: RawByteString;
+  F: TFileStream;
+  I: Integer;
+  N: Cardinal;
+begin
+  Result := nil;
+  if (FOutboxFile = '') or not FileExists(FOutboxFile) then
+    Exit;
+  try
+    F := TFileStream.Create(FOutboxFile, fmOpenRead or fmShareDenyWrite);
+    try
+      SetLength(Data, F.Size);
+      if Length(Data) > 0 then
+        F.ReadBuffer(Data[1], Length(Data));
+    finally
+      F.Free;
+    end;
+  except
+    Exit;
+  end;
+  if Copy(Data, 1, Length(OUTBOX_MAGIC)) <> OUTBOX_MAGIC then
+    Exit;
+  Result := TStringList.Create;
+  I := Length(OUTBOX_MAGIC) + 1;
+  while I + 3 <= Length(Data) do
+  begin
+    N := Cardinal(Byte(Data[I])) shl 24 or Cardinal(Byte(Data[I + 1])) shl 16 or Cardinal(Byte(Data[I + 2])) shl 8 or
+      Byte(Data[I + 3]);
+    if I + 4 + Int64(N) - 1 > Length(Data) then
+      Break;      { cut short: the whole records before it are kept }
+    Result.Add(Copy(Data, I + 4, N));
+    Inc(I, 4 + N);
+  end;
+end;
+
+function OutboxName(const Server, Doc, User: string): string;
+var
+  I: Integer;
+begin
+  Result := Server + '_' + Doc + '_' + User;
+  for I := 1 to Length(Result) do
+    if not (Result[I] in ['A'..'Z', 'a'..'z', '0'..'9', '-', '.']) then
+      Result[I] := '_';
+  Result := Result + '.outbox';
+end;
+
 function TParadeSync.Start(const Server, Doc, Token, UserName: string; Publish: Boolean): Boolean;
 var
   Http: TFPHTTPClient;
   Resp: TStringStream;
-  Body: RawByteString;
+  Body, Chunk: RawByteString;
   Last: Int64;
   H: Cardinal;
   I: Integer;
+  Saved: TStringList;
 begin
   Result := False;
   Stop;
@@ -492,7 +626,9 @@ begin
     H := H * 33 + Ord(UserName[I]);
   FColor := PALETTE[H mod 8];
   FLastError := '';
-  { what the relay has of it already }
+  { what the relay has of it already, all of it (a read returns a few megabytes at most) }
+  Body := '';
+  FLastSeq := 0;
   Http := TFPHTTPClient.Create(nil);
   Resp := TStringStream.Create('');
   try
@@ -500,8 +636,15 @@ begin
       Http.ConnectTimeout := 5000;
       Http.IOTimeout := 30000;
       Authorize(Http);
-      Http.HTTPMethod('GET', Url('/updates?after=0'), Resp, [200]);
-      Body := Resp.DataString;
+      repeat
+        FreeAndNil(Resp);
+        Resp := TStringStream.Create('');
+        Http.HTTPMethod('GET', Url('/updates?after=' + IntToStr(FLastSeq)), Resp, [200]);
+        Chunk := Resp.DataString;
+        Body := Body + Chunk;
+        ApplyFrames(Chunk, Last);     { FSync is nil: only the numbers }
+        FLastSeq := Last;
+      until (Chunk = '') or Publish;
     except
       on E: Exception do
       begin
@@ -528,12 +671,38 @@ begin
   end;
   pd_sync_set_sender(FSync, @OnSend, Self);
   FLastSeq := 0;
+  FOutboxDirty := False;
+  FOutboxFile := '';
+  if (FOutboxDir <> '') and (ParadeTokenRole(Token) <> 'viewer') then
+    FOutboxFile := IncludeTrailingPathDelimiter(FOutboxDir) + OutboxName(Server, Doc, UserName);
   if Publish then
-    pd_sync_publish(FSync)
+  begin
+    if FOutboxFile <> '' then
+      DeleteFile(FOutboxFile);    { left from an earlier document of this name: not this one }
+    pd_sync_publish(FSync);
+  end
   else
   begin
     ApplyFrames(Body, Last);
     FLastSeq := Last;
+    { what an earlier session typed and could not send: into the document, and on to the relay }
+    Saved := LoadOutbox;
+    if Saved <> nil then
+    try
+      for I := 0 to Saved.Count - 1 do
+        if Saved[I] <> '' then
+          pd_sync_receive(FSync, @Saved[I][1], Length(Saved[I]));
+      FLock.Enter;
+      try
+        for I := 0 to Saved.Count - 1 do
+          FOutbox.Insert(I, Saved[I]);    { before anything the merge itself wrote }
+        FOutboxDirty := True;
+      finally
+        FLock.Leave;
+      end;
+    finally
+      Saved.Free;
+    end;
     FEdit.ExternalChange;
     FEdit.Modified := False;
   end;
@@ -561,6 +730,8 @@ begin
     FreeAndNil(FSender);
     FreeAndNil(FPoller);
   end;
+  SaveOutbox;     { what is still unsent stays on disk for the next session; none: no file }
+  FOutboxFile := '';
   if FSync <> nil then
   begin
     pd_sync_free(FSync);

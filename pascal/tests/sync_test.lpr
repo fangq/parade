@@ -1,15 +1,17 @@
 { Two editors sharing a document through the relay (tools/parade_relay.py),
   driven headless: share and join, typing on each side and at once, the
-  others' carets, undo of one's own edits, and the relay going away and
-  coming back with edits made meanwhile. Run under a display (xvfb-run);
-  argument: the path of parade_relay.py. }
+  others' carets, undo of one's own edits, the relay going away and
+  coming back with edits made meanwhile, edits kept on disk across a quit,
+  and joining from a compacted log. Run under a display (xvfb-run);
+  arguments: the path of parade_relay.py, then of pd_compact. }
 program sync_test;
 
 {$mode objfpc}{$H+}
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, Process, parade, paradeedit, paradesync;
+  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, Process, FileUtil, fphttpclient, fpjson, jsonparser,
+  parade, paradeedit, paradesync;
 
 type
   TFunc = function: Boolean;
@@ -18,7 +20,7 @@ var
   Failures: Integer = 0;
   Checks: Integer = 0;
   Relay: TProcess;
-  RelayPy, Dir, SecretFile, DbFile, Url: string;
+  RelayPy, Compactor, Dir, SecretFile, DbFile, Url, OutboxDir: string;
   Port: Integer;
 
 procedure Step(const S: string);
@@ -56,6 +58,10 @@ begin
   Relay.Parameters.Add(SecretFile);
   Relay.Parameters.Add('--port');
   Relay.Parameters.Add(IntToStr(Port));
+  Relay.Parameters.Add('--compactor');
+  Relay.Parameters.Add(Compactor);
+  Relay.Parameters.Add('--compact-every');
+  Relay.Parameters.Add('5');
   Relay.Options := [poNoConsole];
   Relay.Execute;
   Sleep(1500);
@@ -93,6 +99,8 @@ var
   TokA, TokB, TokV: string;
   I: Integer;
   C: pd_pos;
+  J: TJSONObject;
+  F: string;
 
 function Same: Boolean;
 begin
@@ -107,6 +115,25 @@ end;
 function SeesBob: Boolean;
 begin
   Result := (SA.PeerCount = 1) and (SA.Peers[0].Name = 'Bob');
+end;
+
+function OutboxGone: Boolean;
+begin
+  Result := not FileExists(SA.OutboxFile) and (SA.State = pssSynced);
+end;
+
+{ what the relay says of the document's log }
+function Info(const Token: string): TJSONObject;
+var
+  H: TFPHTTPClient;
+begin
+  H := TFPHTTPClient.Create(nil);
+  try
+    H.AddHeader('Authorization', 'Bearer ' + Token);
+    Result := GetJSON(H.Get(Url + '/d/proposal/info')) as TJSONObject;
+  finally
+    H.Free;
+  end;
 end;
 
 function ASynced: Boolean;
@@ -131,7 +158,10 @@ begin
   Application.Initialize;
   try
     RelayPy := ExpandFileName(ParamStr(1));
+    Compactor := ExpandFileName(ParamStr(2));
     Dir := ExtractFilePath(ParamStr(0));
+    OutboxDir := Dir + 'sync_test.outbox';
+    DeleteDirectory(OutboxDir, False);
     SecretFile := Dir + 'sync_test.secret';
     DbFile := Dir + 'sync_test.sqlite';
     DeleteFile(DbFile);
@@ -166,6 +196,7 @@ begin
     Application.ProcessMessages;
     SA := TParadeSync.Create(Form, A);
     SB := TParadeSync.Create(Form, B);
+    SA.OutboxDir := OutboxDir;
 
     { 1. Ann shares her document; Bob joins and gets it }
     Step('share and join');
@@ -212,6 +243,7 @@ begin
     for I := 1 to 3 do
       A.InsertText(' offline' + IntToStr(I));
     Check(WaitFor(@AOffline, 20), 'Ann is told she is offline');
+    Check(FileExists(SA.OutboxFile), 'the unsent edits are on disk: ' + SA.OutboxFile);
     Step('back online');
     StartRelay;
     Check(WaitFor(@BothSynced, 60), 'back: what was typed offline arrives');
@@ -226,6 +258,41 @@ begin
     B.InsertText('Vandalism. ');
     WaitFor(@AOffline, 3);
     Check(Pos('Vandalism', B.DocumentText + A.DocumentText) = 0, 'a viewer cannot type');
+
+    { 8. Ann types with the relay away and quits; started again, she joins and the edits go out }
+    Step('outbox across a quit');
+    SB.Stop;
+    Check(SB.Start(Url, 'proposal', TokB, 'Bob', False), 'Bob back as an editor');
+    Check(WaitFor(@BothSynced, 15), 'Bob back');
+    StopRelay;
+    A.ProcessKey(VK_END, [ssCtrl]);
+    A.InsertText(' typed before quitting');
+    Check(WaitFor(@AOffline, 20), 'offline again');
+    F := SA.OutboxFile;
+    SA.Free;            { the editor quits }
+    Check(FileExists(F), 'what was not sent is kept: ' + F);
+    A.NewDocument;
+    StartRelay;
+    SA := TParadeSync.Create(Form, A);
+    SA.OutboxDir := OutboxDir;
+    Check(SA.Start(Url, 'proposal', TokA, 'Ann', False), 'Ann joins again: ' + SA.LastError);
+    Check(Pos('typed before quitting', A.DocumentText) > 0, 'her saved edits are back in her editor: ' + A.DocumentText);
+    Check(WaitFor(@BothSynced, 60), 'and reach Bob');
+    Check(Pos('typed before quitting', B.DocumentText) > 0, 'Bob has them: ' + B.DocumentText);
+    Check(WaitFor(@OutboxGone, 15), 'sent: the file is gone');
+
+    { 9. the log was compacted on the way, and a newcomer from the start still gets everything }
+    Step('compaction');
+    J := Info(TokA);
+    try
+      Check(J.Get('snapshot', 0) > 0, 'the relay compacted the log: ' + J.AsJSON);
+    finally
+      J.Free;
+    end;
+    SB.Stop;
+    B.NewDocument;
+    Check(SB.Start(Url, 'proposal', TokB, 'Bob', False), 'a fresh join');
+    Check(WaitFor(@BothSynced, 15), 'from the snapshot: the same document');
 
     { a picture of the two editors, the other's caret drawn in each }
     C := A.CaretPos;

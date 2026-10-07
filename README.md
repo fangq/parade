@@ -202,12 +202,20 @@ let write like an editor: updates are opaque to the relay).
     python3 tools/parade_relay.py token --secret-file relay.secret --user ann --doc proposal --role editor
 
 The log is SQLite by default, Postgres with `--db postgresql://...`
-(asyncpg). It is not compacted yet: a long-lived document's log keeps every
-update, and a new editor reads it all once.
+(asyncpg). With `--compactor build-sync/pd_compact` the relay compacts it:
+once `--compact-every` updates (500) follow a document's snapshot,
+`pd_compact` (a small yrs program, built by `make SYNC=yrs`) merges the
+snapshot and them into one update, which replaces them in one transaction;
+a reader from before the snapshot gets it first, then what follows. Deleted
+text is kept in the snapshot, so undo across it still works. A refused merge
+leaves the log as it was. `parade_relay.py compact --db ... --compactor ...
+--doc ...` does one by hand; `GET /d/<doc>/info` tells how far it got.
 
 **The editor side** (`pascal/paradesync.pas`, `TParadeSync`): an outbox one
-thread sends in order and retries until the relay takes it (nothing typed
-offline is lost while the program runs), another thread long-polls the log,
+thread sends in order and retries until the relay takes it, kept on disk
+too when `OutboxDir` is set (what was typed offline survives quitting: the
+next join of that document by that user merges it back and sends it),
+another thread long-polls the log,
 the main thread merges; the others' carets and selections are drawn in their
 colours with their names; Ctrl+Z undoes one's own edits; a viewer's editor
 is read-only. led has Share/Join and a status in the visual editor's

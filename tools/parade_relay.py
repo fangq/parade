@@ -9,6 +9,8 @@ the editors. Catch-up after any absence is "everything after the last
 sequence number I have", live updates are a long poll on the same request.
 
     parade_relay.py serve --db relay.sqlite --secret-file relay.secret [--port 8765]
+                          [--compactor build-sync/pd_compact --compact-every 500]
+    parade_relay.py compact --db relay.sqlite --compactor build-sync/pd_compact --doc proposal
     parade_relay.py serve --db postgresql://user@host/dbname --secret-file relay.secret
     parade_relay.py token --secret-file relay.secret --user ann --doc proposal --role editor [--days 30]
     parade_relay.py secret > relay.secret      # a new random signing key
@@ -22,7 +24,15 @@ HTTP API (Authorization: Bearer <token>):
                                         when there are none; X-Last-Seq: the newest
     POST /d/<doc>/presence           body: JSON {client, name, color, key, offset, anchor_key,
                                      anchor_offset} -> JSON list of the others seen in the last 30 s
+    GET  /d/<doc>/info               -> {"last": newest number, "snapshot": what it covers (0: none),
+                                         "updates": updates kept after it}
     GET  /health                     -> "ok"
+
+Compaction: with --compactor (pd_compact, built with Parade's SYNC=yrs), once a document has
+--compact-every updates after its snapshot the relay merges the snapshot and them into a new
+snapshot and drops the updates it covers, in one transaction. A read from before the snapshot gets
+the snapshot first (numbered as the last update it covers), then what came after: applying more
+than one lacks is harmless. The merge runs on the relay, not trusting any editor's state.
 
 Tokens are HS256 JWTs: {"sub": user, "doc": doc or "*", "role": "viewer" | "commenter" |
 "editor", "exp": ...}. A commenter is let write like an editor: the relay cannot see inside an
@@ -65,15 +75,21 @@ class SqliteStore:
         self.db.execute("pragma synchronous=full")
         self.db.execute("create table if not exists doc_update (doc text not null, seq integer not null,"
                         " client text, author text, data blob not null, at real not null, primary key (doc, seq))")
+        self.db.execute("create table if not exists doc_snapshot (doc text primary key, upto integer not null,"
+                        " data blob not null, at real not null)")
         self.lock = asyncio.Lock()
 
     async def append(self, doc, client, author, data):
         async with self.lock:   # one writer: sequence numbers in order, none twice
             return await asyncio.to_thread(self._append, doc, client, author, data)
 
+    def _last(self, doc):
+        u = self.db.execute("select coalesce(max(seq), 0) from doc_update where doc = ?", (doc,)).fetchone()[0]
+        s = self.db.execute("select coalesce(max(upto), 0) from doc_snapshot where doc = ?", (doc,)).fetchone()[0]
+        return max(u, s)
+
     def _append(self, doc, client, author, data):
-        cur = self.db.execute("select coalesce(max(seq), 0) from doc_update where doc = ?", (doc,))
-        seq = cur.fetchone()[0] + 1
+        seq = self._last(doc) + 1
         self.db.execute("insert into doc_update values (?, ?, ?, ?, ?, ?)", (doc, seq, client, author, data, time.time()))
         return seq
 
@@ -82,6 +98,11 @@ class SqliteStore:
 
     def _after(self, doc, seq, limit_bytes):
         out, size = [], 0
+        snap = self.db.execute("select upto, data from doc_snapshot where doc = ?", (doc,)).fetchone()
+        if snap and seq < snap[0]:   # from before the snapshot: the snapshot, then what follows it
+            out.append((snap[0], bytes(snap[1])))
+            size = len(snap[1])
+            seq = snap[0]
         for s, d in self.db.execute("select seq, data from doc_update where doc = ? and seq > ? order by seq", (doc, seq)):
             if out and size + len(d) > limit_bytes:
                 break
@@ -90,8 +111,42 @@ class SqliteStore:
         return out
 
     async def last(self, doc):
-        return await asyncio.to_thread(
-            lambda: self.db.execute("select coalesce(max(seq), 0) from doc_update where doc = ?", (doc,)).fetchone()[0])
+        return await asyncio.to_thread(self._last, doc)
+
+    async def compaction_input(self, doc):
+        """the snapshot and every update after it, and the number the last one has"""
+        return await asyncio.to_thread(self._compaction_input, doc)
+
+    def _compaction_input(self, doc):
+        snap = self.db.execute("select upto, data from doc_snapshot where doc = ?", (doc,)).fetchone()
+        base = snap[0] if snap else 0
+        rows = self.db.execute("select seq, data from doc_update where doc = ? and seq > ? order by seq",
+                               (doc, base)).fetchall()
+        parts = ([bytes(snap[1])] if snap else []) + [bytes(d) for _, d in rows]
+        return (rows[-1][0] if rows else base), parts
+
+    async def save_snapshot(self, doc, upto, data):
+        async with self.lock:
+            await asyncio.to_thread(self._save_snapshot, doc, upto, data)
+
+    def _save_snapshot(self, doc, upto, data):
+        self.db.execute("begin immediate")
+        try:
+            self.db.execute("insert or replace into doc_snapshot values (?, ?, ?, ?)", (doc, upto, data, time.time()))
+            self.db.execute("delete from doc_update where doc = ? and seq <= ?", (doc, upto))
+            self.db.execute("commit")
+        except BaseException:
+            self.db.execute("rollback")
+            raise
+
+    async def info(self, doc):
+        return await asyncio.to_thread(self._info, doc)
+
+    def _info(self, doc):
+        snap = self.db.execute("select upto from doc_snapshot where doc = ?", (doc,)).fetchone()
+        base = snap[0] if snap else 0
+        n = self.db.execute("select count(*) from doc_update where doc = ? and seq > ?", (doc, base)).fetchone()[0]
+        return {"last": self._last(doc), "snapshot": base, "updates": n}
 
 
 class PgStore:
@@ -108,13 +163,16 @@ class PgStore:
             await c.execute("create table if not exists doc_update (doc text not null, seq bigint not null,"
                             " client text, author text, data bytea not null, at timestamptz not null default now(),"
                             " primary key (doc, seq))")
+            await c.execute("create table if not exists doc_snapshot (doc text primary key, upto bigint not null,"
+                            " data bytea not null, at timestamptz not null default now())")
 
     async def append(self, doc, client, author, data):
         async with self.pool.acquire() as c:
             async with c.transaction():
                 # the document's rows locked while the next number is taken
                 await c.execute("select pg_advisory_xact_lock(hashtext($1))", doc)
-                seq = await c.fetchval("select coalesce(max(seq), 0) + 1 from doc_update where doc = $1", doc)
+                seq = 1 + await c.fetchval("select greatest((select coalesce(max(seq), 0) from doc_update where doc = $1),"
+                                           " (select coalesce(max(upto), 0) from doc_snapshot where doc = $1))", doc)
                 await c.execute("insert into doc_update (doc, seq, client, author, data) values ($1, $2, $3, $4, $5)",
                                 doc, seq, client, author, data)
                 return seq
@@ -122,6 +180,11 @@ class PgStore:
     async def after(self, doc, seq, limit_bytes):
         out, size = [], 0
         async with self.pool.acquire() as c:
+            snap = await c.fetchrow("select upto, data from doc_snapshot where doc = $1", doc)
+            if snap and seq < snap["upto"]:
+                out.append((snap["upto"], bytes(snap["data"])))
+                size = len(snap["data"])
+                seq = snap["upto"]
             for r in await c.fetch("select seq, data from doc_update where doc = $1 and seq > $2 order by seq", doc, seq):
                 if out and size + len(r["data"]) > limit_bytes:
                     break
@@ -131,13 +194,63 @@ class PgStore:
 
     async def last(self, doc):
         async with self.pool.acquire() as c:
-            return await c.fetchval("select coalesce(max(seq), 0) from doc_update where doc = $1", doc)
+            return await c.fetchval("select greatest((select coalesce(max(seq), 0) from doc_update where doc = $1),"
+                                    " (select coalesce(max(upto), 0) from doc_snapshot where doc = $1))", doc)
+
+    async def compaction_input(self, doc):
+        async with self.pool.acquire() as c:
+            snap = await c.fetchrow("select upto, data from doc_snapshot where doc = $1", doc)
+            base = snap["upto"] if snap else 0
+            rows = await c.fetch("select seq, data from doc_update where doc = $1 and seq > $2 order by seq", doc, base)
+            parts = ([bytes(snap["data"])] if snap else []) + [bytes(r["data"]) for r in rows]
+            return (rows[-1]["seq"] if rows else base), parts
+
+    async def save_snapshot(self, doc, upto, data):
+        async with self.pool.acquire() as c:
+            async with c.transaction():
+                await c.execute("insert into doc_snapshot (doc, upto, data) values ($1, $2, $3) on conflict (doc)"
+                                " do update set upto = excluded.upto, data = excluded.data, at = now()", doc, upto, data)
+                await c.execute("delete from doc_update where doc = $1 and seq <= $2", doc, upto)
+
+    async def info(self, doc):
+        async with self.pool.acquire() as c:
+            base = await c.fetchval("select coalesce(max(upto), 0) from doc_snapshot where doc = $1", doc)
+            n = await c.fetchval("select count(*) from doc_update where doc = $1 and seq > $2", doc, base)
+        return {"last": await self.last(doc), "snapshot": base, "updates": n}
+
+
+async def merge(compactor, parts):
+    """the parts merged into one update by pd_compact; None when it says no"""
+    proc = await asyncio.create_subprocess_exec(compactor, stdin=asyncio.subprocess.PIPE,
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    data = b"".join(struct.pack(">I", len(p)) + p for p in parts)
+    out, err = await proc.communicate(data)
+    if proc.returncode != 0 or not out:
+        print("compaction refused: %s" % err.decode(errors="replace").strip(), file=sys.stderr, flush=True)
+        return None
+    return out
+
+
+async def compact(store, compactor, doc):
+    """the document's snapshot and the updates after it, made one snapshot; False when nothing changed"""
+    upto, parts = await store.compaction_input(doc)
+    if len(parts) < 2:
+        return False
+    merged = await merge(compactor, parts)
+    if merged is None:
+        return False
+    await store.save_snapshot(doc, upto, merged)
+    return True
 
 
 class Relay:
-    def __init__(self, store, secret):
+    def __init__(self, store, secret, compactor=None, compact_every=500):
         self.store = store
         self.secret = secret
+        self.compactor = compactor
+        self.compact_every = compact_every
+        self.since = {}         # doc -> updates appended since the relay last looked
+        self.compacting = set()
         self.cond = {}          # doc -> asyncio.Condition, notified at every append
         self.presence = {}      # doc -> {client: (time, dict)}
 
@@ -182,7 +295,26 @@ class Relay:
         cond = self.condition(doc)
         async with cond:
             cond.notify_all()
+        if self.compactor:
+            self.since[doc] = self.since.get(doc, 0) + 1
+            if self.since[doc] >= self.compact_every and doc not in self.compacting:
+                self.since[doc] = 0
+                self.compacting.add(doc)
+                asyncio.create_task(self.compact_now(doc))
         return web.json_response({"seq": seq})
+
+    async def compact_now(self, doc):
+        try:
+            await compact(self.store, self.compactor, doc)
+        except Exception as e:  # the log stays as it was
+            print("compaction of %s failed: %s" % (doc, e), file=sys.stderr, flush=True)
+        finally:
+            self.compacting.discard(doc)
+
+    async def get_info(self, request):
+        doc = self.doc_of(request)
+        self.auth(request, doc)
+        return web.json_response(await self.store.info(doc))
 
     async def get_updates(self, request):
         doc = self.doc_of(request)
@@ -240,6 +372,7 @@ def make_app(relay):
     app.router.add_post("/d/{doc}/updates", relay.post_update)
     app.router.add_get("/d/{doc}/updates", relay.get_updates)
     app.router.add_post("/d/{doc}/presence", relay.post_presence)
+    app.router.add_get("/d/{doc}/info", relay.get_info)
     return app
 
 
@@ -259,6 +392,12 @@ def main():
     s.add_argument("--secret-file", required=True)
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--compactor", help="pd_compact, for log compaction (none: the log is kept whole)")
+    s.add_argument("--compact-every", type=int, default=500, help="updates after the snapshot that start one")
+    c = sub.add_parser("compact")
+    c.add_argument("--db", default="relay.sqlite")
+    c.add_argument("--compactor", required=True)
+    c.add_argument("--doc", required=True)
     t = sub.add_parser("token")
     t.add_argument("--secret-file", required=True)
     t.add_argument("--user", required=True)
@@ -271,6 +410,22 @@ def main():
     if a.cmd == "secret":
         print(secrets.token_urlsafe(48))
         return
+
+    async def open_store(db):
+        if db.startswith("postgresql://") or db.startswith("postgres://"):
+            store = PgStore(db)
+            await store.open()
+            return store
+        return SqliteStore(db)
+
+    if a.cmd == "compact":
+        async def once():
+            store = await open_store(a.db)
+            before = await store.info(a.doc)
+            done = await compact(store, a.compactor, a.doc)
+            print("%s: %s -> %s" % (a.doc, before, await store.info(a.doc) if done else "unchanged"))
+        asyncio.run(once())
+        return
     if jwt is None:
         sys.exit("PyJWT is needed (pip install pyjwt)")
     secret = read_secret(a.secret_file)
@@ -280,12 +435,8 @@ def main():
         return
 
     async def start():
-        if a.db.startswith("postgresql://") or a.db.startswith("postgres://"):
-            store = PgStore(a.db)
-            await store.open()
-        else:
-            store = SqliteStore(a.db)
-        runner = web.AppRunner(make_app(Relay(store, secret)))
+        store = await open_store(a.db)
+        runner = web.AppRunner(make_app(Relay(store, secret, a.compactor, max(2, a.compact_every))))
         await runner.setup()
         await web.TCPSite(runner, a.host, a.port).start()
         print("relay on http://%s:%d, log in %s" % (a.host, a.port, a.db), flush=True)

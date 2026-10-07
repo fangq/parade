@@ -39,10 +39,11 @@ SO      := $(BUILD)/libparade.so
 TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout $(BUILD)/test_pdf $(BUILD)/test_convert
 ifeq ($(SYNC),yrs)
 TESTS   += $(BUILD)/test_sync
+TOOLS_SYNC := $(BUILD)/pd_compact
 endif
 BENCH   := $(BUILD)/bench_parade
 
-all: $(LIB) $(SO) $(TESTS) $(BENCH) $(BUILD)/pd_dump $(BUILD)/pd_conv
+all: $(LIB) $(SO) $(TESTS) $(BENCH) $(BUILD)/pd_dump $(BUILD)/pd_conv $(TOOLS_SYNC)
 
 $(BUILD)/%.o: src/%.c include/parade.h include/parade_doc.h include/parade_layout.h include/parade_convert.h \
            include/parade_sync.h \
@@ -57,6 +58,10 @@ $(SO): $(OBJ)
 
 $(BUILD)/test_%: tests/test_%.c $(LIB)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) $< $(LIB) -o $@ $(LDLIBS)
+
+# the relay's log compaction (tools/parade_relay.py --compactor)
+$(BUILD)/pd_compact: tools/pd_compact.c | $(BUILD)
+	$(CC) $(PD_CFLAGS) $(CFLAGS) $< -o $@ $(LDLIBS)
 
 $(BENCH): bench/bench_parade.c $(LIB)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) $< $(LIB) -o $@ $(LDLIBS)
@@ -141,11 +146,11 @@ pascal-edit: $(BUILD)/pascal/lib/libparade.a $(BUILD)/pd_dump
 # two editors sharing a document through tools/parade_relay.py, headless under Xvfb (SYNC=yrs build in
 # build-sync/, the relay needs python3 with aiohttp and PyJWT)
 pascal-sync:
-	$(MAKE) SYNC=yrs BUILD=build-sync build-sync/pascal/lib/libparade.a
+	$(MAKE) SYNC=yrs BUILD=build-sync build-sync/pascal/lib/libparade.a build-sync/pd_compact
 	cp $(YRS_DIR)/target/release/libyrs.a build-sync/pascal/lib/
 	$(LAZBUILD) pascal/tests/sync_test.lpi
 	Xvfb $(XVFB_DISPLAY) -screen 0 1400x1000x24 >/dev/null 2>&1 & echo $$! > build-sync/pascal/xvfb.pid; sleep 2; \
-	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./build-sync/pascal/sync_test tools/parade_relay.py \
+	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./build-sync/pascal/sync_test tools/parade_relay.py build-sync/pd_compact \
 	    < /dev/null); rc=$$?; kill `cat build-sync/pascal/xvfb.pid`; exit $$rc
 
 pascal-demo: $(BUILD)/pascal/lib/libparade.a
