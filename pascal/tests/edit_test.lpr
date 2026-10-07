@@ -8,6 +8,17 @@ uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, IntfGraphics, FPImage, parade, paradeedit;
 
+type
+  TCounter = class
+    N: Integer;
+    procedure Hit(Sender: TObject);
+  end;
+
+procedure TCounter.Hit(Sender: TObject);
+begin
+  Inc(N);
+end;
+
 var
   Failures: Integer = 0;
   Checks: Integer = 0;
@@ -80,6 +91,10 @@ var
   Bmp: TBitmap;
   PX: TColor;
   Cm: pd_comment;
+  Pp: pd_para_props;
+  Lst: TStringList;
+  Lbl: array[0..63] of AnsiChar;
+  Counter: TCounter;
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -294,6 +309,142 @@ begin
     end;
   end;
 
+
+  { 8b. the Home tab's operations: character and paragraph formatting, lists, styles }
+  Step('home');
+  E.NewDocument;
+  E.InsertText('Plain text here');
+  E.ProcessKey(VK_HOME, []);
+  for I := 1 to 6 do
+    E.ProcessKey(VK_RIGHT, []);
+  for I := 1 to 4 do
+    E.ProcessKey(VK_RIGHT, [ssShift]);
+  Check(E.SelectedText = 'text', 'select "text": ' + E.SelectedText);
+  E.SetFontSize(18);
+  Check(E.CurrentCharProps.size = 18 * PD_SP_PER_PT, 'font size 18');
+  E.StepFontSize(True);
+  Check(E.CurrentCharProps.size = 20 * PD_SP_PER_PT, 'a step up: 20');
+  E.StepFontSize(False);
+  E.StepFontSize(False);
+  Check(E.CurrentCharProps.size = 16 * PD_SP_PER_PT, 'two down: 16');
+  Lst := TStringList.Create;
+  try
+    E.GetFontFamilies(Lst);
+    Check(Lst.Count > 0, 'font families');
+    if Lst.Count > 0 then
+    begin
+      E.SetFontFamily(Lst[Lst.Count - 1]);
+      Check(string(E.CurrentCharProps.family) = Lst[Lst.Count - 1], 'family: ' + E.CurrentCharProps.family);
+    end;
+    E.GetParagraphStyles(Lst);
+    Check(Lst.IndexOf('Heading 1') >= 0, 'paragraph styles: ' + Lst.CommaText);
+  finally
+    Lst.Free;
+  end;
+  E.ToggleStrike;
+  Check(E.CurrentCharProps.strike <> 0, 'strike');
+  E.ToggleSuperscript;
+  Check(E.CurrentCharProps.shift = PD_SHIFT_SUPER, 'superscript');
+  E.ToggleSubscript;
+  Check(E.CurrentCharProps.shift = PD_SHIFT_SUB, 'subscript in its place');
+  E.ToggleSubscript;
+  Check(E.CurrentCharProps.shift = PD_SHIFT_NONE, 'and off');
+  E.SetTextColor($C00000);
+  Check(E.CurrentCharProps.color and $FFFFFF = $C00000, 'colour');
+  E.SetHighlight($FFFF00);
+  Check(E.CurrentCharProps.background and $FFFFFF = $FFFF00, 'highlight');
+  E.SetHighlight(-1);
+  Check(E.CurrentCharProps.background = 0, 'no highlight');
+  E.ClearFormatting;
+  Props := E.CurrentCharProps;
+  Check((Props.size <> 16 * PD_SP_PER_PT) and (Props.strike = 0) and (Props.color and $FFFFFF <> $C00000),
+    'formatting cleared');
+  Check(E.DocumentText = 'Plain text here', 'the text untouched: ' + E.DocumentText);
+
+  { nothing selected: bold for what is typed next, one undo with it }
+  E.ProcessKey(VK_END, []);
+  E.ToggleBold;
+  Check(E.CurrentCharProps.weight = 700, 'bold waiting at the caret');
+  Check(E.DocumentText = 'Plain text here', 'nothing changed yet');
+  E.InsertText(' strong');
+  N := 0;
+  pd_doc_para_runs(E.Doc, E.CaretPos.block, nil, 0, N);
+  SetLength(Runs, N);
+  if N > 0 then
+    pd_doc_para_runs(E.Doc, E.CaretPos.block, @Runs[0], N, N);
+  if N > 0 then
+    pd_doc_format_resolve(E.Doc, E.CaretPos.block, Runs[N - 1].format, Props);
+  Check((N >= 2) and (Runs[N - 1].start = 15) and (Props.weight = 700), 'typed text is bold');
+  E.InsertText('er');
+  Check(E.CurrentCharProps.weight = 700, 'and typing goes on bold');
+  E.Undo;
+  E.Undo;
+  Check(E.DocumentText = 'Plain text here', 'typed bold text undone: ' + E.DocumentText);
+  E.ToggleItalic;
+  E.ProcessKey(VK_HOME, []);
+  Check(E.CurrentCharProps.italic = 0, 'formatting waiting at the caret goes when it moves');
+
+  { paragraphs }
+  E.SetAlignment(PD_ALIGN_CENTER);
+  Check(E.CurrentParaProps.align = PD_ALIGN_CENTER, 'centred');
+  E.ChangeIndent(True);
+  E.ChangeIndent(True);
+  Check(E.CurrentParaProps.indent_left = 72 * PD_SP_PER_PT, 'indent twice: an inch');
+  E.ChangeIndent(False);
+  Pp := E.CurrentParaProps;
+  Check((Pp.indent_left = 36 * PD_SP_PER_PT) and (Pp.align = PD_ALIGN_CENTER), 'back half an inch, still centred');
+  E.SetLineSpacing(1500);
+  E.SetParaSpacing(6, 12);
+  Pp := E.CurrentParaProps;
+  Check((Pp.line_spacing = 1500) and (Pp.space_before = 6 * PD_SP_PER_PT) and (Pp.space_after = 12 * PD_SP_PER_PT),
+    'spacing');
+  E.Undo;
+  Check(E.CurrentParaProps.space_after <> 12 * PD_SP_PER_PT, 'spacing undone');
+
+  { lists }
+  E.ProcessKey(VK_END, []);
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Second');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Third');
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  E.ProcessKey(VK_END, [ssCtrl, ssShift]);
+  E.ToggleList(PD_NUM_DECIMAL);
+  Check(E.CurrentListFormat = PD_NUM_DECIMAL, 'numbered');
+  pd_doc_list_label(E.Doc, E.CaretPos.block, @Lbl[0], 64);
+  Check(string(Lbl) = '3.', 'the third is 3.: ' + Lbl);
+  E.ProcessKey(VK_HOME, []);
+  E.ChangeIndent(True);
+  pd_doc_list_label(E.Doc, E.CaretPos.block, @Lbl[0], 64);
+  Check(string(Lbl) = 'a.', 'indented in a list: a level down, a.: ' + Lbl);
+  E.ChangeIndent(False);
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  E.ProcessKey(VK_END, [ssCtrl, ssShift]);
+  E.ToggleList(PD_NUM_DECIMAL);
+  Check(E.CurrentListFormat = -1, 'numbering off again');
+  E.ToggleList(PD_NUM_BULLET);
+  Check(E.CurrentListFormat = PD_NUM_BULLET, 'bullets');
+  E.ToggleList(PD_NUM_DECIMAL);
+  Check(E.CurrentListFormat = PD_NUM_DECIMAL, 'bullets to numbers');
+
+  { styles, and the toolbar is told }
+  Counter := TCounter.Create;
+  try
+    E.OnSelectionChange := @Counter.Hit;
+    E.ProcessKey(VK_HOME, [ssCtrl]);
+    E.SetParagraphStyle('Heading 1');
+    Check(E.CurrentStyleName = 'Heading 1', 'style: ' + E.CurrentStyleName);
+    E.Invalidate;
+    for I := 1 to 20 do
+    begin
+      Application.ProcessMessages;
+      Sleep(10);
+    end;
+    Check(Counter.N > 0, 'the selection-change event fired');
+    E.OnSelectionChange := nil;
+  finally
+    Counter.Free;
+  end;
 
   { 9. review: tracked changes and comments }
   Step('review');

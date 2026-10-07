@@ -252,7 +252,13 @@ how to join). File > Join Shared Document takes the link.
   and selection are document markers; typing, Enter/Shift+Enter,
   Backspace/Delete across paragraphs, arrows/Home/End/PgUp/PgDn with
   Shift selection, mouse click/drag/double-click, Ctrl+Z/Y/A/B/I/U/C/X/V,
-  zoom (Ctrl+wheel), paragraph styles. Copy puts the selection on the
+  zoom (Ctrl+wheel), paragraph styles. For a toolbar: font family and
+  size (and a step up or down), bold/italic/underline/strike,
+  super/subscript, colour, highlight, clear formatting -- on the
+  selection, or with none on what is typed next -- alignment, indents (a
+  list level in a list), line and paragraph spacing, bullets and
+  numbering, the current character/paragraph properties and style, and
+  an OnSelectionChange event to show them by. Copy puts the selection on the
   clipboard as Parade JData, HTML (CF_HTML on Windows), RTF and text;
   paste takes the richest. Load/save by extension: .pdoc/.bpdoc, .docx,
   .rtf, .html, .md, .tex (save), .txt, .pdf (save).

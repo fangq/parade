@@ -37,6 +37,8 @@ type
   end;
   PGlyphBmp = ^TGlyphBmp;
 
+  TParadeBlockArray = array of pd_block_id;
+
   { an undo or redo done elsewhere (a collaboration binding's own-edits undo); True when it did one }
   TParadeUndoEvent = function(Sender: TObject; Redo: Boolean): Boolean of object;
 
@@ -81,6 +83,11 @@ type
     FDragging: Boolean;
     FFileName: string;
     FOnChange: TNotifyEvent;
+    FOnSelectionChange: TNotifyEvent;
+    FSelSig: string;               { caret, anchor and document revision when the toolbar was last told }
+    FSelQueued: Boolean;
+    FPending: pd_char_props;       { formatting chosen with nothing selected: for what is typed next, here }
+    FPendingAt: pd_pos;
     FModified: Boolean;
     FPageGap: Integer;
     FBack: TBitmap;                { the pages as last drawn, on the display's side: a paint copies from it }
@@ -144,6 +151,11 @@ type
     procedure EnsureCaretVisible;
     function PointToPos(X, Y: Integer; out P: pd_pos): Boolean;
     procedure ToggleCharProp(Mask: UInt32);
+    procedure CheckSelection;
+    procedure SelectionNotify(Data: PtrInt);
+    function PendingHere: Boolean;
+    function SelectedParagraphs: TParadeBlockArray;
+    function ListFormatOf(Block: pd_block_id): Integer;
     function PropsAt(const P: pd_pos): pd_char_props;
     function FormatAt(const P: pd_pos): pd_format_id;
     procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
@@ -195,6 +207,46 @@ type
     procedure ToggleItalic;
     procedure ToggleUnderline;
     procedure SetParagraphStyle(const StyleName: string);
+
+    { ---- character formatting: the selection, or with none what is typed next at the caret ---- }
+    { the masked fields of Props over the selection }
+    procedure ApplyCharProps(const Props: pd_char_props);
+    { the formatting where the selection starts (with none: what typing at the caret gets) }
+    function CurrentCharProps: pd_char_props;
+    procedure SetFontFamily(const Family: string);
+    procedure SetFontSize(Points: Double);
+    { the next size up or down the usual list (8, 9, 10, 11, 12, 14, 16, 18, 20, 24, ...) }
+    procedure StepFontSize(Up: Boolean);
+    procedure ToggleStrike;
+    procedure ToggleSuperscript;
+    procedure ToggleSubscript;
+    { $RRGGBB; -1: the style's colour }
+    procedure SetTextColor(RGB: Integer);
+    { $RRGGBB; -1: none }
+    procedure SetHighlight(RGB: Integer);
+    { direct character formatting removed, styles kept }
+    procedure ClearFormatting;
+
+    { ---- paragraph formatting: every paragraph the selection touches ---- }
+    { the masked fields of Props set on each paragraph, its other direct properties kept }
+    procedure ApplyParaProps(const Props: pd_para_props);
+    { the paragraph at the caret: its style's properties with its own over them }
+    function CurrentParaProps: pd_para_props;
+    procedure SetAlignment(AAlign: Integer);    { PD_ALIGN_* }
+    { half an inch more or less left indent; in a list, a level deeper or shallower }
+    procedure ChangeIndent(Deeper: Boolean);
+    procedure SetLineSpacing(PerMille: Integer);   { 1000: single }
+    procedure SetParaSpacing(Before, After: Double);    { points; < 0: unchanged }
+    { a bulleted (PD_NUM_BULLET) or numbered (PD_NUM_DECIMAL ...) list, or back to plain paragraphs
+      when they all are that kind of list already }
+    procedure ToggleList(AFormat: Integer);
+    { PD_NUM_* of the list the caret's paragraph is in, -1 when none }
+    function CurrentListFormat: Integer;
+    { the paragraph styles, and the caret's }
+    procedure GetParagraphStyles(List: TStrings);
+    function CurrentStyleName: string;
+    { the font families the editor has (AddFont), sorted }
+    procedure GetFontFamilies(List: TStrings);
     function SelectedText: string;
     procedure CopyToClipboard;
     procedure CutToClipboard;
@@ -249,6 +301,8 @@ type
     property Anchors;
     property Zoom: Double read FZoom write SetZoom;
     property OnChange: TNotifyEvent read FOnChange write FOnChange;
+    { the caret moved, the selection changed or the document did: for a toolbar showing what is here }
+    property OnSelectionChange: TNotifyEvent read FOnSelectionChange write FOnSelectionChange;
     property TabStop default True;
   end;
 
@@ -783,6 +837,7 @@ destructor TParadeEdit.Destroy;
 var
   I: Integer;
 begin
+  Application.RemoveAsyncCalls(Self);
   if FLayout <> nil then
     pd_layout_free(FLayout);
   if FDoc <> nil then
@@ -1685,7 +1740,7 @@ begin
     Exit;
   if S = '' then
     Exit;
-  Grouped := HasSelection or (Pos(#10, S) > 0);
+  Grouped := HasSelection or (Pos(#10, S) > 0) or PendingHere;     { the text and its formatting: one undo }
   { text typed over a selection takes the format of the selection's first character }
   Fmt := PD_FORMAT_INHERIT;
   if HasSelection then
@@ -1713,6 +1768,11 @@ begin
       Lines.Free;
     end;
   end;
+  { formatting chosen with nothing selected, on what was just typed where it was chosen }
+  if (FPending.mask <> 0) and (Pos(#10, S) = 0) and (After.block = FPendingAt.block) and
+     (After.offset = FPendingAt.offset + UInt32(Length(S))) then
+    pd_doc_set_char_props(FDoc, PdRange(FPendingAt, After), FPending);
+  FPending.mask := 0;
   if Grouped then
     pd_doc_end_group(FDoc);
   pd_doc_marker_set(FDoc, FCaret, After);
@@ -1748,11 +1808,7 @@ procedure TParadeEdit.ToggleCharProp(Mask: UInt32);
 var
   Cur, Props: pd_char_props;
 begin
-  if FReadOnly then
-    Exit;
-  if not HasSelection then
-    Exit;
-  Cur := PropsAt(SelStart);   { the new state is the opposite of the selection start's }
+  Cur := CurrentCharProps;   { the new state is the opposite of the selection start's }
   FillChar(Props, SizeOf(Props), 0);
   Props.mask := Mask;
   if Mask = PD_CP_WEIGHT then
@@ -1762,9 +1818,492 @@ begin
   else if Mask = PD_CP_ITALIC then
     Props.italic := Ord(Cur.italic = 0)
   else if Mask = PD_CP_UNDERLINE then
-    Props.underline := Ord(Cur.underline = 0);
-  pd_doc_set_char_props(FDoc, PdRange(SelStart, SelEnd), Props);
+    Props.underline := Ord(Cur.underline = 0)
+  else if Mask = PD_CP_STRIKE then
+    Props.strike := Ord(Cur.strike = 0);
+  ApplyCharProps(Props);
+end;
+
+{ the masked fields of B over A }
+procedure MergeCharProps(var A: pd_char_props; const B: pd_char_props);
+begin
+  if B.mask and PD_CP_FAMILY <> 0 then A.family := B.family;
+  if B.mask and PD_CP_SIZE <> 0 then A.size := B.size;
+  if B.mask and PD_CP_WEIGHT <> 0 then A.weight := B.weight;
+  if B.mask and PD_CP_ITALIC <> 0 then A.italic := B.italic;
+  if B.mask and PD_CP_COLOR <> 0 then A.color := B.color;
+  if B.mask and PD_CP_BACKGROUND <> 0 then A.background := B.background;
+  if B.mask and PD_CP_UNDERLINE <> 0 then A.underline := B.underline;
+  if B.mask and PD_CP_STRIKE <> 0 then A.strike := B.strike;
+  if B.mask and PD_CP_SHIFT <> 0 then A.shift := B.shift;
+  A.mask := A.mask or B.mask;
+end;
+
+function TParadeEdit.PendingHere: Boolean;
+begin
+  Result := (FPending.mask <> 0) and not HasSelection and (FPendingAt.block = CaretPos.block) and
+    (FPendingAt.offset = CaretPos.offset);
+end;
+
+procedure TParadeEdit.ApplyCharProps(const Props: pd_char_props);
+begin
+  if FReadOnly or (Props.mask = 0) then
+    Exit;
+  if HasSelection then
+  begin
+    pd_doc_set_char_props(FDoc, PdRange(SelStart, SelEnd), Props);
+    FPending.mask := 0;
+    Changed;
+  end
+  else
+  begin   { nothing selected: kept for what is typed next, here }
+    if not PendingHere then
+    begin
+      FillChar(FPending, SizeOf(FPending), 0);
+      FPendingAt := CaretPos;
+    end;
+    MergeCharProps(FPending, Props);
+    CheckSelection;
+  end;
+end;
+
+function TParadeEdit.CurrentCharProps: pd_char_props;
+var
+  P: pd_pos;
+begin
+  P := SelStart;
+  if (not HasSelection) and (P.offset > 0) then
+    P.offset := P.offset - 1;     { typing at the caret continues the character before it }
+  Result := PropsAt(P);
+  if PendingHere then
+    MergeCharProps(Result, FPending);
+end;
+
+procedure TParadeEdit.SetFontFamily(const Family: string);
+var
+  P: pd_char_props;
+begin
+  if Family = '' then
+    Exit;
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_CP_FAMILY;
+  StrPLCopy(P.family, Family, High(P.family));
+  ApplyCharProps(P);
+end;
+
+procedure TParadeEdit.SetFontSize(Points: Double);
+var
+  P: pd_char_props;
+begin
+  if (Points < 1) or (Points > 1600) then
+    Exit;
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_CP_SIZE;
+  P.size := Round(Points * PD_SP_PER_PT);
+  ApplyCharProps(P);
+end;
+
+const
+  FONT_STEPS: array[0..15] of Double = (8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72, 96);
+
+procedure TParadeEdit.StepFontSize(Up: Boolean);
+var
+  Cur: Double;
+  I: Integer;
+begin
+  Cur := CurrentCharProps.size / PD_SP_PER_PT;
+  if Up then
+  begin
+    for I := 0 to High(FONT_STEPS) do
+      if FONT_STEPS[I] > Cur + 0.01 then
+      begin
+        SetFontSize(FONT_STEPS[I]);
+        Exit;
+      end;
+    SetFontSize(Cur + 12);
+  end
+  else
+  begin
+    for I := High(FONT_STEPS) downto 0 do
+      if FONT_STEPS[I] < Cur - 0.01 then
+      begin
+        SetFontSize(FONT_STEPS[I]);
+        Exit;
+      end;
+    if Cur > 2 then
+      SetFontSize(Cur - 1);
+  end;
+end;
+
+procedure TParadeEdit.ToggleStrike;
+begin
+  ToggleCharProp(PD_CP_STRIKE);
+end;
+
+procedure TParadeEdit.ToggleSuperscript;
+var
+  P: pd_char_props;
+begin
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_CP_SHIFT;
+  if CurrentCharProps.shift <> PD_SHIFT_SUPER then
+    P.shift := PD_SHIFT_SUPER;
+  ApplyCharProps(P);
+end;
+
+procedure TParadeEdit.ToggleSubscript;
+var
+  P: pd_char_props;
+begin
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_CP_SHIFT;
+  if CurrentCharProps.shift <> PD_SHIFT_SUB then
+    P.shift := PD_SHIFT_SUB;
+  ApplyCharProps(P);
+end;
+
+procedure TParadeEdit.SetTextColor(RGB: Integer);
+var
+  P: pd_char_props;
+begin
+  if RGB < 0 then
+  begin   { back to the style's colour }
+    if HasSelection and not FReadOnly then
+    begin
+      pd_doc_clear_char_props(FDoc, PdRange(SelStart, SelEnd), PD_CP_COLOR);
+      Changed;
+    end;
+    Exit;
+  end;
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_CP_COLOR;
+  P.color := $FF000000 or UInt32(RGB and $FFFFFF);
+  ApplyCharProps(P);
+end;
+
+procedure TParadeEdit.SetHighlight(RGB: Integer);
+var
+  P: pd_char_props;
+begin
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_CP_BACKGROUND;
+  if RGB >= 0 then
+    P.background := $FF000000 or UInt32(RGB and $FFFFFF);   { 0: none }
+  ApplyCharProps(P);
+end;
+
+procedure TParadeEdit.ClearFormatting;
+begin
+  FPending.mask := 0;
+  if FReadOnly or not HasSelection then
+    Exit;
+  pd_doc_clear_char_props(FDoc, PdRange(SelStart, SelEnd), $FFFFFFFF and not UInt32(PD_CP_REVISION));
   Changed;
+end;
+
+{ ---- paragraphs ---- }
+
+function TParadeEdit.SelectedParagraphs: TParadeBlockArray;
+var
+  B: pd_block_id;
+begin
+  Result := nil;
+  B := SelStart.block;
+  while B <> 0 do
+  begin
+    SetLength(Result, Length(Result) + 1);
+    Result[High(Result)] := B;
+    if B = SelEnd.block then
+      Break;
+    B := pd_doc_next_paragraph(FDoc, B);
+  end;
+end;
+
+{ the masked fields of B over A }
+procedure MergeParaProps(var A: pd_para_props; const B: pd_para_props);
+begin
+  if B.mask and PD_PP_ALIGN <> 0 then A.align := B.align;
+  if B.mask and PD_PP_INDENT_LEFT <> 0 then A.indent_left := B.indent_left;
+  if B.mask and PD_PP_INDENT_RIGHT <> 0 then A.indent_right := B.indent_right;
+  if B.mask and PD_PP_INDENT_FIRST <> 0 then A.indent_first := B.indent_first;
+  if B.mask and PD_PP_SPACE_BEFORE <> 0 then A.space_before := B.space_before;
+  if B.mask and PD_PP_SPACE_AFTER <> 0 then A.space_after := B.space_after;
+  if B.mask and PD_PP_LINE_SPACING <> 0 then A.line_spacing := B.line_spacing;
+  A.mask := A.mask or B.mask;
+end;
+
+procedure TParadeEdit.ApplyParaProps(const Props: pd_para_props);
+var
+  Paras: TParadeBlockArray;
+  Cur: pd_para_props;
+  I: Integer;
+begin
+  if FReadOnly or (Props.mask = 0) then
+    Exit;
+  Paras := SelectedParagraphs;
+  pd_doc_begin_group(FDoc, 'Paragraph');
+  for I := 0 to High(Paras) do
+  begin
+    FillChar(Cur, SizeOf(Cur), 0);
+    pd_doc_para_props(FDoc, Paras[I], Cur);     { its own, kept but for what changes }
+    MergeParaProps(Cur, Props);
+    pd_doc_set_para_props(FDoc, Paras[I], Cur);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+function TParadeEdit.CurrentParaProps: pd_para_props;
+var
+  Info: pd_block_info;
+  Own: pd_para_props;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.line_spacing := 1000;
+  if pd_doc_block_info(FDoc, CaretPos.block, Info) <> PD_OK then
+    Exit;
+  if Info.style <> 0 then
+    pd_doc_style_resolve(FDoc, Info.style, @Result, nil);
+  FillChar(Own, SizeOf(Own), 0);
+  pd_doc_para_props(FDoc, CaretPos.block, Own);
+  MergeParaProps(Result, Own);
+end;
+
+procedure TParadeEdit.SetAlignment(AAlign: Integer);
+var
+  P: pd_para_props;
+begin
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_PP_ALIGN;
+  P.align := AAlign;
+  ApplyParaProps(P);
+end;
+
+procedure TParadeEdit.ChangeIndent(Deeper: Boolean);
+const
+  STEP = 36 * PD_SP_PER_PT;   { half an inch }
+var
+  Paras: TParadeBlockArray;
+  Info: pd_block_info;
+  Own, Style: pd_para_props;
+  I, Lvl: Integer;
+  NewLeft: pd_sp;
+begin
+  if FReadOnly then
+    Exit;
+  Paras := SelectedParagraphs;
+  pd_doc_begin_group(FDoc, 'Indent');
+  for I := 0 to High(Paras) do
+  begin
+    if pd_doc_block_info(FDoc, Paras[I], Info) <> PD_OK then
+      Continue;
+    if Info.list <> 0 then
+    begin   { in a list: a level deeper or shallower }
+      Lvl := Info.list_level + 2 * Ord(Deeper) - 1;
+      if Lvl < 0 then Lvl := 0;
+      if Lvl > 8 then Lvl := 8;
+      pd_doc_set_list(FDoc, Paras[I], Info.list, Lvl);
+      Continue;
+    end;
+    FillChar(Style, SizeOf(Style), 0);
+    if Info.style <> 0 then
+      pd_doc_style_resolve(FDoc, Info.style, @Style, nil);
+    FillChar(Own, SizeOf(Own), 0);
+    pd_doc_para_props(FDoc, Paras[I], Own);
+    if Own.mask and PD_PP_INDENT_LEFT <> 0 then
+      NewLeft := Own.indent_left
+    else
+      NewLeft := Style.indent_left;
+    if Deeper then
+      NewLeft := (NewLeft div STEP + 1) * STEP
+    else if NewLeft mod STEP <> 0 then
+      NewLeft := (NewLeft div STEP) * STEP
+    else
+      NewLeft := NewLeft - STEP;
+    if NewLeft < 0 then
+      NewLeft := 0;
+    Own.indent_left := NewLeft;
+    Own.mask := Own.mask or PD_PP_INDENT_LEFT;
+    pd_doc_set_para_props(FDoc, Paras[I], Own);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.SetLineSpacing(PerMille: Integer);
+var
+  P: pd_para_props;
+begin
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_PP_LINE_SPACING;
+  P.line_spacing := PerMille;
+  ApplyParaProps(P);
+end;
+
+procedure TParadeEdit.SetParaSpacing(Before, After: Double);
+var
+  P: pd_para_props;
+begin
+  FillChar(P, SizeOf(P), 0);
+  if Before >= 0 then
+  begin
+    P.mask := P.mask or PD_PP_SPACE_BEFORE;
+    P.space_before := Round(Before * PD_SP_PER_PT);
+  end;
+  if After >= 0 then
+  begin
+    P.mask := P.mask or PD_PP_SPACE_AFTER;
+    P.space_after := Round(After * PD_SP_PER_PT);
+  end;
+  ApplyParaProps(P);
+end;
+
+function TParadeEdit.ListFormatOf(Block: pd_block_id): Integer;
+var
+  Info: pd_block_info;
+  Levels: array[0..8] of pd_list_level;
+  N: Int32;
+begin
+  Result := -1;
+  if (pd_doc_block_info(FDoc, Block, Info) <> PD_OK) or (Info.list = 0) then
+    Exit;
+  N := 0;
+  if (pd_doc_list_info(FDoc, Info.list, @N, @Levels[0]) = PD_OK) and (N > 0) then
+    Result := Levels[0].format;
+end;
+
+function TParadeEdit.CurrentListFormat: Integer;
+begin
+  Result := ListFormatOf(CaretPos.block);
+end;
+
+procedure TParadeEdit.ToggleList(AFormat: Integer);
+const
+  BULLETS: array[0..2] of string = (#$E2#$80#$A2, #$E2#$97#$A6, #$E2#$96#$AA);   { bullet, white bullet, square }
+var
+  Paras: TParadeBlockArray;
+  Info: pd_block_info;
+  Levels: array[0..8] of pd_list_level;
+  List: pd_list_id;
+  I: Integer;
+  AllThat: Boolean;
+  Prev: pd_block_id;
+begin
+  if FReadOnly then
+    Exit;
+  Paras := SelectedParagraphs;
+  if Paras = nil then
+    Exit;
+  AllThat := True;
+  for I := 0 to High(Paras) do
+    if ListFormatOf(Paras[I]) <> AFormat then
+      AllThat := False;
+  pd_doc_begin_group(FDoc, 'List');
+  if AllThat then
+    for I := 0 to High(Paras) do
+      pd_doc_set_list(FDoc, Paras[I], 0, 0)     { plain paragraphs again }
+  else
+  begin
+    { the list just above, when it is the same kind: one list, numbered on }
+    List := 0;
+    Prev := pd_doc_prev_paragraph(FDoc, Paras[0]);
+    if (Prev <> 0) and (ListFormatOf(Prev) = AFormat) and (pd_doc_block_info(FDoc, Prev, Info) = PD_OK) then
+      List := Info.list;
+    if List = 0 then
+    begin
+      FillChar(Levels, SizeOf(Levels), 0);
+      for I := 0 to 8 do
+      begin
+        Levels[I].format := AFormat;
+        Levels[I].start := 1;
+        Levels[I].indent := (I + 1) * 36 * PD_SP_PER_PT;
+        Levels[I].hanging := 18 * PD_SP_PER_PT;
+        if AFormat = PD_NUM_BULLET then
+          StrPLCopy(Levels[I].text, BULLETS[I mod 3], High(Levels[I].text))
+        else
+        begin
+          { 1. a. i. 1. a. i. ... down the levels of a numbered list, as word processors do }
+          if AFormat = PD_NUM_DECIMAL then
+            case I mod 3 of
+              1: Levels[I].format := PD_NUM_LOWER_ALPHA;
+              2: Levels[I].format := PD_NUM_LOWER_ROMAN;
+            end;
+          StrPLCopy(Levels[I].text, '%' + IntToStr(I + 1) + '.', High(Levels[I].text));
+        end;
+      end;
+      pd_doc_list_define(FDoc, 9, @Levels[0], List);
+    end;
+    for I := 0 to High(Paras) do
+      if ListFormatOf(Paras[I]) <> AFormat then
+        pd_doc_set_list(FDoc, Paras[I], List, 0);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.GetParagraphStyles(List: TStrings);
+var
+  I: Integer;
+  Kind: Int32;
+  St: pd_style_id;
+begin
+  List.Clear;
+  for I := 0 to pd_doc_style_count(FDoc) - 1 do
+  begin
+    St := pd_doc_style_at(FDoc, I);
+    Kind := -1;
+    if (pd_doc_style_info(FDoc, St, @Kind, nil, nil, nil) = PD_OK) and (Kind = PD_STYLE_PARAGRAPH) then
+      List.Add(pd_doc_style_name(FDoc, St));
+  end;
+end;
+
+function TParadeEdit.CurrentStyleName: string;
+var
+  Info: pd_block_info;
+begin
+  Result := '';
+  if (pd_doc_block_info(FDoc, CaretPos.block, Info) = PD_OK) and (Info.style <> 0) then
+    Result := pd_doc_style_name(FDoc, Info.style);
+end;
+
+procedure TParadeEdit.GetFontFamilies(List: TStrings);
+var
+  I: Integer;
+  L: TStringList;
+begin
+  L := TStringList.Create;
+  try
+    L.Sorted := True;
+    L.Duplicates := dupIgnore;
+    L.CaseSensitive := False;
+    for I := 0 to High(FFonts) do
+      L.Add(FFonts[I].Family);
+    List.Assign(L);
+  finally
+    L.Free;
+  end;
+end;
+
+procedure TParadeEdit.CheckSelection;
+var
+  Sig: string;
+begin
+  if not Assigned(FOnSelectionChange) or FSelQueued then
+    Exit;
+  Sig := SysUtils.Format('%d:%d %d:%d %d %d %d', [CaretPos.block, CaretPos.offset, AnchorPos.block,
+    AnchorPos.offset, pd_doc_revision(FDoc), FPending.mask, Ord(PendingHere)]);
+  if Sig = FSelSig then
+    Exit;
+  FSelSig := Sig;
+  FSelQueued := True;
+  Application.QueueAsyncCall(@SelectionNotify, 0);     { not from inside a paint }
+end;
+
+procedure TParadeEdit.SelectionNotify(Data: PtrInt);
+begin
+  FSelQueued := False;
+  if Assigned(FOnSelectionChange) then
+    FOnSelectionChange(Self);
 end;
 
 procedure TParadeEdit.ToggleBold;
@@ -2551,6 +3090,7 @@ var
   Sig: string;
   R: TRect;
 begin
+  CheckSelection;     { every move of the caret and every edit is followed by a paint }
   if (ClientWidth - FScrollBar.Width <= 0) or (ClientHeight <= 0) then
     Exit;
   Sig := BackSignature;
