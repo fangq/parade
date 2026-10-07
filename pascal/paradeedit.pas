@@ -127,6 +127,7 @@ type
     FBalloons: array of TBalloonHit;
     FOnUndo: TParadeUndoEvent;
     FOnReplacing: TNotifyEvent;
+    FHybridDefault: Boolean;
     FReadOnly: Boolean;
     FRemote: array of TParadeRemoteCaret;
     FRemoteRev: Integer;
@@ -472,6 +473,8 @@ type
     { line breaking as one types: hybrid (lines away from the edit hold still) or optimal (every edited
       paragraph re-broken as if fresh); saved with the document }
     property HybridBreaking: Boolean read GetHybridBreaking write SetHybridBreaking;
+    { what a new or imported document gets (a .pdoc keeps its own); default on }
+    property HybridDefault: Boolean read FHybridDefault write FHybridDefault;
     { Undo/Redo go here when set (a shared document undoes one's own edits only) }
     property OnUndo: TParadeUndoEvent read FOnUndo write FOnUndo;
     { the document is about to be replaced (new, loaded): whatever holds it lets go }
@@ -1044,6 +1047,7 @@ end;
 constructor TParadeEdit.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
+  FHybridDefault := True;
   ControlStyle := ControlStyle + [csOpaque] - [csSetCaption];
   TabStop := True;
   Color := $00E0E0E0;
@@ -1300,6 +1304,7 @@ begin
   if FDoc <> nil then
     pd_doc_free(FDoc);
   FDoc := D;
+  pd_doc_set_stable_breaks(FDoc, Ord(FHybridDefault));
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
   pd_doc_set_math_font(FDoc, FMathFont);
   UseFallbackFonts;
@@ -1353,6 +1358,8 @@ begin
   if FDoc <> nil then
     pd_doc_free(FDoc);
   FDoc := D;
+  if Format <> PD_CONV_JDATA then
+    pd_doc_set_stable_breaks(FDoc, Ord(FHybridDefault));     { a native document says itself }
   UseDocumentFonts;
   { pictures the document only names (Markdown, HTML), from beside the file }
   Base := ExtractFilePath(ExpandFileName(FileName));
