@@ -674,7 +674,24 @@ void bld_inline(pd_bld* b, const pd_inline* o) {
     bld_flush(b);
     at.block = b->para;
     at.offset = para_len(b->d, b->para);
-    pd_doc_insert_inline(b->d, at, o, NULL);
+
+    if (pd_doc_insert_inline(b->d, at, o, NULL) == PD_OK) {
+        /* the format the builder has, not the one of the character before it (a link's, a heading run's) */
+        pd_range r;
+
+        r.start = at;
+        r.end.block = at.block;
+        r.end.offset = at.offset + 3;
+        pd_doc_clear_char_props(b->d, r, 0xFFFFFFFFu);
+
+        if (b->cstyle) {
+            pd_doc_set_char_style(b->d, r, b->cstyle);
+        }
+
+        if (b->cp.mask) {
+            pd_doc_set_char_props(b->d, r, &b->cp);
+        }
+    }
 }
 
 static void bld_push(pd_bld* b, pd_block_id id) {

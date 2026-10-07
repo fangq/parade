@@ -691,11 +691,11 @@ function pd_doc_set_para_style(doc: Ppd_doc; paragraph: pd_block_id; style: pd_s
 function pd_doc_set_para_props(doc: Ppd_doc; paragraph: pd_block_id; constref props: pd_para_props): pd_status; cdecl; PDEXT;
 function pd_doc_set_role(doc: Ppd_doc; paragraph: pd_block_id; role, level: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_para_attrs(doc: Ppd_doc; paragraph: pd_block_id; out attrs: pd_para_attrs): pd_status; cdecl; PDEXT;
-function pd_doc_set_para_attrs(doc: Ppd_doc; paragraph: pd_block_id; const attrs: pd_para_attrs): pd_status; cdecl;
+function pd_doc_set_para_attrs(doc: Ppd_doc; paragraph: pd_block_id; constref attrs: pd_para_attrs): pd_status; cdecl;
   PDEXT;
 function pd_doc_set_metadata(doc: Ppd_doc; text: PAnsiChar; len: csize_t): pd_status; cdecl; PDEXT;
 function pd_doc_metadata(doc: Ppd_doc; out len: csize_t): PAnsiChar; cdecl; PDEXT;
-procedure pd_doc_image_display_size(doc: Ppd_doc; const image: pd_inline; out width, height: pd_sp); cdecl; PDEXT;
+procedure pd_doc_image_display_size(doc: Ppd_doc; constref image: pd_inline; out width, height: pd_sp); cdecl; PDEXT;
 function pd_doc_set_list(doc: Ppd_doc; paragraph: pd_block_id; list: pd_list_id; level: Int32): pd_status; cdecl; PDEXT;
 function pd_doc_insert_block(doc: Ppd_doc; parent: pd_block_id; index, kind: Int32; out block: pd_block_id): pd_status; cdecl; PDEXT;
 function pd_doc_remove_block(doc: Ppd_doc; block: pd_block_id): pd_status; cdecl; PDEXT;

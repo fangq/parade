@@ -92,9 +92,37 @@ var
   PX: TColor;
   Cm: pd_comment;
   Pp: pd_para_props;
+  Obj: pd_inline;
+  Tb, Rw: pd_block_info;
+  Pages: Integer;
   Lst: TStringList;
   Lbl: array[0..63] of AnsiChar;
   Counter: TCounter;
+{ how many blocks of a kind the document has, every story's included }
+function CountKind(Doc: Ppd_doc; Kind: Integer): Integer;
+
+  function Walk(B: pd_block_id): Integer;
+  var
+    Info: pd_block_info;
+    I: Integer;
+  begin
+    Result := 0;
+    if pd_doc_block_info(Doc, B, Info) <> PD_OK then
+      Exit;
+    if Info.kind = Kind then
+      Inc(Result);
+    for I := 0 to Info.child_count - 1 do
+      Inc(Result, Walk(pd_doc_child(Doc, B, I)));
+  end;
+
+var
+  I: Integer;
+begin
+  Result := Walk(pd_doc_root(Doc));
+  for I := 0 to pd_doc_story_count(Doc) - 1 do
+    Inc(Result, Walk(pd_doc_story_at(Doc, I)));
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -445,6 +473,118 @@ begin
   finally
     Counter.Free;
   end;
+
+  { 8c. the Insert tab's operations }
+  Step('insert');
+  E.NewDocument;
+  E.InsertText('Before after');
+  E.ProcessKey(VK_HOME, []);
+  for I := 1 to 7 do
+    E.ProcessKey(VK_RIGHT, []);
+  E.InsertTable(2, 3);
+  Check(CountKind(E.Doc, PD_BLOCK_TABLE) = 1, 'a table');
+  pd_doc_block_info(E.Doc, E.CaretPos.block, Info);
+  pd_doc_block_info(E.Doc, Info.parent, Tb);
+  Check(Tb.kind = PD_BLOCK_CELL, 'the caret in its first cell');
+  pd_doc_block_info(E.Doc, Tb.parent, Rw);
+  Check((Rw.kind = PD_BLOCK_ROW) and (Rw.child_count = 3) and (Rw.index = 0), 'three cells a row');
+  pd_doc_block_info(E.Doc, Rw.parent, Tb);
+  Check((Tb.kind = PD_BLOCK_TABLE) and (Tb.child_count = 2), 'two rows');
+  E.InsertText('cell');
+  Check(Pos('cell', E.DocumentText) > 0, 'typing in the cell');
+  E.Undo;
+  E.Undo;
+  Check((CountKind(E.Doc, PD_BLOCK_TABLE) = 0) and (E.DocumentText = 'Before after'),
+    'one undo takes the table away, the paragraph whole again: ' + E.DocumentText);
+
+  Pages := E.PageCount;
+  E.ProcessKey(VK_HOME, []);
+  for I := 1 to 7 do
+    E.ProcessKey(VK_RIGHT, []);
+  E.InsertBreak(PD_BREAK_PAGE);
+  pd_doc_block_info(E.Doc, E.CaretPos.block, Info);
+  Check(E.PageCount = Pages + 1, Format('a page break: another page (%d -> %d, breaks %d, caret in %d at %d, "%s")',
+    [Pages, E.PageCount, CountKind(E.Doc, PD_BLOCK_BREAK), E.CaretPos.block, Info.index,
+    E.ParaText(E.CaretPos.block)]));
+  E.Undo;
+  Check(E.PageCount = Pages, 'undone');
+  E.InsertBreak(PD_BREAK_RULE);
+  Check(CountKind(E.Doc, PD_BLOCK_BREAK) = 1, 'a horizontal rule');
+  E.Undo;
+
+  E.ProcessKey(VK_END, []);
+  E.InsertText(' ');
+  E.InsertLink('https://example.org/', 'Example');
+  Check(Pos('Example', E.DocumentText) > 0, 'link text: ' + E.DocumentText);
+  C := E.CaretPos;
+  FillChar(Obj, SizeOf(Obj), 0);
+  Check((pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3), Obj) = PD_OK) and (Obj.kind = PD_INLINE_LINK) and
+    (Obj.source_len = 0), 'the link''s end mark before the caret');
+  Check((pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3 - 7 - 3), Obj) = PD_OK) and
+    (Obj.kind = PD_INLINE_LINK) and (Copy(Obj.source, 1, Obj.source_len) = 'https://example.org/'),
+    'and its start mark with the address');
+  Check(E.PropsAt(PdPos(C.block, C.offset - 5)).underline = PD_UNDERLINE_SINGLE, 'link text underlined');
+  { a link over a selection }
+  E.ProcessKey(VK_HOME, []);
+  for I := 1 to 6 do
+    E.ProcessKey(VK_RIGHT, [ssShift]);
+  E.InsertLink('https://parade.example/', '');
+  Check(Copy(E.DocumentText, 4, 6) = 'Before', 'the selection kept as the link''s text: ' + E.DocumentText);
+  Check((pd_doc_inline_at(E.Doc, PdPos(C.block, 0), Obj) = PD_OK) and (Obj.kind = PD_INLINE_LINK),
+    'its start before it');
+
+  E.ProcessKey(VK_END, [ssCtrl]);
+  Check(E.InsertPicture('tests/data/photo.jpg'), 'a picture from a file');
+  C := E.CaretPos;
+  Check((pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3), Obj) = PD_OK) and (Obj.kind = PD_INLINE_IMAGE) and
+    (Obj.resource <> 0) and (Obj.width = 60 * 3 * 65536 div 4), 'at its own size');
+  Check(not E.InsertPicture('tests/data/nothing-here.png'), 'no file: no picture');
+
+  E.InsertEquation('x^2+y^2=z^2', False);
+  C := E.CaretPos;
+  Check((pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3), Obj) = PD_OK) and
+    (Obj.kind = PD_INLINE_EQUATION) and (Copy(Obj.source, 1, Obj.source_len) = 'x^2+y^2=z^2'), 'an equation');
+  Check(E.PropsAt(PdPos(C.block, C.offset - 3)).color <> $FF0563C1, Format('the equation is not in the link''s colour (%x, picture %x)',
+    [E.PropsAt(PdPos(C.block, C.offset - 3)).color, E.PropsAt(PdPos(C.block, C.offset - 6)).color]));
+  E.InsertText(' and');
+  E.InsertEquation('\int_0^1 f(x)\,dx', True);
+  pd_doc_block_info(E.Doc, E.CaretPos.block, Info);
+  Check((Info.role = PD_ROLE_EQUATION) and (E.CaretPos.offset = 3), 'a display equation on a line of its own');
+
+  E.ProcessKey(VK_END, [ssCtrl]);
+  E.InsertNote('A footnote.');
+  C := E.CaretPos;
+  Check((pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3), Obj) = PD_OK) and
+    (Obj.kind = PD_INLINE_FOOTNOTE) and (Obj.target <> 0), 'a footnote mark');
+  if Obj.target <> 0 then
+    Check(E.ParaText(pd_doc_child(E.Doc, Obj.target, 0)) = 'A footnote.', 'its note');
+  E.InsertField(PD_FIELD_PAGE);
+  C := E.CaretPos;
+  Check((pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3), Obj) = PD_OK) and (Obj.kind = PD_INLINE_FIELD),
+    'a page number field');
+  E.InsertTable(2, 2);
+
+  { all of it through a Word file and back }
+  E.SaveToFile(Dir + 'edit_insert.docx');
+  E.LoadFromFile(Dir + 'edit_insert.docx');
+  Check(CountKind(E.Doc, PD_BLOCK_TABLE) = 1, 'the table comes back from .docx');
+  Check((Pos('Example', E.DocumentText) > 0) and (Pos('Before', E.DocumentText) > 0), 'and the links'' text');
+  C := PdPos(pd_doc_next_paragraph(E.Doc, 0), 0);
+  T := E.ParaText(C.block);
+  I := Pos('x^', T);   { not there: the equation is one U+FFFC; find it as the object after the picture }
+  N := 0;
+  for I := 1 to Length(T) - 2 do
+    if (Copy(T, I, 3) = #$EF#$BF#$BC) and (pd_doc_inline_at(E.Doc, PdPos(C.block, I - 1), Obj) = PD_OK) and
+       (Obj.kind = PD_INLINE_EQUATION) then
+    begin
+      N := 1;
+      Props := E.PropsAt(PdPos(C.block, I - 1));
+      Check(Props.color <> $FF0563C1, Format('the equation after a link is not the link''s colour (%x, u%d, fmt %d; picture %x)',
+        [Props.color, Props.underline, I - 1, E.PropsAt(PdPos(C.block, I - 4)).color]));
+      Break;
+    end;
+  Check(N = 1, 'the equation comes back from .docx');
+  SavePage(E, 0, Dir + 'edit_insert.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
 
   { 9. review: tracked changes and comments }
   Step('review');

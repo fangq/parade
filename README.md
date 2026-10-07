@@ -258,7 +258,9 @@ how to join). File > Join Shared Document takes the link.
   selection, or with none on what is typed next -- alignment, indents (a
   list level in a list), line and paragraph spacing, bullets and
   numbering, the current character/paragraph properties and style, and
-  an OnSelectionChange event to show them by. Copy puts the selection on the
+  an OnSelectionChange event to show them by; and inserting a table,
+  picture, link, page/column break or rule, equation (LaTeX), footnote or
+  endnote, or field (page number, pages, date). Copy puts the selection on the
   clipboard as Parade JData, HTML (CF_HTML on Windows), RTF and text;
   paste takes the richest. Load/save by extension: .pdoc/.bpdoc, .docx,
   .rtf, .html, .md, .tex (save), .txt, .pdf (save).

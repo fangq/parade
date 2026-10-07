@@ -140,7 +140,6 @@ type
     function SelStart: pd_pos;
     function SelEnd: pd_pos;
     procedure SetCaret(const P: pd_pos; Extend: Boolean);
-    function ParaText(Block: pd_block_id): string;
     function NextPos(const P: pd_pos): pd_pos;
     function PrevPos(const P: pd_pos): pd_pos;
     function FirstPara: pd_block_id;
@@ -156,7 +155,9 @@ type
     function PendingHere: Boolean;
     function SelectedParagraphs: TParadeBlockArray;
     function ListFormatOf(Block: pd_block_id): Integer;
-    function PropsAt(const P: pd_pos): pd_char_props;
+    procedure InsertObject(const Obj: pd_inline);
+    function TextWidthAt(Block: pd_block_id): pd_sp;
+    function BlockSlot(out AParent: pd_block_id; out AIndex: Integer): Boolean;
     function FormatAt(const P: pd_pos): pd_format_id;
     procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
     procedure UseDocumentFonts;
@@ -211,6 +212,10 @@ type
     { ---- character formatting: the selection, or with none what is typed next at the caret ---- }
     { the masked fields of Props over the selection }
     procedure ApplyCharProps(const Props: pd_char_props);
+    { a paragraph's text (UTF-8, U+FFFC for each inline object) }
+    function ParaText(Block: pd_block_id): string;
+    { the formatting of the character at a position }
+    function PropsAt(const P: pd_pos): pd_char_props;
     { the formatting where the selection starts (with none: what typing at the caret gets) }
     function CurrentCharProps: pd_char_props;
     procedure SetFontFamily(const Family: string);
@@ -247,6 +252,23 @@ type
     function CurrentStyleName: string;
     { the font families the editor has (AddFont), sorted }
     procedure GetFontFamilies(List: TStrings);
+
+    { ---- the Insert tab: objects at the caret (over the selection), one undo each ---- }
+    { a picture from a file (PNG, JPEG, GIF), at its own size or the text's width when wider; False when it
+      cannot be read }
+    function InsertPicture(const FileName: string): Boolean;
+    { a link to URL around the selection, or Text (the URL when empty) inserted as a link }
+    procedure InsertLink(const URL, AText: string);
+    { a page (PD_BREAK_PAGE), column (PD_BREAK_COLUMN) break or a horizontal rule (PD_BREAK_RULE) at the caret }
+    procedure InsertBreak(Kind: Integer);
+    { a Rows x Cols table at the caret (the paragraph split there), the caret in its first cell }
+    procedure InsertTable(Rows, Cols: Integer);
+    { an equation from its LaTeX source, in the line or (Display) on a line of its own }
+    procedure InsertEquation(const Source: string; Display: Boolean);
+    { a footnote (or endnote) mark at the caret, the note holding Text }
+    procedure InsertNote(const ANote: string; Endnote: Boolean = False);
+    { a field: PD_FIELD_PAGE, PD_FIELD_PAGES or PD_FIELD_DATE }
+    procedure InsertField(Kind: Integer);
     function SelectedText: string;
     procedure CopyToClipboard;
     procedure CutToClipboard;
@@ -2282,6 +2304,304 @@ begin
   finally
     L.Free;
   end;
+end;
+
+{ ---- the Insert tab ---- }
+
+{ the object at the caret, over the selection; the caret after it }
+procedure TParadeEdit.InsertObject(const Obj: pd_inline);
+var
+  After: pd_pos;
+begin
+  DeleteSelection;
+  if pd_doc_insert_inline(FDoc, CaretPos, Obj, @After) = PD_OK then
+  begin
+    pd_doc_marker_set(FDoc, FCaret, After);
+    pd_doc_marker_set(FDoc, FAnchor, After);
+  end;
+end;
+
+{ the width the caret's paragraph has to fill: its section's page less the margins }
+function TParadeEdit.TextWidthAt(Block: pd_block_id): pd_sp;
+var
+  Info: pd_block_info;
+  Sp: pd_section_props;
+  B: pd_block_id;
+begin
+  Result := 0;
+  B := Block;
+  while (B <> 0) and (pd_doc_block_info(FDoc, B, Info) = PD_OK) do
+  begin
+    if Info.kind = PD_BLOCK_SECTION then
+    begin
+      if pd_doc_section_props(FDoc, B, Sp) = PD_OK then
+        Result := Sp.page_width - Sp.margin_left - Sp.margin_right;
+      Exit;
+    end;
+    B := Info.parent;
+  end;
+end;
+
+{ where a block goes at the caret, among the paragraph's siblings: the paragraph split at the caret
+  (unless the caret is at its start), the block before the second part }
+function TParadeEdit.BlockSlot(out AParent: pd_block_id; out AIndex: Integer): Boolean;
+var
+  Info: pd_block_info;
+  After: pd_pos;
+begin
+  Result := False;
+  DeleteSelection;
+  if CaretPos.offset > 0 then
+  begin
+    if pd_doc_split(FDoc, CaretPos, @After) <> PD_OK then
+      Exit;
+    pd_doc_marker_set(FDoc, FCaret, After);
+    pd_doc_marker_set(FDoc, FAnchor, After);
+  end;
+  if pd_doc_block_info(FDoc, CaretPos.block, Info) <> PD_OK then
+    Exit;
+  AParent := Info.parent;
+  AIndex := Info.index;
+  Result := True;
+end;
+
+function TParadeEdit.InsertPicture(const FileName: string): Boolean;
+var
+  Data: TMemoryStream;
+  Mime, Alt: string;
+  Res: pd_res_id;
+  O: pd_inline;
+  W, H, Room: pd_sp;
+begin
+  Result := False;
+  if FReadOnly then
+    Exit;
+  case LowerCase(ExtractFileExt(FileName)) of
+    '.png': Mime := 'image/png';
+    '.jpg', '.jpeg': Mime := 'image/jpeg';
+    '.gif': Mime := 'image/gif';
+  else
+    Exit;
+  end;
+  Data := TMemoryStream.Create;
+  try
+    try
+      Data.LoadFromFile(FileName);
+    except
+      Exit;
+    end;
+    if (Data.Size = 0) or (pd_doc_add_resource(FDoc, PAnsiChar(Mime), Data.Memory, Data.Size, Res) <> PD_OK) then
+      Exit;
+  finally
+    Data.Free;
+  end;
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_IMAGE;
+  O.resource := Res;
+  Alt := ChangeFileExt(ExtractFileName(FileName), '');
+  O.alt := PAnsiChar(Alt);
+  O.alt_len := Length(Alt);
+  { its own size, 96 dpi; no wider than the text }
+  pd_doc_image_display_size(FDoc, O, W, H);
+  Room := TextWidthAt(CaretPos.block);
+  if (Room > 0) and (W > Room) then
+  begin
+    H := Round(H * (Room / W));
+    W := Room;
+  end;
+  O.width := W;
+  O.height := H;
+  pd_doc_begin_group(FDoc, 'Insert picture');
+  InsertObject(O);
+  pd_doc_end_group(FDoc);
+  Changed;
+  Result := True;
+end;
+
+procedure TParadeEdit.InsertLink(const URL, AText: string);
+var
+  O: pd_inline;
+  A, B, After: pd_pos;
+  T: string;
+  P: pd_char_props;
+begin
+  if FReadOnly or (URL = '') then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Insert link');
+  if not HasSelection then
+  begin
+    T := AText;
+    if T = '' then
+      T := URL;
+    A := CaretPos;
+    pd_doc_insert_text(FDoc, A, PAnsiChar(T), Length(T), PD_FORMAT_INHERIT, @After);
+    pd_doc_marker_set(FDoc, FAnchor, A);    { the inserted text selected: linked below }
+    pd_doc_marker_set(FDoc, FCaret, After);
+  end;
+  A := SelStart;
+  B := SelEnd;
+  if A.block = B.block then
+  begin
+    { the end first: inserting it does not move where the start goes }
+    FillChar(O, SizeOf(O), 0);
+    O.kind := PD_INLINE_LINK;     { no address: where the link ends }
+    pd_doc_insert_inline(FDoc, B, O, @After);
+    O.source := PAnsiChar(URL);
+    O.source_len := Length(URL);
+    pd_doc_insert_inline(FDoc, A, O, nil);
+    { the end moved by the start mark's three bytes }
+    B.offset := B.offset + 3;
+    After.offset := After.offset + 3;
+    { shown as links are: blue, underlined }
+    FillChar(P, SizeOf(P), 0);
+    P.mask := PD_CP_COLOR or PD_CP_UNDERLINE;
+    P.color := $FF0563C1;
+    P.underline := PD_UNDERLINE_SINGLE;
+    pd_doc_set_char_props(FDoc, PdRange(PdPos(A.block, A.offset + 3), B), P);
+    pd_doc_marker_set(FDoc, FCaret, After);
+    pd_doc_marker_set(FDoc, FAnchor, After);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.InsertBreak(Kind: Integer);
+var
+  Par, Br: pd_block_id;
+  Index: Integer;
+begin
+  if FReadOnly then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Insert break');
+  if BlockSlot(Par, Index) and (pd_doc_insert_block(FDoc, Par, Index, PD_BLOCK_BREAK, Br) = PD_OK) then
+    pd_doc_set_break(FDoc, Br, Kind);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.InsertTable(Rows, Cols: Integer);
+var
+  Par, T, Row, Cell, Para: pd_block_id;
+  Index, R, C: Integer;
+  Tp: pd_table_props;
+  Room: pd_sp;
+begin
+  if FReadOnly or (Rows < 1) or (Cols < 1) then
+    Exit;
+  if Cols > PD_TABLE_MAX_COLS then
+    Cols := PD_TABLE_MAX_COLS;
+  pd_doc_begin_group(FDoc, 'Insert table');
+  if BlockSlot(Par, Index) and (pd_doc_insert_block(FDoc, Par, Index, PD_BLOCK_TABLE, T) = PD_OK) then
+  begin
+    { a table starts as one row of one cell }
+    for R := 0 to Rows - 1 do
+    begin
+      if R = 0 then
+        Row := pd_doc_child(FDoc, T, 0)
+      else if pd_doc_insert_block(FDoc, T, -1, PD_BLOCK_ROW, Row) <> PD_OK then
+        Break;
+      for C := 1 to Cols - 1 do
+        pd_doc_insert_block(FDoc, Row, -1, PD_BLOCK_CELL, Cell);
+    end;
+    { ruled, across the text in equal columns }
+    pd_table_props_init(Tp);
+    pd_doc_table_props(FDoc, T, Tp);
+    Tp.border := PD_SP_PER_PT div 2;
+    Tp.border_color := $FF000000;
+    Room := TextWidthAt(T);
+    if Room > 0 then
+    begin
+      Tp.width := Room;
+      Tp.ncols := Cols;
+      for C := 0 to Cols - 1 do
+        Tp.col_width[C] := Room div Cols;
+    end;
+    pd_doc_set_table_props(FDoc, T, Tp);
+    Para := pd_doc_child(FDoc, pd_doc_child(FDoc, pd_doc_child(FDoc, T, 0), 0), 0);
+    if Para <> 0 then
+    begin
+      pd_doc_marker_set(FDoc, FCaret, PdPos(Para, 0));
+      pd_doc_marker_set(FDoc, FAnchor, PdPos(Para, 0));
+    end;
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.InsertEquation(const Source: string; Display: Boolean);
+var
+  O: pd_inline;
+  After: pd_pos;
+begin
+  if FReadOnly or (Source = '') then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Insert equation');
+  DeleteSelection;
+  if Display then
+  begin
+    { a paragraph of its own: split before and after the caret as needed }
+    if CaretPos.offset > 0 then
+    begin
+      pd_doc_split(FDoc, CaretPos, @After);
+      pd_doc_marker_set(FDoc, FCaret, After);
+    end;
+    if ParaText(CaretPos.block) <> '' then
+    begin
+      pd_doc_split(FDoc, CaretPos, @After);
+      pd_doc_marker_set(FDoc, FCaret, PdPos(pd_doc_prev_paragraph(FDoc, After.block), 0));
+    end;
+    pd_doc_marker_set(FDoc, FAnchor, CaretPos);
+    pd_doc_set_role(FDoc, CaretPos.block, PD_ROLE_EQUATION, 0);
+  end;
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_EQUATION;
+  O.source := PAnsiChar(Source);
+  O.source_len := Length(Source);
+  { a first guess: the layout typesets it with the math font and takes its real size }
+  O.width := Length(Source) * 5 * PD_SP_PER_PT;
+  O.height := 8 * PD_SP_PER_PT;
+  O.depth := 2 * PD_SP_PER_PT;
+  InsertObject(O);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.InsertNote(const ANote: string; Endnote: Boolean);
+var
+  Story, Para: pd_block_id;
+  O: pd_inline;
+begin
+  if FReadOnly then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Insert note');
+  if pd_doc_insert_block(FDoc, 0, -1, PD_BLOCK_STORY, Story) = PD_OK then
+  begin
+    Para := pd_doc_child(FDoc, Story, 0);    { a story starts with one paragraph }
+    if (Para <> 0) and (ANote <> '') then
+      pd_doc_insert_text(FDoc, PdPos(Para, 0), PAnsiChar(ANote), Length(ANote), PD_FORMAT_INHERIT, nil);
+    FillChar(O, SizeOf(O), 0);
+    O.kind := PD_INLINE_FOOTNOTE;
+    O.target := Story;
+    O.level := Ord(Endnote);
+    InsertObject(O);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.InsertField(Kind: Integer);
+var
+  O: pd_inline;
+begin
+  if FReadOnly then
+    Exit;
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_FIELD;
+  O.field := Kind;
+  pd_doc_begin_group(FDoc, 'Insert field');
+  InsertObject(O);
+  pd_doc_end_group(FDoc);
+  Changed;
 end;
 
 procedure TParadeEdit.CheckSelection;

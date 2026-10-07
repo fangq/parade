@@ -5285,6 +5285,7 @@ static void dw_image(dw* w) {
 
     if (!w->anchor) {
         dw_begin_para(w);
+        dw_apply_run(w);    /* its run's format, not the one before it */
         bld_inline(X->b, &o);
     } else if (w->npend_fl < 8) {
         int k = w->npend_fl++;
@@ -5608,8 +5609,18 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 o.source_len = (int32_t)strlen(tex);
 
                 if (o.source_len > 0) {
+                    pd_char_props keep_rcp = w->rcp;
+                    char keep_rstyle[sizeof(w->rstyle)];
+
+                    /* outside any run: the paragraph's own format, not what the run before it had */
+                    memcpy(keep_rstyle, w->rstyle, sizeof(keep_rstyle));
+                    memset(&w->rcp, 0, sizeof(w->rcp));
+                    w->rstyle[0] = 0;
                     dw_begin_para(w);
+                    dw_apply_run(w);
                     bld_inline(X->b, &o);
+                    w->rcp = keep_rcp;
+                    memcpy(w->rstyle, keep_rstyle, sizeof(keep_rstyle));
                 }
 
                 free(tex);
