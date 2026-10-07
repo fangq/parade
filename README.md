@@ -189,6 +189,17 @@ gives (yrs 0.28 loses an update that arrives before one it depends on).
 `tools/yrs-rust-1.91.patch` rewrites the one `if let` guard yrs uses, which
 Rust 1.91 does not have yet.
 
+**A plain text** (`include/parade_tsync.h`, `pd_tsync`) is shared the same
+way, for a code or text editor: one yrs text, positions in UTF-16 code
+units, the same relay and wire format. The host reports what it typed or
+deleted (`pd_tsync_insert`/`pd_tsync_delete`) and is told every other change
+-- the others', or an undo of its own -- as one replacement between whole
+characters, at a position in its text as it has it (yrs's own deltas can
+split an emoji in two; these are found by comparing the text the host has
+with the shared one). `tests/test_tsync.c` runs three replicas through a
+relay-ordered log, with undo, CJK and emoji, at random for 3000 steps
+(`SYNC_SEED`, `SYNC_STEPS` to vary it).
+
 **The relay** (`tools/parade_relay.py`) is what editors share a document
 through: one append-only log per document, numbered as updates come in and
 read in that order by everyone, over HTTP (catch-up is "everything after
@@ -240,6 +251,15 @@ others -- `http://host:8765/d/<document>#t=<token>`, everything in one
 (`ParadeInviteLink`/`ParadeParseInvite`; the token after the `#` stays out
 of a browser's requests, and the relay answers the link with a page saying
 how to join). File > Join Shared Document takes the link.
+
+`TParadeSync` runs a session for a `TParadeSyncTarget`: `TParadeRichTarget`
+is a `TParadeEdit` with its `pd_sync`; `TParadeTextTarget`
+(`pascal/paradetextsync.pas`) is any lines-based editor, which says what its
+lines are and how to replace a range (a SynEdit in led; `TParadeStringsTarget`
+for a `TStrings`). It finds what was typed by comparing the lines with the
+ones it had, so an editor needs no hook beyond "something changed from this
+line on". An invitation link for a text says so (`#t=...&k=text`), and
+`ParadeRelayKind` asks the relay which kind a document is.
 
 ## Lazarus / Free Pascal (`pascal/`)
 

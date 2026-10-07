@@ -13,7 +13,7 @@ program sync_test;
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, Process, FileUtil, fphttpclient, fpjson, jsonparser,
-  parade, paradeedit, paradesync, paraderelay;
+  parade, paradeedit, paradesync, paraderelay, paradetextsync;
 
 type
   TFunc = function: Boolean;
@@ -160,7 +160,7 @@ var
   Form: TForm;
   A, B: TParadeEdit;
   SA, SB: TParadeSync;
-  TokA, TokB, TokV: string;
+  TokA, TokB, TokV, TokA2, TokB2: string;
   I: Integer;
   C: pd_pos;
   J: TJSONObject;
@@ -179,6 +179,22 @@ end;
 function SeesBob: Boolean;
 begin
   Result := (SA.PeerCount = 1) and (SA.Peers[0].Name = 'Bob');
+end;
+
+var
+  TA, TB: TParadeSync;
+  LA, LB: TStringList;
+  Wide: string;
+
+function TextsSame: Boolean;
+begin
+  Result := (TA.State = pssSynced) and (TB.State = pssSynced) and (LA.Text = LB.Text);
+end;
+
+function BobCaretSeen: Boolean;
+begin
+  with TParadeStringsTarget(TA.Target) do
+    Result := (PeerCarets = 1) and (PeerCaret(0).Line = 2) and (PeerCaret(0).Col = 4);
 end;
 
 function OutboxGone: Boolean;
@@ -244,6 +260,8 @@ begin
     Url := 'http://127.0.0.1:' + IntToStr(Port);
     TokA := Run(['token', '--secret-file', SecretFile, '--user', 'ann', '--doc', 'proposal']);
     TokB := Run(['token', '--secret-file', SecretFile, '--user', 'bob', '--doc', 'proposal']);
+    TokA2 := Run(['token', '--secret-file', SecretFile, '--user', 'ann', '--doc', 'hello.pas']);
+    TokB2 := Run(['token', '--secret-file', SecretFile, '--user', 'bob', '--doc', 'hello.pas']);
     TokV := Run(['token', '--secret-file', SecretFile, '--user', 'vic', '--doc', 'proposal', '--role', 'viewer']);
     Step('relay');
     StartRelay;
@@ -372,6 +390,54 @@ begin
     B.NewDocument;
     Check(SB.Start(Url, 'proposal', TokB, 'Bob', False), 'a fresh join');
     Check(WaitFor(@BothSynced, 15), 'from the snapshot: the same document');
+
+    { 10. a plain text shared: a code editor's lines, not a rich document }
+    Step('plain text');
+    LA := TStringList.Create;
+    LB := TStringList.Create;
+    try
+      LA.Text := 'program hello;' + LineEnding + 'begin' + LineEnding + 'end.';
+      TA := TParadeSync.CreateFor(Form, TParadeStringsTarget.Create(LA));
+      TB := TParadeSync.CreateFor(Form, TParadeStringsTarget.Create(LB));
+      Check(TA.Start(Url, 'hello.pas', TokA2, 'Ann', True), 'share a text: ' + TA.LastError);
+      Check(TB.Start(Url, 'hello.pas', TokB2, 'Bob', False), 'join it: ' + TB.LastError);
+      Check(WaitFor(@TextsSame, 15), 'the joiner has the text: ' + LB.Text);
+      Check(LB.Count = 3, 'three lines');
+      { Bob types a line in; Ann sees it }
+      TParadeStringsTarget(TB.Target).Edit(1, 5, 1, 5, #10 + '  WriteLn(''hi'');');
+      Check(WaitFor(@TextsSame, 15), 'a line typed reaches the other: ' + LA.Text);
+      Check((LA.Count = 4) and (LA[2] = '  WriteLn(''hi'');'), 'the line: ' + LA.Text);
+      { both at once, in the same line }
+      Wide := 'hello, ' + #$E4#$B8#$96#$E7#$95#$8C + ' ' + #$F0#$9F#$98#$80;
+      TParadeStringsTarget(TA.Target).Edit(0, 8, 0, 13, 'world');
+      TParadeStringsTarget(TB.Target).Edit(2, 11, 2, 13, Wide);
+      Check(WaitFor(@TextsSame, 15), 'edits at once merge');
+      Check((LA[0] = 'program world;') and (LB[2] = '  WriteLn(''' + Wide + ''');'),
+        'both kept, wide characters too: ' + LA[0] + ' / ' + LB[2]);
+      Check(TParadeTextTarget(TA.Target).SharedText = TParadeTextTarget(TB.Target).SharedText, 'the same shared text');
+      Check(ParadeRelayKind(Url, 'hello.pas', TokA2) = 'text', 'the relay''s text is a text');
+      Check(ParadeRelayKind(Url, 'proposal', TokA) = 'rich', 'and the rich document is not');
+      Check(ParadeRelayKind(Url, 'nothing-here', TokA) = '', 'nothing yet: neither');
+      F := ParadeInviteLink(Url, 'hello.pas', TokB2, 'text');
+      Check((ParadeInviteKind(F) = 'text') and ParadeParseInvite(F, Server, DocName, Token) and (Token = TokB2) and
+        (DocName = 'hello.pas'), 'a link says it is a text, its token whole: ' + F);
+      Check(ParadeInviteKind(ParadeInviteLink(Url, 'proposal', TokB)) = '', 'a rich document''s link says nothing');
+      { undo takes back one's own edit only }
+      TParadeTextTarget(TA.Target).Seal;
+      TParadeStringsTarget(TA.Target).Edit(3, 4, 3, 4, ' { the end }');
+      Check(WaitFor(@TextsSame, 15), 'another edit');
+      Check(TParadeTextTarget(TA.Target).Undo, 'undo');
+      Check(WaitFor(@TextsSame, 15) and (LB[3] = 'end.') and (Pos(Wide, LB[2]) > 0),
+        'Ann''s last edit gone from both, Bob''s kept: ' + LB[3]);
+      { the others' carets, where they are }
+      TParadeStringsTarget(TB.Target).SetCaretAt(2, 4);
+      Check(WaitFor(@BobCaretSeen, 15), 'Bob''s caret where he left it');
+      TA.Stop;
+      TB.Stop;
+    finally
+      LA.Free;
+      LB.Free;
+    end;
 
     { a picture of the two editors, the other's caret drawn in each }
     C := A.CaretPos;

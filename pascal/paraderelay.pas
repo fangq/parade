@@ -206,6 +206,7 @@ begin
     Move(B[0], Result[1], Length(B));
 end;
 
+{$PUSH}{$R-}{$Q-}    { the hash adds modulo 2^32: a build with range and overflow checks on would stop it }
 function SHA256Bytes(const Data: TBytes): TBytes;
 var
   H: array[0..7] of Cardinal;
@@ -261,6 +262,7 @@ begin
     Result[I * 4 + 3] := H[I] and $FF;
   end;
 end;
+{$POP}
 
 function ParadeSHA256(const Data: RawByteString): RawByteString;
 begin

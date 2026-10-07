@@ -30,7 +30,7 @@ SRC     := src/pd_font.c src/pd_raster.c src/pd_cff.c src/pd_unidata.c src/pd_te
            src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c src/pd_conv.c src/pd_markup.c src/pd_html.c \
            src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c src/pd_math.c src/pd_emf.c src/pd_omml.c
 ifeq ($(SYNC),yrs)
-SRC     += src/pd_sync.c
+SRC     += src/pd_sync.c src/pd_tsync.c
 endif
 BUILD   ?= build
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)
@@ -38,7 +38,7 @@ LIB     := $(BUILD)/libparade.a
 SO      := $(BUILD)/libparade.so
 TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout $(BUILD)/test_pdf $(BUILD)/test_convert
 ifeq ($(SYNC),yrs)
-TESTS   += $(BUILD)/test_sync
+TESTS   += $(BUILD)/test_sync $(BUILD)/test_tsync
 TOOLS_SYNC := $(BUILD)/pd_compact
 endif
 BENCH   := $(BUILD)/bench_parade
@@ -46,7 +46,7 @@ BENCH   := $(BUILD)/bench_parade
 all: $(LIB) $(SO) $(TESTS) $(BENCH) $(BUILD)/pd_dump $(BUILD)/pd_conv $(TOOLS_SYNC)
 
 $(BUILD)/%.o: src/%.c include/parade.h include/parade_doc.h include/parade_layout.h include/parade_convert.h \
-           include/parade_sync.h \
+           include/parade_sync.h include/parade_tsync.h \
            src/pd_internal.h src/pd_doc_internal.h src/pd_json.h src/pd_conv.h | $(BUILD)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) -c $< -o $@
 
