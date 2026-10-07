@@ -713,6 +713,169 @@ static void dx_fill(pd_buf* o, uint32_t c) {
 /* A drawing resource (a Word canvas or group read in) as a Word group: its
    pictures, shapes and text boxes in the group's own coordinates, the
    drawing's (sp, as EMU), shown at cx x cy. */
+/* a picture in a text box's line */
+static void dx_txbx_picture(dxo* x, const pj_node* r) {
+    pd_buf* o = x->o;
+    pd_res_id cr = (pd_res_id)jnum(r, "img");
+    long long cx = EMU(jnum(r, "w")), cy = EMU(jnum(r, "h"));
+    const char* name, *cm = "";
+    const void* cd = NULL;
+    size_t cn = 0;
+    int m;
+
+    if (pd_doc_resource(x->d, cr, &cm, &cd, &cn) == PD_OK && strcmp(cm, PD_DRAWING_MIME) == 0) {
+        pj_doc* jd = pj_parse(cd, cn, 0, NULL);     /* a metafile: the metafile itself */
+
+        cr = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
+        pj_free(jd);
+    }
+
+    m = cr ? dx_media(x, cr, &name) : -1;
+
+    if (m < 0 || cx <= 0 || cy <= 0) {
+        return;
+    }
+
+    x->docpr++;
+    pb_printf(o, "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"%lld\" "
+              "cy=\"%lld\"/><wp:docPr id=\"%d\" name=\"Picture %d\"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData "
+              "uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" "
+              "name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"rIdm%d\"/><a:stretch><a:fillRect/>"
+              "</a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
+              "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>"
+              "</wp:inline></w:drawing></w:r>", cx, cy, x->docpr, x->docpr, x->docpr, name, m + 1, cx, cy);
+}
+
+static void dx_txbx_table(dxo* x, const pj_node* tbl, int depth);
+
+/* a text box's paragraphs (and tables), as the drawing has them */
+static void dx_txbx_paras(dxo* x, const pj_node* paras, int depth) {
+    pd_buf* o = x->o;
+    const pj_node* p, *r;
+
+    for (p = paras ? paras->child : NULL; p; p = p->next) {
+        int a = (int)jnum(p, "a");
+
+        if (pj_get(p, "table")) {
+            if (depth < 4) {
+                dx_txbx_table(x, pj_get(p, "table"), depth + 1);
+            }
+
+            continue;
+        }
+
+        pb_printf(o, "<w:p><w:pPr><w:spacing w:after=\"0\"/><w:jc w:val=\"%s\"/></w:pPr>", a == PD_ALIGN_CENTER ?
+                  "center" : a == PD_ALIGN_RIGHT ? "right" : a == PD_ALIGN_JUSTIFY ? "both" : "left");
+
+        for (r = pj_get(p, "runs") ? pj_get(p, "runs")->child : NULL; r; r = r->next) {
+            const pj_node* t = pj_get(r, "t"), *f = pj_get(r, "f");
+
+            if (pj_get(r, "img")) {
+                dx_txbx_picture(x, r);
+                continue;
+            }
+
+            if (!t || t->type != PJ_STR) {
+                continue;
+            }
+
+            pb_puts(o, "<w:r><w:rPr>");
+
+            if (f && f->type == PJ_STR) {
+                pb_puts(o, "<w:rFonts w:ascii=\"");
+                xesc(o, f->s, f->len);
+                pb_puts(o, "\" w:hAnsi=\"");
+                xesc(o, f->s, f->len);
+                pb_puts(o, "\"/>");
+            }
+
+            pb_puts(o, jnum(r, "w") >= 600 ? "<w:b/>" : "");
+            pb_puts(o, jnum(r, "i") ? "<w:i/>" : "");
+
+            if ((uint32_t)jnum(r, "c") & 0xFFFFFF) {
+                pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(jnum(r, "c") & 0xFFFFFF));
+            }
+
+            if (jnum(r, "sz") > 0) {
+                pb_printf(o, "<w:sz w:val=\"%d\"/>", (int)SCALE(jnum(r, "sz"), 2, 65536));
+            }
+
+            if (jnum(r, "u")) {
+                pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name((int32_t)jnum(r, "u")));
+            }
+
+            if (jnum(r, "s")) {
+                pb_puts(o, jnum(r, "s") == PD_SHIFT_SUPER ? "<w:vertAlign w:val=\"superscript\"/>" :
+                        "<w:vertAlign w:val=\"subscript\"/>");
+            }
+
+            pb_puts(o, "</w:rPr><w:t xml:space=\"preserve\">");
+            xesc(o, t->s, t->len);
+            pb_puts(o, "</w:t></w:r>");
+        }
+
+        pb_puts(o, "</w:p>");
+    }
+
+}
+
+/* a text box's table: its grid, its rows of cells, their spans, shading and rules */
+static void dx_txbx_table(dxo* x, const pj_node* tbl, int depth) {
+    pd_buf* o = x->o;
+    const pj_node* q, *row, *cell;
+    static const char* const side[] = { "top", "left", "bottom", "right", "insideH", "insideV" };
+    long long rule = jnum(tbl, "rules");
+    int jc = (int)jnum(tbl, "jc"), sz = (int)SCALE(rule, 8, 65536), k;
+
+    pb_printf(o, "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/>%s<w:tblBorders>", jc == PD_ALIGN_CENTER ?
+              "<w:jc w:val=\"center\"/>" : jc == PD_ALIGN_RIGHT ? "<w:jc w:val=\"right\"/>" : "");
+
+    for (k = 0; k < 6; k++) {
+        pb_printf(o, rule > 0 ? "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"auto\"/>" :
+                  "<w:%s w:val=\"nil\"/>", side[k], sz);
+    }
+
+    pb_puts(o, "</w:tblBorders><w:tblLayout w:type=\"fixed\"/></w:tblPr><w:tblGrid>");
+
+    for (q = pj_get(tbl, "cols") ? pj_get(tbl, "cols")->child : NULL; q; q = q->next) {
+        pb_printf(o, "<w:gridCol w:w=\"%d\"/>", (int)pj_int_or(q, 0));
+    }
+
+    pb_puts(o, "</w:tblGrid>");
+
+    for (row = pj_get(tbl, "rows") ? pj_get(tbl, "rows")->child : NULL; row; row = row->next) {
+        pb_puts(o, "<w:tr>");
+
+        for (cell = row->child; cell; cell = cell->next) {
+            int span = (int)jnum(cell, "span");
+            uint32_t bg = (uint32_t)jnum(cell, "bg");
+
+            pb_puts(o, "<w:tc><w:tcPr>");
+
+            if (span > 1) {
+                pb_printf(o, "<w:gridSpan w:val=\"%d\"/>", span);
+            }
+
+            if (bg) {
+                pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(bg & 0xFFFFFF));
+            }
+
+            pb_puts(o, "</w:tcPr>");
+            dx_txbx_paras(x, pj_get(cell, "paras"), depth);
+
+            if (!pj_get(cell, "paras") || !pj_get(cell, "paras")->child) {
+                pb_puts(o, "<w:p/>");   /* a cell ends in a paragraph */
+            }
+
+            pb_puts(o, "</w:tc>");
+        }
+
+        pb_puts(o, "</w:tr>");
+    }
+
+    pb_puts(o, "</w:tbl><w:p/>");   /* and so does a text box: after its table */
+}
+
 static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx, long long cy) {
     pd_buf* o = x->o;
     pj_doc* doc = pj_parse(data, len, 0, NULL);
@@ -863,63 +1026,13 @@ static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx,
             pb_puts(o, "</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" "
                     "anchor=\"b\"/></wps:wsp>");
         } else if (pj_get(it, "text")) {
-            const pj_node* p, *r, *ins = pj_get(it, "ins"), *an = pj_get(it, "anchor");
+            const pj_node* ins = pj_get(it, "ins"), *an = pj_get(it, "anchor");
 
             pb_printf(o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Text Box %d\"/><wps:cNvSpPr txBox=\"1\"/><wps:spPr>%s"
                       "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>"
                       "<wps:txbx><w:txbxContent>", id, id, xfrm);
 
-            for (p = pj_get(it, "text")->child; p; p = p->next) {
-                int a = (int)jnum(p, "a");
-
-                pb_printf(o, "<w:p><w:pPr><w:spacing w:after=\"0\"/><w:jc w:val=\"%s\"/></w:pPr>", a == PD_ALIGN_CENTER ?
-                          "center" : a == PD_ALIGN_RIGHT ? "right" : a == PD_ALIGN_JUSTIFY ? "both" : "left");
-
-                for (r = pj_get(p, "runs") ? pj_get(p, "runs")->child : NULL; r; r = r->next) {
-                    const pj_node* t = pj_get(r, "t"), *f = pj_get(r, "f");
-
-                    if (!t || t->type != PJ_STR) {
-                        continue;
-                    }
-
-                    pb_puts(o, "<w:r><w:rPr>");
-
-                    if (f && f->type == PJ_STR) {
-                        pb_puts(o, "<w:rFonts w:ascii=\"");
-                        xesc(o, f->s, f->len);
-                        pb_puts(o, "\" w:hAnsi=\"");
-                        xesc(o, f->s, f->len);
-                        pb_puts(o, "\"/>");
-                    }
-
-                    pb_puts(o, jnum(r, "w") >= 600 ? "<w:b/>" : "");
-                    pb_puts(o, jnum(r, "i") ? "<w:i/>" : "");
-
-                    if ((uint32_t)jnum(r, "c") & 0xFFFFFF) {
-                        pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(jnum(r, "c") & 0xFFFFFF));
-                    }
-
-                    if (jnum(r, "sz") > 0) {
-                        pb_printf(o, "<w:sz w:val=\"%d\"/>", (int)SCALE(jnum(r, "sz"), 2, 65536));
-                    }
-
-                    if (jnum(r, "u")) {
-                        pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name((int32_t)jnum(r, "u")));
-                    }
-
-                    if (jnum(r, "s")) {
-                        pb_puts(o, jnum(r, "s") == PD_SHIFT_SUPER ? "<w:vertAlign w:val=\"superscript\"/>" :
-                                "<w:vertAlign w:val=\"subscript\"/>");
-                    }
-
-                    pb_puts(o, "</w:rPr><w:t xml:space=\"preserve\">");
-                    xesc(o, t->s, t->len);
-                    pb_puts(o, "</w:t></w:r>");
-                }
-
-                pb_puts(o, "</w:p>");
-            }
-
+            dx_txbx_paras(x, pj_get(it, "text"), 0);
             pb_printf(o, "</w:txbxContent></wps:txbx><wps:bodyPr lIns=\"%lld\" tIns=\"%lld\" rIns=\"%lld\" bIns=\"%lld\" "
                       "anchor=\"%s\"/></wps:wsp>", EMU(pj_int_or(pj_at(ins, 0), 0)), EMU(pj_int_or(pj_at(ins, 1), 0)),
                       EMU(pj_int_or(pj_at(ins, 2), 0)), EMU(pj_int_or(pj_at(ins, 3), 0)),
@@ -933,6 +1046,23 @@ static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx,
 }
 
 /* a float that is only a picture: Word anchors it in the paragraph that follows */
+static int first_rev(void* user, const pd_span* sp) {
+    *(pd_rev_id*)user = sp->cp.revision;
+    return 1;
+}
+
+/* the tracked change a float's picture is in (a deleted one: in w:del) */
+static pd_rev_id dx_float_rev(const dxo* x, pd_block_id fl) {
+    pd_rev_id rev = 0;
+    pd_block_info fi;
+
+    if (pd_doc_block_info(x->d, fl, &fi) == PD_OK && fi.child_count == 1) {
+        pd_conv_spans_all(x->d, pd_doc_child(x->d, fl, 0), first_rev, &rev);
+    }
+
+    return rev;
+}
+
 static int dx_float_picture(const dxo* x, pd_block_id fl, pd_inline* ob) {
     pd_block_info fi, pi;
     const char* t;
@@ -1060,7 +1190,27 @@ static void dx_anchors(dxo* x) {
         pd_float_props fp;
 
         if (dx_float_picture(x, pend[i], &ob) && pd_doc_float_props(x->d, pend[i], &fp) == PD_OK) {
+            pd_revision rv;
+            pd_rev_id rev = dx_float_rev(x, pend[i]);
+            int tracked = rev && pd_doc_revision_get(x->d, rev, &rv) == PD_OK;
+
+            if (tracked) {      /* inserted or deleted with the text around it */
+                pb_printf(x->o, "<w:%s w:id=\"%d\" w:author=\"", rv.kind == PD_REV_DELETE ? "del" : "ins", ++x->nrev);
+                xesc(x->o, rv.author, strlen(rv.author));
+
+                if (rv.date[0]) {
+                    pb_puts(x->o, "\" w:date=\"");
+                    xesc(x->o, rv.date, strlen(rv.date));
+                }
+
+                pb_puts(x->o, "\">");
+            }
+
             dx_picture(x, &ob, &fp);
+
+            if (tracked) {
+                pb_puts(x->o, rv.kind == PD_REV_DELETE ? "</w:del>" : "</w:ins>");
+            }
         } else if (pd_doc_float_props(x->d, pend[i], &fp) == PD_OK) {
             dx_textbox(x, pend[i], &fp);
         }
@@ -3446,6 +3596,7 @@ typedef struct {
         int pending;            /* 1 start, 2 end: marked before a paragraph began, so at its start */
     }* cm;
     int ncm, capcm;
+    pd_rev_id float_rev;        /* the tracked change a float being read sits in: its content's */
 } dxi;
 
 /* ------------------------------------------------------------------ */
@@ -3623,6 +3774,11 @@ uint32_t pd_conv_clr_modify(uint32_t c, const char* t, const pd_markup* m) {
         return lum_adjust(c, f, 0);
     } else if (!strcmp(t, "lumOff")) {
         return lum_adjust(c, 1, f);
+    } else if (!strcmp(t, "alpha")) {   /* how opaque: the colour's alpha byte (1 at the least: 0 says "opaque") */
+        int a = (int)(f * 255 + 0.5);
+
+        a = a < 1 ? 1 : a > 255 ? 255 : a;
+        return (c & 0xFFFFFFu) | (uint32_t)a << 24;
     } else if (!strcmp(t, "tint") || !strcmp(t, "shade")) {    /* toward white, toward black */
         uint32_t r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
 
@@ -4721,6 +4877,7 @@ typedef struct {
         int wrap, has_off;
         const char* tbx;        /* a text box: its w:txbxContent, read into the float */
         size_t tbn;
+        pd_rev_id rev;          /* inserted or deleted with its anchor */
     } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
     int npend_fl;
     /* tables */
@@ -4807,9 +4964,9 @@ static void dw_apply_run(dw* w) {
         memcpy(cp.family_cs, f->family_cs, sizeof(cp.family_cs));
     }
 
-    if (w->rev) {
+    if (w->rev || w->X->float_rev) {
         cp.mask |= PD_CP_REVISION;
-        cp.revision = w->rev;
+        cp.revision = w->rev ? w->rev : w->X->float_rev;
     }
 
     bld_set_format(w->X->b, &cp);
@@ -5432,6 +5589,14 @@ static void dw_footnote(dw* w, int id, int endnote) {
    round them (square, tight, through), on the side Word put them; across
    the column when it puts text above and below or none at all. Pinned at
    the anchor, which is where Word positions them from. */
+/* the change a float goes with when it is a deletion (its content then deleted too, gone where deletions are
+   hidden); an insertion leaves its content as it is */
+static pd_rev_id deleted_rev(const dxi* X, pd_rev_id rev) {
+    pd_revision rv;
+
+    return rev && pd_doc_revision_get(X->b->d, rev, &rv) == PD_OK && rv.kind == PD_REV_DELETE ? rev : 0;
+}
+
 static void dw_floats(dw* w) {
     pd_bld* b = w->X->b;
     int k;
@@ -5459,9 +5624,12 @@ static void dw_floats(dw* w) {
 
         if (w->pend_fl[k].tbx) {    /* a text box: what it holds, read here, in the float */
             pd_char_props keep = b->cp;
+            pd_rev_id outer = w->X->float_rev;
 
             w->X->depth++;
+            w->X->float_rev = w->pend_fl[k].rev ? w->pend_fl[k].rev : outer;
             dw_parse(w->X, w->pend_fl[k].tbx, w->pend_fl[k].tbn, 1);
+            w->X->float_rev = outer;
             w->X->depth--;
             bld_end_para(b);
             b->cp = keep;
@@ -5475,7 +5643,20 @@ static void dw_floats(dw* w) {
         o.width = w->pend_fl[k].w;
         o.height = w->pend_fl[k].h;
         bld_begin_para(b);
-        bld_inline(b, &o);
+
+        if (w->pend_fl[k].rev) {    /* a picture inserted or deleted */
+            pd_char_props keep = b->cp, cp;
+
+            memset(&cp, 0, sizeof(cp));
+            cp.mask = PD_CP_REVISION;
+            cp.revision = w->pend_fl[k].rev;
+            bld_set_format(b, &cp);
+            bld_inline(b, &o);
+            bld_set_format(b, &keep);
+        } else {
+            bld_inline(b, &o);
+        }
+
         bld_float_end(b);
     }
 
@@ -5537,9 +5718,134 @@ static uint32_t scheme_color(const dxi* X, const char* name) {
     return slot >= 0 ? X->theme_clr[slot] : 0xFF000000u;
 }
 
-typedef struct {                /* child coordinates to the drawing's: x * s + o */
-    double ox, oy, sx, sy;
+typedef struct {                /* child coordinates to the drawing's: (a x + b y + ox, c x + d y + oy) */
+    double ox, oy, sx, sy;      /* sx, sy: how much a unit along each axis becomes (sizes of what cannot turn) */
+    double a, b, c, d;
 } dxform;
+
+static void fr_pt(const dxform* f, double x, double y, double* ox, double* oy) {
+    *ox = f->a * x + f->b * y + f->ox;
+    *oy = f->c * x + f->d * y + f->oy;
+}
+
+/* g after f: what maps by g, then by f */
+static dxform fr_then(const dxform* f, const dxform* g) {
+    dxform r;
+
+    r.a = f->a * g->a + f->b * g->c;
+    r.b = f->a * g->b + f->b * g->d;
+    r.c = f->c * g->a + f->d * g->c;
+    r.d = f->c * g->b + f->d * g->d;
+    r.ox = f->a * g->ox + f->b * g->oy + f->ox;
+    r.oy = f->c * g->ox + f->d * g->oy + f->oy;
+    r.sx = sqrt(r.a * r.a + r.c * r.c);
+    r.sy = sqrt(r.b * r.b + r.d * r.d);
+    return r;
+}
+
+/* a box's own turn and flips (and a 3-D camera's projection, lin: its 2x2), about its centre (cx, cy), as a map */
+static dxform fr_box(double cx, double cy, int rot, int fliph, int flipv, const double* lin) {
+    double t = rot / 60000.0 * 3.14159265358979 / 180, ct = cos(t), st = sin(t);
+    double fa = fliph ? -1 : 1, fd = flipv ? -1 : 1;
+    double l0 = lin ? lin[0] : 1, l1 = lin ? lin[1] : 0, l2 = lin ? lin[2] : 0, l3 = lin ? lin[3] : 1;
+    dxform r;
+
+    /* flipped first, then projected, then turned: R * L * F */
+    double m0 = l0 * fa, m1 = l1 * fd, m2 = l2 * fa, m3 = l3 * fd;
+
+    r.a = ct * m0 - st * m2;
+    r.b = ct * m1 - st * m3;
+    r.c = st * m0 + ct * m2;
+    r.d = st * m1 + ct * m3;
+    r.ox = cx - (r.a * cx + r.b * cy);
+    r.oy = cy - (r.c * cx + r.d * cy);
+    r.sx = sqrt(r.a * r.a + r.c * r.c);
+    r.sy = sqrt(r.b * r.b + r.d * r.d);
+    return r;
+}
+
+/* A 3-D camera (scene3d) seen in parallel: the 2x2 its rotation does to the shape's plane, from the preset (Office's
+   values, as LibreOffice reads them) and an explicit rot over it. 0 when there is none, or it is head-on. */
+static int camera_lin(const char* prst, int has_rot, double lat, double lon, double rev, double* lin) {
+    static const struct {
+        const char* n;
+        double lat, lon, rev;
+    } p[] = {
+        { "isometricBottomDown", 2124000, 18882000, 17988000 }, { "isometricBottomUp", 2124000, 2718000, 3612000 },
+        { "isometricLeftDown", 2100000, 2700000, 0 }, { "isometricLeftUp", 19500000, 2700000, 0 },
+        { "isometricOffAxis1Left", 1080000, 3840000, 0 }, { "isometricOffAxis1Right", 1080000, 20040000, 0 },
+        { "isometricOffAxis1Top", 18078000, 18390000, 3456000 }, { "isometricOffAxis2Left", 1080000, 1560000, 0 },
+        { "isometricOffAxis2Right", 1080000, 17760000, 0 }, { "isometricOffAxis2Top", 18078000, 3210000, 18144000 },
+        { "isometricOffAxis3Bottom", 3522000, 18390000, 18144000 }, { "isometricOffAxis3Left", 20520000, 3840000, 0 },
+        { "isometricOffAxis3Right", 20520000, 20040000, 0 }, { "isometricOffAxis4Bottom", 3522000, 3210000, 3456000 },
+        { "isometricOffAxis4Left", 20520000, 1560000, 0 }, { "isometricOffAxis4Right", 20520000, 17760000, 0 },
+        { "isometricRightDown", 19500000, 18900000, 0 }, { "isometricRightUp", 2100000, 18900000, 0 },
+        { "isometricTopDown", 19476000, 2718000, 17988000 }, { "isometricTopUp", 19476000, 18882000, 3612000 }
+    };
+    size_t i;
+    double la = 0, lo = 0, re = 0, d2r = 3.14159265358979 / 180 / 60000, X[9], Y[9], Z[9], XY[9], M[9];
+    int found = 0, k, j, q;
+
+    for (i = 0; prst && i < sizeof(p) / sizeof(p[0]); i++) {
+        if (!strcmp(prst, p[i].n)) {
+            la = p[i].lat;
+            lo = p[i].lon;
+            re = p[i].rev;
+            found = 1;
+        }
+    }
+
+    if (has_rot) {
+        la = lat;
+        lo = lon;
+        re = rev;
+        found = 1;
+    }
+
+    if (!found || (la == 0 && lo == 0 && re == 0)) {
+        return 0;
+    }
+
+    la *= d2r;
+    lo *= d2r;
+    re *= d2r;
+    /* about y by lon, then x by lat, then z by rev: Z * X * Y */
+    memset(X, 0, sizeof(X));
+    memset(Y, 0, sizeof(Y));
+    memset(Z, 0, sizeof(Z));
+    X[0] = 1;
+    X[4] = cos(la); X[8] = cos(la); X[5] = sin(la); X[7] = -sin(la);
+    Y[4] = 1;
+    Y[0] = cos(lo); Y[8] = cos(lo); Y[2] = -sin(lo); Y[6] = sin(lo);
+    Z[8] = 1;
+    Z[0] = cos(re); Z[4] = cos(re); Z[1] = sin(re); Z[3] = -sin(re);
+
+    for (k = 0; k < 3; k++) {
+        for (j = 0; j < 3; j++) {
+            XY[3 * k + j] = 0;
+
+            for (q = 0; q < 3; q++) {
+                XY[3 * k + j] += X[3 * k + q] * Y[3 * q + j];
+            }
+        }
+    }
+
+    for (k = 0; k < 3; k++) {
+        for (j = 0; j < 3; j++) {
+            M[3 * k + j] = 0;
+
+            for (q = 0; q < 3; q++) {
+                M[3 * k + j] += Z[3 * k + q] * XY[3 * q + j];
+            }
+        }
+    }
+
+    lin[0] = M[0];
+    lin[1] = M[1];
+    lin[2] = M[3];
+    lin[3] = M[4];
+    return 1;
+}
 
 typedef struct {                /* the xfrm being read: offset, extent, and a group's child space */
     long long off[2], ext[2], choff[2], chext[2];
@@ -5611,19 +5917,31 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     char cg_cmd = 'm';
     char blip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
     uint32_t fill = 0, line = 0, sfill = 0, sline = 0, *cur_clr = NULL;
+    char cam_prst[48] = "";         /* the shape's 3-D camera (scene3d), seen in parallel */
+    int cam_has_rot = 0, in_camera = 0;
+    double cam_lat = 0, cam_lon = 0, cam_rev = 0;
     long long lw = 9525, ins[4] = { 91440, 45720, 91440, 45720 };
-    pd_char_props base, rcp;
+    pd_char_props base, pbase, rcp;     /* the text boxes' Normal, the paragraph's style's, the run's own */
     pd_buf text;
     int jc = PD_ALIGN_LEFT;
+    int tb_depth = 0, tb_pr = 0, tb_tcpr = 0, tb_head = 0, tb_row0 = 1, tb_cell0 = 1, tb_jc = PD_ALIGN_LEFT;
+    int tb_span = 1, tb_rule = 0, tb_grid = 0;
+    int in_inl = 0;                 /* a picture in a text box's paragraph: its size and image */
+    long long inl_cx = 0, inl_cy = 0;
+    char inl_blip[64] = "";   /* a text box's table: one level of it, its cells' paragraphs among the text's */
+    uint32_t tb_bg = 0;
 
     memset(&xf, 0, sizeof(xf));
     memset(&o, 0, sizeof(o));
     memset(&text, 0, sizeof(text));
     fr[0].ox = fr[0].oy = 0;
     fr[0].sx = fr[0].sy = 1;
+    fr[0].a = fr[0].d = 1;
+    fr[0].b = fr[0].c = 0;
 
     /* the text boxes' default characters: Normal's, which is the document's default paragraph style by now */
     pd_doc_style_resolve(X->b->d, pd_doc_style_find(X->b->d, "Normal"), NULL, &base);
+    pbase = base;
 
     pb_printf(&o, "{\"w\":%d,\"h\":%d,\"items\":[", (int)emu_sp((double)w->cx), (int)emu_sp((double)w->cy));
     mu_init(&g, m->s + m->pos, m->n - m->pos, 0);
@@ -5656,12 +5974,12 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 un = dec.n;
 
                 if (un) {
-                    pd_char_props c = base;
+                    pd_char_props c = pbase;
                     dprops a, b;
 
                     memset(&a, 0, sizeof(a));
                     memset(&b, 0, sizeof(b));
-                    a.cp = base;
+                    a.cp = pbase;
                     b.cp = rcp;
                     pr_over(&a, &b);
                     c = a.cp;
@@ -5693,6 +6011,37 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             continue;
         }
 
+        if (in_txbx && (in_inl || (!strcmp(t, "drawing") && g.type == MT_OPEN))) {     /* not the group's own shapes */
+            if (!strcmp(t, "drawing")) {
+                if (g.type == MT_OPEN && !in_inl++) {
+                    inl_cx = inl_cy = 0;
+                    inl_blip[0] = '\0';
+                } else if (g.type == MT_CLOSE && !--in_inl && inl_blip[0] && inl_cx > 0 && inl_cy > 0) {
+                    pd_res_id r = dw_resource(X, inl_blip);
+
+                    if (r) {
+                        if (!para_open) {
+                            pb_printf(&text, "%s{\"a\":%d,\"runs\":[", nopara ? "" : ",", jc);
+                            para_open = 1;
+                            nopara = 0;
+                        } else if (text.n && text.p[text.n - 1] != '[') {
+                            pb_putc(&text, ',');
+                        }
+
+                        pb_printf(&text, "{\"img\":%d,\"w\":%d,\"h\":%d}", (int)r, (int)emu_sp((double)inl_cx),
+                                  (int)emu_sp((double)inl_cy));
+                    }
+                }
+            } else if (!strcmp(t, "extent") && open && !inl_cx) {
+                inl_cx = mu_attr(&g, "cx", v, sizeof(v)) ? atoll(v) : 0;
+                inl_cy = mu_attr(&g, "cy", v, sizeof(v)) ? atoll(v) : 0;
+            } else if (!strcmp(t, "blip") && open && !inl_blip[0]) {
+                mu_attr(&g, "r:embed", inl_blip, sizeof(inl_blip));
+            }
+
+            continue;
+        }
+
         /* groups: their xfrm maps their children's coordinates into their parent's */
         if (!strcmp(t, "grpSpPr")) {
             if (g.type == MT_OPEN) {
@@ -5709,16 +6058,26 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     sy = xf.chext[1] > 0 ? (double)w->cy / xf.chext[1] : 1;
                     fr[0].sx = sx;
                     fr[0].sy = sy;
+                    fr[0].a = sx;
+                    fr[0].d = sy;
+                    fr[0].b = fr[0].c = 0;
                     fr[0].ox = -xf.choff[0] * sx;
                     fr[0].oy = -xf.choff[1] * sy;
                     root_frame = 0;
-                } else if (nfr < 17) {  /* a nested group: off + (child - chOff) * ext / chExt, in its parent */
-                    dxform* p = &fr[nfr - 1];
+                } else if (nfr < 17) {
+                    /* a nested group: off + (child - chOff) * ext / chExt, then turned and flipped about its box's
+                       centre, in its parent */
+                    dxform gmap, box, both;
 
-                    fr[nfr].sx = p->sx * sx;
-                    fr[nfr].sy = p->sy * sy;
-                    fr[nfr].ox = p->ox + p->sx * (xf.off[0] - xf.choff[0] * sx);
-                    fr[nfr].oy = p->oy + p->sy * (xf.off[1] - xf.choff[1] * sy);
+                    memset(&gmap, 0, sizeof(gmap));
+                    gmap.a = sx;
+                    gmap.d = sy;
+                    gmap.ox = xf.off[0] - xf.choff[0] * sx;
+                    gmap.oy = xf.off[1] - xf.choff[1] * sy;
+                    box = fr_box(xf.off[0] + xf.ext[0] / 2.0, xf.off[1] + xf.ext[1] / 2.0, xf.rot, xf.fliph, xf.flipv,
+                                 NULL);
+                    both = fr_then(&box, &gmap);
+                    fr[nfr] = fr_then(&fr[nfr - 1], &both);
                     nfr++;
                 }
             }
@@ -5743,6 +6102,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         if ((!strcmp(t, "pic") || !strcmp(t, "wsp")) && g.type == MT_OPEN) {
             kind = !strcmp(t, "pic") ? 1 : 2;
             memset(&xf, 0, sizeof(xf));
+            cam_prst[0] = '\0';
+            cam_has_rot = in_camera = 0;
             blip[0] = '\0';
             strcpy(geom, "rect");
             have_fill = have_line = style_fill = style_line = 0;
@@ -5762,8 +6123,20 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         }
 
         if ((!strcmp(t, "pic") || !strcmp(t, "wsp")) && g.type == MT_CLOSE && kind) {
-            double x = FR->ox + FR->sx * xf.off[0], y = FR->oy + FR->sy * xf.off[1];
-            double cw = FR->sx * xf.ext[0], ch = FR->sy * xf.ext[1];
+            /* the shape's own map: its box turned, flipped and seen through its camera, in its group's */
+            double lin[4], bx0 = (double)xf.off[0], by0 = (double)xf.off[1], bw = (double)xf.ext[0], bh = (double)xf.ext[1];
+            int cam = camera_lin(cam_prst[0] ? cam_prst : NULL, cam_has_rot, cam_lat, cam_lon, cam_rev, lin);
+            dxform box = fr_box(bx0 + bw / 2, by0 + bh / 2, xf.rot, xf.fliph, xf.flipv, cam ? lin : NULL);
+            dxform sm = fr_then(FR, &box);
+            int straight = fabs(sm.b) < 1e-9 && fabs(sm.c) < 1e-9 && sm.a > 0 && sm.d > 0;
+            double x, y, cw, ch, mx, my;
+
+            /* where an unturnable box (a picture, a text box) goes: its centre mapped, its size scaled */
+            fr_pt(&sm, bx0 + bw / 2, by0 + bh / 2, &mx, &my);
+            cw = FR->sx * bw;
+            ch = FR->sy * bh;
+            x = mx - cw / 2;
+            y = my - ch / 2;
 
             if (para_open) {
                 pb_puts(&text, "]}");
@@ -5780,11 +6153,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 }
             } else if (kind == 2) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
-                int turned = xf.rot % 21600000 != 0, isline = !strcmp(geom, "line");
+                int isline = !strcmp(geom, "line"), k;
+                double lwd = lw * (FR->sx + FR->sy) / 2;
 
                 if (!strcmp(geom, "cust") && cg_n >= 2 && (f || l)) {     /* custom geometry: its path in the box */
-                    double gx = cg_w > 0 ? cw / cg_w : 1, gy = cg_h > 0 ? ch / cg_h : 1;
-                    int k;
+                    double gx = cg_w > 0 ? bw / cg_w : 1, gy = cg_h > 0 ? bh / cg_h : 1, qx, qy;
 
                     ITEM_SEP();
                     pb_puts(&o, "{\"path\":[");
@@ -5793,40 +6166,39 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         if (isnan(cg_xy[2 * k])) {
                             pb_printf(&o, "%s%d,%d", k ? "," : "", (int)INT32_MIN, (int)INT32_MIN);
                         } else {
-                            pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(x + cg_xy[2 * k] * gx),
-                                      (int)emu_sp(y + cg_xy[2 * k + 1] * gy));
+                            fr_pt(&sm, bx0 + cg_xy[2 * k] * gx, by0 + cg_xy[2 * k + 1] * gy, &qx, &qy);
+                            pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(qx), (int)emu_sp(qy));
                         }
                     }
 
                     pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", cg_closed, (unsigned)f, (unsigned)l,
-                              (int)emu_sp((double)lw));
+                              (int)emu_sp(lwd));
                     f = l = 0;
                 }
 
-                if ((f || l) && (turned || isline)) {
-                    /* a turned box or ellipse, or a line in any direction: as a path, turned about its centre */
-                    double cxm = x + cw / 2, cym = y + ch / 2, a = xf.rot / 60000.0 * 3.14159265358979 / 180;
-                    double ca = cos(a), sa = sin(a), px[64], py[64];
-                    int np = 0, k;
+                if ((f || l) && (!straight || isline)) {
+                    /* a turned or projected box or ellipse, or a line: as a path through the shape's map */
+                    double px[64], py[64];
+                    int np = 0;
 
-                    if (isline) {   /* corner to corner; the flips say which */
-                        px[0] = xf.fliph ? x + cw : x;
-                        py[0] = xf.flipv ? y + ch : y;
-                        px[1] = xf.fliph ? x : x + cw;
-                        py[1] = xf.flipv ? y : y + ch;
+                    if (isline) {   /* corner to corner; the flips are in the map */
+                        px[0] = bx0;
+                        py[0] = by0;
+                        px[1] = bx0 + bw;
+                        py[1] = by0 + bh;
                         np = 2;
                     } else if (!strcmp(geom, "ellipse")) {
                         for (k = 0; k < 48; k++) {
-                            px[k] = cxm + cw / 2 * cos(k * 6.2831853 / 48);
-                            py[k] = cym + ch / 2 * sin(k * 6.2831853 / 48);
+                            px[k] = bx0 + bw / 2 + bw / 2 * cos(k * 6.2831853 / 48);
+                            py[k] = by0 + bh / 2 + bh / 2 * sin(k * 6.2831853 / 48);
                         }
 
                         np = 48;
                     } else {
-                        px[0] = x; py[0] = y;
-                        px[1] = x + cw; py[1] = y;
-                        px[2] = x + cw; py[2] = y + ch;
-                        px[3] = x; py[3] = y + ch;
+                        px[0] = bx0; py[0] = by0;
+                        px[1] = bx0 + bw; py[1] = by0;
+                        px[2] = bx0 + bw; py[2] = by0 + bh;
+                        px[3] = bx0; py[3] = by0 + bh;
                         np = 4;
                     }
 
@@ -5834,23 +6206,24 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     pb_puts(&o, "{\"path\":[");
 
                     for (k = 0; k < np; k++) {
-                        double rx = cxm + (px[k] - cxm) * ca - (py[k] - cym) * sa;
-                        double ry = cym + (px[k] - cxm) * sa + (py[k] - cym) * ca;
+                        double rx, ry;
 
+                        fr_pt(&sm, px[k], py[k], &rx, &ry);
                         px[k] = rx;
                         py[k] = ry;
                         pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(rx), (int)emu_sp(ry));
                     }
 
                     pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", isline ? 0 : 1,
-                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp((double)lw));
+                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd));
 
                     /* arrowheads: a filled triangle at the end the line says */
                     for (k = 0; isline && l && k < 2; k++) {
                         if ((k == 0 && head_arrow) || (k == 1 && tail_arrow)) {
                             double tx = k ? px[1] : px[0], ty = k ? py[1] : py[0];
                             double fx = k ? px[0] : px[1], fy = k ? py[0] : py[1];
-                            double dx = tx - fx, dy = ty - fy, len = sqrt(dx * dx + dy * dy), s3 = lw * 3 > 50800 ? lw * 3 : 50800;
+                            double dx = tx - fx, dy = ty - fy, len = sqrt(dx * dx + dy * dy);
+                            double s3 = lwd * 3 > 50800 ? lwd * 3 : 50800;
 
                             if (len > 0) {
                                 dx /= len;
@@ -5867,11 +6240,15 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     f = l = 0;  /* drawn */
                 }
 
-                if (f || l) {
+                if (f || l) {   /* a box or an ellipse square to the page */
+                    double x0, y0, x1, y1;
+
+                    fr_pt(&sm, bx0, by0, &x0, &y0);
+                    fr_pt(&sm, bx0 + bw, by0 + bh, &x1, &y1);
                     ITEM_SEP();
                     pb_printf(&o, "{\"shape\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", geom,
-                              (int)emu_sp(x), (int)emu_sp(y), (int)emu_sp(cw), (int)emu_sp(ch), (unsigned)f, (unsigned)l,
-                              (int)emu_sp((double)lw));
+                              (int)emu_sp(x0), (int)emu_sp(y0), (int)emu_sp(x1 - x0), (int)emu_sp(y1 - y0), (unsigned)f,
+                              (unsigned)l, (int)emu_sp(lwd));
                 }
 
                 if (!nopara) {
@@ -5910,8 +6287,102 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             in_lnref = g.type == MT_OPEN && attr_int(&g, "idx", 0) > 0;
         } else if (!strcmp(t, "gs")) {
             in_gs = g.type == MT_OPEN ? in_gs + 1 : 0;
+        } else if (in_txbx && (!strcmp(t, "tbl") || !strcmp(t, "tblGrid") || !strcmp(t, "gridCol") ||
+                               !strcmp(t, "tr") || !strcmp(t, "tc") || !strcmp(t, "tcPr") || !strcmp(t, "tblPr") ||
+                               !strcmp(t, "gridSpan") || (tb_depth == 1 && (tb_pr || tb_tcpr)))) {
+            if (!strcmp(t, "tbl")) {
+                if (g.type == MT_OPEN && ++tb_depth == 1) {
+                    if (para_open) {
+                        pb_puts(&text, "]}");
+                        para_open = 0;
+                    }
+
+                    pb_printf(&text, "%s{\"table\":{", nopara ? "" : ",");
+                    nopara = 0;
+                    tb_row0 = 1;
+                    tb_rule = 0;
+                    tb_grid = 0;
+                    tb_jc = PD_ALIGN_LEFT;
+                } else if (g.type == MT_CLOSE && tb_depth > 0 && --tb_depth == 0) {
+                    pb_puts(&text, tb_grid ? "]}}" : "\"cols\":[],\"rows\":[]}}");
+                }
+            } else if (tb_depth != 1) {
+                /* a table in the table: its cells' text flows into the outer cell */
+            } else if (!strcmp(t, "tblPr")) {
+                tb_pr = g.type == MT_OPEN;
+            } else if (tb_pr) {
+                if (!strcmp(t, "jc") && mu_attr(&g, "w:val", v, sizeof(v))) {
+                    tb_jc = !strcmp(v, "center") ? PD_ALIGN_CENTER : !strcmp(v, "right") || !strcmp(v, "end") ?
+                            PD_ALIGN_RIGHT : PD_ALIGN_LEFT;
+                } else if ((!strcmp(t, "top") || !strcmp(t, "insideH")) && open && mu_attr(&g, "w:val", v, sizeof(v)) &&
+                           strcmp(v, "nil") && strcmp(v, "none")) {
+                    int sz = attr_int(&g, "w:sz", 2);     /* eighths of a point, a hairline at the least */
+
+                    sz = (sz < 2 ? 2 : sz) * 65536 / 8;
+                    tb_rule = sz > tb_rule ? sz : tb_rule;
+                }
+            } else if (!strcmp(t, "tblGrid")) {
+                if (g.type == MT_OPEN && !tb_grid) {
+                    tb_grid = 1;
+                    pb_printf(&text, "\"rules\":%d,\"jc\":%d,\"cols\":[", tb_rule, tb_jc);
+                    tb_cell0 = 1;
+                } else if (g.type == MT_CLOSE && tb_grid == 1) {
+                    tb_grid = 2;
+                    pb_puts(&text, "],\"rows\":[");
+                }
+            } else if (tb_grid != 2 && strcmp(t, "gridCol")) {
+                /* rows before the grid: not a table to draw */
+            } else if (!strcmp(t, "gridCol") && open && tb_grid == 1) {
+                pb_printf(&text, "%s%d", tb_cell0 ? "" : ",", attr_int(&g, "w:w", 0));
+                tb_cell0 = 0;
+            } else if (!strcmp(t, "tr")) {
+                if (g.type == MT_OPEN) {
+                    pb_puts(&text, tb_row0 ? "[" : ",[");
+                    tb_row0 = 0;
+                    tb_cell0 = 1;
+                } else if (g.type == MT_CLOSE) {
+                    pb_putc(&text, ']');
+                }
+            } else if (!strcmp(t, "tc")) {
+                if (g.type == MT_OPEN) {
+                    tb_span = 1;
+                    tb_bg = 0;
+                    tb_head = 0;
+                } else if (g.type == MT_CLOSE) {
+                    if (para_open) {
+                        pb_puts(&text, "]}");
+                        para_open = 0;
+                    }
+
+                    if (!tb_head) {
+                        pb_printf(&text, "%s{\"span\":%d,\"bg\":%u,\"paras\":[", tb_cell0 ? "" : ",", tb_span,
+                                  (unsigned)tb_bg);
+                        tb_cell0 = 0;
+                    }
+
+                    pb_puts(&text, "]}");
+                    nopara = 0;
+                    tb_head = 1;
+                }
+            } else if (!strcmp(t, "tcPr")) {
+                tb_tcpr = g.type == MT_OPEN;
+
+                if (g.type == MT_CLOSE && !tb_head) {   /* the cell's head, its paragraphs to follow */
+                    pb_printf(&text, "%s{\"span\":%d,\"bg\":%u,\"paras\":[", tb_cell0 ? "" : ",", tb_span,
+                              (unsigned)tb_bg);
+                    tb_cell0 = 0;
+                    tb_head = 1;
+                    nopara = 1;
+                }
+            } else if (tb_tcpr && !strcmp(t, "gridSpan") && open) {
+                tb_span = attr_int(&g, "w:val", 1);
+            } else if (tb_tcpr && !strcmp(t, "shd") && open) {
+                shd_color(X, &g, &tb_bg);
+            }
         } else if (!open) {
-            if (!strcmp(t, "p") && para_open) {
+            if (!strcmp(t, "camera")) {
+                in_camera = 0;
+            } else if (!strcmp(t, "p") && para_open) {
                 pb_puts(&text, "]}");
                 para_open = 0;
             } else if (!strcmp(t, "rPr")) {
@@ -5923,6 +6394,17 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             continue;
         } else if (in_sppr && !in_ln && (!strcmp(t, "xfrm") || !strcmp(t, "off") || !strcmp(t, "ext"))) {
             xfrm_attr(&g, t, &xf);
+        } else if (in_sppr && !strcmp(t, "camera")) {
+            if (!mu_attr(&g, "prst", cam_prst, sizeof(cam_prst))) {
+                cam_prst[0] = '\0';
+            }
+
+            in_camera = g.type == MT_OPEN;
+        } else if (in_camera && !strcmp(t, "rot")) {
+            cam_has_rot = 1;
+            cam_lat = mu_attr(&g, "lat", v, sizeof(v)) ? atof(v) : 0;
+            cam_lon = mu_attr(&g, "lon", v, sizeof(v)) ? atof(v) : 0;
+            cam_rev = mu_attr(&g, "rev", v, sizeof(v)) ? atof(v) : 0;
         } else if (in_sppr && !strcmp(t, "custGeom")) {
             strcpy(geom, "cust");
         } else if (in_sppr && !strcmp(t, "path") && !strcmp(geom, "cust")) {   /* its coordinate space */
@@ -5943,8 +6425,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             cg_pt[2 * cg_npt + 1] = py;
             cg_npt++;
 
-            /* a point, or the end of a curve: a curve as its end point and its control points, straightened */
+            /* a point, or the end of a curve: a curve as points along it, from where the path is */
             if ((cg_cmd == 'c' && cg_npt == 3) || (cg_cmd == 'q' && cg_npt == 2) || cg_cmd == 'm' || cg_cmd == 'l') {
+                int curve = (cg_cmd == 'c' || cg_cmd == 'q') && cg_n > 0 && !isnan(cg_xy[2 * cg_n - 2]) && !cg_new_ring;
+                double x0 = curve ? cg_xy[2 * cg_n - 2] : 0, y0 = curve ? cg_xy[2 * cg_n - 1] : 0;
+
                 if (cg_new_ring && cg_n > 0) {
                     cg_xy[2 * cg_n] = NAN;
                     cg_xy[2 * cg_n + 1] = NAN;
@@ -5953,10 +6438,28 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
                 cg_new_ring = 0;
 
-                for (k2 = 0; k2 < cg_npt; k2++) {
-                    cg_xy[2 * cg_n] = cg_pt[2 * k2];
-                    cg_xy[2 * cg_n + 1] = cg_pt[2 * k2 + 1];
-                    cg_n++;
+                if (curve && cg_n + 12 < 2048) {
+                    for (k2 = 1; k2 <= 12; k2++) {
+                        double tt = k2 / 12.0, u = 1 - tt;
+
+                        if (cg_cmd == 'c') {
+                            cg_xy[2 * cg_n] = u * u * u * x0 + 3 * u * u * tt * cg_pt[0] + 3 * u * tt * tt * cg_pt[2] +
+                                              tt * tt * tt * cg_pt[4];
+                            cg_xy[2 * cg_n + 1] = u * u * u * y0 + 3 * u * u * tt * cg_pt[1] + 3 * u * tt * tt * cg_pt[3] +
+                                                  tt * tt * tt * cg_pt[5];
+                        } else {
+                            cg_xy[2 * cg_n] = u * u * x0 + 2 * u * tt * cg_pt[0] + tt * tt * cg_pt[2];
+                            cg_xy[2 * cg_n + 1] = u * u * y0 + 2 * u * tt * cg_pt[1] + tt * tt * cg_pt[3];
+                        }
+
+                        cg_n++;
+                    }
+                } else {
+                    for (k2 = 0; k2 < cg_npt; k2++) {
+                        cg_xy[2 * cg_n] = cg_pt[2 * k2];
+                        cg_xy[2 * cg_n + 1] = cg_pt[2 * k2 + 1];
+                        cg_n++;
+                    }
                 }
 
                 cg_npt = 0;
@@ -5993,7 +6496,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 cur_clr = NULL;     /* no modifiers inside */
             }
         } else if (cur_clr && (!strcmp(t, "lumMod") || !strcmp(t, "lumOff") || !strcmp(t, "tint") ||
-                               !strcmp(t, "shade"))) {
+                               !strcmp(t, "shade") || !strcmp(t, "alpha"))) {
             *cur_clr = pd_conv_clr_modify(*cur_clr, t, &g);
         } else if (in_ln && (!strcmp(t, "headEnd") || !strcmp(t, "tailEnd"))) {
             int arrow = mu_attr(&g, "type", v, sizeof(v)) && strcmp(v, "none") != 0;
@@ -6022,9 +6525,25 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 snprintf(anchor, sizeof(anchor), "%.3s", v);
             }
         } else if (in_txbx) {
+            if (!strcmp(t, "p") && tb_depth == 1 && tb_grid == 2 && g.type == MT_OPEN && !tb_head) {   /* a cell without tcPr */
+                pb_printf(&text, "%s{\"span\":%d,\"bg\":%u,\"paras\":[", tb_cell0 ? "" : ",", tb_span,
+                          (unsigned)tb_bg);
+                tb_cell0 = 0;
+                tb_head = 1;
+                nopara = 1;
+            }
+
             if (!strcmp(t, "p")) {
                 jc = PD_ALIGN_LEFT;
+                pbase = base;
                 memset(&rcp, 0, sizeof(rcp));
+            } else if (!strcmp(t, "pStyle") && mu_attr(&g, "w:val", v, sizeof(v))) {
+                dprops a;
+
+                memset(&a, 0, sizeof(a));
+                a.cp = base;
+                style_chain(X, v, &a, 0);
+                pbase = a.cp;
             } else if (!strcmp(t, "jc") && mu_attr(&g, "w:val", v, sizeof(v))) {
                 jc = !strcmp(v, "center") ? PD_ALIGN_CENTER : !strcmp(v, "right") || !strcmp(v, "end") ? PD_ALIGN_RIGHT :
                      !strcmp(v, "both") ? PD_ALIGN_JUSTIFY : PD_ALIGN_LEFT;
@@ -6109,6 +6628,7 @@ static void dw_image(dw* w) {
         w->pend_fl[k].h = o.height;
         w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
         w->pend_fl[k].wrap = w->wrap;
+        w->pend_fl[k].rev = deleted_rev(X, w->rev);
         w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
         w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
 
@@ -7525,6 +8045,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->pend_fl[k].h = (pd_sp)(w->cy * 65536 / 12700);
                 w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
                 w->pend_fl[k].wrap = w->wrap;
+                w->pend_fl[k].rev = deleted_rev(X, w->rev);
                 w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
                 w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
                 w->pend_fl[k].tbx = w->tbx;

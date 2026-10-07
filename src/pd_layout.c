@@ -687,59 +687,76 @@ static pd_sp float_taken(const pd_float_props* fp, pd_sp w, pd_sp colw, pd_sp* o
 }
 
 /* lay out the paragraphs of a block stack at a width; returns total height */
-static pd_sp stack_height(pd_layout* L, pd_block_id container, pd_sp width, pd_status* st) {
-    pd_block_id ids[512];
-    int32_t n = 0, i;
+static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t page, pd_sp x, pd_sp y, int32_t region,
+                             int draw, pd_status* st);
+
+/* A block stack (a float's, a text box's, a cell's, a story's) from (x, y), or only measured (draw 0): its
+   paragraphs, and its tables as tables -- a table's paragraphs are not the stack's. Returns its height. */
+static pd_sp stack_walk(pd_layout* L, pd_block_id container, pd_sp width, int draw, int32_t page, pd_sp x, pd_sp y,
+                        int32_t region, pd_status* st) {
+    const blk* cb = pd_doc_blk(L->doc, container);
+    pd_block_id ids[512], prev = 0;
+    int32_t n, i, kk, k;
     pd_sp h = 0, prev_after = 0;
 
-    collect_paras(L->doc, container, ids, &n, 512);
+    if (!cb) {
+        return 0;
+    }
 
-    for (i = 0; i < n && i < 512; i++) {
-        pcache* c = layout_para(L, ids[i], width, st);
+    for (kk = 0; kk < (cb->kind == PD_BLOCK_PARAGRAPH ? 1 : cb->nkids); kk++) {
+        pd_block_id kid = cb->kind == PD_BLOCK_PARAGRAPH ? container : cb->kids[kk];
+        const blk* kb = pd_doc_blk(L->doc, kid);
 
-        if (!c) {
-            return -1;
+        if (kb && kb->kind == PD_BLOCK_TABLE) {
+            pd_sp th = place_table_box(L, kb, width, page, x, y + h + (prev ? prev_after : 0), region, draw, st);
+
+            if (th < 0) {
+                return -1;
+            }
+
+            h += (prev ? prev_after : 0) + th;
+            prev = 0;       /* what follows a table starts afresh */
+            prev_after = 0;
+            continue;
         }
 
-        if (i > 0) {
-            h += para_gap(L->doc, ids[i - 1], prev_after, ids[i], &c->pp);
-        }
+        n = 0;
+        collect_paras(L->doc, kid, ids, &n, 512);
 
-        h += c->height;
-        prev_after = c->pp.space_after;
+        for (i = 0; i < n && i < 512; i++) {
+            pcache* c = layout_para(L, ids[i], width, st);
+
+            if (!c) {
+                return -1;
+            }
+
+            if (prev) {
+                h += para_gap(L->doc, prev, prev_after, ids[i], &c->pp);
+            }
+
+            for (k = 0; draw && k < c->nlines; k++) {
+                add_line(L, page, c, k, x, y + h, region);
+            }
+
+            h += c->height;
+            prev_after = c->pp.space_after;
+            prev = ids[i];
+        }
     }
 
     return h;
 }
 
-/* place a block stack's paragraphs from (x, y) */
+static pd_sp stack_height(pd_layout* L, pd_block_id container, pd_sp width, pd_status* st) {
+    return stack_walk(L, container, width, 0, 0, 0, 0, 0, st);
+}
+
+/* place a block stack's paragraphs (and tables) from (x, y) */
 static void place_stack(pd_layout* L, pd_block_id container, pd_sp width, int32_t page, pd_sp x, pd_sp y,
                         int32_t region) {
-    pd_block_id ids[512];
-    int32_t n = 0, i, k;
-    pd_sp prev_after = 0;
     pd_status st;
 
-    collect_paras(L->doc, container, ids, &n, 512);
-
-    for (i = 0; i < n && i < 512; i++) {
-        pcache* c = layout_para(L, ids[i], width, &st);
-
-        if (!c) {
-            return;
-        }
-
-        if (i > 0) {
-            y += para_gap(L->doc, ids[i - 1], prev_after, ids[i], &c->pp);
-        }
-
-        for (k = 0; k < c->nlines; k++) {
-            add_line(L, page, c, k, x, y, region);
-        }
-
-        y += c->height;
-        prev_after = c->pp.space_after;
-    }
+    stack_walk(L, container, width, 1, page, x, y, region, &st);
 }
 
 /* the lines of a container whose tops are in [lo, hi) of it (a slice of a table row): placed with the
@@ -1040,8 +1057,7 @@ static void clear_wrap(filler* F) {
 }
 
 /* narrowest and widest useful width of a cell's content */
-static void cell_minmax(filler* F, pd_block_id cell, pd_sp* mn, pd_sp* mx) {
-    pd_layout* L = F->L;
+static void cell_minmax(pd_layout* L, pd_block_id cell, pd_sp* mn, pd_sp* mx) {
     pd_block_id ids[256];
     int32_t n = 0, i;
 
@@ -1196,20 +1212,20 @@ static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd
     return cuts;
 }
 
-static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* prev_keep, int* first) {
-    const pd_doc* d = F->L->doc;
+/* A table's grid in a column colw wide: its columns' widths (natural, or as the table says), where it sits, its
+   header rows. T->hdr_item and T->rowh are left for the caller. */
+static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
+    const pd_doc* d = L->doc;
     const pd_table_props* tp = &t->st.tp;
-    ptable T;
     pd_sp mn[PD_TABLE_MAX_COLS], mx[PD_TABLE_MAX_COLS], w[PD_TABLE_MAX_COLS], avail, fixed = 0;
     int64_t smin = 0, smax = 0;
-    int32_t r, k, c, pass, nauto = 0, ti;
-    pd_sp pad = tp->cell_padding, padv = tp->cell_padding_v >= 0 ? tp->cell_padding_v : pad;
-    pd_status st = PD_OK;
+    int32_t r, k, c, pass, nauto = 0;
+    pd_sp pad = tp->cell_padding;
 
-    memset(&T, 0, sizeof(T));
-    T.block = t->id;
-    T.tp = *tp;
-    T.ncols = tp->ncols;
+    memset(T, 0, sizeof(*T));
+    T->block = t->id;
+    T->tp = *tp;
+    T->ncols = tp->ncols;
 
     for (r = 0; r < t->nkids; r++) {    /* grid width: the widest row */
         const blk* row = d->tab[t->kids[r]];
@@ -1220,13 +1236,13 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
             cols += sp < 1 ? 1 : sp;
         }
 
-        T.ncols = cols > T.ncols ? cols : T.ncols;
+        T->ncols = cols > T->ncols ? cols : T->ncols;
     }
 
-    T.ncols = T.ncols > PD_TABLE_MAX_COLS ? PD_TABLE_MAX_COLS : T.ncols;
+    T->ncols = T->ncols > PD_TABLE_MAX_COLS ? PD_TABLE_MAX_COLS : T->ncols;
 
-    if (T.ncols == 0) {
-        return PD_OK;
+    if (T->ncols == 0) {
+        return;
     }
 
     memset(mn, 0, sizeof(mn));
@@ -1237,9 +1253,9 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
         for (r = 0; r < t->nkids; r++) {
             const blk* row = d->tab[t->kids[r]];
 
-            for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
+            for (k = 0, c = 0; k < row->nkids && c < T->ncols; k++) {
                 const blk* cell = d->tab[row->kids[k]];
-                int32_t span = cell_span(&T, cell, c), j;
+                int32_t span = cell_span(T, cell, c), j;
                 pd_sp a, b;
 
                 if ((span == 1) != (pass == 0) || cell->st.cell.merge_up) {
@@ -1247,7 +1263,7 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
                     continue;
                 }
 
-                cell_minmax(F, cell->id, &a, &b);
+                cell_minmax(L, cell->id, &a, &b);
                 a += 2 * pad;
                 b += 2 * pad;
 
@@ -1279,14 +1295,14 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
     }
 
     {   /* the width it is given: of the column, or its own; an indented table has less room */
-        pd_sp want = tp->width_pct > 0 ? (pd_sp)((int64_t)F->colw * tp->width_pct / 1000) : tp->width;
-        pd_sp room = F->colw - (tp->align == PD_ALIGN_LEFT && tp->indent > 0 ? tp->indent : 0);
+        pd_sp want = tp->width_pct > 0 ? (pd_sp)((int64_t)colw * tp->width_pct / 1000) : tp->width;
+        pd_sp room = colw - (tp->align == PD_ALIGN_LEFT && tp->indent > 0 ? tp->indent : 0);
 
         avail = want > 0 && want < room ? want : room;
-        avail = avail > 0 ? avail : F->colw;
+        avail = avail > 0 ? avail : colw;
     }
 
-    for (c = 0; c < T.ncols; c++) {
+    for (c = 0; c < T->ncols; c++) {
         mx[c] = mx[c] < mn[c] ? mn[c] : mx[c];
 
         if (c < tp->ncols && tp->col_width[c] > 0) {
@@ -1300,7 +1316,7 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
         }
     }
 
-    for (c = 0; c < T.ncols; c++) {
+    for (c = 0; c < T->ncols; c++) {
         int64_t rest = (int64_t)avail - fixed;
 
         if (w[c] >= 0) {
@@ -1320,16 +1336,31 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
         }
     }
 
-    for (c = 0; c < T.ncols; c++) {
-        T.colx[c + 1] = T.colx[c] + (w[c] > 0 ? w[c] : 0);
+    for (c = 0; c < T->ncols; c++) {
+        T->colx[c + 1] = T->colx[c] + (w[c] > 0 ? w[c] : 0);
     }
 
-    T.width = T.colx[T.ncols];
-    T.x = tp->align == PD_ALIGN_CENTER ? (F->colw - T.width) / 2 : tp->align == PD_ALIGN_RIGHT ? F->colw - T.width :
+    T->width = T->colx[T->ncols];
+    T->x = tp->align == PD_ALIGN_CENTER ? (colw - T->width) / 2 : tp->align == PD_ALIGN_RIGHT ? colw - T->width :
           tp->indent;
-    T.x = T.x < 0 && tp->align != PD_ALIGN_LEFT ? 0 : T.x;
-    T.header_rows = tp->header_rows < t->nkids ? tp->header_rows : t->nkids - 1;
-    T.header_rows = T.header_rows < 0 ? 0 : T.header_rows;
+    T->x = T->x < 0 && tp->align != PD_ALIGN_LEFT ? 0 : T->x;
+    T->header_rows = tp->header_rows < t->nkids ? tp->header_rows : t->nkids - 1;
+    T->header_rows = T->header_rows < 0 ? 0 : T->header_rows;
+}
+
+static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* prev_keep, int* first) {
+    const pd_doc* d = F->L->doc;
+    const pd_table_props* tp = &t->st.tp;
+    ptable T;
+    int32_t r, k, c, pass, ti;
+    pd_sp pad = tp->cell_padding, padv = tp->cell_padding_v >= 0 ? tp->cell_padding_v : pad;
+    pd_status st = PD_OK;
+
+    table_grid(F->L, t, F->colw, &T);
+
+    if (T.ncols == 0) {
+        return PD_OK;
+    }
 
     if (T.header_rows > 0 && (T.hdr_item = (int32_t*)malloc((size_t)T.header_rows * sizeof(int32_t))) == NULL) {
         return PD_ERR_NOMEM;
@@ -1475,6 +1506,53 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
     return PD_OK;
 }
 
+/* whether all a block holds is hidden by how changes are shown (a deleted float where deletions go): 1 when
+   something was seen and nothing of it shows, -1 when nothing was seen */
+static int all_hidden(const pd_doc* d, pd_block_id id, int depth) {
+    const blk* b = pd_doc_blk(d, id);
+    int32_t i, seen = 0;
+
+    if (!b || depth > 16) {
+        return 0;
+    }
+
+    if (b->kind == PD_BLOCK_PARAGRAPH) {
+        for (i = 0; i < b->st.nruns; i++) {
+            pd_char_props cp;
+
+            if (b->st.runs[i].end <= b->st.runs[i].start) {
+                continue;
+            }
+
+            if (pd_doc_format_resolve(d, b->id, b->st.runs[i].format, &cp) != PD_OK) {
+                return 0;
+            }
+
+            pd_doc_markup_props(d, &cp);
+
+            if (!cp.hidden) {
+                return 0;
+            }
+
+            seen = 1;
+        }
+
+        return seen ? 1 : -1;
+    }
+
+    for (i = 0; i < b->nkids; i++) {
+        int h = all_hidden(d, b->kids[i], depth + 1);
+
+        if (h == 0) {
+            return 0;
+        }
+
+        seen |= h > 0;
+    }
+
+    return seen ? 1 : -1;
+}
+
 static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after, int* prev_keep, int* first) {
     const pd_doc* d = F->L->doc;
     blk* c = pd_doc_blk(d, container);
@@ -1567,6 +1645,10 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
         } else if (b->kind == PD_BLOCK_FLOAT) {
             pfloat* f;
             pd_sp ox;
+
+            if (pd_doc_revision_count(d) > 0 && all_hidden(d, b->id, 0) > 0) {
+                continue;   /* deleted, and deletions not shown here */
+            }
 
             clear_wrap(F);
 
@@ -1819,6 +1901,121 @@ static pd_sp edge_rule(const ptable* T, const blk* cell, int edge, const blk* ac
 
     *color = T->tp.border_color;
     return (sides & (outer ? outer_bit : inner_bit)) ? T->tp.border : 0;
+}
+
+/* A table inside a block stack (a float, a text box, a cell), whole where it is: its grid in width, each row as tall
+   as its tallest cell, the cells' shading, content and rules. Measured only with draw 0. Returns its height. */
+static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t page, pd_sp x, pd_sp y, int32_t region,
+                             int draw, pd_status* st) {
+    const pd_doc* d = L->doc;
+    ptable T;
+    pd_sp pad = t->st.tp.cell_padding, padv = t->st.tp.cell_padding_v >= 0 ? t->st.tp.cell_padding_v : pad, h = 0;
+    pd_sp rowh[256];
+    int32_t r, k, c;
+
+    table_grid(L, t, width, &T);
+    T.block = t->id;
+
+    if (T.ncols == 0 || t->nkids == 0) {
+        return 0;
+    }
+
+    for (r = 0; r < t->nkids && r < 256; r++) {     /* each row: its tallest cell */
+        const blk* row = d->tab[t->kids[r]];
+
+        rowh[r] = 0;
+
+        for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
+            const blk* cell = d->tab[row->kids[k]];
+            int32_t span = cell_span(&T, cell, c);
+            pd_sp inner = T.colx[c + span] - T.colx[c] - 2 * pad, ch;
+
+            c += span;
+
+            if (cell->st.cell.merge_up) {
+                continue;
+            }
+
+            ch = stack_walk(L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, 0, 0, 0, 0, 0, st);
+
+            if (ch < 0) {
+                return -1;
+            }
+
+            ch += 2 * padv;
+            ch = ch > cell->st.cell.min_height ? ch : cell->st.cell.min_height;
+            rowh[r] = ch > rowh[r] ? ch : rowh[r];
+        }
+
+        h += rowh[r];
+    }
+
+    if (!draw) {
+        return h;
+    }
+
+    for (r = 0, h = 0; r < t->nkids && r < 256; r++) {
+        const blk* row = d->tab[t->kids[r]];
+        const blk* next = r + 1 < t->nkids ? d->tab[t->kids[r + 1]] : NULL;
+        const blk* prev = r > 0 ? d->tab[t->kids[r - 1]] : NULL;
+        pd_sp ry = y + h, tx = x + T.x;
+
+        for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
+            const blk* cell = d->tab[row->kids[k]];
+            int32_t span = cell_span(&T, cell, c);
+            pd_sp cx = tx + T.colx[c], cw = T.colx[c + span] - T.colx[c], inner = cw - 2 * pad, bw, ch, off = 0;
+            uint32_t bc;
+
+            inner = inner < PD_PT(1) ? PD_PT(1) : inner;
+
+            if (cell->st.cell.background) {
+                add_rule(L, page, cx, ry, cw, rowh[r], cell->st.cell.background, region, cell->id);
+            }
+
+            if (!cell->st.cell.merge_up) {
+                ch = stack_walk(L, cell->id, inner, 0, 0, 0, 0, 0, st);
+                off = cell->st.cell.valign == 1 ? (rowh[r] - 2 * padv - ch) / 2 : cell->st.cell.valign == 2 ?
+                      rowh[r] - 2 * padv - ch : 0;
+                stack_walk(L, cell->id, inner, 1, page, cx + pad, ry + padv + (off > 0 ? off : 0), region, st);
+            }
+
+            bw = edge_rule(&T, cell, PD_BORDER_LEFT, c > 0 ? cell_over(d, &T, row, c - 1) : NULL, PD_BORDER_RIGHT,
+                           PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, c == 0, &bc);
+
+            if (bw > 0) {
+                add_rule(L, page, cx - bw / 2, ry, bw, rowh[r], bc, region, cell->id);
+            }
+
+            if (c + span >= T.ncols || k + 1 == row->nkids) {
+                bw = edge_rule(&T, cell, PD_BORDER_RIGHT, NULL, 0, PD_TBORDER_RIGHT, PD_TBORDER_INSIDE_V,
+                               c + span >= T.ncols, &bc);
+
+                if (bw > 0) {
+                    add_rule(L, page, cx + cw - bw / 2, ry, bw, rowh[r], bc, region, cell->id);
+                }
+            }
+
+            bw = edge_rule(&T, cell, PD_BORDER_TOP, prev ? cell_over(d, &T, prev, c) : NULL, PD_BORDER_BOTTOM,
+                           PD_TBORDER_TOP, PD_TBORDER_INSIDE_H, r == 0, &bc);
+
+            if (bw > 0 && !cell->st.cell.merge_up) {
+                add_rule(L, page, cx - bw / 2, ry - bw / 2, cw + bw, bw, bc, region, cell->id);
+            }
+
+            bw = edge_rule(&T, cell, PD_BORDER_BOTTOM, next ? cell_over(d, &T, next, c) : NULL, PD_BORDER_TOP,
+                           PD_TBORDER_BOTTOM, PD_TBORDER_INSIDE_H, !next, &bc);
+
+            if (bw > 0) {
+                add_rule(L, page, cx - bw / 2, ry + rowh[r] - bw / 2, cw + bw, bw, bc, region, cell->id);
+            }
+
+            c += span;
+        }
+
+        h += rowh[r];
+    }
+
+    return h;
 }
 
 /* one table row: cell backgrounds, contents and grid rules */
@@ -3811,28 +4008,31 @@ static pd_sp jsp(const pj_node* o, const char* k) {
 
 /* a text box of a drawing: its paragraphs set in its width less its insets,
    at its top, middle or bottom */
-static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp bx, pd_sp by, pd_sp bw, pd_sp bh,
-                         double sc, pd_block_id block, uint32_t off, int32_t region) {
-    const pj_node* paras = pj_get(it, "text"), *ins = pj_get(it, "ins"), *an = pj_get(it, "anchor"), *p;
-    pd_sp il = (pd_sp)(pj_int_or(pj_at(ins, 0), 0) * sc), it_ = (pd_sp)(pj_int_or(pj_at(ins, 1), 0) * sc);
-    pd_sp ir = (pd_sp)(pj_int_or(pj_at(ins, 2), 0) * sc), ib = (pd_sp)(pj_int_or(pj_at(ins, 3), 0) * sc);
-    pd_sp width = bw - il - ir, y = 0, dy;
-    dlist_t M;
+static pd_sp lay_table(const pd_layout* L, dlist_t* M, const pj_node* tbl, pd_sp x0, pd_sp y0, pd_sp width,
+                       double sc, pd_block_id block, uint32_t off, int32_t region, int depth);
+
+/* A drawing's text box's paragraphs (and tables) laid out into M, from (x0, 0) and width wide; their height */
+static pd_sp lay_paras(const pd_layout* L, dlist_t* M, const pj_node* paras, pd_sp x0, pd_sp width, double sc,
+                       pd_block_id block, uint32_t off, int32_t region, int depth) {
+    const pj_node* p;
+    pd_sp y = 0;
     int32_t i;
 
-    if (!paras || width <= 0) {
-        return;
-    }
-
-    memset(&M, 0, sizeof(M));
-
     for (p = paras->child; p; p = p->next) {
-        const pj_node* runs = pj_get(p, "runs"), *r;
+        const pj_node* runs = pj_get(p, "runs"), *r, *tbl = pj_get(p, "table");
         char text[4096];        /* the paragraph's text, for the code points drawn */
         size_t tl = 0;
         pd_params prm;
         pd_break_info bi;
         int32_t nl, li;
+
+        if (tbl) {      /* a table among the paragraphs */
+            if (depth < 4) {
+                y += lay_table(L, M, tbl, x0, y, width, sc, block, off, region, depth + 1);
+            }
+
+            continue;
+        }
 
         pd_para_clear(L->scratch);
         pd_para_set_shape(L->scratch, 0, NULL, NULL);
@@ -3841,6 +4041,18 @@ static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_s
             const pj_node* tn = pj_get(r, "t"), *fn = pj_get(r, "f");
             pd_char_props c;
             pd_style st;
+
+            if (pj_get(r, "img")) {     /* a picture in the line, sitting on its baseline */
+                pd_sp iw = (pd_sp)(jsp(r, "w") * sc), ih = (pd_sp)(jsp(r, "h") * sc);
+
+                if (iw > 0 && ih > 0 && tl + 3 < sizeof(text) &&
+                        pd_para_add_object(L->scratch, iw, ih, 0, (int32_t)pj_int_or(pj_get(r, "img"), 0)) == PD_OK) {
+                    memcpy(text + tl, "\xEF\xBF\xBC", 3);
+                    tl += 3;
+                }
+
+                continue;
+            }
 
             if (!tn || tn->type != PJ_STR || tn->len == 0) {
                 continue;
@@ -3860,8 +4072,8 @@ static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_s
                 snprintf(c.family, sizeof(c.family), "%.*s", (int)(fn->len < 63 ? fn->len : 63), fn->s);
             }
 
-            if (pd_doc_cp_style(L->doc, &c, &st) == PD_OK && pd_para_add_text(L->scratch, tn->s, tn->len, &st) == PD_OK &&
-                    tl + tn->len < sizeof(text)) {
+            if (pd_doc_cp_style(L->doc, &c, &st) == PD_OK && (st.user = c.shift, 1) &&     /* raised or lowered below */
+                    pd_para_add_text(L->scratch, tn->s, tn->len, &st) == PD_OK && tl + tn->len < sizeof(text)) {
                 memcpy(text + tl, tn->s, tn->len);
                 tl += tn->len;
             }
@@ -3902,6 +4114,29 @@ static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_s
                     pd_style gs;
                     pd_draw a;
 
+                    if (g[i].kind == PD_OBJECT) {
+                        const pj_node* q;
+
+                        for (q = runs ? runs->child : NULL; q; q = q->next) {   /* its height: its run's */
+                            if (pj_int_or(pj_get(q, "img"), -1) == g[i].user) {
+                                break;
+                            }
+                        }
+
+                        memset(&a, 0, sizeof(a));
+                        a.kind = PD_DRAW_IMAGE;
+                        a.resource = (pd_res_id)g[i].user;
+                        a.w = g[i].advance;
+                        a.h = q ? (pd_sp)(jsp(q, "h") * sc) : g[i].advance;
+                        a.x = x0 + g[i].x;
+                        a.y = y + g[i].y - a.h;
+                        a.block = block;
+                        a.offset = off;
+                        a.region = region;
+                        emit(M, &a);
+                        continue;
+                    }
+
                     if (g[i].kind != PD_GLYPH || pd_para_get_style(L->scratch, g[i].style, &gs) != PD_OK) {
                         continue;
                     }
@@ -3909,7 +4144,7 @@ static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_s
                     memset(&a, 0, sizeof(a));
                     a.kind = PD_DRAW_GLYPH;
                     a.scale = g[i].scale ? g[i].scale : 65536;
-                    a.x = bx + il + g[i].x;
+                    a.x = x0 + g[i].x;
                     a.y = y + g[i].y;
                     a.w = g[i].advance;
                     a.glyph = g[i].glyph;
@@ -3920,13 +4155,152 @@ static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_s
                     a.block = block;
                     a.offset = off;
                     a.region = region;
-                    emit(&M, &a);
+
+                    if (gs.user == PD_SHIFT_SUPER || gs.user == PD_SHIFT_SUB) {     /* as the text's: its size 7/10 */
+                        pd_sp full = gs.size * 10 / 7;
+
+                        a.y += gs.user == PD_SHIFT_SUPER ? -full / 3 : full / 6;
+                    }
+
+                    emit(M, &a);
                 }
             }
 
             y += bi.height;
         }
     }
+
+    return y;
+}
+
+/* A table of a text box ({"cols": widths in twips, "rules": width (0 none), "rows": [[cell...]...]}, a cell
+   {"span", "bg", "paras"}) laid out into M at (x0, y0): its columns scaled to width when wider, each row as tall
+   as its tallest cell, shading and rules under and over. Its height. */
+static pd_sp lay_table(const pd_layout* L, dlist_t* M, const pj_node* tbl, pd_sp x0, pd_sp y0, pd_sp width,
+                       double sc, pd_block_id block, uint32_t off, int32_t region, int depth) {
+    const pj_node* cols = pj_get(tbl, "cols"), *rows = pj_get(tbl, "rows"), *row, *cell, *q;
+    pd_sp colx[65], total = 0, y = y0, pad = (pd_sp)(PD_PT(5.4) * sc), rule = (pd_sp)(jsp(tbl, "rules") * sc);
+    uint32_t rc = (uint32_t)pj_int_or(pj_get(tbl, "rc"), 0xFF000000LL);
+    int32_t n = 0, k;
+    double f;
+
+    for (q = cols ? cols->child : NULL; q && n < 64; q = q->next) {
+        colx[++n] = (pd_sp)(pj_int_or(q, 0) * 65536 / 20 * sc);
+        total += colx[n];
+    }
+
+    if (n == 0 || total <= 0) {
+        return 0;
+    }
+
+    f = total > width ? (double)width / total : 1;
+    colx[0] = 0;
+
+    for (k = 1; k <= n; k++) {
+        colx[k] = colx[k - 1] + (pd_sp)(colx[k] * f);
+    }
+
+    k = (int32_t)pj_int_or(pj_get(tbl, "jc"), PD_ALIGN_LEFT);
+    x0 += k == PD_ALIGN_CENTER ? (width - colx[n]) / 2 : k == PD_ALIGN_RIGHT ? width - colx[n] : 0;
+
+    for (row = rows ? rows->child : NULL; row; row = row->next) {
+        dlist_t R;
+        pd_sp rh = 0, cx[65], cw[65];
+        uint32_t bg[65];
+        int32_t c = 0, nc = 0, start = 0;
+
+        memset(&R, 0, sizeof(R));
+
+        for (cell = row->child; cell && c < n && nc < 64; cell = cell->next) {   /* each cell laid out on its own */
+            int32_t span = (int32_t)pj_int_or(pj_get(cell, "span"), 1), j;
+            pd_sp ch;
+
+            span = span < 1 ? 1 : c + span > n ? n - c : span;
+            cx[nc] = colx[c];
+            cw[nc] = colx[c + span] - colx[c];
+            bg[nc] = (uint32_t)pj_int_or(pj_get(cell, "bg"), 0);
+            start = R.n;
+            ch = lay_paras(L, &R, pj_get(cell, "paras"), x0 + cx[nc] + pad, cw[nc] - 2 * pad > PD_PT(1) ?
+                           cw[nc] - 2 * pad : PD_PT(1), sc, block, off, region, depth);
+
+            for (j = start; j < R.n; j++) {
+                R.d[j].y += y + rule;
+            }
+
+            rh = ch + 2 * rule > rh ? ch + 2 * rule : rh;
+            c += span;
+            nc++;
+        }
+
+        for (k = 0; k < nc; k++) {      /* shading under the text */
+            if (bg[k]) {
+                pd_draw a;
+
+                memset(&a, 0, sizeof(a));
+                a.kind = PD_DRAW_RULE;
+                a.x = x0 + cx[k];
+                a.y = y;
+                a.w = cw[k];
+                a.h = rh;
+                a.color = bg[k];
+                a.block = block;
+                a.region = region;
+                emit(M, &a);
+            }
+        }
+
+        for (k = 0; k < R.n; k++) {
+            emit(M, &R.d[k]);
+        }
+
+        free(R.d);
+        free(R.pts);
+
+        for (k = 0; rule > 0 && k < nc; k++) {  /* the grid's rules: each cell's box */
+            pd_draw a;
+
+            memset(&a, 0, sizeof(a));
+            a.kind = PD_DRAW_RULE;
+            a.color = rc;
+            a.block = block;
+            a.region = region;
+            a.x = x0 + cx[k];
+            a.y = y;
+            a.w = cw[k];
+            a.h = rule;
+            emit(M, &a);
+            a.y = y + rh - rule;
+            emit(M, &a);
+            a.y = y;
+            a.w = rule;
+            a.h = rh;
+            emit(M, &a);
+            a.x = x0 + cx[k] + cw[k] - rule;
+            emit(M, &a);
+        }
+
+        y += rh;
+    }
+
+    return y - y0;
+}
+
+static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp bx, pd_sp by, pd_sp bw, pd_sp bh,
+                         double sc, pd_block_id block, uint32_t off, int32_t region) {
+    const pj_node* paras = pj_get(it, "text"), *ins = pj_get(it, "ins"), *an = pj_get(it, "anchor");
+    pd_sp il = (pd_sp)(pj_int_or(pj_at(ins, 0), 0) * sc), it_ = (pd_sp)(pj_int_or(pj_at(ins, 1), 0) * sc);
+    pd_sp ir = (pd_sp)(pj_int_or(pj_at(ins, 2), 0) * sc), ib = (pd_sp)(pj_int_or(pj_at(ins, 3), 0) * sc);
+    pd_sp width = bw - il - ir, y = 0, dy;
+    dlist_t M;
+    int32_t i;
+
+    if (!paras || width <= 0) {
+        return;
+    }
+
+    memset(&M, 0, sizeof(M));
+
+    y = lay_paras(L, &M, paras, bx + il, width, sc, block, off, region, 0);
 
     /* where the text sits in the box */
     dy = by + it_;

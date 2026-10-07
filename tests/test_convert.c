@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "parade_convert.h"
+#include "parade_layout.h"
 #include "../src/pd_conv.h"
 
 static int failures = 0, checks = 0;
@@ -2174,6 +2175,226 @@ static void test_docx_shading_edges(void) {
     pd_doc_free(d);
 }
 
+/* Shapes in a group: a translucent fill keeps its alpha; a box turned 45 degrees, or seen through an isometric
+   camera, is drawn as the outline it comes to, not as an upright box. */
+static void test_docx_group_turned_shapes(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpg=\"wpg\" xmlns:wps=\"wps\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"2540000\"/><a:graphic><a:graphicData><wpg:wgp>"
+        "<wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/><a:chOff x=\"0\" y=\"0\"/>"
+        "<a:chExt cx=\"2540000\" cy=\"2540000\"/></a:xfrm></wpg:grpSpPr>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:solidFill><a:srgbClr val=\"0000FF\"><a:alpha val=\"50000\"/></a:srgbClr>"
+        "</a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm rot=\"2700000\"><a:off x=\"1270000\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/>"
+        "</a:xfrm><a:prstGeom prst=\"rect\"/><a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill></wps:spPr>"
+        "<wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"1270000\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill><a:scene3d><a:camera "
+        "prst=\"isometricOffAxis1Top\"/></a:scene3d></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>",
+        NULL);
+    pd_inline o;
+    char* js;
+    unsigned long alpha = 0;
+    const char* f;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+    js = drawing_json(d, o.resource);
+    CHECK(js != NULL);
+
+    if (js) {
+        f = strstr(js, "\"shape\":\"rect\"");      /* the upright one: a box, half see-through */
+        CHECK(f != NULL && (f = strstr(f, "\"fill\":")) != NULL);
+        alpha = f ? (strtoul(f + 7, NULL, 10) >> 24) : 0;
+        CHECK(alpha >= 0x7E && alpha <= 0x81);
+        f = strstr(js, "\"path\"");
+        CHECK(f != NULL && strstr(f + 1, "\"path\"") != NULL);  /* the turned box and the camera's: outlines */
+        CHECK(strstr(js, "\"shape\":\"rect\"") == strstr(js, "\"shape\""));
+        CHECK(strstr(strstr(js, "\"shape\"") + 1, "\"shape\"") == NULL);   /* only the upright one a box */
+        free(js);
+    }
+
+    pd_doc_free(d);
+}
+
+static pd_font* layout_font;
+
+static const pd_font* layout_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
+    (void)user;
+    (void)family;
+    (void)weight;
+    (void)italic;
+    return layout_font;
+}
+
+/* a font to lay documents out in, as test_layout's; 0 if there is none (those checks skipped) */
+static int have_layout_font(void) {
+    const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
+                       "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
+
+    return layout_font || pd_font_load_file(path, 0, &layout_font) == PD_OK;
+}
+
+/* draw items of a kind over all pages of a fresh layout (colour 0: any) */
+static int count_draws(pd_doc* d, int32_t kind, uint32_t color) {
+    pd_layout* L = NULL;
+    int32_t pg, k, n, c = 0;
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) != PD_OK || pd_layout_update(L, NULL) != PD_OK) {
+        pd_layout_free(L);
+        return -1;
+    }
+
+    for (pg = 0; pg < pd_layout_page_count(L); pg++) {
+        pd_draw* it;
+
+        pd_layout_page_items(L, pg, NULL, 0, &n);
+        it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+        pd_layout_page_items(L, pg, it, n, &n);
+
+        for (k = 0; k < n; k++) {
+            c += it[k].kind == kind && (!color || it[k].color == color);
+        }
+
+        free(it);
+    }
+
+    pd_layout_free(L);
+    return c;
+}
+
+/* A text box in a group holding a table (a spanned head row, a shaded cell), a paragraph in a style of its own
+   with a superscript, and a picture in its line: the drawing has them all, laid out as a table, and keeps them
+   through DOCX. */
+static void test_docx_group_textbox_table(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/styles.xml",
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:styleId=\"Small\"><w:name w:val=\"Small\"/>"
+        "<w:rPr><w:sz w:val=\"14\"/></w:rPr></w:style></w:styles>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\" "
+        "xmlns:wpg=\"wpg\" xmlns:wps=\"wps\" xmlns:mc=\"mc\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"2540000\"/><a:graphic><a:graphicData><wpg:wgp>"
+        "<wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/><a:chOff x=\"0\" y=\"0\"/>"
+        "<a:chExt cx=\"2540000\" cy=\"2540000\"/></a:xfrm></wpg:grpSpPr>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx><w:txbxContent>"
+        "<w:tbl><w:tblPr><w:jc w:val=\"center\"/><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders>"
+        "</w:tblPr><w:tblGrid><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"2000\"/></w:tblGrid>"
+        "<w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr><w:p><w:r><w:t>Head</w:t></w:r></w:p></w:tc></w:tr>"
+        "<w:tr><w:tc><w:tcPr><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"CCCCCC\"/></w:tcPr><w:p><w:r>"
+        "<w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+        "<w:p><w:pPr><w:pStyle w:val=\"Small\"/></w:pPr><w:r><w:t>cm</w:t></w:r><w:r><w:rPr><w:vertAlign "
+        "w:val=\"superscript\"/></w:rPr><w:t>2</w:t></w:r><w:r><w:drawing><wp:inline><wp:extent cx=\"254000\" "
+        "cy=\"127000\"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill>"
+        "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"254000\" cy=\"127000\"/></a:xfrm></pic:spPr></pic:pic>"
+        "</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
+        "</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline>"
+        "</w:drawing></w:r></w:p></w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_inline o;
+        char* js;
+        char want[64];
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+        js = drawing_json(d, o.resource);
+        CHECK(js != NULL);
+
+        if (js) {
+            CHECK(strstr(js, "\"table\":{") != NULL && strstr(js, "\"cols\":[1000,2000]") != NULL);
+            CHECK(strstr(js, "\"span\":2") != NULL && strstr(js, "\"bg\":4291611852") != NULL);    /* 0xFFCCCCCC */
+            CHECK(strstr(js, "\"t\":\"Head\"") != NULL && strstr(js, "\"t\":\"b\"") != NULL);
+            snprintf(want, sizeof(want), "\"sz\":%d", (int)PD_PT(7));      /* the paragraph's style's size */
+            CHECK(strstr(js, want) != NULL);
+            snprintf(want, sizeof(want), "\"s\":%d", (int)PD_SHIFT_SUPER);
+            CHECK(strstr(js, want) != NULL);
+            snprintf(want, sizeof(want), "\"w\":%d,\"h\":%d}", (int)PD_PT(20), (int)PD_PT(10));    /* the picture */
+            CHECK(strstr(js, "{\"img\":") != NULL && strstr(js, want) != NULL);
+            free(js);
+        }
+
+        /* laid out: the shaded cell, the rules, the picture in the line */
+        if (!have_layout_font()) {
+            continue;
+        }
+
+        CHECK(count_draws(d, PD_DRAW_RULE, 0xFFCCCCCCu) == 1);
+        CHECK(count_draws(d, PD_DRAW_RULE, 0xFF000000u) >= 12);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 1);
+    }
+
+    pd_doc_free(d);
+}
+
+/* A floating picture deleted with tracked changes: it keeps its place in the document and its deletion through
+   DOCX, but takes no room where deletions are not shown, and is drawn where they are. */
+static void test_docx_deleted_float(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">Text </w:t></w:r><w:del w:id=\"1\" w:author=\"A\"><w:r><w:drawing>"
+        "<wp:anchor distL=\"114300\" distR=\"114300\"><wp:positionH relativeFrom=\"column\"><wp:align>right</wp:align>"
+        "</wp:positionH><wp:extent cx=\"1270000\" cy=\"1270000\"/><wp:wrapSquare wrapText=\"bothSides\"/><a:graphic>"
+        "<a:graphicData><pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic></a:graphicData>"
+        "</a:graphic></wp:anchor></w:drawing></w:r></w:del><w:r><w:t>beside.</w:t></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        CHECK(pd_doc_revision_count(d) >= 1);
+
+        if (!have_layout_font()) {
+            continue;
+        }
+
+        pd_doc_set_markup(d, PD_MARKUP_BALLOONS);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 0);
+        pd_doc_set_markup(d, PD_MARKUP_FINAL);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 0);
+        pd_doc_set_markup(d, PD_MARKUP_INLINE);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 1);
+        pd_doc_set_markup(d, PD_MARKUP_ORIGINAL);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 1);
+        pd_doc_set_markup(d, PD_MARKUP_BALLOONS);
+    }
+
+    pd_doc_free(d);
+}
+
 /* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
 static int near_color(uint32_t got, uint32_t want) {
     int k;
@@ -3801,6 +4022,9 @@ int main(void) {
     test_docx_charts();
     test_docx_east_asian();
     test_docx_shading_edges();
+    test_docx_group_textbox_table();
+    test_docx_deleted_float();
+    test_docx_group_turned_shapes();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");
@@ -3817,6 +4041,7 @@ int main(void) {
     test_md_more();
     printf("malformed input\n");
     test_fuzz();
+    pd_font_free(layout_font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

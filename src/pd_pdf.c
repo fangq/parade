@@ -206,6 +206,14 @@ static void sb_num(sbuf* b, int64_t sp) {
     sb_raw(b, " ", 1);
 }
 
+/* a colour 0xAARRGGBB that is see-through: its graphics state /GA0../GA16 (sixteenths), -1 when opaque (alpha 255,
+   or 0: a colour given without one) */
+static int see_through(uint32_t c) {
+    uint32_t a = c >> 24;
+
+    return a == 0 || a == 255 ? -1 : (int)((a * 16 + 127) / 255);
+}
+
 /* color 0xAARRGGBB as three components with 3 decimals */
 static void sb_rgb(sbuf* b, uint32_t c, const char* op) {
     int k;
@@ -1095,6 +1103,13 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
         }
     }
 
+    w_str(&w, " >> /ExtGState <<");     /* see-through fills and strokes, in sixteenths */
+
+    for (i = 0; i <= 16; i++) {
+        w_fmt(&w, " /GA%d << /ca %d.%04d /CA %d.%04d >>", (int)i, (int)(i / 16), (int)(i % 16 * 625),
+              (int)(i / 16), (int)(i % 16 * 625));
+    }
+
     w_str(&w, " >> /XObject <<");
 
     for (i = 0; i < nimages; i++) {
@@ -1155,15 +1170,26 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                 }
 
                 if (a->kind == PD_DRAW_RULE) {
+                    int ga = see_through(a->color);
+
+                    if (ga >= 0) {
+                        sb_fmt(&c, "q /GA%d gs ", ga);
+                    }
+
                     sb_rgb(&c, a->color, "rg");
                     sb_num(&c, a->x);
                     sb_num(&c, (int64_t)pi.height - a->y - a->h);
                     sb_num(&c, a->w);
                     sb_num(&c, a->h);
-                    sb_fmt(&c, "re f\n");
+                    sb_fmt(&c, ga >= 0 ? "re f Q\n" : "re f\n");
                 } else if (a->kind == PD_DRAW_PATH && a->points && a->npoints >= 2) {
                     int32_t q, first;
                     int stroke = a->line_width > 0 && a->color, fill = a->fill != 0;
+                    int ga = see_through(fill ? a->fill : a->color);
+
+                    if (ga >= 0) {
+                        sb_fmt(&c, "q /GA%d gs ", ga);
+                    }
 
                     if (fill) {
                         sb_rgb(&c, a->fill, "rg");
@@ -1196,6 +1222,10 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                     }
 
                     sb_fmt(&c, fill && stroke ? "B\n" : fill ? "f\n" : "S\n");
+
+                    if (ga >= 0) {
+                        sb_fmt(&c, "Q\n");
+                    }
                 } else if (a->kind == PD_DRAW_IMAGE || a->kind == PD_DRAW_BOX) {
                     for (k = 0; k < nimages && (a->kind != PD_DRAW_IMAGE || images[k].res != a->resource); k++) {
                     }

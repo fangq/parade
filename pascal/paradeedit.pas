@@ -543,6 +543,14 @@ begin
   end;
 end;
 
+{ how opaque a colour 0xAARRGGBB is to draw: its alpha, 0 (a colour given without one) as opaque }
+function RuleAlpha(Col: UInt32): Integer;
+begin
+  Result := Col shr 24;
+  if Result = 0 then
+    Result := 255;
+end;
+
 procedure FillRectImg(Img: TLazIntfImage; X0, Y0, X1, Y1: Integer; Col: UInt32; Alpha: Integer);
 var
   X, Y: Integer;
@@ -626,6 +634,7 @@ procedure FillRingsImg(Img: TLazIntfImage; const Rings: TRings; Col: UInt32);
 const
   SUB = 4;
 var
+  Op: Integer;
   N, I, J, K, PY, S, X0, X1, Cnt, Wind, PX, RI, Total: Integer;
   P: TPtDArray;
   MinY, MaxY, MinX, MaxX, Sy, Ax, Ay, Bx, By, Xa, Xb: Double;
@@ -665,6 +674,10 @@ begin
   R := (Col shr 16) and $FF;
   G := (Col shr 8) and $FF;
   B := Col and $FF;
+  { the colour's own alpha (0xAARRGGBB): 1..254 see-through; 0 and 255 opaque, 0 being a colour given without one }
+  Op := 255;
+  if ((Col shr 24) > 0) and ((Col shr 24) < 255) then
+    Op := Col shr 24;
   for PY := Trunc(MinY) to Trunc(MaxY) do
   begin
     if (PY < 0) or (PY >= Img.Height) then
@@ -733,8 +746,8 @@ begin
     Inc(Pix, X0);
     for PX := 0 to X1 - X0 - 1 do
     begin
-      A := Round(Cov[PX] * 255);
-      if A > 255 then A := 255;
+      A := Round(Cov[PX] * Op);
+      if A > Op then A := Op;
       if A > 0 then
       begin
         Pix^.R := (Pix^.R * (255 - A) + R * A) div 255;
@@ -5360,7 +5373,7 @@ begin
       case kind of
         PD_DRAW_RULE:
           FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale) + 1,
-            OY + Round((y + h) * PxScale) + 1, color and $FFFFFF, 255);
+            OY + Round((y + h) * PxScale) + 1, color and $FFFFFF, RuleAlpha(color));
         PD_DRAW_IMAGE:
           begin
             IX := OX + Round(x * PxScale);
@@ -5397,11 +5410,11 @@ begin
                 Rings[High(Rings)][High(Rings[High(Rings)])].Y := OY + points[2 * K + 1] * PxScale;
               end;
             if fill <> 0 then
-              FillRingsImg(Img, Rings, fill and $FFFFFF);
+              FillRingsImg(Img, Rings, fill);
             if (line_width > 0) and (color <> 0) then
               for K := 0 to High(Rings) do
                 StrokePolylineImg(Img, Rings[K], (path_flags and PD_PATH_CLOSED) <> 0, line_width * PxScale,
-                  color and $FFFFFF);
+                  color);
           end;
         PD_DRAW_GLYPH:
           if font <> nil then
