@@ -99,6 +99,9 @@ var
   Tp: pd_table_props;
   Cp: pd_cell_props;
   Cell, Row, Tbl: pd_block_id;
+  Refs: TParadeRefTargets;
+  Heads: TStringList;
+  Z: Double;
   Lst: TStringList;
   Lbl: array[0..63] of AnsiChar;
   Counter: TCounter;
@@ -125,6 +128,23 @@ begin
   Result := Walk(pd_doc_root(Doc));
   for I := 0 to pd_doc_story_count(Doc) - 1 do
     Inc(Result, Walk(pd_doc_story_at(Doc, I)));
+end;
+
+{ how many paragraphs of the main text have the style }
+function CountStyle(E: TParadeEdit; const Name: string): Integer;
+var
+  B: pd_block_id;
+  Info: pd_block_info;
+begin
+  Result := 0;
+  B := pd_doc_next_paragraph(E.Doc, 0);
+  while B <> 0 do
+  begin
+    if (pd_doc_block_info(E.Doc, B, Info) = PD_OK) and (Info.style <> 0) and
+       (string(pd_doc_style_name(E.Doc, Info.style)) = Name) then
+      Inc(Result);
+    B := pd_doc_next_paragraph(E.Doc, B);
+  end;
 end;
 
 function ChildCountOf(Doc: Ppd_doc; B: pd_block_id): Integer;
@@ -693,6 +713,106 @@ begin
   Check(not E.InTable and (CountKind(E.Doc, PD_BLOCK_TABLE) = 0), 'the table deleted, the caret out of it');
   E.Undo;
   Check(CountKind(E.Doc, PD_BLOCK_TABLE) = 1, 'and back');
+
+  { 8f. the References tab: a table of contents, captions, cross-references }
+  Step('references');
+  E.NewDocument;
+  E.InsertText('Intro');
+  E.SetParagraphStyle('Heading 1');
+  E.ProcessKey(VK_RETURN, []);
+  E.SetParagraphStyle('Normal');
+  E.InsertText('Some text.');
+  E.InsertCaption('Figure', 'A first picture');
+  Check(Pos('Figure ', E.ParaText(E.CaretPos.block)) = 1, 'a caption: ' + E.ParaText(E.CaretPos.block));
+  E.ProcessKey(VK_RETURN, []);
+  E.SetParagraphStyle('Normal');
+  E.InsertBreak(PD_BREAK_PAGE);
+  E.InsertText('Methods');
+  E.SetParagraphStyle('Heading 1');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Detail');
+  E.SetParagraphStyle('Heading 2');
+  E.ProcessKey(VK_RETURN, []);
+  E.SetParagraphStyle('Normal');
+  E.InsertCaption('Figure', 'A second one');
+  E.InsertCaption('Table', 'Numbers');
+  Refs := E.ReferenceTargets;
+  Check(Length(Refs) = 6, Format('six targets: %d', [Length(Refs)]));
+  if Length(Refs) = 6 then
+  begin
+    Check(not Refs[0].IsCaption and (Refs[0].Text = 'Intro') and (Refs[0].Level = 1), 'a heading: ' + Refs[0].Text);
+    Check(Refs[1].IsCaption and (Refs[1].Seq = 'Figure') and (Refs[1].Number = 1) and
+      (Refs[1].Text = 'Figure 1: A first picture'), 'Figure 1: ' + Refs[1].Text);
+    Check(Refs[4].IsCaption and (Refs[4].Number = 2), 'Figure 2: ' + Refs[4].Text);
+    Check(Refs[5].IsCaption and (Refs[5].Seq = 'Table') and (Refs[5].Number = 1), 'Table 1 on its own count');
+    E.ProcessKey(VK_END, [ssCtrl]);
+    E.ProcessKey(VK_RETURN, []);
+    E.SetParagraphStyle('Normal');
+    E.InsertText('See ');
+    E.InsertCrossReference(Refs[4], prfLabel);
+    E.InsertText(' on page ');
+    E.InsertCrossReference(Refs[4], prfPage);
+    E.InsertText(', and ');
+    E.InsertCrossReference(Refs[2], prfText);
+    Check(Pos('See Figure ', E.ParaText(E.CaretPos.block)) = 1, 'a reference: ' + E.ParaText(E.CaretPos.block));
+    Check(Pos(', and Methods', E.ParaText(E.CaretPos.block)) > 0, 'a heading''s text');
+  end;
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  E.InsertTableOfContents;
+  Check(CountStyle(E, 'TOC Heading') = 1, 'a table of contents with its title');
+  Check(CountStyle(E, 'TOC 1') = 2, Format('two first-level entries: %d', [CountStyle(E, 'TOC 1')]));
+  Check(CountStyle(E, 'TOC 2') = 1, 'one second-level');
+  Check((Pos('Contents', E.DocumentText) = 1), 'the table first: ' + Copy(E.DocumentText, 1, 40));
+  SavePage(E, 0, Dir + 'edit_toc.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+  { a heading more, and the table updated }
+  E.ProcessKey(VK_END, [ssCtrl]);
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Results');
+  E.SetParagraphStyle('Heading 1');
+  Check(E.UpdateTableOfContents, 'updated');
+  Check(CountStyle(E, 'TOC 1') = 3, Format('three first-level entries now: %d', [CountStyle(E, 'TOC 1')]));
+  Check(CountStyle(E, 'TOC Heading') = 1, 'still one table');
+  E.Undo;
+  Check(CountStyle(E, 'TOC 1') = 2, 'the update undone in one');
+  E.InsertBookmark('results');
+  { through Word and back: the table is found again by its styles }
+  E.SaveToFile(Dir + 'edit_refs.docx');
+  E.LoadFromFile(Dir + 'edit_refs.docx');
+  Check(CountStyle(E, 'TOC 1') = 2, 'the table of contents back from .docx');
+  Check(E.UpdateTableOfContents and (CountStyle(E, 'TOC 1') = 3), 'and updatable there');
+
+  { 8g. the View tab: zoom to fit, formatting marks, headings }
+  Step('view');
+  Z := E.PageWidthZoom;
+  Check((Z > 0.3) and (Z < 4), Format('a page-width zoom: %g', [Z]));
+  Check(E.WholePageZoom <= Z + 1e-9, 'a whole page is no wider than the page''s width');
+  E.Zoom := Z;
+  Check(Abs(E.Zoom - Z) < 1e-9, 'zoomed');
+  Heads := TStringList.Create;
+  try
+    E.GetHeadings(Heads);
+    Check((Heads.Count = 4) and (Trim(Heads[2]) = 'Detail') and (Heads[2][1] = ' '), 'the headings, indented by level: ' +
+      Heads.CommaText);
+    if Heads.Count = 4 then
+    begin
+      E.GoToPos(PdPos(pd_block_id(PtrUInt(Heads.Objects[3])), 0));
+      Check(Copy(E.ParaText(E.CaretPos.block), 1, 7) = 'Results', Format('going to a heading (%d, caret in %d: "%s")',
+        [PtrUInt(Heads.Objects[3]), E.CaretPos.block, E.ParaText(E.CaretPos.block)]));
+    end;
+  finally
+    Heads.Free;
+  end;
+  E.Zoom := 1;
+  E.ShowMarks := False;
+  Bmp := TBitmap.Create;
+  try
+    E.RenderPage(0, Bmp, 1.0 * 96 / 72 / PD_SP_PER_PT);
+    I := DarkPixels(Bmp);
+  finally
+    Bmp.Free;
+  end;
+  E.ShowMarks := True;
+  Check(E.ShowMarks, 'formatting marks on');
 
   { 9. review: tracked changes and comments }
   Step('review');

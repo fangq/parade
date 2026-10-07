@@ -39,6 +39,18 @@ type
 
   TParadeBlockArray = array of pd_block_id;
 
+  { a place a cross-reference can point at }
+  TParadeRefTarget = record
+    Block: pd_block_id;
+    IsCaption: Boolean;        { a caption (with its number); else a heading }
+    Seq: string;               { the caption's sequence: Figure, Table, Equation }
+    Number: Integer;           { the caption's number, as the layout counts them }
+    Level: Integer;            { the heading's level }
+    Text: string;              { the paragraph's text, objects left out }
+  end;
+  TParadeRefTargets = array of TParadeRefTarget;
+  TParadeRefWhat = (prfLabel, prfNumber, prfPage, prfText);
+
   { an undo or redo done elsewhere (a collaboration binding's own-edits undo); True when it did one }
   TParadeUndoEvent = function(Sender: TObject; Redo: Boolean): Boolean of object;
 
@@ -88,6 +100,7 @@ type
     FSelQueued: Boolean;
     FPending: pd_char_props;       { formatting chosen with nothing selected: for what is typed next, here }
     FPendingAt: pd_pos;
+    FShowMarks: Boolean;
     FModified: Boolean;
     FPageGap: Integer;
     FBack: TBitmap;                { the pages as last drawn, on the display's side: a paint copies from it }
@@ -166,6 +179,12 @@ type
     function ChildCount(Block: pd_block_id): Integer;
     procedure MoveCellContent(From, Into: pd_block_id);
     function SelectedCells: TParadeBlockArray;
+    function PlainText(Block: pd_block_id): string;
+    function StyleNameOf(Block: pd_block_id): string;
+    function TocStyle(Level: Integer; Room: pd_sp): pd_style_id;
+    function BuildToc(Container: pd_block_id; Index, MaxLevel: Integer): Integer;
+    procedure SetShowMarks(AValue: Boolean);
+    procedure PaintMarks(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double);
     function FormatAt(const P: pd_pos): pd_format_id;
     procedure PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean);
     procedure UseDocumentFonts;
@@ -325,6 +344,31 @@ type
     procedure DistributeColumns;
     function CurrentTableProps: pd_table_props;
     function CurrentCellProps: pd_cell_props;
+
+    { ---- the References tab ---- }
+    { a table of contents of the headings (levels 1 to MaxLevel) at the caret: their text, dot leaders and page
+      numbers kept up to date; its paragraphs have the styles TOC Heading and TOC 1.. }
+    procedure InsertTableOfContents(MaxLevel: Integer = 3);
+    { the table of contents made again from the headings as they are now; False when there is none }
+    function UpdateTableOfContents: Boolean;
+    { a caption paragraph after the caret's: "Figure 3: ...", numbered on its own for each Seq name }
+    procedure InsertCaption(const Seq, AText: string);
+    { what a cross-reference can point at: every caption and heading, in document order }
+    function ReferenceTargets: TParadeRefTargets;
+    { a reference at the caret to a target's label and number ("Figure 2", prfLabel), number (prfNumber),
+      page (prfPage) or text (prfText) }
+    procedure InsertCrossReference(const Target: TParadeRefTarget; What: TParadeRefWhat);
+    { a named place, for links (#name) and other programs' cross-references }
+    procedure InsertBookmark(const AName: string);
+
+    { ---- the View tab ---- }
+    { the zoom at which a page fills the width of the view, or the whole page fits in it }
+    function PageWidthZoom: Double;
+    function WholePageZoom: Double;
+    { the headings, in order, for a navigation list: Objects are their blocks, the strings indented by level }
+    procedure GetHeadings(List: TStrings);
+    { the caret to a position, scrolled into view }
+    procedure GoToPos(const P: pd_pos);
     function SelectedText: string;
     procedure CopyToClipboard;
     procedure CutToClipboard;
@@ -381,6 +425,8 @@ type
     property OnChange: TNotifyEvent read FOnChange write FOnChange;
     { the caret moved, the selection changed or the document did: for a toolbar showing what is here }
     property OnSelectionChange: TNotifyEvent read FOnSelectionChange write FOnSelectionChange;
+    { formatting marks: a pilcrow at each paragraph's end }
+    property ShowMarks: Boolean read FShowMarks write SetShowMarks;
     property TabStop default True;
   end;
 
@@ -3519,6 +3565,458 @@ begin
   Changed;
 end;
 
+{ ---- the References tab ---- }
+
+{ a paragraph's text without its objects (U+FFFC) }
+function TParadeEdit.PlainText(Block: pd_block_id): string;
+begin
+  Result := StringReplace(ParaText(Block), #$EF#$BF#$BC, '', [rfReplaceAll]);
+end;
+
+function TParadeEdit.StyleNameOf(Block: pd_block_id): string;
+var
+  Info: pd_block_info;
+begin
+  Result := '';
+  if (pd_doc_block_info(FDoc, Block, Info) = PD_OK) and (Info.style <> 0) then
+    Result := pd_doc_style_name(FDoc, Info.style);
+end;
+
+function IsTocStyle(const S: string): Boolean;
+begin
+  Result := (Copy(S, 1, 4) = 'TOC ');
+end;
+
+{ the style a level of the table of contents has, made when the document has none: indented by level, the page
+  number at the right edge of the text after dot leaders }
+function TParadeEdit.TocStyle(Level: Integer; Room: pd_sp): pd_style_id;
+var
+  SName: string;
+  Pp: pd_para_props;
+  Cp: pd_char_props;
+  Id: UInt32;
+begin
+  if Level <= 0 then
+    SName := 'TOC Heading'
+  else
+    SName := 'TOC ' + IntToStr(Level);
+  Result := pd_doc_style_find(FDoc, PAnsiChar(SName));
+  if Result <> 0 then
+    Exit;
+  FillChar(Pp, SizeOf(Pp), 0);
+  FillChar(Cp, SizeOf(Cp), 0);
+  if Level <= 0 then
+  begin
+    Pp.mask := PD_PP_SPACE_BEFORE or PD_PP_SPACE_AFTER;
+    Pp.space_before := 12 * PD_SP_PER_PT;
+    Pp.space_after := 6 * PD_SP_PER_PT;
+    Cp.mask := PD_CP_WEIGHT or PD_CP_SIZE;
+    Cp.weight := 700;
+    Cp.size := 16 * PD_SP_PER_PT;
+  end
+  else
+  begin
+    Pp.mask := PD_PP_INDENT_LEFT or PD_PP_SPACE_AFTER or PD_PP_TABS;
+    Pp.indent_left := (Level - 1) * 18 * PD_SP_PER_PT;
+    Pp.space_after := 3 * PD_SP_PER_PT;
+    Pp.ntabs := 1;
+    Pp.tabs[0].position := Room;
+    Pp.tabs[0].align := PD_TAB_RIGHT;
+    Pp.tabs[0].leader := PD_LEADER_DOT;
+  end;
+  Id := 0;
+  pd_doc_style_define(FDoc, PAnsiChar(SName), PD_STYLE_PARAGRAPH, pd_doc_style_find(FDoc, 'Normal'), @Pp, @Cp, @Id);
+  Result := Id;
+end;
+
+{ the table of contents' paragraphs at a place among a container's blocks; how many there are }
+function TParadeEdit.BuildToc(Container: pd_block_id; Index, MaxLevel: Integer): Integer;
+var
+  B, P: pd_block_id;
+  Info: pd_block_info;
+  Heads: TParadeBlockArray;
+  Room: pd_sp;
+  I: Integer;
+  T: string;
+  At: pd_pos;
+  O: pd_inline;
+
+  function NewPara(Style: pd_style_id; const S: string): pd_block_id;
+  begin
+    Result := 0;
+    if pd_doc_insert_block(FDoc, Container, Index, PD_BLOCK_PARAGRAPH, Result) <> PD_OK then
+      Exit;
+    Inc(Index);
+    pd_doc_set_para_style(FDoc, Result, Style);
+    if S <> '' then
+      pd_doc_insert_text(FDoc, PdPos(Result, 0), PAnsiChar(S), Length(S), PD_FORMAT_INHERIT, nil);
+  end;
+
+begin
+  Result := 0;
+  { the headings first: the table's own paragraphs are about to be among them }
+  Heads := nil;
+  B := pd_doc_next_paragraph(FDoc, 0);
+  while B <> 0 do
+  begin
+    if (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.role = PD_ROLE_HEADING) and (Info.level >= 1) and
+       (Info.level <= MaxLevel) and (PlainText(B) <> '') and not IsTocStyle(StyleNameOf(B)) then
+    begin
+      SetLength(Heads, Length(Heads) + 1);
+      Heads[High(Heads)] := B;
+    end;
+    B := pd_doc_next_paragraph(FDoc, B);
+  end;
+  Room := TextWidthAt(Container);
+  if Room <= 0 then
+    Room := 468 * PD_SP_PER_PT;
+  NewPara(TocStyle(0, Room), 'Contents');
+  Inc(Result);
+  if Heads = nil then
+  begin
+    NewPara(TocStyle(1, Room), 'No headings yet: give paragraphs a Heading style, then update the table.');
+    Exit(Result + 1);
+  end;
+  for I := 0 to High(Heads) do
+  begin
+    pd_doc_block_info(FDoc, Heads[I], Info);
+    T := PlainText(Heads[I]);
+    P := NewPara(TocStyle(Info.level, Room), T);
+    if P = 0 then
+      Break;
+    Inc(Result);
+    At := PdPos(P, Length(T));
+    pd_doc_insert_text(FDoc, At, #9, 1, PD_FORMAT_INHERIT, @At);    { to the right-aligned stop, after dots }
+    FillChar(O, SizeOf(O), 0);
+    O.kind := PD_INLINE_FIELD;
+    O.field := PD_FIELD_REF_PAGE;
+    O.target := Heads[I];
+    pd_doc_insert_inline(FDoc, At, O, nil);
+  end;
+end;
+
+procedure TParadeEdit.InsertTableOfContents(MaxLevel: Integer);
+var
+  Par: pd_block_id;
+  Index, N: Integer;
+begin
+  if FReadOnly then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Table of contents');
+  if BlockSlot(Par, Index) then
+  begin
+    N := BuildToc(Par, Index, MaxLevel);
+    { the caret after the table, where the paragraph it was in goes on }
+    CaretToCell(pd_doc_child(FDoc, Par, Index + N));
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+function TParadeEdit.UpdateTableOfContents: Boolean;
+var
+  B, Par: pd_block_id;
+  Info: pd_block_info;
+  Index, Old, New, MaxLevel, I: Integer;
+  S: string;
+begin
+  Result := False;
+  if FReadOnly then
+    Exit;
+  { the first paragraph of a table of contents, and the run of them it starts }
+  B := pd_doc_next_paragraph(FDoc, 0);
+  while (B <> 0) and not IsTocStyle(StyleNameOf(B)) do
+    B := pd_doc_next_paragraph(FDoc, B);
+  if (B = 0) or (pd_doc_block_info(FDoc, B, Info) <> PD_OK) then
+    Exit;
+  Par := Info.parent;
+  Index := Info.index;
+  MaxLevel := 3;
+  Old := 0;
+  while (Index + Old < ChildCount(Par)) and IsTocStyle(StyleNameOf(pd_doc_child(FDoc, Par, Index + Old))) do
+  begin
+    S := StyleNameOf(pd_doc_child(FDoc, Par, Index + Old));
+    MaxLevel := Max(MaxLevel, StrToIntDef(Copy(S, 5, 2), 0));
+    Inc(Old);
+  end;
+  pd_doc_begin_group(FDoc, 'Update table of contents');
+  { the new one in front of the old, then the old one out: the container is never empty }
+  New := BuildToc(Par, Index, MaxLevel);
+  for I := 1 to Old do
+    pd_doc_remove_block(FDoc, pd_doc_child(FDoc, Par, Index + New));
+  pd_doc_end_group(FDoc);
+  Changed;
+  Result := True;
+end;
+
+procedure TParadeEdit.InsertCaption(const Seq, AText: string);
+var
+  Info: pd_block_info;
+  B: pd_block_id;
+  At: pd_pos;
+  O: pd_inline;
+  S: string;
+begin
+  if FReadOnly or (Seq = '') or (pd_doc_block_info(FDoc, CaretPos.block, Info) <> PD_OK) then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Caption');
+  if pd_doc_insert_block(FDoc, Info.parent, Info.index + 1, PD_BLOCK_PARAGRAPH, B) = PD_OK then
+  begin
+    if pd_doc_style_find(FDoc, 'Caption') <> 0 then
+      pd_doc_set_para_style(FDoc, B, pd_doc_style_find(FDoc, 'Caption'));
+    pd_doc_set_role(FDoc, B, PD_ROLE_CAPTION, 0);
+    S := Seq + ' ';
+    pd_doc_insert_text(FDoc, PdPos(B, 0), PAnsiChar(S), Length(S), PD_FORMAT_INHERIT, @At);
+    FillChar(O, SizeOf(O), 0);
+    O.kind := PD_INLINE_FIELD;
+    O.field := PD_FIELD_SEQ;
+    StrPLCopy(O.name, Seq, High(O.name));
+    pd_doc_insert_inline(FDoc, At, O, @At);
+    if AText <> '' then
+    begin
+      S := ': ' + AText;
+      pd_doc_insert_text(FDoc, At, PAnsiChar(S), Length(S), PD_FORMAT_INHERIT, @At);
+    end;
+    pd_doc_marker_set(FDoc, FCaret, At);
+    pd_doc_marker_set(FDoc, FAnchor, At);
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+function TParadeEdit.ReferenceTargets: TParadeRefTargets;
+var
+  B: pd_block_id;
+  Info: pd_block_info;
+  T, S, SName: string;
+  I, K: Integer;
+  O: pd_inline;
+  Seqs: TStringList;
+  R: TParadeRefTarget;
+begin
+  Result := nil;
+  Seqs := TStringList.Create;    { each sequence's count so far, as the layout numbers them }
+  try
+    B := pd_doc_next_paragraph(FDoc, 0);
+    while B <> 0 do
+    begin
+      pd_doc_block_info(FDoc, B, Info);
+      T := ParaText(B);
+      R := Default(TParadeRefTarget);
+      R.Block := B;
+      S := '';
+      I := 1;
+      while I <= Length(T) do
+        if Copy(T, I, 3) = #$EF#$BF#$BC then
+        begin
+          if (pd_doc_inline_at(FDoc, PdPos(B, I - 1), O) = PD_OK) and (O.kind = PD_INLINE_FIELD) and
+             (O.field = PD_FIELD_SEQ) then
+          begin
+            SName := O.name;
+            K := Seqs.IndexOf(SName);
+            if K < 0 then
+              K := Seqs.AddObject(SName, TObject(PtrInt(0)));
+            Seqs.Objects[K] := TObject(PtrInt(Seqs.Objects[K]) + 1);
+            if not R.IsCaption then
+            begin
+              R.IsCaption := True;
+              R.Seq := SName;
+              R.Number := PtrInt(Seqs.Objects[K]);
+            end;
+            S := S + IntToStr(PtrInt(Seqs.Objects[K]));
+          end;
+          Inc(I, 3);
+        end
+        else
+        begin
+          S := S + T[I];
+          Inc(I);
+        end;
+      R.Text := S;
+      if R.IsCaption or ((Info.role = PD_ROLE_HEADING) and (S <> '') and not IsTocStyle(StyleNameOf(B))) then
+      begin
+        R.Level := Info.level;
+        SetLength(Result, Length(Result) + 1);
+        Result[High(Result)] := R;
+      end;
+      B := pd_doc_next_paragraph(FDoc, B);
+    end;
+  finally
+    Seqs.Free;
+  end;
+end;
+
+procedure TParadeEdit.InsertCrossReference(const Target: TParadeRefTarget; What: TParadeRefWhat);
+var
+  O: pd_inline;
+  S: string;
+  After: pd_pos;
+  K: Integer;
+begin
+  if FReadOnly or (Target.Block = 0) then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Cross-reference');
+  DeleteSelection;
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_FIELD;
+  O.target := Target.Block;
+  case What of
+    prfLabel, prfNumber:
+      if Target.IsCaption then
+      begin
+        if What = prfLabel then
+        begin
+          S := Target.Seq + ' ';
+          pd_doc_insert_text(FDoc, CaretPos, PAnsiChar(S), Length(S), PD_FORMAT_INHERIT, @After);
+          pd_doc_marker_set(FDoc, FCaret, After);
+          pd_doc_marker_set(FDoc, FAnchor, After);
+        end;
+        O.field := PD_FIELD_REF_NUMBER;
+        InsertObject(O);
+      end
+      else
+        What := prfText;      { a heading has no number: its text }
+    prfPage:
+      begin
+        O.field := PD_FIELD_REF_PAGE;
+        InsertObject(O);
+      end;
+  end;
+  if What = prfText then
+  begin
+    S := Target.Text;
+    K := Pos(': ', S);
+    if Target.IsCaption and (K > 0) then
+      S := Copy(S, K + 2, MaxInt);    { the caption's own words, without "Figure 2: " }
+    if S <> '' then
+    begin
+      pd_doc_insert_text(FDoc, CaretPos, PAnsiChar(S), Length(S), PD_FORMAT_INHERIT, @After);
+      pd_doc_marker_set(FDoc, FCaret, After);
+      pd_doc_marker_set(FDoc, FAnchor, After);
+    end;
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.InsertBookmark(const AName: string);
+var
+  O: pd_inline;
+begin
+  if FReadOnly or (AName = '') then
+    Exit;
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_BOOKMARK;
+  StrPLCopy(O.name, AName, High(O.name));
+  pd_doc_begin_group(FDoc, 'Bookmark');
+  InsertObject(O);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+{ ---- the View tab ---- }
+
+function TParadeEdit.PageWidthZoom: Double;
+var
+  Info: pd_page_info;
+begin
+  Result := FZoom;
+  if (PageCount = 0) or (pd_layout_page_info(FLayout, 0, Info) <> PD_OK) or (Info.width <= 0) then
+    Exit;
+  Result := (ClientWidth - FScrollBar.Width - 2 * FPageGap - MarkupWidth) /
+    (Info.width * SCREEN_PPI / 72.0 / PD_SP_PER_PT);
+end;
+
+function TParadeEdit.WholePageZoom: Double;
+var
+  Info: pd_page_info;
+begin
+  Result := PageWidthZoom;
+  if (PageCount = 0) or (pd_layout_page_info(FLayout, 0, Info) <> PD_OK) or (Info.height <= 0) then
+    Exit;
+  Result := Min(Result, (ClientHeight - 2 * FPageGap) / (Info.height * SCREEN_PPI / 72.0 / PD_SP_PER_PT));
+end;
+
+procedure TParadeEdit.GetHeadings(List: TStrings);
+var
+  B: pd_block_id;
+  Info: pd_block_info;
+  T: string;
+begin
+  List.BeginUpdate;
+  try
+    List.Clear;
+    B := pd_doc_next_paragraph(FDoc, 0);
+    while B <> 0 do
+    begin
+      if (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.role = PD_ROLE_HEADING) and
+         not IsTocStyle(StyleNameOf(B)) then
+      begin
+        T := PlainText(B);
+        if T <> '' then
+          List.AddObject(StringOfChar(' ', 3 * Max(0, Info.level - 1)) + T, TObject(PtrUInt(B)));
+      end;
+      B := pd_doc_next_paragraph(FDoc, B);
+    end;
+  finally
+    List.EndUpdate;
+  end;
+end;
+
+procedure TParadeEdit.GoToPos(const P: pd_pos);
+var
+  Page: Int32;
+  X, Base, Asc, Desc: pd_sp;
+begin
+  FHasDesiredX := False;
+  SetCaret(P, False);
+  { the place near the top of the view, as following a link or a heading does, not at the edge }
+  if pd_layout_caret(FLayout, CaretPos, Page, X, Base, Asc, Desc) = PD_OK then
+  begin
+    FScrollY := FScrollY + PageTop(Page) + Round((Base - Asc) * PxPerSp) - 3 * FPageGap;
+    if FScrollY < 0 then
+      FScrollY := 0;
+    UpdateScrollBar;
+    Invalidate;
+  end;
+end;
+
+procedure TParadeEdit.SetShowMarks(AValue: Boolean);
+begin
+  if FShowMarks = AValue then
+    Exit;
+  FShowMarks := AValue;
+  Invalidate;
+end;
+
+{ a pilcrow where each paragraph on the page ends }
+procedure TParadeEdit.PaintMarks(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double);
+var
+  B: pd_block_id;
+  CPage: Int32;
+  CX, CBase, CAsc, CDesc: pd_sp;
+  G: PGlyphBmp;
+  Glyph: UInt32;
+begin
+  if Length(FFonts) = 0 then
+    Exit;
+  Glyph := pd_font_glyph_index(FFonts[0].Font, $B6);
+  if Glyph = 0 then
+    Exit;
+  B := pd_doc_next_paragraph(FDoc, 0);
+  while B <> 0 do
+  begin
+    if (pd_layout_caret(FLayout, PdPos(B, Length(ParaText(B))), CPage, CX, CBase, CAsc, CDesc) = PD_OK) and
+       (CPage = Page) then
+    begin
+      G := GetGlyphBmp(FFonts[0].Font, Glyph, Round((CAsc + CDesc) * 0.85 * PxScale * PD_SP_PER_PT), 0);
+      if G^.W > 0 then
+        BlendGlyph(Img, G, OX + Round(CX * PxScale) + 2, OY + Round(CBase * PxScale), $9AA9C4);
+    end;
+    B := pd_doc_next_paragraph(FDoc, B);
+  end;
+end;
+
 procedure TParadeEdit.CheckSelection;
 var
   Sig: string;
@@ -4179,6 +4677,9 @@ begin
           end;
       end;
 
+  if FShowMarks then
+    PaintMarks(Img, Page, OX, OY, PxScale);
+
   { the others' carets, each with its name above it }
   for CI := 0 to High(FRemote) do
     with FRemote[CI] do
@@ -4225,8 +4726,8 @@ function TParadeEdit.BackSignature: string;
 var
   A, B: pd_pos;
 begin
-  Result := Format('%d %d %g %d %d %p %d %d', [ClientWidth, ClientHeight, FZoom, FScrollY, FLayoutEpoch, Pointer(FDoc),
-    Int64(pd_doc_revision(FDoc)), FRemoteRev]);
+  Result := Format('%d %d %g %d %d %p %d %d %d', [ClientWidth, ClientHeight, FZoom, FScrollY, FLayoutEpoch, Pointer(FDoc),
+    Int64(pd_doc_revision(FDoc)), FRemoteRev, Ord(FShowMarks)]);
   if HasSelection then
   begin
     A := SelStart;
