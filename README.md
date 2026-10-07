@@ -246,6 +246,10 @@ how to join). File > Join Shared Document takes the link.
 - `parade.pas`: the binding for all three headers (static link by default,
   `-dPARADE_DYNAMIC` for the shared library). Record layouts are checked
   against the C compiler's on every `make pascal` (about 220 sizes/offsets).
+- `paradefonts.pas`: the fonts installed on the system (fontconfig, or the
+  font folders read through the files' own name tables), for a font list;
+  `TParadeEdit.AddSystemFonts` registers them and loads each face the
+  first time text uses it.
 - `paradeedit.pas`: `TParadeEdit`, a page-view rich text editor control.
   Glyphs are rasterized by Parade (exact-area coverage, integer only), so
   the screen shows exactly the computed layout on every widgetset. Caret

@@ -6,7 +6,8 @@ program edit_test;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, IntfGraphics, FPImage, parade, paradeedit;
+  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, parade, paradeedit,
+  paradefonts;
 
 type
   TCounter = class
@@ -102,6 +103,10 @@ var
   Refs: TParadeRefTargets;
   Heads: TStringList;
   Z: Double;
+  Sys, Scanned, One: TParadeSystemFaces;
+  Before, Added, K: Integer;
+  T0: QWord;
+  Fam: string;
   Lst: TStringList;
   Lbl: array[0..63] of AnsiChar;
   Counter: TCounter;
@@ -813,6 +818,81 @@ begin
   end;
   E.ShowMarks := True;
   Check(E.ShowMarks, 'formatting marks on');
+
+  { 8h. the system's fonts: listed, loaded when used }
+  Step('system fonts');
+  T0 := GetTickCount64;
+  Sys := ParadeSystemFaces;
+  WriteLn(StdErr, Format('  %d system faces in %d ms', [Length(Sys), GetTickCount64 - T0]));
+  Check(Length(Sys) > 10, 'the system''s fonts are found');
+  Check(Length(ParadeSystemFaces) = Length(Sys), 'and kept');
+  if Length(Sys) > 0 then
+  begin
+    { a file's own tables say what fontconfig says }
+    K := -1;
+    for I := 0 to High(Sys) do
+      if (LowerCase(ExtractFileExt(Sys[I].FileName)) = '.ttf') and (Sys[I].Index = 0) then
+      begin
+        K := I;
+        Break;
+      end;
+    if K >= 0 then
+    begin
+      One := ParadeReadFontFile(Sys[K].FileName);
+      Check((Length(One) = 1) and (One[0].Family = Sys[K].Family) and (One[0].Italic = Sys[K].Italic) and
+        (Abs(One[0].Weight - Sys[K].Weight) <= 100), Format('the file''s own name: "%s" for "%s" (%s)',
+        [IfThen(Length(One) > 0, One[0].Family, '-'), Sys[K].Family, Sys[K].FileName]));
+    end;
+    Scanned := ParadeScanFontDirs(['/usr/share/fonts/truetype']);
+    Check(Length(Scanned) > 0, Format('the folders read where fontconfig is not: %d faces', [Length(Scanned)]));
+  end;
+  E.NewDocument;
+  Lst := TStringList.Create;
+  try
+    E.GetFontFamilies(Lst);
+    Before := Lst.Count;
+    T0 := GetTickCount64;
+    Added := E.AddSystemFonts;
+    E.GetFontFamilies(Lst);
+    WriteLn(StdErr, Format('  %d faces registered in %d ms; %d families listed, %d before', [Added,
+      GetTickCount64 - T0, Lst.Count, Before]));
+    Check(Lst.Count > Before + 5, 'the font list has the system''s families');
+    { one the editor did not have, used: loaded then, and drawn }
+    Fam := '';
+    for I := 0 to High(Sys) do
+      if (Pos('Mono', Sys[I].Family) = 0) and (LowerCase(ExtractFileExt(Sys[I].FileName)) = '.ttf') and
+         not Sys[I].Italic and (Sys[I].Weight = 400) and (Pos(LowerCase(Sys[I].Family), 'liberation serif liberation sans') = 0) then
+      begin
+        Fam := Sys[I].Family;
+        Break;
+      end;
+    if Fam <> '' then
+    begin
+      E.InsertText('In a system font.');
+      E.SelectAll;
+      E.SetFontFamily(Fam);
+      Check(string(E.CurrentCharProps.family) = Fam, 'the text in ' + Fam);
+      Bmp := TBitmap.Create;
+      try
+        E.RenderPage(0, Bmp, 1.0 * 96 / 72 / PD_SP_PER_PT);
+        Check(DarkPixels(Bmp) > 100, 'drawn in it');
+      finally
+        Bmp.Free;
+      end;
+    end;
+    { a family no font has falls back to the editor's own, not to some system face }
+    E.SelectAll;
+    E.SetFontFamily('No Such Family Anywhere');
+    Bmp := TBitmap.Create;
+    try
+      E.RenderPage(0, Bmp, 1.0 * 96 / 72 / PD_SP_PER_PT);
+      Check(DarkPixels(Bmp) > 100, 'an unknown family still drawn');
+    finally
+      Bmp.Free;
+    end;
+  finally
+    Lst.Free;
+  end;
 
   { 9. review: tracked changes and comments }
   Step('review');

@@ -17,14 +17,20 @@ interface
 
 uses
   Classes, SysUtils, Controls, Graphics, LCLType, LCLIntf, ExtCtrls, StdCtrls, Forms, Clipbrd,
-  IntfGraphics, GraphType, FPImage, LazFileUtils, Math, ctypes, parade;
+  IntfGraphics, GraphType, FPImage, LazFileUtils, Math, ctypes, parade, paradefonts;
 
 type
   TParadeFontEntry = record
     Family: string;
     Weight, Italic: Integer;
-    Font: Ppd_font;
+    Font: Ppd_font;             { nil until the face is first used, for one registered from a file (AddFontFile) }
     FromDoc: Boolean;           { carried by the document (a DOCX's embedded font): dropped with it }
+    FileName: string;           { where a face not loaded yet is }
+    FaceIndex: Integer;         { its face in a collection }
+    Lazy: Boolean;              { registered to be loaded when used: a system font }
+    Failed: Boolean;            { its file would not load: passed over }
+    Key: string;                { the family, lower case }
+    Cls: Integer;               { pd_font_family_class of the family }
   end;
 
   TGlyphBmp = record
@@ -212,6 +218,12 @@ type
     { fonts: the resolver picks the closest registered face for a family }
     procedure AddFont(const Family, FileName: string; Weight: Integer = 400; Italic: Boolean = False);
     procedure AddDefaultFonts;
+    { a face registered from its file and loaded only when text first uses it }
+    procedure AddFontFile(const Family, FileName: string; Weight: Integer = 400; Italic: Boolean = False;
+      FaceIndex: Integer = 0);
+    { every font installed on the system (paradefonts), registered to be loaded when used -- for a font list;
+      a family registered already keeps its own faces. How many faces were added. }
+    function AddSystemFonts: Integer;
     { an OpenType math font (Latin Modern Math, STIX Two Math) for equations }
     procedure SetMathFont(const FileName: string);
 
@@ -766,30 +778,47 @@ var
   E: TParadeEdit;
   I, Best, Score, BestScore, Cls: Integer;
   Fam: string;
+  F: Ppd_font;
+  P: ^TParadeFontEntry;
 begin
   E := TParadeEdit(user);
   Result := nil;
   Fam := LowerCase(StrPas(family));
-  Best := -1;
-  BestScore := MaxInt;
   Cls := pd_font_family_class(family);
-  for I := 0 to High(E.FFonts) do
-  begin
-    { family mismatch costs most, less when it is the same kind of face (a sans
-      for Arial, a mono for Courier New); then italic; then weight distance }
-    Score := Abs(E.FFonts[I].Weight - weight) + 1000 * Ord((E.FFonts[I].Italic <> 0) <> (italic <> 0));
-    if (Fam <> '') and (LowerCase(E.FFonts[I].Family) <> Fam) then
-      Inc(Score, 100000 - 50000 * Ord(pd_font_family_class(PAnsiChar(E.FFonts[I].Family)) = Cls))
-    else if (Fam = '') and (I > 0) and (LowerCase(E.FFonts[I].Family) <> LowerCase(E.FFonts[0].Family)) then
-      Inc(Score, 100000);
-    if Score < BestScore then
+  repeat
+    Best := -1;
+    BestScore := MaxInt;
+    for I := 0 to High(E.FFonts) do
     begin
-      BestScore := Score;
-      Best := I;
+      P := @E.FFonts[I];    { through a pointer, not "with": the fields would hide weight and italic }
+      if P^.Failed then
+        Continue;
+      { family mismatch costs most, less when it is the same kind of face (a sans for Arial, a mono for
+        Courier New) and less again for a face loaded already, not one of the system's many; then italic;
+        then weight distance; a face not loaded yet loses a tie }
+      Score := Abs(P^.Weight - weight) + 1000 * Ord((P^.Italic <> 0) <> (italic <> 0)) + Ord(P^.Lazy);
+      if (Fam <> '') and (P^.Key <> Fam) then
+        Inc(Score, 100000 - 50000 * Ord(P^.Cls = Cls) + 20000 * Ord(P^.Lazy))
+      else if (Fam = '') and (I > 0) and (P^.Key <> E.FFonts[0].Key) then
+        Inc(Score, 100000 + 20000 * Ord(P^.Lazy));
+      if Score < BestScore then
+      begin
+        BestScore := Score;
+        Best := I;
+      end;
     end;
-  end;
-  if Best >= 0 then
-    Result := E.FFonts[Best].Font;
+    if Best < 0 then
+      Exit;
+    P := @E.FFonts[Best];
+    if P^.Font = nil then
+    begin   { first used: loaded now; a file that will not load is passed over from then on }
+      if pd_font_load_file(PAnsiChar(P^.FileName), P^.FaceIndex, F) = PD_OK then
+        P^.Font := F
+      else
+        P^.Failed := True;
+    end;
+    Result := P^.Font;
+  until Result <> nil;
 end;
 
 function WriteToStream(user: Pointer; data: Pointer; len: csize_t): cint; cdecl;
@@ -985,7 +1014,8 @@ begin
   FBack.Free;
   FBackImg.Free;
   for I := 0 to High(FFonts) do
-    pd_font_free(FFonts[I].Font);
+    if FFonts[I].Font <> nil then
+      pd_font_free(FFonts[I].Font);
   if FMathFont <> nil then
     pd_font_free(FMathFont);
   inherited Destroy;
@@ -997,15 +1027,71 @@ var
 begin
   ParadeCheck(pd_font_load_file(PAnsiChar(FileName), 0, F), 'font ' + FileName);
   SetLength(FFonts, Length(FFonts) + 1);
+  FFonts[High(FFonts)] := Default(TParadeFontEntry);
   FFonts[High(FFonts)].Family := Family;
   FFonts[High(FFonts)].Weight := Weight;
   FFonts[High(FFonts)].Italic := Ord(Italic);
   FFonts[High(FFonts)].Font := F;
-  FFonts[High(FFonts)].FromDoc := False;
+  FFonts[High(FFonts)].FileName := FileName;
+  FFonts[High(FFonts)].Key := LowerCase(Family);
+  FFonts[High(FFonts)].Cls := pd_font_family_class(PAnsiChar(Family));
   if FLayout <> nil then
   begin
     pd_layout_invalidate(FLayout);
     Relayout;
+  end;
+end;
+
+procedure TParadeEdit.AddFontFile(const Family, FileName: string; Weight: Integer; Italic: Boolean;
+  FaceIndex: Integer);
+begin
+  SetLength(FFonts, Length(FFonts) + 1);
+  FFonts[High(FFonts)] := Default(TParadeFontEntry);
+  { by index, not "with": the fields would hide the parameters of the same names }
+  FFonts[High(FFonts)].Family := Family;
+  FFonts[High(FFonts)].Weight := Weight;
+  FFonts[High(FFonts)].Italic := Ord(Italic);
+  FFonts[High(FFonts)].FileName := FileName;
+  FFonts[High(FFonts)].FaceIndex := FaceIndex;
+  FFonts[High(FFonts)].Lazy := True;
+  FFonts[High(FFonts)].Key := LowerCase(Family);
+  FFonts[High(FFonts)].Cls := pd_font_family_class(PAnsiChar(Family));
+end;
+
+function TParadeEdit.AddSystemFonts: Integer;
+var
+  Faces: TParadeSystemFaces;
+  Have: TStringList;
+  I, N: Integer;
+begin
+  Result := 0;
+  Faces := ParadeSystemFaces;
+  Have := TStringList.Create;    { the families registered already keep their faces: no system ones beside them }
+  try
+    Have.Sorted := True;
+    Have.Duplicates := dupIgnore;
+    for I := 0 to High(FFonts) do
+      Have.Add(FFonts[I].Key);
+    N := Length(FFonts);
+    SetLength(FFonts, N + Length(Faces));
+    for I := 0 to High(Faces) do
+      if Have.IndexOf(LowerCase(Faces[I].Family)) < 0 then
+      begin
+        FFonts[N] := Default(TParadeFontEntry);
+        FFonts[N].Family := Faces[I].Family;
+        FFonts[N].Weight := Faces[I].Weight;
+        FFonts[N].Italic := Ord(Faces[I].Italic);
+        FFonts[N].FileName := Faces[I].FileName;
+        FFonts[N].FaceIndex := Faces[I].Index;
+        FFonts[N].Lazy := True;
+        FFonts[N].Key := LowerCase(Faces[I].Family);
+        FFonts[N].Cls := pd_font_family_class(PAnsiChar(Faces[I].Family));
+        Inc(N);
+        Inc(Result);
+      end;
+    SetLength(FFonts, N);
+  finally
+    Have.Free;
   end;
 end;
 
@@ -1024,7 +1110,10 @@ begin
   Kept := nil;
   for I := 0 to High(FFonts) do
     if FFonts[I].FromDoc then
-      pd_font_free(FFonts[I].Font)
+    begin
+      if FFonts[I].Font <> nil then
+        pd_font_free(FFonts[I].Font);
+    end
     else
     begin
       SetLength(Kept, Length(Kept) + 1);
@@ -1042,6 +1131,9 @@ begin
       Fam := Copy(Fam, 1, Pos('"', Fam) - 1);
       { after the registered ones: the first stays the default face for text that names none }
       SetLength(FFonts, Length(FFonts) + 1);
+      FFonts[High(FFonts)] := Default(TParadeFontEntry);
+      FFonts[High(FFonts)].Key := LowerCase(Fam);
+      FFonts[High(FFonts)].Cls := pd_font_family_class(PAnsiChar(Fam));
       FFonts[High(FFonts)].Family := Fam;
       FFonts[High(FFonts)].Weight := 400 + 300 * Ord(Pos('weight=700', M) > 0);
       FFonts[High(FFonts)].Italic := Ord(Pos('italic=1', M) > 0);
