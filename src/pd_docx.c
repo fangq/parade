@@ -2927,6 +2927,7 @@ typedef struct {
     pd_block_id hf_last[6];     /* the previous section's: header default/first/even, footer the same */
     char def_pstyle[64];        /* the paragraph style of a paragraph that names none */
     char theme_major[64], theme_minor[64];  /* the theme's heading and body fonts */
+    uint32_t theme_clr[12];     /* the theme's colours: dk1 lt1 dk2 lt2 accent1..6 hlink folHlink */
     pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
     struct {                    /* bookmarks read: where they are */
         char name[32];
@@ -2947,6 +2948,165 @@ typedef struct {
     }* cm;
     int ncm, capcm;
 } dxi;
+
+/* ------------------------------------------------------------------ */
+/* theme colours                                                      */
+/* ------------------------------------------------------------------ */
+
+enum { TC_DK1, TC_LT1, TC_DK2, TC_LT2, TC_ACCENT1, TC_HLINK = 10, TC_FOLHLINK, TC_N };
+
+/* Office's default theme, for a document without one */
+static void theme_defaults(uint32_t* c) {
+    static const uint32_t d[TC_N] = { 0x000000, 0xFFFFFF, 0x44546A, 0xE7E6E6, 0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000,
+                                      0x5B9BD5, 0x70AD47, 0x0563C1, 0x954F72
+                                    };
+    int i;
+
+    for (i = 0; i < TC_N; i++) {
+        c[i] = 0xFF000000u | d[i];
+    }
+}
+
+/* a theme colour's slot by its name: DrawingML's (dk1, tx1, accent1, hlink) or WordprocessingML's (dark1, text1,
+   accent1, hyperlink); text and background as Word maps them (text1 dark1, background1 light1); -1 if none */
+static int theme_slot(const char* n) {
+    static const struct {
+        const char* n;
+        int slot;
+    } t[] = { { "dk1", TC_DK1 }, { "lt1", TC_LT1 }, { "dk2", TC_DK2 }, { "lt2", TC_LT2 }, { "tx1", TC_DK1 },
+        { "bg1", TC_LT1 }, { "tx2", TC_DK2 }, { "bg2", TC_LT2 }, { "dark1", TC_DK1 }, { "light1", TC_LT1 },
+        { "dark2", TC_DK2 }, { "light2", TC_LT2 }, { "text1", TC_DK1 }, { "background1", TC_LT1 },
+        { "text2", TC_DK2 }, { "background2", TC_LT2 }, { "hlink", TC_HLINK }, { "hyperlink", TC_HLINK },
+        { "folHlink", TC_FOLHLINK }, { "followedHyperlink", TC_FOLHLINK }
+    };
+    size_t i;
+
+    if (strncmp(n, "accent", 6) == 0 && n[6] >= '1' && n[6] <= '6' && !n[7]) {
+        return TC_ACCENT1 + n[6] - '1';
+    }
+
+    for (i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        if (strcmp(n, t[i].n) == 0) {
+            return t[i].slot;
+        }
+    }
+
+    return -1;
+}
+
+static void rgb_hsl(uint32_t c, double* h, double* s, double* l) {
+    double r = ((c >> 16) & 255) / 255.0, g = ((c >> 8) & 255) / 255.0, b = (c & 255) / 255.0;
+    double mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    double d = mx - mn;
+
+    *l = (mx + mn) / 2;
+    *h = *s = 0;
+
+    if (d > 1e-9) {
+        *s = *l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+        *h = mx == r ? (g - b) / d + (g < b ? 6 : 0) : mx == g ? (b - r) / d + 2 : (r - g) / d + 4;
+        *h /= 6;
+    }
+}
+
+static double hue_part(double p, double q, double t) {
+    t = t < 0 ? t + 1 : t > 1 ? t - 1 : t;
+    return t < 1.0 / 6 ? p + (q - p) * 6 * t : t < 0.5 ? q : t < 2.0 / 3 ? p + (q - p) * (2.0 / 3 - t) * 6 : p;
+}
+
+static uint32_t hsl_rgb(uint32_t alpha, double h, double s, double l) {
+    double r = l, g = l, b = l, q, p;
+
+    l = l < 0 ? 0 : l > 1 ? 1 : l;
+    r = g = b = l;
+
+    if (s > 1e-9) {
+        q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        p = 2 * l - q;
+        r = hue_part(p, q, h + 1.0 / 3);
+        g = hue_part(p, q, h);
+        b = hue_part(p, q, h - 1.0 / 3);
+    }
+
+    return alpha | (uint32_t)(r * 255 + 0.5) << 16 | (uint32_t)(g * 255 + 0.5) << 8 | (uint32_t)(b * 255 + 0.5);
+}
+
+/* a colour's luminance scaled by mul and moved by add (DrawingML's lumMod and lumOff; Word's tints and shades) */
+static uint32_t lum_adjust(uint32_t c, double mul, double add) {
+    double h, s, l;
+
+    rgb_hsl(c, &h, &s, &l);
+    return hsl_rgb(c & 0xFF000000u, h, s, l * mul + add);
+}
+
+/* a w: colour: the theme colour named by themeattr when there is one (tinted toward white, or shaded toward
+   black, by the hex 00-FF in tintattr and shadeattr), else the hex in valattr; 0 when neither, or auto */
+static int wcolor(const dxi* X, const pd_markup* m, const char* valattr, const char* themeattr, const char* tintattr,
+                  const char* shadeattr, uint32_t* out) {
+    char v[64];
+    int slot = -1;
+
+    if (themeattr && mu_attr(m, themeattr, v, sizeof(v))) {
+        slot = theme_slot(v);
+    }
+
+    if (slot >= 0) {
+        *out = X->theme_clr[slot];
+
+        if (tintattr && mu_attr(m, tintattr, v, sizeof(v))) {
+            double t = (double)strtoul(v, NULL, 16) / 255.0;
+
+            *out = lum_adjust(*out, t, 1 - t);
+        }
+
+        if (shadeattr && mu_attr(m, shadeattr, v, sizeof(v))) {
+            *out = lum_adjust(*out, (double)strtoul(v, NULL, 16) / 255.0, 0);
+        }
+
+        return 1;
+    }
+
+    if (mu_attr(m, valattr, v, sizeof(v)) && strcmp(v, "auto") != 0) {
+        *out = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+        return 1;
+    }
+
+    return 0;
+}
+
+/* a DrawingML colour modifier (a child of srgbClr, schemeClr, sysClr, prstClr) applied to c */
+static uint32_t clr_modify(uint32_t c, const char* t, const pd_markup* m) {
+    char v[32];
+    double f;
+
+    if (!mu_attr(m, "val", v, sizeof(v))) {
+        return c;
+    }
+
+    f = atof(v) / 100000.0;
+
+    if (!strcmp(t, "lumMod")) {
+        return lum_adjust(c, f, 0);
+    } else if (!strcmp(t, "lumOff")) {
+        return lum_adjust(c, 1, f);
+    } else if (!strcmp(t, "tint") || !strcmp(t, "shade")) {    /* toward white, toward black */
+        uint32_t r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+
+        if (t[0] == 't') {
+            r = (uint32_t)(255 - (255 - r) * f + 0.5);
+            g = (uint32_t)(255 - (255 - g) * f + 0.5);
+            b = (uint32_t)(255 - (255 - b) * f + 0.5);
+        } else {
+            r = (uint32_t)(r * f + 0.5);
+            g = (uint32_t)(g * f + 0.5);
+            b = (uint32_t)(b * f + 0.5);
+        }
+
+        return (c & 0xFF000000u) | r << 16 | g << 8 | b;
+    }
+
+    return c;
+}
 
 static const char* rel_target(const dxi* X, const char* id, int* external) {
     int i;
@@ -3008,6 +3168,7 @@ static pd_sp twips(int v) {
 static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_props* cp, char* rstyle,
                      size_t rcap) {
     char v[300];
+    uint32_t c;
 
     if (strcmp(t, "b") == 0) {
         cp->mask |= PD_CP_WEIGHT;
@@ -3029,12 +3190,13 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "vertAlign") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
         cp->mask |= PD_CP_SHIFT;
         cp->shift = strcmp(v, "superscript") == 0 ? PD_SHIFT_SUPER : strcmp(v, "subscript") == 0 ? PD_SHIFT_SUB : 0;
-    } else if (strcmp(t, "color") == 0 && mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+    } else if (strcmp(t, "color") == 0 && wcolor(X, m, "w:val", "w:themeColor", "w:themeTint", "w:themeShade", &c)) {
         cp->mask |= PD_CP_COLOR;
-        cp->color = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
-    } else if (strcmp(t, "shd") == 0 && mu_attr(m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+        cp->color = c;
+    } else if (strcmp(t, "shd") == 0 && wcolor(X, m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade",
+                                               &c)) {
         cp->mask |= PD_CP_BACKGROUND;
-        cp->background = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+        cp->background = c;
     } else if (strcmp(t, "highlight") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
         cp->mask |= PD_CP_BACKGROUND;
         cp->background = strcmp(v, "none") == 0 ? 0 : strcmp(v, "yellow") == 0 ? 0xFFFFFF00u : strcmp(v, "green") == 0 ?
@@ -3081,7 +3243,7 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
 }
 
 /* one child of a w:pPr into pr */
-static void ppr_elem(const pd_markup* m, const char* t, dprops* pr) {
+static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr) {
     pd_para_props* pp = &pr->pp;
     char v[64];
 
@@ -3171,8 +3333,9 @@ static void ppr_elem(const pd_markup* m, const char* t, dprops* pr) {
             pp->border_width = pp->border_width > 0 ? pp->border_width : PD_PT(0.25);
 
             if (!pp->border_color || side != PD_BORDER_BETWEEN) {
-                pp->border_color = mu_attr(m, "w:color", v, sizeof(v)) && strcmp(v, "auto") != 0 ?
-                                   0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0xFF000000u;
+                if (!wcolor(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &pp->border_color)) {
+                    pp->border_color = 0xFF000000u;
+                }
             }
 
             if (side != PD_BORDER_BETWEEN && attr_int(m, "w:space", 0) > 0) {   /* in points */
@@ -3183,8 +3346,9 @@ static void ppr_elem(const pd_markup* m, const char* t, dprops* pr) {
         }
     } else if (strcmp(t, "shd") == 0) {
         pp->mask |= PD_PP_SHADING;
-        pp->shading = mu_attr(m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0 ?
-                      0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0;
+        if (!wcolor(X, m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", &pp->shading)) {
+            pp->shading = 0;
+        }
     } else if (strcmp(t, "suppressAutoHyphens") == 0) {
         pp->mask |= PD_PP_HYPHENATE;
         pp->hyphenate = !attr_on(m);
@@ -3373,7 +3537,7 @@ static void read_styles(dxi* X, const char* xml, size_t n) {
         } else if (strcmp(t, "rPr") == 0) {
             in_rpr = m.type == MT_OPEN;
         } else if (open && tgt && in_ppr) {
-            ppr_elem(&m, t, tgt);
+            ppr_elem(X, &m, t, tgt);
 
             if (cur >= 0 && strcmp(t, "outlineLvl") == 0) {
                 X->styles[cur].outline = attr_int(&m, "w:val", -1);
@@ -3395,7 +3559,7 @@ static void read_styles(dxi* X, const char* xml, size_t n) {
 }
 
 /* the edges of a w:tblBorders or w:tcBorders: one child into e */
-static void edge_elem(const pd_markup* m, const char* t, dedges* e) {
+static void edge_elem(const dxi* X, const pd_markup* m, const char* t, dedges* e) {
     char v[32];
     int bit = !strcmp(t, "top") ? PD_TBORDER_TOP : !strcmp(t, "bottom") ? PD_TBORDER_BOTTOM :
               !strcmp(t, "left") || !strcmp(t, "start") ? PD_TBORDER_LEFT : !strcmp(t, "right") ||
@@ -3415,9 +3579,7 @@ static void edge_elem(const pd_markup* m, const char* t, dedges* e) {
         e->w = bw > e->w ? bw : e->w;
         e->w = e->w > 0 ? e->w : PD_PT(0.25);   /* w:sz 0: the thinnest, 2/8 pt */
 
-        if (mu_attr(m, "w:color", v, sizeof(v)) && strcmp(v, "auto") != 0) {
-            e->c = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
-        }
+        wcolor(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &e->c);
     } else {
         e->on &= ~bit;
     }
@@ -3527,13 +3689,13 @@ static void read_table_styles(dxi* X, const char* xml, size_t n) {
         } else if (!open) {
             continue;
         } else if (in_ppr && !in_rpr) {
-            ppr_elem(&m, t, &tp->pr);
+            ppr_elem(X, &m, t, &tp->pr);
         } else if (in_rpr && !in_ppr) {
             rpr_elem(X, &m, t, &tp->pr.cp, NULL, 0);
         } else if (in_tb && part == TP_WHOLE) {
-            edge_elem(&m, t, &ts->tb);
+            edge_elem(X, &m, t, &ts->tb);
         } else if (in_cb) {
-            edge_elem(&m, t, &tp->cb);
+            edge_elem(X, &m, t, &tp->cb);
         } else if (in_mar && part == TP_WHOLE) {
             int side = !strcmp(t, "top") ? 0 : !strcmp(t, "right") || !strcmp(t, "end") ? 1 : !strcmp(t, "bottom") ? 2 :
                        !strcmp(t, "left") || !strcmp(t, "start") ? 3 : -1;
@@ -3550,8 +3712,9 @@ static void read_table_styles(dxi* X, const char* xml, size_t n) {
             ts->col_band = attr_int(&m, "w:val", 1);
         } else if (in_tcpr && strcmp(t, "shd") == 0) {
             tp->has_shd = 1;
-            tp->shd = mu_attr(&m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0 ?
-                      0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0;
+            if (!wcolor(X, &m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", &tp->shd)) {
+                tp->shd = 0;
+            }
         } else if (strcmp(t, "basedOn") == 0) {
             mu_attr(&m, "w:val", ts->based_on, sizeof(ts->based_on));
         }
@@ -3597,17 +3760,30 @@ static void table_style_resolve(const dxi* X, const char* id, dtstyle* out, int 
     out->col_band = ts->col_band > 0 ? ts->col_band : out->col_band;
 }
 
-/* the theme's font scheme: the Latin face of the major (headings) and minor (body) fonts */
+/* the theme's colour scheme, and its font scheme: the Latin face of the major (headings) and minor (body) fonts */
 static void read_theme(dxi* X, const char* xml, size_t n) {
     pd_markup m;
     char* which = NULL;
+    int slot = -1, in_scheme = 0;
+    char v[32];
 
     mu_init(&m, xml, n, 0);
 
     while (mu_next(&m) != MT_END) {
         const char* t = mu_local(m.name);
 
-        if (m.type == MT_OPEN && strcmp(t, "majorFont") == 0) {
+        if (strcmp(t, "clrScheme") == 0) {
+            in_scheme = m.type == MT_OPEN;
+        } else if (in_scheme && m.type == MT_OPEN && theme_slot(t) >= 0 && (t[0] == 'd' || t[0] == 'l' ||
+                   t[0] == 'a' || t[0] == 'h' || t[0] == 'f')) {
+            slot = theme_slot(t);   /* dk1 ... folHlink, each holding one colour */
+        } else if (in_scheme && m.type == MT_CLOSE && theme_slot(t) >= 0) {
+            slot = -1;
+        } else if (slot >= 0 && strcmp(t, "srgbClr") == 0 && mu_attr(&m, "val", v, sizeof(v))) {
+            X->theme_clr[slot] = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+        } else if (slot >= 0 && strcmp(t, "sysClr") == 0 && mu_attr(&m, "lastClr", v, sizeof(v))) {
+            X->theme_clr[slot] = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+        } else if (m.type == MT_OPEN && strcmp(t, "majorFont") == 0) {
             which = X->theme_major;
         } else if (m.type == MT_OPEN && strcmp(t, "minorFont") == 0) {
             which = X->theme_minor;
@@ -4717,25 +4893,11 @@ static pd_res_id dw_resource(dxi* X, const char* rid) {
 /* drawing canvases and groups                                        */
 /* ------------------------------------------------------------------ */
 
-/* Word's theme colours by name, as Office's default theme has them */
-static uint32_t scheme_color(const char* name) {
-    static const struct {
-        const char* n;
-        uint32_t c;
-    } t[] = { { "accent1", 0x4472C4 }, { "accent2", 0xED7D31 }, { "accent3", 0xA5A5A5 }, { "accent4", 0xFFC000 },
-        { "accent5", 0x5B9BD5 }, { "accent6", 0x70AD47 }, { "tx1", 0x000000 }, { "dk1", 0x000000 }, { "bg1", 0xFFFFFF },
-        { "lt1", 0xFFFFFF }, { "tx2", 0x44546A }, { "dk2", 0x44546A }, { "bg2", 0xE7E6E6 }, { "lt2", 0xE7E6E6 },
-        { "hlink", 0x0563C1 }
-    };
-    size_t i;
+/* a DrawingML scheme colour by name, from the document's theme */
+static uint32_t scheme_color(const dxi* X, const char* name) {
+    int slot = theme_slot(name);
 
-    for (i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
-        if (strcmp(name, t[i].n) == 0) {
-            return 0xFF000000u | t[i].c;
-        }
-    }
-
-    return 0xFF000000u;
+    return slot >= 0 ? X->theme_clr[slot] : 0xFF000000u;
 }
 
 typedef struct {                /* child coordinates to the drawing's: x * s + o */
@@ -4811,7 +4973,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int cg_n = 0, cg_npt = 0, cg_closed = 0, cg_new_ring = 1, k2;
     char cg_cmd = 'm';
     char blip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
-    uint32_t fill = 0, line = 0, sfill = 0, sline = 0;
+    uint32_t fill = 0, line = 0, sfill = 0, sline = 0, *cur_clr = NULL;
     long long lw = 9525, ins[4] = { 91440, 45720, 91440, 45720 };
     pd_char_props base, rcp;
     pd_buf text;
@@ -5165,23 +5327,37 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (in_sppr && !strcmp(t, "prstGeom") && mu_attr(&g, "prst", v, sizeof(v))) {
             snprintf(geom, sizeof(geom), "%s", !strcmp(v, "ellipse") ? "ellipse" : !strcmp(v, "line") ||
                      strstr(v, "Connector") ? "line" : "rect");
-        } else if (!strcmp(t, "srgbClr") || !strcmp(t, "schemeClr")) {
-            uint32_t c = !strcmp(t, "srgbClr") ? (mu_attr(&g, "val", v, sizeof(v)) ?
-                         0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0xFF000000u) :
-                         (mu_attr(&g, "val", v, sizeof(v)) ? scheme_color(v) : 0xFF000000u);
+        } else if (!strcmp(t, "srgbClr") || !strcmp(t, "schemeClr") || !strcmp(t, "sysClr")) {
+            uint32_t c = !strcmp(t, "schemeClr") ? (mu_attr(&g, "val", v, sizeof(v)) ? scheme_color(X, v) :
+                                                    0xFF000000u) :
+                         mu_attr(&g, !strcmp(t, "sysClr") ? "lastClr" : "val", v, sizeof(v)) ?
+                         0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0xFF000000u;
+
+            cur_clr = NULL;
 
             if (in_ln) {
                 line = c;
+                cur_clr = &line;
             } else if (in_sppr && (!in_gs || in_gs == 1) && !have_fill) {
                 fill = c;   /* a gradient: its first stop */
                 have_fill = 1;
+                cur_clr = &fill;
             } else if (in_fillref) {
                 sfill = c;
                 style_fill = 1;
+                cur_clr = &sfill;
             } else if (in_lnref) {
                 sline = c;
                 style_line = 1;
+                cur_clr = &sline;
             }
+
+            if (g.type != MT_OPEN) {
+                cur_clr = NULL;     /* no modifiers inside */
+            }
+        } else if (cur_clr && (!strcmp(t, "lumMod") || !strcmp(t, "lumOff") || !strcmp(t, "tint") ||
+                               !strcmp(t, "shade"))) {
+            *cur_clr = clr_modify(*cur_clr, t, &g);
         } else if (in_ln && (!strcmp(t, "headEnd") || !strcmp(t, "tailEnd"))) {
             int arrow = mu_attr(&g, "type", v, sizeof(v)) && strcmp(v, "none") != 0;
 
@@ -5784,7 +5960,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 } else if (strcmp(t, "outlineLvl") == 0) {
                     w->outline = attr_int(&m, "w:val", -1);
                 } else {
-                    ppr_elem(&m, t, &w->ppr);
+                    ppr_elem(w->X, &m, t, &w->ppr);
                 }
             } else if (strcmp(t, "r") == 0) {
                 memset(&w->rcp, 0, sizeof(w->rcp));
@@ -6029,7 +6205,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->in_borders = m.type == MT_OPEN;
             } else if (w->in_tblpr && w->in_borders) {
                 if (w->ntab >= 1 && w->ntab <= 8) {
-                    edge_elem(&m, t, &w->tabs[w->ntab - 1].tb);
+                    edge_elem(w->X, &m, t, &w->tabs[w->ntab - 1].tb);
                 }
             } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblStyle") == 0) {
                 mu_attr(&m, "w:val", w->tabs[w->ntab - 1].style, sizeof(w->tabs[0].style));
@@ -6111,12 +6287,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->cell_merge = !(mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "restart") == 0);
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->cell_valign = strcmp(v, "center") == 0 ? 1 : strcmp(v, "bottom") == 0 ? 2 : 0;
-                } else if (strcmp(t, "shd") == 0 && mu_attr(&m, "w:fill", v, sizeof(v)) && strcmp(v, "auto") != 0) {
-                    w->cell_bg = 0xFF000000u | (uint32_t)strtoul(v, NULL, 16);
+                } else if (strcmp(t, "shd") == 0 && wcolor(w->X, &m, "w:fill", "w:themeFill", "w:themeFillTint",
+                           "w:themeFillShade", &w->cell_bg)) {
                 } else if (strcmp(t, "tcBorders") == 0) {
                     w->in_cb = m.type == MT_OPEN;
                 } else if (w->in_cb) {
-                    edge_elem(&m, t, &w->cell_edges);
+                    edge_elem(w->X, &m, t, &w->cell_edges);
                 }
             }
 
@@ -6400,6 +6576,7 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     pd_status st;
 
     memset(&X, 0, sizeof(X));
+    theme_defaults(X.theme_clr);
     X.margin_left = PD_PT(72);
 
     if (zip_open(&X.z, s, n) != 0) {

@@ -1772,6 +1772,112 @@ static void test_docx_borders(void) {
     pd_doc_free(d);
 }
 
+static char* drawing_json(const pd_doc* d, pd_res_id r);
+
+/* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
+static int near_color(uint32_t got, uint32_t want) {
+    int k;
+
+    for (k = 0; k < 32; k += 8) {
+        int a = (int)((got >> k) & 255), b = (int)((want >> k) & 255);
+
+        if (a - b > 2 || b - a > 2) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/* Theme colours: the document's own scheme (an srgbClr, a sysClr's last colour), named by w:themeColor on text,
+   shading and borders, lightened by w:themeTint and darkened by w:themeShade; a document with no theme gets
+   Office's. Kept through DOCX as the colours they come to. */
+static void test_docx_theme_colors(void) {
+    static const char* theme =
+        "<a:theme xmlns:a=\"a\"><a:themeElements><a:clrScheme name=\"T\">"
+        "<a:dk1><a:sysClr val=\"windowText\" lastClr=\"111111\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1>"
+        "<a:dk2><a:srgbClr val=\"222222\"/></a:dk2><a:lt2><a:srgbClr val=\"EEEEEE\"/></a:lt2>"
+        "<a:accent1><a:srgbClr val=\"336699\"/></a:accent1><a:accent2><a:srgbClr val=\"C0504D\"/></a:accent2>"
+        "<a:accent3><a:srgbClr val=\"9BBB59\"/></a:accent3><a:accent4><a:srgbClr val=\"8064A2\"/></a:accent4>"
+        "<a:accent5><a:srgbClr val=\"4BACC6\"/></a:accent5><a:accent6><a:srgbClr val=\"F79646\"/></a:accent6>"
+        "<a:hlink><a:srgbClr val=\"0000FF\"/></a:hlink><a:folHlink><a:srgbClr val=\"800080\"/></a:folHlink>"
+        "</a:clrScheme><a:fontScheme name=\"F\"><a:majorFont><a:latin typeface=\"Cambria\"/></a:majorFont>"
+        "<a:minorFont><a:latin typeface=\"Calibri\"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>";
+    static const char* body =
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:r><w:rPr><w:color w:val=\"FF0000\" w:themeColor=\"accent1\"/></w:rPr><w:t>a</w:t></w:r>"
+        "<w:r><w:rPr><w:color w:val=\"000000\" w:themeColor=\"accent1\" w:themeTint=\"99\"/></w:rPr><w:t>b</w:t></w:r>"
+        "<w:r><w:rPr><w:color w:val=\"000000\" w:themeColor=\"accent1\" w:themeShade=\"BF\"/></w:rPr><w:t>c</w:t></w:r>"
+        "<w:r><w:rPr><w:color w:val=\"000000\" w:themeColor=\"text1\"/></w:rPr><w:t>d</w:t></w:r>"
+        "<w:r><w:rPr><w:shd w:val=\"clear\" w:fill=\"auto\" w:themeFill=\"accent2\" w:themeFillShade=\"BF\"/></w:rPr>"
+        "<w:t>e</w:t></w:r><w:r><w:rPr><w:color w:val=\"00FF00\"/></w:rPr><w:t>f</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"8\" w:color=\"000000\" w:themeColor=\"accent2\"/></w:pBdr>"
+        "<w:shd w:val=\"clear\" w:fill=\"FFFFFF\" w:themeFill=\"accent1\" w:themeFillTint=\"33\"/></w:pPr>"
+        "<w:r><w:t>g</w:t></w:r></w:p></w:body></w:document>";
+    pd_doc* d = docx_doc("word/theme/theme1.xml", theme, "word/document.xml", body, NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec, p;
+        pd_para_props pp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        p = pd_doc_child(d, sec, 0);
+        CHECK(chars_at(d, p, 0).color == 0xFF336699u);              /* the theme's, not w:val's */
+        CHECK(near_color(chars_at(d, p, 1).color, 0xFF75A3D1u));    /* 60% of it, the rest white */
+        CHECK(near_color(chars_at(d, p, 2).color, 0xFF264C73u));    /* 75% of its luminance */
+        CHECK(chars_at(d, p, 3).color == 0xFF111111u);              /* text1: dk1, a system colour's last value */
+        CHECK(near_color(chars_at(d, p, 4).background, 0xFF953735u));
+        CHECK(chars_at(d, p, 5).color == 0xFF00FF00u);
+        pp = para_resolved(d, pd_doc_child(d, sec, 1));
+        CHECK(pp.border_color == 0xFFC0504Du);
+        CHECK(near_color(pp.shading, 0xFFD1E0F0u));
+    }
+
+    pd_doc_free(d);
+
+    /* a shape's scheme colour, its luminance modified (DrawingML's lumMod, lumOff) */
+    d = docx_doc("word/theme/theme1.xml", theme, "word/document.xml",
+                 "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpc=\"wpc\" xmlns:wps=\"wps\"><w:body>"
+                 "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"1270000\" cy=\"635000\"/><a:graphic><a:graphicData>"
+                 "<wpc:wpc><wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+                 "<a:prstGeom prst=\"rect\"/><a:solidFill><a:schemeClr val=\"accent2\"><a:lumMod val=\"40000\"/>"
+                 "<a:lumOff val=\"60000\"/></a:schemeClr></a:solidFill><a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/>"
+                 "</wps:wsp></wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>",
+                 NULL);
+    CHECK(d != NULL);
+
+    if (d) {
+        pd_inline o;
+        char* js;
+        const char* f;
+
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+        js = drawing_json(d, o.resource);
+        f = js ? strstr(js, "\"fill\":") : NULL;
+        CHECK(f != NULL && near_color((uint32_t)strtoul(f + 7, NULL, 10), 0xFFE6B9B8u));
+        free(js);
+        pd_doc_free(d);
+    }
+
+    /* no theme part: Office's */
+    d = docx_doc("word/document.xml", "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:rPr>"
+                 "<w:color w:val=\"000000\" w:themeColor=\"accent1\"/></w:rPr><w:t>x</w:t></w:r></w:p></w:body></w:document>",
+                 NULL);
+    CHECK(d != NULL);
+
+    if (d) {
+        CHECK(chars_at(d, pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0).color == 0xFF4472C4u);
+        pd_doc_free(d);
+    }
+}
+
 /* Word's table styles: the default style's cell margins, a style's rules
    (top, bottom and between rows only), its header row (bold, shaded, ruled
    under) and banded rows, as the table's tblLook allows; the table's own
@@ -3289,6 +3395,7 @@ int main(void) {
     printf("docx fields and references\n");
     test_docx_fields();
     test_docx_review();
+    test_docx_theme_colors();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");
