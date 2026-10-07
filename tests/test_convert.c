@@ -576,7 +576,7 @@ static void write_files(const char* dir) {
         pd_conv_format f;
         const char* ext;
     } fmts[] = { { PD_CONV_HTML, "html" }, { PD_CONV_MARKDOWN, "md" }, { PD_CONV_LATEX, "tex" }, { PD_CONV_RTF, "rtf" },
-        { PD_CONV_DOCX, "docx" }, { PD_CONV_TEXT, "txt" }, { PD_CONV_JDATA, "pdoc" }
+        { PD_CONV_DOCX, "docx" }, { PD_CONV_TEXT, "txt" }, { PD_CONV_JDATA, "jdoc" }
     };
     pd_doc* d = rich();
     size_t i;

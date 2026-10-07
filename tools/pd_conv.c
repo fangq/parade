@@ -1,7 +1,8 @@
 /*
  * pd_conv: convert between document formats with Parade
  *
- *   pd_conv in.{pdoc,bpdoc,html,md,rtf,docx,txt} out.{pdoc,bpdoc,html,md,tex,rtf,docx,txt,pdf}
+ *   pd_conv in.{pdoc,jdoc,html,md,rtf,docx,txt} out.{pdoc,jdoc,html,md,tex,rtf,docx,txt,pdf}
+ *   (.pdoc: the native document in BJData; .jdoc: the same in JSON text)
  *
  * Formats come from the file extensions (or, for input, the content).
  * PDF output lays the document out with Parade itself (Liberation Serif, and
@@ -180,8 +181,8 @@ static int fmt_of(const char* ext, int* jdata_binary) {
         return PD_CONV_TEXT;
     }
 
-    if (!strcmp(ext, "pdoc") || !strcmp(ext, "bpdoc")) {
-        *jdata_binary = !strcmp(ext, "bpdoc");
+    if (!strcmp(ext, "pdoc") || !strcmp(ext, "jdoc")) {
+        *jdata_binary = !strcmp(ext, "pdoc");
         return PD_CONV_JDATA;
     }
 

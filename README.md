@@ -39,7 +39,7 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
 - **Editing**: every change is an operation recording its inverse —
   undo/redo, labelled groups, typing coalescing, markers that follow
   edits, per-block revisions and a change listener.
-- **Native format**: JData (`.pdoc`, JSON) or BJData (`.bpdoc`), using
+- **Native format**: BJData (`.pdoc`, binary) or its JSON text (`.jdoc`), using
   `_TreeNode_`/`_TreeChildren_`, `_ByteStream_` and optimized N-D arrays;
   the codec (`src/pd_json.c`) is a C99 port of mimamo's
   mmm_json/mmm_bjdata/mmm_base64 conventions. Loading untrusted files is
@@ -295,7 +295,7 @@ line on". An invitation link for a text says so (`#t=...&k=text`), and
   heading; bookmarks); and for viewing, page-width and whole-page zoom,
   formatting marks, the headings for a navigation list, GoToPos. Copy puts the selection on the
   clipboard as Parade JData, HTML (CF_HTML on Windows), RTF and text;
-  paste takes the richest. Load/save by extension: .pdoc/.bpdoc, .docx,
+  paste takes the richest. Load/save by extension: .pdoc/.jdoc, .docx,
   .rtf, .html, .md, .tex (save), .txt, .pdf (save).
 - `demo/paradedemo`: a small word processor on the control.
 

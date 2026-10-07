@@ -473,7 +473,7 @@ type
     { line breaking as one types: hybrid (lines away from the edit hold still) or optimal (every edited
       paragraph re-broken as if fresh); saved with the document }
     property HybridBreaking: Boolean read GetHybridBreaking write SetHybridBreaking;
-    { what a new or imported document gets (a .pdoc keeps its own); default on }
+    { what a new or imported document gets (a .pdoc or .jdoc keeps its own); default on }
     property HybridDefault: Boolean read FHybridDefault write FHybridDefault;
     { Undo/Redo go here when set (a shared document undoes one's own edits only) }
     property OnUndo: TParadeUndoEvent read FOnUndo write FOnUndo;
@@ -930,7 +930,7 @@ begin
   end;
 end;
 
-{ converter format of a file name: PD_CONV_*, PD_CONV_JDATA for .pdoc/.bpdoc, -1 unknown }
+{ converter format of a file name: PD_CONV_*, PD_CONV_JDATA for .pdoc (BJData) and .jdoc (JSON), -1 unknown }
 function FormatOfFile(const FileName: string): Int32;
 var
   E: string;
@@ -942,7 +942,7 @@ begin
   if E = '.rtf' then Exit(PD_CONV_RTF);
   if E = '.docx' then Exit(PD_CONV_DOCX);
   if E = '.txt' then Exit(PD_CONV_TEXT);
-  if (E = '.pdoc') or (E = '.bpdoc') then Exit(PD_CONV_JDATA);
+  if (E = '.pdoc') or (E = '.jdoc') then Exit(PD_CONV_JDATA);
   Result := -1;
 end;
 
@@ -1425,7 +1425,7 @@ begin
     Fmt := PD_CONV_JDATA;
   Fs := TFileStream.Create(FileName, fmCreate);
   try
-    SaveToStream(Fs, Fmt, LowerCase(ExtractFileExt(FileName)) = '.bpdoc');
+    SaveToStream(Fs, Fmt, LowerCase(ExtractFileExt(FileName)) <> '.jdoc');   { .pdoc and the rest binary }
   finally
     Fs.Free;
   end;

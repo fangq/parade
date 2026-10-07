@@ -1,9 +1,9 @@
 /*
  * pd_dump: lay out a document and dump its pages as JSON for the viewer
  *
- * usage: pd_dump [in.pdoc|in.bpdoc] > pages.json
+ * usage: pd_dump [in.pdoc|in.jdoc] > pages.json
  * Without an input it builds a sample document (and saves it next to the
- * output as build/sample.pdoc) exercising headings, lists, styles, floats,
+ * output as build/sample.jdoc) exercising headings, lists, styles, floats,
  * fields, a footnote mark, headers/footers, breaks and a two-column section.
  */
 
@@ -461,7 +461,7 @@ int main(int argc, char** argv) {
     pd_layout_info info;
     int32_t pg, i, k;
 
-    if (argc > 2 && strcmp(argv[1], "--pdf") == 0) {     /* --pdf out.pdf [in.pdoc] */
+    if (argc > 2 && strcmp(argv[1], "--pdf") == 0) {     /* --pdf out.pdf [in.pdoc|in.jdoc] */
         pdf = argv[2];
         argv += 2;
         argc -= 2;
@@ -498,7 +498,7 @@ int main(int argc, char** argv) {
         FILE* fp;
 
         d = sample();
-        fp = fopen("build/sample.pdoc", "wb");
+        fp = fopen("build/sample.jdoc", "wb");
 
         if (fp) {
             pd_doc_save(d, PD_JDATA_TEXT, to_file, fp);

@@ -140,7 +140,7 @@ pascal-edit: $(BUILD)/pascal/lib/libparade.a $(BUILD)/pd_dump
 	$(ulimit_cmd) && ./$(BUILD)/pd_dump > $(BUILD)/pages.json
 	$(LAZBUILD) pascal/tests/edit_test.lpi
 	Xvfb $(XVFB_DISPLAY) -screen 0 1280x1024x24 >/dev/null 2>&1 & echo $$! > $(BUILD)/pascal/xvfb.pid; sleep 2; \
-	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./$(BUILD)/pascal/edit_test $(BUILD)/sample.pdoc $(REVIEW_DOC) \
+	    ($(ulimit_cmd) && DISPLAY=$(XVFB_DISPLAY) timeout -s KILL 300 ./$(BUILD)/pascal/edit_test $(BUILD)/sample.jdoc $(REVIEW_DOC) \
 	    < /dev/null); rc=$$?; kill `cat $(BUILD)/pascal/xvfb.pid`; exit $$rc
 
 # two editors sharing a document through tools/parade_relay.py, headless under Xvfb (SYNC=yrs build in
@@ -229,7 +229,7 @@ $(BUILD)/fuzz/seeds/.done: $(BUILD)/pd_dump $(BUILD)/test_convert
 	rm -rf $(BUILD)/fuzz/seeds && mkdir -p $(addprefix $(BUILD)/fuzz/seeds/,$(FUZZ_TARGETS))
 	$(ulimit_cmd) && ./$(BUILD)/pd_dump > /dev/null && PARADE_CONV_OUT=$(BUILD)/conv ./$(BUILD)/test_convert > /dev/null
 	for t in $(FUZZ_TARGETS); do [ ! -d fuzz/seeds/$$t ] || cp fuzz/seeds/$$t/* $(BUILD)/fuzz/seeds/$$t/; done
-	cp $(BUILD)/sample.pdoc $(BUILD)/conv/rich.pdoc $(BUILD)/conv/rich.md $(BUILD)/conv/rich.html $(BUILD)/fuzz/seeds/doc/
+	cp $(BUILD)/sample.jdoc $(BUILD)/conv/rich.jdoc $(BUILD)/conv/rich.md $(BUILD)/conv/rich.html $(BUILD)/fuzz/seeds/doc/
 	cp tests/data/*.png /usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf $(BUILD)/fuzz/seeds/font/
 	set -e; s=$(BUILD)/fuzz/seeds/import; \
 	    for x in txt:0 html:1 md:2 rtf:3 docx:4 pdoc:5; do \

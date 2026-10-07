@@ -58,6 +58,20 @@ begin
   end;
 end;
 
+{ a file's bytes }
+function FileText(const FileName: string): RawByteString;
+var
+  S: TStringStream;
+begin
+  S := TStringStream.Create('');
+  try
+    S.LoadFromFile(FileName);
+    Result := S.DataString;
+  finally
+    S.Free;
+  end;
+end;
+
 procedure SavePage(E: TParadeEdit; Page: Integer; const FileName: string; Scale: Double);
 var
   Bmp: TBitmap;
@@ -321,6 +335,11 @@ begin
   T := E.DocumentText;
   E.LoadFromFile(Dir + 'edit_test.pdoc');
   Check(E.DocumentText = T, 'save/load');
+  Check(Pos('"_DataInfo_"', FileText(Dir + 'edit_test.pdoc')) = 0, 'a .pdoc is BJData, not JSON');
+  E.SaveToFile(Dir + 'edit_test.jdoc');
+  Check(Pos('"_DataInfo_"', FileText(Dir + 'edit_test.jdoc')) > 0, 'a .jdoc is JSON text');
+  E.LoadFromFile(Dir + 'edit_test.jdoc');
+  Check(E.DocumentText = T, 'and loads back');
   E.ProcessKey(VK_END, [ssCtrl]);
   E.ProcessKey(VK_LEFT, [ssShift]);
   E.ProcessKey(VK_LEFT, [ssShift]);

@@ -110,7 +110,7 @@ var
 begin
   D := TOpenDialog.Create(Self);
   try
-    D.Filter := 'All documents|*.pdoc;*.bpdoc;*.docx;*.rtf;*.html;*.htm;*.md;*.txt|Parade documents|*.pdoc;*.bpdoc|' +
+    D.Filter := 'All documents|*.pdoc;*.jdoc;*.docx;*.rtf;*.html;*.htm;*.md;*.txt|Parade documents|*.pdoc;*.jdoc|' +
       'Word|*.docx|Rich Text|*.rtf|HTML|*.html;*.htm|Markdown|*.md|Text|*.txt|All files|*';
     if D.Execute then
       FEdit.LoadFromFile(D.FileName);
@@ -126,7 +126,7 @@ var
 begin
   D := TSaveDialog.Create(Self);
   try
-    D.Filter := 'JData (text)|*.pdoc|BJData (binary)|*.bpdoc|Word|*.docx|Rich Text|*.rtf|HTML|*.html|Markdown|*.md|' +
+    D.Filter := 'Parade document|*.pdoc|Parade document, JSON text|*.jdoc|Word|*.docx|Rich Text|*.rtf|HTML|*.html|Markdown|*.md|' +
       'LaTeX|*.tex|Text|*.txt';
     D.DefaultExt := 'pdoc';
     D.FileName := FEdit.FileName;

@@ -908,8 +908,8 @@ PD_API int32_t pd_doc_load_images(pd_doc* doc, pd_image_fetch fetch, void* user)
 
 typedef enum {
     PD_JDATA_AUTO = -1,         /**< load only: detect from the first bytes */
-    PD_JDATA_TEXT = 0,          /**< JData in JSON text (.pdoc) */
-    PD_JDATA_BINARY = 1         /**< JData in BJData Draft-2+ (.bpdoc) */
+    PD_JDATA_TEXT = 0,          /**< JData in JSON text (.jdoc) */
+    PD_JDATA_BINARY = 1         /**< JData in BJData Draft-2+ (.pdoc, the native file) */
 } pd_jdata_format;
 
 /**

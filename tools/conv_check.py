@@ -4,7 +4,7 @@
   python3 tools/conv_check.py BUILD_DIR
 
 Expects BUILD_DIR/conv/rich.* (written by test_convert with PARADE_CONV_OUT)
-and BUILD_DIR/sample.pdoc (from pd_dump). Every external program runs under
+and BUILD_DIR/sample.jdoc (from pd_dump). Every external program runs under
 an address-space cap and a timeout.
 """
 import os
@@ -91,7 +91,7 @@ def foreign_docx(work):
     d.add_paragraph("after the break")
     src = os.path.join(work, "foreign.docx")
     d.save(src)
-    pdoc = os.path.join(work, "foreign.pdoc")
+    pdoc = os.path.join(work, "foreign.jdoc")
     r = run([PD_CONV, src, pdoc])
     check(r.returncode == 0, "pd_conv imports it")
     if r.returncode != 0:
@@ -197,7 +197,7 @@ def main():
                     t = open(txt, encoding="utf-8").read()
                     missing = [k for k in KEY if k not in t]
                     check(not missing, "all key text back" + (" (missing %s)" % missing if missing else ""))
-                    pdoc = os.path.join(work, "back-" + fmt + ".pdoc")
+                    pdoc = os.path.join(work, "back-" + fmt + ".jdoc")
                     run([PD_CONV, out, pdoc])
                     s = open(pdoc, encoding="utf-8").read()
                     check('"Role": "heading"' in s, "headings recognized")
@@ -208,7 +208,7 @@ def main():
 
 
     print("sample document through every format to PDF")
-    sample = os.path.join(BUILD, "sample.pdoc")
+    sample = os.path.join(BUILD, "sample.jdoc")
     for ext in ["html", "md", "rtf", "docx"]:
         mid = os.path.join(work, "sample." + ext)
         r1 = run([PD_CONV, sample, mid])
