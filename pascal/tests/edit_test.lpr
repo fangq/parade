@@ -10,6 +10,9 @@ uses
   paradefonts;
 
 type
+  { the wheel, as the mouse turns it }
+  TParadeWheel = class(TParadeEdit);
+
   TCounter = class
     N: Integer;
     procedure Hit(Sender: TObject);
@@ -92,6 +95,7 @@ end;
 
 var
   Form: TForm;
+  Same: Boolean;
   E: TParadeEdit;
   Dir, Sample, T: string;
   C: pd_pos;
@@ -331,6 +335,27 @@ begin
   for I := 1 to 120 do
     E.InsertText('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor. ');
   Check(E.PageCount >= 2, 'second page');
+  { scrolled a wheel step at a time: the view moves and only the strip that
+    comes into view is drawn, which is what a redraw of all of it gives }
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  E.Repaint;
+  Application.ProcessMessages;
+  Same := True;
+  for I := 1 to 30 do
+  begin
+    TParadeWheel(E).DoMouseWheel([], -120, Point(50, 50));
+    E.Repaint;
+    Application.ProcessMessages;
+    Same := Same and E.ViewMatchesRedraw;
+  end;
+  for I := 1 to 12 do
+  begin
+    TParadeWheel(E).DoMouseWheel([], 120, Point(50, 50));
+    E.Repaint;
+    Application.ProcessMessages;
+    Same := Same and E.ViewMatchesRedraw;
+  end;
+  Check(Same, 'a scrolled view is what drawing it afresh gives');
   E.SaveToFile(Dir + 'edit_test.pdoc');
   T := E.DocumentText;
   E.LoadFromFile(Dir + 'edit_test.pdoc');

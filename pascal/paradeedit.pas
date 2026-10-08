@@ -119,7 +119,8 @@ type
     FPageGap: Integer;
     FBack: TBitmap;                { the pages as last drawn, on the display's side: a paint copies from it }
     FBackImg: TLazIntfImage;       { ... and the same pixels here, to find what a redraw changes }
-    FBackSig: string;              { what they were drawn for: size, zoom, scroll, layout, selection }
+    FBackSig: string;              { what they were drawn for: size, zoom, layout, selection -- not the scroll }
+    FBackScroll: Integer;          { ... and the scroll position they were drawn at }
     FLayoutEpoch: Integer;         { counts layout updates }
     FAuthor: string;               { who tracked changes and comments are by }
     FTrack: Boolean;
@@ -215,6 +216,8 @@ type
       OnScreen: Boolean = False);
     procedure UseDocumentFonts;
     function BackSignature: string;
+    function ScrollBack(DY: Integer): Boolean;
+    procedure DrawView(Img: TLazIntfImage; ATop, AHeight: Integer; PagesToo: Boolean);
     procedure RebuildBack;
     function CaretRect(out R: TRect): Boolean;
   protected
@@ -473,6 +476,9 @@ type
     { line breaking as one types: hybrid (lines away from the edit hold still) or optimal (every edited
       paragraph re-broken as if fresh); saved with the document }
     property HybridBreaking: Boolean read GetHybridBreaking write SetHybridBreaking;
+    { for tests: the view as last painted (scrolled pixels and drawn strips)
+      is what drawing all of it afresh gives, pixels and balloons alike }
+    function ViewMatchesRedraw: Boolean;
     { what a new or imported document gets (a .pdoc or .jdoc keeps its own); default on }
     property HybridDefault: Boolean read FHybridDefault write FHybridDefault;
     { Undo/Redo go here when set (a shared document undoes one's own edits only) }
@@ -5295,6 +5301,9 @@ var
   CKind, CSpec: string;
   CA, CB: pd_pos;
   IX2, IY2: Integer;
+  VTop, VBot, PY0, PY1: Double;
+  Keep: Boolean;
+  J: Integer;
 
   { a range behind the text: one band per line, the line's full height, from
     the first character in it to the last -- the spaces between them too --
@@ -5371,6 +5380,47 @@ begin
     Exit;
   SetLength(Items, N + 1);
   pd_layout_page_items(FLayout, Page, @Items[0], N, N);
+
+  { Only what reaches into the image: the strip a scroll brings into view is
+    a tenth of a page, and every glyph, rule and path of the page went
+    through the loops below for it.  Each item's own extent, with a few
+    pixels to spare, so an item kept or dropped draws exactly as before. }
+  VTop := (-OY - 4) / PxScale;
+  VBot := (Img.Height - OY + 4) / PxScale;
+  K := 0;
+  for I := 0 to N - 1 do
+  begin
+    with Items[I] do
+      case kind of
+        PD_DRAW_GLYPH:
+          Keep := (y - 1.5 * size < VBot) and (y + size > VTop);
+        PD_DRAW_PATH:
+          begin
+            Keep := points = nil;
+            if not Keep then
+            begin
+              PY0 := 1e30;
+              PY1 := -1e30;
+              for J := 0 to npoints - 1 do
+                if points[2 * J] <> PD_PATH_BREAK then
+                begin
+                  if points[2 * J + 1] < PY0 then PY0 := points[2 * J + 1];
+                  if points[2 * J + 1] > PY1 then PY1 := points[2 * J + 1];
+                end;
+              Keep := (PY0 - line_width < VBot) and (PY1 + line_width > VTop);
+            end;
+          end;
+      else
+        Keep := (y < VBot) and (y + h > VTop);
+      end;
+    if Keep then
+    begin
+      if K <> I then
+        Items[K] := Items[I];
+      Inc(K);
+    end;
+  end;
+  N := K;
 
   { comments' ranges, lightly in their authors' colours; the selection over them }
   if pd_doc_comment_count(FDoc) > 0 then
@@ -5519,7 +5569,7 @@ function TParadeEdit.BackSignature: string;
 var
   A, B: pd_pos;
 begin
-  Result := Format('%d %d %g %d %d %p %d %d %d', [ClientWidth, ClientHeight, FZoom, FScrollY, FLayoutEpoch, Pointer(FDoc),
+  Result := Format('%d %d %g %d %p %d %d %d', [ClientWidth, ClientHeight, FZoom, FLayoutEpoch, Pointer(FDoc),
     Int64(pd_doc_revision(FDoc)), FRemoteRev, Ord(FShowMarks)]);
   if HasSelection then
   begin
@@ -5547,18 +5597,7 @@ begin
     Exit;
   Img := NewImage(W, H, TColorToRGB(Color));
   SetLength(FBalloons, 0);
-  for Page := 0 to PageCount - 1 do
-  begin
-    PTop := PageTop(Page);
-    pd_layout_page_info(FLayout, Page, Info);
-    if PTop + Round(Info.height * PxPerSp) < 0 then
-      Continue;
-    if PTop > H then
-      Break;
-    PaintPage(Img, Page, PageLeft(Page), PTop, PxPerSp, False, True);
-    if FHasMarkup then
-      PaintMarkup(Img, Page, PageLeft(Page), PTop, PxPerSp);
-  end;
+  DrawView(Img, 0, H, True);
 
   Full := (FBack = nil) or (FBackImg = nil) or (FBackImg.Width <> W) or (FBackImg.Height <> H);
   RowBytes := W * 4;
@@ -5614,6 +5653,144 @@ begin
   FBackImg := Img;
 end;
 
+{ Scrolled by DY pixels and nothing else changed: the pixels already drawn
+  move -- on the display's side as well as here, so none of them cross the
+  connection again -- and only the strip that came into view is drawn and
+  sent.  This is how a scroll stays cheap over a remote display (an RDP or
+  X2Go session sends a moved area as a copy, a redrawn one as pixels) and
+  on a large window, where drawing every page in view again was most of a
+  step.  False when there is nothing to move: a jump of a window or more. }
+{ The pages that reach into the band of the view from Top, Height pixels
+  tall, drawn into Img (whose row 0 is the band's top), with their balloons
+  when there is markup -- and the balloons of the page just above the band,
+  whose column can run on past the page's foot into it.  PagesToo false: the
+  balloons alone, for the list a click looks in. }
+procedure TParadeEdit.DrawView(Img: TLazIntfImage; ATop, AHeight: Integer; PagesToo: Boolean);
+var
+  Page, PTop, Prev: Integer;
+  Info: pd_page_info;
+begin
+  Prev := -1;
+  for Page := 0 to PageCount - 1 do
+  begin
+    PTop := PageTop(Page);
+    pd_layout_page_info(FLayout, Page, Info);
+    if PTop + Round(Info.height * PxPerSp) + FPageGap < ATop then
+    begin
+      Prev := Page;
+      Continue;
+    end;
+    if PTop > ATop + AHeight then
+      Break;
+    if FHasMarkup and (Prev >= 0) then
+    begin
+      PaintMarkup(Img, Prev, PageLeft(Prev), PageTop(Prev) - ATop, PxPerSp);
+      Prev := -1;
+    end;
+    if PagesToo then
+      PaintPage(Img, Page, PageLeft(Page), PTop - ATop, PxPerSp, False, True);
+    if FHasMarkup then
+      PaintMarkup(Img, Page, PageLeft(Page), PTop - ATop, PxPerSp);
+  end;
+end;
+
+function TParadeEdit.ScrollBack(DY: Integer): Boolean;
+var
+  W, H, SY0, SH, Y: Integer;
+  Strip, Dot: TLazIntfImage;
+  Bmp: TBitmap;
+begin
+  Result := False;
+  W := ClientWidth - FScrollBar.Width;
+  H := ClientHeight;
+  if (FBack = nil) or (FBackImg = nil) or (FBackImg.Width <> W) or (FBackImg.Height <> H) or (DY = 0) or
+     (Abs(DY) >= H) then
+    Exit;
+
+  { what is still in view moves by DY: here, row by row in the right order, and there, as one copy }
+  if DY > 0 then
+  begin   { down the document: the rows move up }
+    for Y := 0 to H - 1 - DY do
+      Move(FBackImg.GetDataLineStart(Y + DY)^, FBackImg.GetDataLineStart(Y)^, W * 4);
+    FBack.Canvas.CopyRect(Rect(0, 0, W, H - DY), FBack.Canvas, Rect(0, DY, W, H));
+    SY0 := H - DY;
+  end
+  else
+  begin
+    for Y := H - 1 downto -DY do
+      Move(FBackImg.GetDataLineStart(Y + DY)^, FBackImg.GetDataLineStart(Y)^, W * 4);
+    FBack.Canvas.CopyRect(Rect(0, -DY, W, H), FBack.Canvas, Rect(0, 0, W, H + DY));
+    SY0 := 0;
+  end;
+  SH := Abs(DY);
+
+  { the strip that came into view, drawn alone }
+  Strip := NewImage(W, SH, TColorToRGB(Color));
+  try
+    DrawView(Strip, SY0, SH, True);
+    { the balloons to click, as a full drawing would list them: laid out again
+      for the whole view onto nothing (a pixel), which measures their text
+      but draws none of it }
+    SetLength(FBalloons, 0);
+    if FHasMarkup then
+    begin
+      Dot := NewImage(1, 1, 0);
+      try
+        DrawView(Dot, 0, H, False);
+      finally
+        Dot.Free;
+      end;
+    end;
+
+    for Y := 0 to SH - 1 do
+      Move(Strip.GetDataLineStart(Y)^, FBackImg.GetDataLineStart(SY0 + Y)^, W * 4);
+    Bmp := TBitmap.Create;
+    try
+      Bmp.LoadFromIntfImage(Strip);
+      FBack.Canvas.Draw(0, SY0, Bmp);
+    finally
+      Bmp.Free;
+    end;
+  finally
+    Strip.Free;
+  end;
+  Result := True;
+end;
+
+function TParadeEdit.ViewMatchesRedraw: Boolean;
+var
+  W, H, Y: Integer;
+  Img: TLazIntfImage;
+  Kept: array of TBalloonHit;
+  I: Integer;
+begin
+  Result := False;
+  W := ClientWidth - FScrollBar.Width;
+  H := ClientHeight;
+  if (FBackImg = nil) or (FBackImg.Width <> W) or (FBackImg.Height <> H) then
+    Exit;
+  SetLength(Kept, Length(FBalloons));
+  for I := 0 to High(FBalloons) do
+    Kept[I] := FBalloons[I];
+  SetLength(FBalloons, 0);
+  Img := NewImage(W, H, TColorToRGB(Color));
+  try
+    DrawView(Img, 0, H, True);
+    Result := Length(FBalloons) = Length(Kept);
+    for I := 0 to High(Kept) do
+      if Result and not (EqualRect(Kept[I].R, FBalloons[I].R) and (Kept[I].Id = FBalloons[I].Id)) then
+        Result := False;
+    for Y := 0 to H - 1 do
+      if Result and not CompareMem(Img.GetDataLineStart(Y), FBackImg.GetDataLineStart(Y), W * 4) then
+        Result := False;
+  finally
+    Img.Free;
+    SetLength(FBalloons, Length(Kept));
+    for I := 0 to High(Kept) do
+      FBalloons[I] := Kept[I];
+  end;
+end;
+
 procedure TParadeEdit.Paint;
 var
   Sig: string;
@@ -5629,10 +5806,13 @@ begin
   if (ClientWidth - FScrollBar.Width <= 0) or (ClientHeight <= 0) then
     Exit;
   Sig := BackSignature;
-  if (Sig <> FBackSig) or (FBack = nil) then
+  if (Sig = FBackSig) and (FBack <> nil) and (FScrollY <> FBackScroll) and ScrollBack(FScrollY - FBackScroll) then
+    FBackScroll := FScrollY
+  else if (Sig <> FBackSig) or (FBack = nil) or (FScrollY <> FBackScroll) then
   begin
     RebuildBack;
     FBackSig := Sig;
+    FBackScroll := FScrollY;
   end;
   if FBack = nil then
     Exit;

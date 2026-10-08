@@ -110,6 +110,10 @@ typedef struct {
     int32_t nrules, caprules;
     int32_t lnum_first;         /* line numbering: lines counted before this page's first, in its scope */
     pd_sp* pts;                 /* the points of the paths last listed for the page */
+    pd_draw* items;             /* the page's draw list, made on the first listing and kept until the page is
+                                   laid out again: a drawing's text boxes are laid out to make it */
+    int32_t nitems;
+    int items_ok;
 } ppage;
 
 typedef struct {
@@ -2877,6 +2881,7 @@ static void drop_pages_after(pd_layout* L, int32_t page) {
         free(p->rules);
         free(p->owned);
         free(p->pts);
+        free(p->items);
     }
 }
 
@@ -3118,6 +3123,7 @@ static void clear_pages(pd_layout* L) {
         free(L->pages[i].lines);
         free(L->pages[i].rules);
         free(L->pages[i].pts);
+        free(L->pages[i].items);
 
         for (k = 0; k < L->pages[i].nowned; k++) {
             pcache_free(L->pages[i].owned[k]);
@@ -4975,6 +4981,7 @@ static void emit_line_numbers(const pd_layout* L, dlist_t* D, const ppage* p) {
 }
 
 pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, int32_t cap, int32_t* count) {
+    ppage* pg;
     dlist_t D;
     int32_t i;
 
@@ -4986,41 +4993,47 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
         return PD_ERR_RANGE;
     }
 
-    memset(&D, 0, sizeof(D));
+    /* Made once and kept with the page, until it is laid out again.  A page is
+       listed for every paint -- twice, for the count and then the items -- and
+       making the list lays out every text box of a drawing on it again: a page
+       with a figure's grid of pictures and a table took 23 ms a paint, which a
+       scroll paid on every step that showed a sliver of it. */
+    pg = (ppage*)&L->pages[page];
 
-    for (i = 0; i < L->pages[page].nrules; i++) {  /* rules first: backgrounds sit under the text */
-        const prule* r = &L->pages[page].rules[i];
-        pd_draw a;
+    if (!pg->items_ok) {
+        memset(&D, 0, sizeof(D));
 
-        memset(&a, 0, sizeof(a));
-        a.kind = PD_DRAW_RULE;
-        a.x = r->x;
-        a.y = r->y;
-        a.w = r->w;
-        a.h = r->h;
-        a.color = r->color;
-        a.region = r->region;
-        a.block = r->block;
-        emit(&D, &a);
-    }
+        for (i = 0; i < pg->nrules; i++) {  /* rules first: backgrounds sit under the text */
+            const prule* r = &pg->rules[i];
+            pd_draw a;
 
-    emit_para_boxes(&D, &L->pages[page]);
+            memset(&a, 0, sizeof(a));
+            a.kind = PD_DRAW_RULE;
+            a.x = r->x;
+            a.y = r->y;
+            a.w = r->w;
+            a.h = r->h;
+            a.color = r->color;
+            a.region = r->region;
+            a.block = r->block;
+            emit(&D, &a);
+        }
 
-    for (i = 0; i < L->pages[page].n; i++) {
-        emit_line(L, &D, &L->pages[page], &L->pages[page].lines[i]);
-    }
+        emit_para_boxes(&D, pg);
 
-    emit_line_numbers(L, &D, &L->pages[page]);
+        for (i = 0; i < pg->n; i++) {
+            emit_line(L, &D, pg, &pg->lines[i]);
+        }
 
-    if (D.err) {
-        free(D.d);
-        free(D.pts);
-        return PD_ERR_NOMEM;
-    }
+        emit_line_numbers(L, &D, pg);
 
-    {   /* the paths' points: kept with the page until it is listed again */
-        ppage* pg = (ppage*)&L->pages[page];
+        if (D.err) {
+            free(D.d);
+            free(D.pts);
+            return PD_ERR_NOMEM;
+        }
 
+        /* the paths' points: kept with the page as the list is */
         free(pg->pts);
         pg->pts = D.pts;
 
@@ -5029,22 +5042,25 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
                 D.d[i].points = D.pts + (intptr_t)D.d[i].points;
             }
         }
+
+        free(pg->items);
+        pg->items = D.d;
+        pg->nitems = D.n;
+        pg->items_ok = 1;
     }
 
-    *count = D.n;
+    *count = pg->nitems;
 
     if (buf) {
-        if (cap < D.n) {
-            free(D.d);
+        if (cap < pg->nitems) {
             return PD_ERR_RANGE;
         }
 
-        if (D.n) {
-            memcpy(buf, D.d, (size_t)D.n * sizeof(pd_draw));
+        if (pg->nitems) {
+            memcpy(buf, pg->items, (size_t)pg->nitems * sizeof(pd_draw));
         }
     }
 
-    free(D.d);
     return PD_OK;
 }
 
