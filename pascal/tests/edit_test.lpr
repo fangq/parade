@@ -106,6 +106,11 @@ var
   BX0, BY0, BX1, BY1, NX0, NY0, NX1, NY1: Double;
   NShapes: Integer;
   Xml: string;
+  NStories, J, PickOk, PickAll, PickPg: Integer;
+  PickSeen: string;
+  Pt0, Pt1: TPoint;
+  StA, StB, Bk: pd_block_id;
+  CanvasP: pd_pos;
   E: TParadeEdit;
   Dir, Sample, T: string;
   C: pd_pos;
@@ -226,6 +231,48 @@ begin
     Check(E.PageCount >= 3, 'sample pages');
     SavePage(E, 0, Dir + 'edit_sample_p1.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
     SavePage(E, E.PageCount - 1, Dir + 'edit_sample_last.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+  end;
+
+  { PARADE_PICK_DOCX=file.docx: every picture and drawing of a document, clicked where it is drawn, is selected --
+    inline or floating }
+  if GetEnvironmentVariable('PARADE_PICK_DOCX') <> '' then
+  begin
+    E.LoadFromFile(GetEnvironmentVariable('PARADE_PICK_DOCX'));
+    PickOk := 0;
+    PickAll := 0;
+    PickSeen := '';
+    for PickPg := 0 to E.PageCount - 1 do
+    begin
+      pd_layout_page_items(E.Layout, PickPg, nil, 0, N);
+      SetLength(Items, N + 1);
+      pd_layout_page_items(E.Layout, PickPg, @Items[0], N, N);
+      for I := 0 to N - 1 do
+        if (Items[I].kind = PD_DRAW_IMAGE) and (Items[I].block <> 0) and (Items[I].w > 4 * PD_SP_PER_PT) and
+           (Pos('|' + IntToStr(Items[I].block) + ':' + IntToStr(Items[I].offset) + '|', PickSeen) = 0) and
+           (pd_doc_inline_at(E.Doc, PdPos(Items[I].block, Items[I].offset), Obj) = PD_OK) then
+        begin
+          PickSeen := PickSeen + '|' + IntToStr(Items[I].block) + ':' + IntToStr(Items[I].offset) + '|';
+          Inc(PickAll);
+          E.ProcessKey(VK_ESCAPE, []);
+          E.ProcessKey(VK_ESCAPE, []);
+          E.ClickAt(PickPg, (Items[I].x + Items[I].w / 2) / PD_SP_PER_PT, (Items[I].y + Items[I].h / 2) / PD_SP_PER_PT);
+          if E.SelectedShape(DrawP, DrawSid) and (DrawP.block = Items[I].block) and (DrawP.offset = Items[I].offset) then
+            Inc(PickOk)
+          else
+          begin
+            WriteLn('  not picked: page ', PickPg + 1, ' at ', Round(Items[I].x / PD_SP_PER_PT), ',',
+              Round(Items[I].y / PD_SP_PER_PT), ' ', Round(Items[I].w / PD_SP_PER_PT), 'x',
+              Round(Items[I].h / PD_SP_PER_PT), ' region ', Items[I].region);
+            if pd_layout_caret(E.Layout, PdPos(Items[I].block, Items[I].offset), CapPage, CapX, CapBase, CapAsc,
+               CapDesc) = PD_OK then
+              WriteLn('    caret: page ', CapPage + 1, ' x ', Round(CapX / PD_SP_PER_PT), ' base ',
+                Round(CapBase / PD_SP_PER_PT), ' obj ', Round(Obj.width / PD_SP_PER_PT), 'x',
+                Round(Obj.height / PD_SP_PER_PT), ' selected ', E.SelectedShape(DrawP, DrawSid));
+          end;
+        end;
+    end;
+    WriteLn('picked ', PickOk, ' of ', PickAll);
+    Halt(0);
   end;
 
   Step('editing');
@@ -477,6 +524,105 @@ begin
       end;
     end;
   end;
+
+  { a canvas put in, shapes drawn in it; text boxes that keep their own text when their order changes }
+  E.ProcessKey(VK_END, [ssCtrl]);
+  E.ProcessKey(VK_RETURN, []);
+  NStories := pd_doc_story_count(E.Doc);
+  Check(E.InsertCanvas(300, 150) and E.SelectedShape(DrawP, DrawSid) and (DrawSid = -1), 'a canvas put in, selected');
+  Check(E.KeptXml(Xml) and (Pos('<wpc:wpc>', Xml) > 0) and (Length(E.DrawingShapes(DrawP)) = 0), 'and empty');
+  CanvasP := DrawP;
+  Check(E.AddShape('rect', 10 * PD_SP_PER_PT, 10 * PD_SP_PER_PT, 82 * PD_SP_PER_PT, 64 * PD_SP_PER_PT) and
+    E.SelectedShape(DrawP, DrawSid) and (DrawSid = 0) and (Length(E.DrawingShapes(CanvasP)) = 1),
+    'a rectangle put in, selected');
+  Check(E.ShapeBox(0, BX0, BY0, BX1, BY1) and (Abs(BX0 - 10 * PD_SP_PER_PT) < PD_SP_PER_PT) and
+    (Abs(BX1 - 82 * PD_SP_PER_PT) < PD_SP_PER_PT), 'where it was put');
+  Check(E.AddShape('star5', 100 * PD_SP_PER_PT, 10 * PD_SP_PER_PT, 150 * PD_SP_PER_PT, 60 * PD_SP_PER_PT) and
+    E.SelectedShape(DrawP, DrawSid) and (DrawSid = 1), 'a star after it');
+  Check(E.AddShape('arrow', 10 * PD_SP_PER_PT, 100 * PD_SP_PER_PT, 150 * PD_SP_PER_PT, 120 * PD_SP_PER_PT, True) and
+    E.KeptXml(Xml) and (Pos('<a:tailEnd type="triangle"/>', Xml) > 0) and (Pos('flipH="1"', Xml) > 0),
+    'an arrow, right to left');
+  Check(E.InsertShape('ellipse') and (E.DrawKind = 'ellipse'), 'Insert shape with a canvas selected: drawn next');
+  E.ProcessKey(VK_ESCAPE, []);
+  Check(E.DrawKind = '', 'Escape: not drawn');
+  E.ToggleShape(0);
+  E.ProcessKey(VK_ESCAPE, []);
+  Check(E.AddShape('textbox', 170 * PD_SP_PER_PT, 10 * PD_SP_PER_PT, 280 * PD_SP_PER_PT, 40 * PD_SP_PER_PT) and
+    (pd_doc_story_count(E.Doc) = NStories + 1), 'a text box: a story of its own');
+  StA := pd_doc_story_at(E.Doc, pd_doc_story_count(E.Doc) - 1);
+  Check(pd_doc_child(E.Doc, StA, 0) <> 0, 'with a paragraph to type in');
+  pd_doc_insert_text(E.Doc, PdPos(pd_doc_child(E.Doc, StA, 0), 0), 'Alpha', 5, 0, nil);
+  Check(E.AddShape('textbox', 170 * PD_SP_PER_PT, 60 * PD_SP_PER_PT, 280 * PD_SP_PER_PT, 90 * PD_SP_PER_PT), 'another');
+  StB := pd_doc_story_at(E.Doc, pd_doc_story_count(E.Doc) - 1);
+  pd_doc_insert_text(E.Doc, PdPos(pd_doc_child(E.Doc, StB, 0), 0), 'Beta', 4, 0, nil);
+  Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = 4) and E.ShapeOrder(3) and E.SelectedShape(DrawP, DrawSid) and
+    (DrawSid = 0), 'the second sent to the back');
+  Check(pd_doc_story_count(E.Doc) = NStories + 2, 'no story made by the move');
+  Check((Pos('Alpha', E.ParaText(pd_doc_child(E.Doc, StA, 0))) = 1) and
+    (Pos('Beta', E.ParaText(pd_doc_child(E.Doc, StB, 0))) = 1), 'each keeps its own text');
+  E.Undo;
+  Check(E.SelectedShape(DrawP, DrawSid), 'undo');
+  E.Redo;
+  { a shape drawn with the mouse: chosen, then dragged in the canvas from its top left corner }
+  E.ProcessKey(VK_ESCAPE, []);
+  E.ProcessKey(VK_ESCAPE, []);    { the caret after the canvas: in view }
+  E.Repaint;
+  Application.ProcessMessages;
+  NShapes := Length(E.DrawingShapes(CanvasP));
+  if (pd_layout_caret(E.Layout, CanvasP, CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK) then
+    E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 2, CapBase / PD_SP_PER_PT - 150 + 2);
+  Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = -1) and (DrawP.block = CanvasP.block), 'the canvas clicked');
+  if E.InsertShape('ellipse') and
+     (pd_layout_caret(E.Layout, CanvasP, CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK) then
+  begin
+    Pt0 := E.PageToClient(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 150 + 20);
+    Pt1 := E.PageToClient(CapPage, CapX / PD_SP_PER_PT + 92, CapBase / PD_SP_PER_PT - 150 + 74);
+    TParadeWheel(E).MouseDown(mbLeft, [], Pt0.X, Pt0.Y);
+    TParadeWheel(E).MouseMove([ssLeft], (Pt0.X + Pt1.X) div 2, (Pt0.Y + Pt1.Y) div 2);
+    TParadeWheel(E).MouseMove([ssLeft], Pt1.X, Pt1.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], Pt1.X, Pt1.Y);
+    Check((Length(E.DrawingShapes(CanvasP)) = NShapes + 1) and (E.DrawKind = '') and
+      E.SelectedShape(DrawP, DrawSid) and (DrawSid = NShapes), 'an oval drawn by a drag');
+    Check(E.ShapeBox(DrawSid, BX0, BY0, BX1, BY1) and (Abs(BX0 - 20 * PD_SP_PER_PT) < 2 * PD_SP_PER_PT) and
+      (Abs(BX1 - 92 * PD_SP_PER_PT) < 2 * PD_SP_PER_PT) and (Abs(BY1 - 74 * PD_SP_PER_PT) < 2 * PD_SP_PER_PT),
+      Format('where it was dragged: %.0f %.0f %.0f %.0f', [BX0 / PD_SP_PER_PT, BY0 / PD_SP_PER_PT,
+      BX1 / PD_SP_PER_PT, BY1 / PD_SP_PER_PT]));
+    E.Undo;
+    Check(Length(E.DrawingShapes(CanvasP)) = NShapes, 'and gone with undo');
+    E.Redo;
+  end
+  else
+    Check(False, 'the oval to draw');
+
+  { the whole canvas made wider: the object's size }
+  E.ProcessKey(VK_ESCAPE, []);
+  Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = -1) and (pd_doc_inline_at(E.Doc, CanvasP, Obj) = PD_OK) and
+    E.ResizeObject(Obj.width + 72 * PD_SP_PER_PT, Obj.height) and (pd_doc_inline_at(E.Doc, CanvasP, Obj) = PD_OK) and
+    (Abs(Obj.width - 372 * PD_SP_PER_PT) < 2), 'the canvas made an inch wider');
+  E.Undo;
+  Check((pd_doc_inline_at(E.Doc, CanvasP, Obj) = PD_OK) and (Abs(Obj.width - 300 * PD_SP_PER_PT) < 2),
+    'and back with undo');
+  E.SaveToFile(Dir + 'edit_canvas.docx');
+  E.LoadFromFile(Dir + 'edit_canvas.docx');
+  Same := False;
+  Bk := pd_doc_next_paragraph(E.Doc, 0);
+  while (Bk <> 0) and not Same do
+  begin
+    I := Pos(#$EF#$BF#$BC, E.ParaText(Bk));
+    if I > 0 then
+      Same := Length(E.DrawingShapes(PdPos(Bk, I - 1))) = 6;
+    Bk := pd_doc_next_paragraph(E.Doc, Bk);
+  end;
+  Check(Same, 'saved: the canvas comes back with its six shapes');
+  Same := False;
+  I := -1;
+  J := -1;
+  for K := 0 to pd_doc_story_count(E.Doc) - 1 do
+  begin
+    if Pos('Alpha', E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, K), 0))) = 1 then I := K;
+    if Pos('Beta', E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, K), 0))) = 1 then J := K;
+  end;
+  Check((I >= 0) and (J >= 0) and (J < I), 'and its text boxes, Beta now first: ' + IntToStr(I) + ' ' + IntToStr(J));
 
   { scrolled a wheel step at a time: the view moves and only the strip that
     comes into view is drawn, which is what a redraw of all of it gives }
@@ -796,6 +942,23 @@ begin
   C := E.CaretPos;
   Check((pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3), Obj) = PD_OK) and (Obj.kind = PD_INLINE_IMAGE) and
     (Obj.resource <> 0) and (Obj.width = 60 * 3 * 65536 div 4), 'at its own size');
+  { a click on the picture selects it as a whole, as a drawing is; its size changed, and back with undo }
+  if pd_layout_caret(E.Layout, PdPos(C.block, C.offset - 3), CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK then
+  begin
+    E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 5, CapBase / PD_SP_PER_PT - 5);
+    Check(E.SelectedShape(DrawP, DrawSid) and (DrawP.block = C.block) and (DrawP.offset = C.offset - 3) and
+      (DrawSid = -1), 'a click on a picture selects it');
+    Check(E.ResizeObject(Obj.width * 2, Obj.height * 2) and
+      (pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3), Obj) = PD_OK) and (Obj.width = 60 * 3 * 65536 div 2),
+      'and makes it twice the size');
+    E.Undo;
+    Check((pd_doc_inline_at(E.Doc, PdPos(C.block, C.offset - 3), Obj) = PD_OK) and
+      (Obj.width = 60 * 3 * 65536 div 4), 'undo: its size again');
+    E.ProcessKey(VK_ESCAPE, []);
+    E.ProcessKey(VK_END, [ssCtrl]);
+  end
+  else
+    Check(False, 'the picture is laid out');
   Check(not E.InsertPicture('tests/data/nothing-here.png'), 'no file: no picture');
 
   E.InsertEquation('x^2+y^2=z^2', False);

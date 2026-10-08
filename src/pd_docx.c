@@ -3872,6 +3872,8 @@ typedef struct {
     const pj_node* rebuild;     /* a drawing made again from its edited XML: its description as it was (pictures,
                                    styles, text boxes, fallback), in place of the package it was read from */
     int rebuild_story;          /* the next of its text boxes' stories */
+    const int* rebuild_map;     /* the k-th text box's story, an index into the old ones (-1: a new one); NULL: in order */
+    int rebuild_nmap;
 } dxi;
 
 /* ------------------------------------------------------------------ */
@@ -6448,17 +6450,48 @@ static int dw_color(const dxi* X, const pd_markup* g, const char* t, uint32_t* o
 /* a drawing made again: the story of its next text box, as the description it had names them in order */
 static pd_block_id dw_rebuild_story(dxi* X) {
     const pj_node* it, *items = pj_get(X->rebuild, "items");
-    int k = 0;
+    int k = 0, want = X->rebuild_story++;
 
-    for (it = items ? items->child : NULL; it; it = it->next) {
-        if (pj_get(it, "story") && k++ == X->rebuild_story) {
-            X->rebuild_story++;
+    if (X->rebuild_map) {   /* the text boxes as the editor marked them: moved ones keep their own text */
+        want = want < X->rebuild_nmap ? X->rebuild_map[want] : -1;
+    }
+
+    for (it = items ? items->child : NULL; it && want >= 0; it = it->next) {
+        if (pj_get(it, "story") && k++ == want) {
             return (pd_block_id)pj_int_or(pj_get(it, "story"), 0);
         }
     }
 
     return 0;
 }
+
+/* Office's preset shapes that are polygons: their corners in a box of 1000 by 1000 (the adjustments at their
+   defaults), drawn as a custom geometry is */
+static const struct {
+    const char* n;
+    int np;
+    short xy[24];
+} dw_presets[] = {
+    { "triangle", 3, { 500, 0, 1000, 1000, 0, 1000 } },
+    { "rtTriangle", 3, { 0, 0, 1000, 1000, 0, 1000 } },
+    { "diamond", 4, { 500, 0, 1000, 500, 500, 1000, 0, 500 } },
+    { "flowChartDecision", 4, { 500, 0, 1000, 500, 500, 1000, 0, 500 } },
+    { "parallelogram", 4, { 250, 0, 1000, 0, 750, 1000, 0, 1000 } },
+    { "flowChartInputOutput", 4, { 200, 0, 1000, 0, 800, 1000, 0, 1000 } },
+    { "trapezoid", 4, { 250, 0, 750, 0, 1000, 1000, 0, 1000 } },
+    { "pentagon", 5, { 500, 0, 1000, 382, 809, 1000, 191, 1000, 0, 382 } },
+    { "hexagon", 6, { 250, 0, 750, 0, 1000, 500, 750, 1000, 250, 1000, 0, 500 } },
+    { "octagon", 8, { 293, 0, 707, 0, 1000, 293, 1000, 707, 707, 1000, 293, 1000, 0, 707, 0, 293 } },
+    { "rightArrow", 7, { 0, 250, 500, 250, 500, 0, 1000, 500, 500, 1000, 500, 750, 0, 750 } },
+    { "leftArrow", 7, { 1000, 250, 500, 250, 500, 0, 0, 500, 500, 1000, 500, 750, 1000, 750 } },
+    { "upArrow", 7, { 250, 1000, 250, 500, 0, 500, 500, 0, 1000, 500, 750, 500, 750, 1000 } },
+    { "downArrow", 7, { 250, 0, 250, 500, 0, 500, 500, 1000, 1000, 500, 750, 500, 750, 0 } },
+    { "leftRightArrow", 10, { 0, 500, 250, 0, 250, 250, 750, 250, 750, 0, 1000, 500, 750, 1000, 750, 750, 250, 750, 250, 1000 } },
+    { "homePlate", 5, { 0, 0, 750, 0, 1000, 500, 750, 1000, 0, 1000 } },
+    { "chevron", 6, { 0, 0, 750, 0, 1000, 500, 750, 1000, 0, 1000, 250, 500 } },
+    { "star5", 10, { 500, 0, 612, 345, 976, 345, 682, 559, 794, 905, 500, 691, 206, 905, 318, 559, 24, 345, 388, 345 } },
+    { "plus", 12, { 250, 0, 750, 0, 750, 250, 1000, 250, 1000, 750, 750, 750, 750, 1000, 250, 1000, 250, 750, 0, 750, 0, 250, 250, 250 } },
+};
 
 /* N bytes of H holding the first of NN bytes of NEEDLE, or NULL */
 static const char* dw_memmem(const char* h, size_t n, const char* needle, size_t nn) {
@@ -7273,14 +7306,25 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                        styles, fields -- and edited in place; the drawing says where it goes. Made again from
                        edited XML: the story it had, as edited */
                     pd_char_props keep = X->b->cp;
-                    pd_block_id story = X->rebuild ? dw_rebuild_story(X) : bld_story_begin(X->b);
+                    pd_block_id story = X->rebuild ? dw_rebuild_story(X) : 0;
+                    int fresh = !story;
 
-                    if (story && !X->rebuild) {
+                    if (fresh) {    /* read now: a text box new to the drawing, or the drawing read from DOCX */
+                        story = bld_story_begin(X->b);
+                    }
+
+                    if (story && fresh) {
+                        pd_block_id para;
+
                         X->depth++;
                         dw_parse(X, tx_a, (size_t)(tx_b - tx_a), 1);
                         X->depth--;
                         bld_end_para(X->b);
                         bld_story_end(X->b);
+
+                        if (pd_doc_child(X->b->d, story, 0) == 0) {     /* empty: a paragraph to type in */
+                            pd_doc_insert_block(X->b->d, story, -1, PD_BLOCK_PARAGRAPH, &para);
+                        }
                     }
 
                     if (story) {
@@ -7639,6 +7683,28 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             snprintf(geom, sizeof(geom), "%s", !strcmp(v, "ellipse") ? "ellipse" : !strcmp(v, "line") ||
                      strstr(v, "Connector") ? "line" : !strcmp(v, "roundRect") ? "roundRect" : "rect");
             snprintf(conn, sizeof(conn), "%.23s", strstr(v, "Connector") && strcmp(v, "straightConnector1") ? v : "");
+
+            if (!strcmp(v, "flowChartTerminator") || !strcmp(v, "flowChartAlternateProcess")) {
+                strcpy(geom, "roundRect");
+            }
+
+            for (k2 = 0; k2 < (int)(sizeof(dw_presets) / sizeof(dw_presets[0])); k2++) {
+                if (!strcmp(v, dw_presets[k2].n)) {     /* a polygon: as a custom geometry of its corners */
+                    int q;
+
+                    strcpy(geom, "cust");
+                    cg_w = cg_h = 1000;
+                    cg_n = 0;
+
+                    for (q = 0; q < dw_presets[k2].np; q++, cg_n++) {
+                        cg_xy[2 * cg_n] = dw_presets[k2].xy[2 * q];
+                        cg_xy[2 * cg_n + 1] = dw_presets[k2].xy[2 * q + 1];
+                    }
+
+                    cg_closed = 1;
+                    break;
+                }
+            }
         } else if (!strcmp(t, "srgbClr") || !strcmp(t, "schemeClr") || !strcmp(t, "sysClr")) {
             uint32_t c = !strcmp(t, "schemeClr") ? (mu_attr(&g, "val", v, sizeof(v)) ? scheme_color(X, v) :
                                                     0xFF000000u) :
@@ -9717,7 +9783,9 @@ pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xm
     pd_bld b;
     dw w;
     pd_markup m;
-    int k, canvas = -1;
+    int k, canvas = -1, nmap = 0, *map = NULL;
+    char* clean = NULL;
+    size_t clen = 0;
     pd_status st = PD_ERR_FORMAT;
 
     if (!doc || !xml || !out) {
@@ -9753,6 +9821,49 @@ pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xm
         }
     }
 
+    {   /* <!--pd-story:N--> in a text box: the editor's mark of whose story it is; taken out of what is kept */
+        static const char mk[] = "<!--pd-story:", tb[] = "<w:txbxContent";
+        const char* p = xml, *e = xml + len, *q;
+        int has = dw_memmem(xml, len, mk, sizeof(mk) - 1) != NULL;
+
+        clean = (char*)malloc(len + 1);
+        map = (int*)malloc(sizeof(int) * (len / 16 + 1));
+
+        if (!clean || !map) {
+            free(clean);
+            free(map);
+            free(X);
+            pj_free(jd);
+            return PD_ERR_NOMEM;
+        }
+
+        while (p < e) {
+            if (*p == '<' && (size_t)(e - p) >= sizeof(tb) - 1 && !memcmp(p, tb, sizeof(tb) - 1) &&
+                    (p[sizeof(tb) - 1] == '>' || p[sizeof(tb) - 1] == ' ' || p[sizeof(tb) - 1] == '/')) {
+                const char* end = dw_memmem(p, (size_t)(e - p), "</w:txbxContent>", 16);
+                const char* m2 = dw_memmem(p, (size_t)((end ? end : e) - p), mk, sizeof(mk) - 1);
+
+                map[nmap++] = m2 ? atoi(m2 + sizeof(mk) - 1) : -1;
+            }
+
+            if (*p == '<' && (size_t)(e - p) >= sizeof(mk) - 1 && !memcmp(p, mk, sizeof(mk) - 1) &&
+                    (q = dw_memmem(p, (size_t)(e - p), "-->", 3)) != NULL) {
+                p = q + 3;
+                continue;
+            }
+
+            clean[clen++] = *p++;
+        }
+
+        if (has) {
+            X->rebuild_map = map;
+            X->rebuild_nmap = nmap;
+        }
+
+        xml = clean;
+        len = clen;
+    }
+
     memset(&w, 0, sizeof(w));
     w.X = X;
     w.cx = (long long)(pj_int_or(pj_get(root, "w"), 0) * 12700LL / 65536);    /* the drawing's extent, in EMU */
@@ -9774,6 +9885,9 @@ pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xm
         st = *out ? PD_OK : PD_ERR_FORMAT;
     }
 
+    bld_end_para(&b);
+    free(clean);
+    free(map);
     free(X);
     pj_free(jd);
     return st;

@@ -106,6 +106,8 @@ type
     FShapeAt: pd_pos;              { the drawing: its object in the text }
     FShapeSid: Integer;            { the shape (its sid), -1 the whole drawing }
     FShapeMore: array of Integer;  { more shapes of the drawing, added with Shift+click }
+    FDrawKind: string;             { a shape to draw by dragging in the selected canvas; '' none }
+    FDrawCursor: TCursor;          { the cursor before drawing began }
     FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape }
     FShapeFrom: TPoint;            { where it began (client pixels) }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
@@ -242,6 +244,7 @@ type
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
     function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
     procedure OnlyShape;
+    function CanvasSelected: Boolean;
     function ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
     function ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
     function ShapeDragStart(X, Y: Integer): Boolean;
@@ -320,6 +323,23 @@ type
     function UngroupShape: Boolean;
     { the XML kept for Word of the selected drawing; False when it keeps none (made here, or not from a .docx) }
     function KeptXml(out Xml: string): Boolean;
+    { a new canvas (a drawing to draw shapes in), WPt by HPt points (0: as wide as the text, three inches high),
+      put in at the caret and selected }
+    function InsertCanvas(WPt: Double = 0; HPt: Double = 0): Boolean;
+    { a shape of a kind -- rect, roundRect, ellipse, triangle, diamond, pentagon, hexagon, rightArrow, leftArrow,
+      upArrow, downArrow, star5, line, arrow, textbox -- added to the selected canvas: drawn with the mouse when one
+      is selected (the next drag in it), else a new canvas with the shape in its middle }
+    function InsertShape(const Kind: string): Boolean;
+    { the shape put into the selected canvas at a box of the drawing's units (the line's ends at its corners,
+      FlipH/FlipV: from the right, from the bottom); selected }
+    function AddShape(const Kind: string; X0, Y0, X1, Y1: Double; FlipH: Boolean = False;
+      FlipV: Boolean = False): Boolean;
+    { a point of a page (points from its top left) in the control's pixels, as the view is now }
+    function PageToClient(Page: Integer; XPt, YPt: Double): TPoint;
+    { the shape kind waiting for a drag in the canvas ('' none) }
+    property DrawKind: string read FDrawKind;
+    { the selected object (a picture or a drawing) made W by H (sp); one step of undo }
+    function ResizeObject(W, H: pd_sp): Boolean;
     { the shapes selected: the one, and those added (Shift+click), as sids }
     function SelectedShapes: TIntegerArray;
     { a shape of the selected drawing added to the selection, or taken out if it is in it (Shift+click) }
@@ -5167,6 +5187,12 @@ begin
     case Key of
       VK_ESCAPE:    { a shape: back to its drawing; the drawing: back to the text }
         begin
+          if FDrawKind <> '' then
+          begin   { no shape drawn after all }
+            FDrawKind := '';
+            Cursor := FDrawCursor;
+            Exit;
+          end;
           SetLength(FShapeMore, 0);
           if FShapeSid >= 0 then
           begin
@@ -5436,16 +5462,7 @@ var
 begin
   Result := False;
   Page := 0; X := 0; Y := 0; W := 0; H := 0; JW := 0; JH := 0;
-  J := DrawingJson(FDoc, P);
-  if J = nil then
-    Exit;
-  try
-    JW := J.Get('w', 0.0);
-    JH := J.Get('h', 0.0);
-  finally
-    J.Free;
-  end;
-  if (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or
+  if (P.block = 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or (O.kind <> PD_INLINE_IMAGE) or
      (pd_layout_caret(FLayout, P, Page, CX, Base, Asc, Desc) <> PD_OK) then
     Exit;
   pd_doc_image_display_size(FDoc, O, IW, IH);
@@ -5453,6 +5470,19 @@ begin
   Y := Base - IH;     { on its line's baseline }
   W := IW;
   H := IH;
+  J := DrawingJson(FDoc, P);
+  if J <> nil then
+    try
+      JW := J.Get('w', 0.0);
+      JH := J.Get('h', 0.0);
+    finally
+      J.Free;
+    end
+  else
+  begin   { a picture: its own units its size }
+    JW := W;
+    JH := H;
+  end;
   Result := (W > 0) and (H > 0);
 end;
 
@@ -5466,8 +5496,10 @@ var
   X, Y, W, H, JW, JH: Double;
   Seen: string;
   Key: string;
+  BX, BY, BW, BH: Double;
 begin
   Result := False;
+  BX := 0; BY := 0; BW := 0; BH := 0;
   P := PdPos(0, 0);
   if pd_layout_page_items(FLayout, Page, nil, 0, N) <> PD_OK then
     Exit;
@@ -5484,10 +5516,12 @@ begin
     Seen := Seen + Key;
     Q := PdPos(Items[I].block, Items[I].offset);
     if DrawingPlace(Q, Pg, X, Y, W, H, JW, JH) and (Pg = Page) and (SX >= X) and (SX <= X + W) and
-       (SY >= Y) and (SY <= Y + H) then
-    begin
+       (SY >= Y) and (SY <= Y + H) and (not Result or not ((X <= BX) and (Y <= BY) and (X + W >= BX + BW) and
+       (Y + H >= BY + BH))) then
+    begin   { the one drawn last over it, unless it holds the one before: a picture in a drawing's text box }
       P := Q;
-      Exit(True);
+      BX := X; BY := Y; BW := W; BH := H;
+      Result := True;
     end;
   end;
 end;
@@ -5530,6 +5564,7 @@ var
   CPage: Int32;
   CX, Base, Asc, Desc: pd_sp;
   Sid: Integer;
+  InStory: Boolean;
 begin
   Result := False;
   if not DrawingAt(Page, SX, SY, D) then
@@ -5538,8 +5573,13 @@ begin
       ClearShapeSelection;
     Exit;
   end;
-  { on a line of its text: the text's, as any text is clicked }
-  if pd_layout_hit_test(FLayout, Page, SX, SY, HP) = PD_OK then
+  { on a line of its text: the text's, as any text is clicked -- unless what is clicked is in that text itself
+    (a picture in a text box) }
+  StoryTop := D.block;
+  while (pd_doc_block_info(FDoc, StoryTop, Info) = PD_OK) and (Info.parent <> 0) do
+    StoryTop := Info.parent;
+  InStory := (pd_doc_block_info(FDoc, StoryTop, Info) = PD_OK) and (Info.kind = PD_BLOCK_STORY);
+  if not InStory and (pd_layout_hit_test(FLayout, Page, SX, SY, HP) = PD_OK) then
   begin
     StoryTop := HP.block;
     while (pd_doc_block_info(FDoc, StoryTop, Info) = PD_OK) and (Info.parent <> 0) do
@@ -5581,6 +5621,11 @@ end;
 
 procedure TParadeEdit.ClearShapeSelection;
 begin
+  if FDrawKind <> '' then
+  begin
+    FDrawKind := '';
+    Cursor := FDrawCursor;
+  end;
   if not FShapeOn then
     Exit;
   FShapeOn := False;
@@ -5965,6 +6010,18 @@ begin
 end;
 
 { the drawing at P given a new description: the old object out and the new in, one step of undo }
+{ an object's text (source, title, alt) copied out of the document into Keep, its pointers moved there: for an
+  object taken out and put back }
+procedure KeepInlineText(var O: pd_inline; out Keep: array of string);
+begin
+  SetString(Keep[0], O.source, O.source_len);
+  SetString(Keep[1], O.title, O.title_len);
+  SetString(Keep[2], O.alt, O.alt_len);
+  O.source := PAnsiChar(Keep[0]);
+  O.title := PAnsiChar(Keep[1]);
+  O.alt := PAnsiChar(Keep[2]);
+end;
+
 function TParadeEdit.ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
 var
   R: pd_res_id;
@@ -5978,10 +6035,12 @@ end;
 function TParadeEdit.ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
 var
   O: pd_inline;
+  Keep: array[0..2] of string;
 begin
   Result := False;
   if FReadOnly or (R = 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
     Exit;
+  KeepInlineText(O, Keep);
   O.resource := R;
   pd_doc_begin_group(FDoc, PAnsiChar(Lbl));
   pd_doc_delete(FDoc, PdRange(P, PdPos(P.block, P.offset + 3)), nil);
@@ -5992,6 +6051,37 @@ begin
 end;
 
 { ---------------- shapes edited in the XML kept for Word ---------------- }
+
+{ each text box's content marked with whose story it is (its place among the drawing's), so that a text box moved
+  in the XML keeps its text when the drawing is made again }
+function MarkTextBoxes(const Xml: string): string;
+var
+  I, J, K: Integer;
+begin
+  Result := '';
+  I := 1;
+  K := 0;
+  repeat
+    J := PosEx('<w:txbxContent', Xml, I);
+    if (J = 0) or (J + 14 > Length(Xml)) or not (Xml[J + 14] in ['>', ' ']) then
+    begin
+      if J > 0 then
+      begin   { another element whose name begins so }
+        Result := Result + Copy(Xml, I, J + 14 - I);
+        I := J + 14;
+        Continue;
+      end;
+      Break;
+    end;
+    J := PosEx('>', Xml, J);
+    if J = 0 then
+      Break;
+    Result := Result + Copy(Xml, I, J + 1 - I) + '<!--pd-story:' + IntToStr(K) + '-->';
+    Inc(K);
+    I := J + 1;
+  until False;
+  Result := Result + Copy(Xml, I, MaxInt);
+end;
 
 function TParadeEdit.KeptXml(out Xml: string): Boolean;
 var
@@ -6007,7 +6097,7 @@ begin
   try
     if (J.Find('xml') <> nil) and (J.Find('xml').JSONType = jtString) then
     begin
-      Xml := J.Strings['xml'];
+      Xml := MarkTextBoxes(J.Strings['xml']);
       Result := Xml <> '';
     end;
   finally
@@ -6021,9 +6111,16 @@ var
   O: pd_inline;
   R: pd_res_id;
 begin
-  Result := FShapeOn and (pd_doc_inline_at(FDoc, FShapeAt, O) = PD_OK) and
-    (pd_docx_drawing_rebuild(FDoc, O.resource, PAnsiChar(Xml), Length(Xml), R) = PD_OK) and
-    ReplaceDrawingRes(FShapeAt, R, Lbl);
+  Result := False;
+  if FReadOnly or not FShapeOn or (pd_doc_inline_at(FDoc, FShapeAt, O) <> PD_OK) then
+    Exit;
+  pd_doc_begin_group(FDoc, PAnsiChar(Lbl));     { with the story a new text box is given }
+  try
+    Result := (pd_docx_drawing_rebuild(FDoc, O.resource, PAnsiChar(Xml), Length(Xml), R) = PD_OK) and
+      ReplaceDrawingRes(FShapeAt, R, Lbl);
+  finally
+    pd_doc_end_group(FDoc);
+  end;
   if Result then
   begin
     FShapeOn := True;
@@ -6409,6 +6506,224 @@ begin
   Result := ApplyKeptXml(Xml, 'Ungroup', SidAt(XmlElements(Xml), Els[G].A));
 end;
 
+{ ---------------- canvases and shapes put in ---------------- }
+
+function TParadeEdit.PageToClient(Page: Integer; XPt, YPt: Double): TPoint;
+begin
+  Result := Point(PageLeft(Page) + Round(XPt * PD_SP_PER_PT * PxPerSp), PageTop(Page) + Round(YPt * PD_SP_PER_PT * PxPerSp));
+end;
+
+function TParadeEdit.ResizeObject(W, H: pd_sp): Boolean;
+var
+  O: pd_inline;
+  Keep: array[0..2] of string;
+  P: pd_pos;
+begin
+  Result := False;
+  P := FShapeAt;
+  if FReadOnly or not FShapeOn or (W <= 0) or (H <= 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
+    Exit;
+  KeepInlineText(O, Keep);
+  O.width := W;
+  O.height := H;
+  pd_doc_begin_group(FDoc, 'Size');
+  pd_doc_delete(FDoc, PdRange(P, PdPos(P.block, P.offset + 3)), nil);
+  Result := pd_doc_insert_inline(FDoc, P, O, nil) = PD_OK;
+  pd_doc_end_group(FDoc);
+  FShapeOn := True;
+  FShapeAt := P;
+  FShapeSid := -1;
+  SelectRange(PdRange(P, PdPos(P.block, P.offset + 3)));
+  Changed;
+end;
+
+function TParadeEdit.InsertCanvas(WPt: Double; HPt: Double): Boolean;
+var
+  J: TJSONObject;
+  S, Xml: string;
+  R0, R: pd_res_id;
+  O: pd_inline;
+  W, H: pd_sp;
+  P: pd_pos;
+begin
+  Result := False;
+  if FReadOnly then
+    Exit;
+  if WPt > 0 then
+    W := Round(WPt * PD_SP_PER_PT)
+  else
+    W := TextWidthAt(CaretPos.block);
+  if W <= 0 then
+    W := 6 * 72 * PD_SP_PER_PT;
+  if HPt > 0 then
+    H := Round(HPt * PD_SP_PER_PT)
+  else
+    H := 3 * 72 * PD_SP_PER_PT;
+  Xml := '<wpc:wpc><wpc:bg/><wpc:whole/></wpc:wpc>';
+  J := TJSONObject.Create(['w', Integer(W), 'h', Integer(H), 'items', TJSONArray.Create, 'kind', 'wpc',
+    'rels', TJSONObject.Create, 'xml', Xml]);
+  try
+    S := J.AsJSON;
+  finally
+    J.Free;
+  end;
+  pd_doc_begin_group(FDoc, 'Insert canvas');
+  try
+    if (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(S), Length(S), R0) <> PD_OK) or
+       (pd_docx_drawing_rebuild(FDoc, R0, PAnsiChar(Xml), Length(Xml), R) <> PD_OK) then
+      Exit;
+    FillChar(O, SizeOf(O), 0);
+    O.kind := PD_INLINE_IMAGE;
+    O.resource := R;
+    O.width := W;
+    O.height := H;
+    DeleteSelection;
+    P := CaretPos;
+    InsertObject(O);
+  finally
+    pd_doc_end_group(FDoc);
+  end;
+  Changed;
+  FShapeOn := True;
+  FShapeAt := P;
+  FShapeSid := -1;
+  SetLength(FShapeMore, 0);
+  SelectRange(PdRange(P, PdPos(P.block, P.offset + 3)));
+  Invalidate;
+  Result := True;
+end;
+
+{ the selected drawing is a canvas made here or read from Word, shapes can go into }
+function TParadeEdit.CanvasSelected: Boolean;
+var
+  Xml: string;
+begin
+  Result := KeptXml(Xml) and (Pos('<wpc:wpc', Xml) > 0);
+end;
+
+function TParadeEdit.InsertShape(const Kind: string): Boolean;
+var
+  Pg: Int32;
+  X, Y, W, H, JW, JH: Double;
+begin
+  Result := False;
+  if FReadOnly or (Kind = '') then
+    Exit;
+  if FShapeOn and (FShapeSid >= 0) then
+    FShapeSid := -1;    { into the drawing the shape is in }
+  if FShapeOn and CanvasSelected then
+  begin   { the next drag in the canvas draws it }
+    if FDrawKind = '' then
+      FDrawCursor := Cursor;
+    FDrawKind := Kind;
+    Cursor := crCross;
+    Exit(True);
+  end;
+  if FShapeOn then
+  begin   { not into the picture or drawing selected: after it }
+    SetCaret(PdPos(FShapeAt.block, FShapeAt.offset + 3), False);
+    ClearShapeSelection;
+  end;
+  if not InsertCanvas or not DrawingPlace(FShapeAt, Pg, X, Y, W, H, JW, JH) then
+    Exit;
+  { an inch and a half by one, in the middle (a line: across) }
+  if (Kind = 'line') or (Kind = 'arrow') then
+    Result := AddShape(Kind, JW / 2 - 54 * PD_SP_PER_PT, JH / 2, JW / 2 + 54 * PD_SP_PER_PT, JH / 2)
+  else
+    Result := AddShape(Kind, JW / 2 - 54 * PD_SP_PER_PT, JH / 2 - 36 * PD_SP_PER_PT, JW / 2 + 54 * PD_SP_PER_PT,
+      JH / 2 + 36 * PD_SP_PER_PT);
+end;
+
+{ a shape's DrawingML, as Word writes one in a canvas (EMU) }
+function ShapeXml(const Kind: string; Id: Integer; X, Y, CX, CY: Int64; FlipH, FlipV: Boolean): string;
+const
+  Body = '<wps:bodyPr rot="0" vert="horz" wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" ' +
+    'anchor="ctr" anchorCtr="0"><a:noAutofit/></wps:bodyPr>';
+var
+  Xf, Name, Geom: string;
+begin
+  Xf := '<a:xfrm';
+  if FlipH then Xf := Xf + ' flipH="1"';
+  if FlipV then Xf := Xf + ' flipV="1"';
+  Xf := Xf + '><a:off x="' + IntToStr(X) + '" y="' + IntToStr(Y) + '"/><a:ext cx="' + IntToStr(CX) + '" cy="' +
+    IntToStr(CY) + '"/></a:xfrm>';
+  if (Kind = 'line') or (Kind = 'arrow') then
+    Exit('<wps:wsp><wps:cNvPr id="' + IntToStr(Id) + '" name="' + IfThen(Kind = 'arrow', 'Straight Arrow Connector ',
+      'Straight Connector ') + IntToStr(Id) + '"/><wps:cNvCnPr/><wps:spPr>' + Xf +
+      '<a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr ' +
+      'val="4472C4"/></a:solidFill>' + IfThen(Kind = 'arrow', '<a:tailEnd type="triangle"/>', '') +
+      '</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>');
+  if Kind = 'textbox' then
+    Exit('<wps:wsp><wps:cNvPr id="' + IntToStr(Id) + '" name="Text Box ' + IntToStr(Id) +
+      '"/><wps:cNvSpPr txBox="1"/><wps:spPr>' + Xf + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill>' +
+      '<a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="6350"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>' +
+      '</a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx>' +
+      StringReplace(Body, 'anchor="ctr"', 'anchor="t"', []) + '</wps:wsp>');
+  Geom := Kind;
+  case Kind of
+    'rect': Name := 'Rectangle ';
+    'roundRect': Name := 'Rectangle: Rounded Corners ';
+    'ellipse': Name := 'Oval ';
+    'triangle': Name := 'Isosceles Triangle ';
+    'diamond': Name := 'Diamond ';
+    'rightArrow': Name := 'Arrow: Right ';
+  else
+    Name := 'Shape ';
+  end;
+  Result := '<wps:wsp><wps:cNvPr id="' + IntToStr(Id) + '" name="' + Name + IntToStr(Id) +
+    '"/><wps:cNvSpPr/><wps:spPr>' + Xf + '<a:prstGeom prst="' + Geom + '"><a:avLst/></a:prstGeom><a:solidFill>' +
+    '<a:srgbClr val="4472C4"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="2F528F"/></a:solidFill>' +
+    '</a:ln></wps:spPr>' + Body + '</wps:wsp>';
+end;
+
+function TParadeEdit.AddShape(const Kind: string; X0, Y0, X1, Y1: Double; FlipH: Boolean;
+  FlipV: Boolean): Boolean;
+const
+  Emu = 12700 / 65536;    { sp to EMU }
+var
+  Xml, Sh: string;
+  Els: TXmlEls;
+  I, Id, P, L, At, Root: Integer;
+begin
+  Result := False;
+  if FShapeOn and (FShapeSid >= 0) then
+    FShapeSid := -1;
+  if not FShapeOn or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  Root := -1;
+  for I := 0 to High(Els) do
+    if Els[I].Name = 'wpc:wpc' then
+    begin
+      Root := I;
+      Break;
+    end;
+  if Root < 0 then
+    Exit;
+  Id := 1;    { an id none of the drawing's shapes has }
+  P := Pos('id="', Xml);
+  while P > 0 do
+  begin
+    L := PosEx('"', Xml, P + 4);
+    if L > 0 then
+      Id := Max(Id, StrToIntDef(Copy(Xml, P + 4, L - P - 4), 0) + 1);
+    P := PosEx('id="', Xml, P + 4);
+  end;
+  Sh := ShapeXml(Kind, Id, Round(X0 * Emu), Round(Y0 * Emu), Max(1, Round((X1 - X0) * Emu)),
+    Round((Y1 - Y0) * Emu), FlipH, FlipV);
+  if Copy(Xml, Els[Root].B - 2, 2) = '/>' then
+  begin   { <wpc:wpc/>: opened }
+    At := Els[Root].A;
+    Xml := Copy(Xml, 1, At - 1) + '<wpc:wpc>' + Sh + '</wpc:wpc>' + Copy(Xml, Els[Root].B, MaxInt);
+  end
+  else
+  begin   { last: drawn over the others }
+    At := CloseOf(Xml, Els[Root]);
+    Insert(Sh, Xml, At);
+  end;
+  Result := ApplyKeptXml(Xml, 'Insert shape', SidAt(XmlElements(Xml), At));
+end;
+
 function TParadeEdit.SetShapeBox(Sid: Integer; X0, Y0, X1, Y1: Double): Boolean;
 var
   J, It, Mk: TJSONObject;
@@ -6571,11 +6886,40 @@ function TParadeEdit.ShapeDragStart(X, Y: Integer): Boolean;
 var
   R: TRect;
   I, HX, HY: Integer;
+  Pg: Int32;
+  PX, PY, W, H, JW, JH: Double;
 begin
   Result := False;
-  if not FShapeOn or (FShapeSid < 0) or
-     not ShapeBox(FShapeSid, FShapeOld[0], FShapeOld[1], FShapeOld[2], FShapeOld[3]) or
-     not ShapeClientRect(FShapeOld, R) then
+  if not FShapeOn then
+    Exit;
+  if FDrawKind <> '' then
+  begin   { a shape drawn: from the press, in the canvas }
+    if DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) and (W > 0) and (H > 0) and
+       (X >= PageLeft(Pg) + Round(PX * PxPerSp)) and (X <= PageLeft(Pg) + Round((PX + W) * PxPerSp)) and
+       (Y >= PageTop(Pg) + Round(PY * PxPerSp)) and (Y <= PageTop(Pg) + Round((PY + H) * PxPerSp)) then
+    begin
+      FShapeOld[0] := ((X - PageLeft(Pg)) / PxPerSp - PX) * JW / W;
+      FShapeOld[1] := ((Y - PageTop(Pg)) / PxPerSp - PY) * JH / H;
+      FShapeOld[2] := FShapeOld[0];
+      FShapeOld[3] := FShapeOld[1];
+      FShapeNew := FShapeOld;
+      FShapeDrag := 9;
+      FShapeFrom := Point(X, Y);
+      Exit(True);
+    end;
+    FDrawKind := '';    { pressed elsewhere: no shape }
+    Cursor := FDrawCursor;
+    Exit;
+  end;
+  if FShapeSid < 0 then
+  begin   { the whole object: its box, resized by its handles }
+    if not DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) then
+      Exit;
+    FShapeOld[0] := 0; FShapeOld[1] := 0; FShapeOld[2] := JW; FShapeOld[3] := JH;
+  end
+  else if not ShapeBox(FShapeSid, FShapeOld[0], FShapeOld[1], FShapeOld[2], FShapeOld[3]) then
+    Exit;
+  if not ShapeClientRect(FShapeOld, R) then
     Exit;
   FShapeNew := FShapeOld;
   for I := 0 to 7 do    { the handles, as PaintShapeSelection draws them }
@@ -6598,7 +6942,7 @@ begin
       Exit(True);
     end;
   end;
-  if PtInRect(Rect(R.Left, R.Top, R.Right + 1, R.Bottom + 1), Point(X, Y)) then
+  if (FShapeSid >= 0) and PtInRect(Rect(R.Left, R.Top, R.Right + 1, R.Bottom + 1), Point(X, Y)) then
   begin
     FShapeDrag := 8;
     FShapeFrom := Point(X, Y);
@@ -6618,6 +6962,10 @@ begin
   DY := (Y - FShapeFrom.Y) / PxPerSp * JH / H;
   FShapeNew := FShapeOld;
   case FShapeDrag of
+    9: begin    { a shape being drawn: from where the press was }
+         FShapeNew[2] := FShapeOld[0] + DX;
+         FShapeNew[3] := FShapeOld[1] + DY;
+       end;
     8: begin
          FShapeNew[0] := FShapeOld[0] + DX; FShapeNew[2] := FShapeOld[2] + DX;
          FShapeNew[1] := FShapeOld[1] + DY; FShapeNew[3] := FShapeOld[3] + DY;
@@ -6679,7 +7027,7 @@ begin
       end;
   if (Button = mbLeft) and ShapeDragStart(X, Y) then
     Exit;     { the selected shape: moved, or resized by a handle }
-  if (Button = mbLeft) and not (ssShift in Shift) then
+  if (Button = mbLeft) and (not (ssShift in Shift) or (FShapeOn and (FShapeSid >= 0))) then
     for Page := 0 to PageCount - 1 do     { a drawing, or a shape of it: selected }
     begin
       pd_layout_page_info(FLayout, Page, Info);
@@ -6718,13 +7066,40 @@ begin
 end;
 
 procedure TParadeEdit.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+var
+  D: Integer;
+  Moved: Boolean;
+  K: string;
+  Pg: Int32;
+  PX, PY, W, H, JW, JH: Double;
 begin
   inherited MouseUp(Button, Shift, X, Y);
   FDragging := False;
   if FShapeDrag >= 0 then
   begin
+    D := FShapeDrag;
     FShapeDrag := -1;
-    if (Abs(X - FShapeFrom.X) > 2) or (Abs(Y - FShapeFrom.Y) > 2) then     { moved: the shape takes its box }
+    Moved := (Abs(X - FShapeFrom.X) > 2) or (Abs(Y - FShapeFrom.Y) > 2);
+    if D = 9 then
+    begin   { drawn: its box as dragged, or an inch by three quarters where a click was }
+      K := FDrawKind;
+      FDrawKind := '';
+      Cursor := FDrawCursor;
+      if not Moved then
+      begin
+        FShapeNew[2] := FShapeNew[0] + PD_SP_PER_PT * 72;
+        FShapeNew[3] := FShapeNew[1] + PD_SP_PER_PT * IfThen((K = 'line') or (K = 'arrow'), 0, 54);
+      end;
+      AddShape(K, Min(FShapeNew[0], FShapeNew[2]), Min(FShapeNew[1], FShapeNew[3]), Max(FShapeNew[0], FShapeNew[2]),
+        Max(FShapeNew[1], FShapeNew[3]), FShapeNew[2] < FShapeNew[0], FShapeNew[3] < FShapeNew[1]);
+    end
+    else if Moved and (FShapeSid < 0) then
+    begin   { the whole object: its new size }
+      if DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) and (JW > 0) and (JH > 0) then
+        ResizeObject(Max(PD_SP_PER_PT, Round(Abs(FShapeNew[2] - FShapeNew[0]) * W / JW)),
+          Max(PD_SP_PER_PT, Round(Abs(FShapeNew[3] - FShapeNew[1]) * H / JH)));
+    end
+    else if Moved then     { moved: the shape takes its box }
       SetShapeBox(FShapeSid, Min(FShapeNew[0], FShapeNew[2]), Min(FShapeNew[1], FShapeNew[3]),
         Max(FShapeNew[0], FShapeNew[2]), Max(FShapeNew[1], FShapeNew[3]));
     Invalidate;

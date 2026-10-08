@@ -2350,6 +2350,49 @@ static void test_docx_drawing_rebuild(void) {
             free(moved);
         }
 
+        /* the editor's marks: the text box marked as story 0 keeps it, one new (unmarked) gets a story of its own,
+           read from its XML; the marks are not kept */
+        {
+            const char* tb = strstr(xml, "<w:txbxContent>"), *end = strstr(xml, "</wpc:wpc>");
+            const char* nb = "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"635000\" cy=\"300000\"/>"
+                             "</a:xfrm><a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Fresh"
+                             "</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>";
+            char* mk = (char*)malloc(strlen(xml) + strlen(nb) + 64);
+            size_t k;
+            int found = 0;
+
+            CHECK(tb != NULL && end != NULL);
+
+            if (tb && end && mk) {
+                size_t at = (size_t)(tb - xml) + strlen("<w:txbxContent>");
+
+                memcpy(mk, xml, at);
+                strcpy(mk + at, "<!--pd-story:0-->");
+                strncat(mk, xml + at, (size_t)(end - xml) - at);
+                strcat(mk, nb);
+                strcat(mk, end);
+                stories = pd_doc_story_count(d);
+                CHECK(pd_docx_drawing_rebuild(d, o.resource, mk, strlen(mk), &r2) == PD_OK);
+                CHECK(pd_doc_story_count(d) == stories + 1);
+                js2 = r2 ? drawing_json(d, r2) : NULL;
+                CHECK(js2 && strstr(js2, "pd-story") == NULL);
+
+                for (k = 0; k < (size_t)pd_doc_story_count(d); k++) {
+                    const char* t;
+                    uint32_t tn = 0;
+
+                    if (pd_doc_para_text(d, pd_doc_child(d, pd_doc_story_at(d, (int32_t)k), 0), &t, &tn) == PD_OK) {
+                        found += tn == 5 && !memcmp(t, "Fresh", 5);
+                    }
+                }
+
+                CHECK(found == 1);
+                free(js2);
+            }
+
+            free(mk);
+        }
+
         free(xml);
         free(js);
     }
