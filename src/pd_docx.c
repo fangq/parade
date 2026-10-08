@@ -6672,6 +6672,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int nrel = 0, rel_ok = 1;
     const char* tx_a = NULL, *tx_b = NULL;              /* a text box's w:txbxContent: its inside, read into a story */
     int tx_depth = 0;
+    int sid = -1;                                       /* the shape being read: its place among the group's shapes */
     double cg_xy[4096], cg_pt[6];   /* a custom geometry's points (its own space), NAN pairs between rings */
     long long cg_w = 0, cg_h = 0;
     int cg_n = 0, cg_npt = 0, cg_closed = 0, cg_new_ring = 1, k2;
@@ -6915,6 +6916,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         /* a picture or a shape: read to its end, then written */
         if ((!strcmp(t, "pic") || !strcmp(t, "wsp")) && g.type == MT_OPEN) {
             kind = !strcmp(t, "pic") ? 1 : 2;
+            sid++;      /* the n-th wsp or pic of the group's XML, in order */
             memset(&xf, 0, sizeof(xf));
             cam_prst[0] = '\0';
             cam_has_rot = in_camera = 0;
@@ -6952,6 +6954,24 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             dxform sm = fr_then(FR, &box);
             int straight = fabs(sm.b) < 1e-9 && fabs(sm.c) < 1e-9 && sm.a > 0 && sm.d > 0;
             double x, y, cw, ch, mx, my;
+
+            {   /* the shape, for a selection: which it is, its box as drawn, and its group's scale (EMU a unit) */
+                double cx4[4] = { bx0, bx0 + bw, bx0 + bw, bx0 }, cy4[4] = { by0, by0, by0 + bh, by0 + bh };
+                double qx, qy, x0 = 1e300, y0 = 1e300, x1 = -1e300, y1 = -1e300;
+                int c4;
+
+                for (c4 = 0; c4 < 4; c4++) {
+                    fr_pt(&sm, cx4[c4], cy4[c4], &qx, &qy);
+                    x0 = qx < x0 ? qx : x0;
+                    y0 = qy < y0 ? qy : y0;
+                    x1 = qx > x1 ? qx : x1;
+                    y1 = qy > y1 ? qy : y1;
+                }
+
+                ITEM_SEP();
+                pb_printf(&o, "{\"sid\":%d,\"box\":[%d,%d,%d,%d],\"fs\":[%d,%d]}", sid, (int)emu_sp(x0), (int)emu_sp(y0),
+                          (int)emu_sp(x1), (int)emu_sp(y1), (int)(FR->sx * 1000000), (int)(FR->sy * 1000000));
+            }
 
             /* where an unturnable box (a picture, a text box) goes: its centre mapped, its size scaled */
             fr_pt(&sm, bx0 + bw / 2, by0 + bh / 2, &mx, &my);

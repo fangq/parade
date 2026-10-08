@@ -69,6 +69,14 @@ type
   end;
 
   { a margin balloon as last drawn: where a click on it selects the text it is about }
+  { a shape of a drawing, as its description says: its place among the drawing's shapes and its box, in the
+    drawing's own units (sp) }
+  TParadeShapeBox = record
+    Sid: Integer;
+    X0, Y0, X1, Y1: Double;
+  end;
+  TParadeShapeBoxes = array of TParadeShapeBox;
+
   TBalloonHit = record
     R: TRect;
     Range: pd_range;
@@ -93,6 +101,12 @@ type
     FScrollY: Integer;
     FScrollBar: TScrollBar;
     FScrollHost: TPanel;           { the scroll bar's own window, for its own cursor }
+    FShapeOn: Boolean;             { a drawing selected, or a shape of it }
+    FShapeAt: pd_pos;              { the drawing: its object in the text }
+    FShapeSid: Integer;            { the shape (its sid), -1 the whole drawing }
+    FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape }
+    FShapeFrom: TPoint;            { where it began (client pixels) }
+    FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
     FBlink: TTimer;
     FCaretOn: Boolean;
     FGlyphs: array of PGlyphBmp;   { open-addressing hash table by font, glyph, size and subpixel position }
@@ -218,6 +232,16 @@ type
     procedure UseDocumentFonts;
     function BackSignature: string;
     function ScrollBack(DY: Integer): Boolean;
+    function DrawingPlace(const P: pd_pos; out Page: Int32; out X, Y, W, H: Double; out JW, JH: Double): Boolean;
+    function DrawingAt(Page: Integer; SX, SY: pd_sp; out P: pd_pos): Boolean;
+    function PickShape(const P: pd_pos; Page: Integer; SX, SY: pd_sp): Integer;
+    function ClickPage(Page: Integer; SX, SY: pd_sp; Shift: TShiftState): Boolean;
+    procedure PaintShapeSelection;
+    function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
+    function ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
+    function ShapeDragStart(X, Y: Integer): Boolean;
+    procedure ShapeDragMove(X, Y: Integer; Shift: TShiftState);
+    function NudgeShape(DX, DY: Double): Boolean;
     procedure DrawView(Img: TLazIntfImage; ATop, AHeight: Integer; PagesToo: Boolean);
     procedure RebuildBack;
     function CaretRect(out R: TRect): Boolean;
@@ -268,6 +292,18 @@ type
     { the caret in a drawing's text box: back to the text, just after the drawing (Escape). False when the
       caret is not in one }
     function LeaveDrawingText: Boolean;
+    { the drawing selected, or a shape of it: True with its object's place and the shape (-1: the whole drawing) }
+    function SelectedShape(out At: pd_pos; out Sid: Integer): Boolean;
+    procedure ClearShapeSelection;
+    { the shapes of the drawing whose object is at P, from its description (empty when it is no drawing) }
+    function DrawingShapes(const P: pd_pos): TParadeShapeBoxes;
+    { the selected drawing's shape Sid: its box in the drawing's units (sp) }
+    function ShapeBox(Sid: Integer; out X0, Y0, X1, Y1: Double): Boolean;
+    { the selected drawing's shape Sid moved and sized to a box (the drawing's units): its pieces, and the shape
+      in the XML kept for Word; one step of undo }
+    function SetShapeBox(Sid: Integer; X0, Y0, X1, Y1: Double): Boolean;
+    { the selected shape taken out of its drawing; one step of undo }
+    function DeleteShape: Boolean;
     procedure SelectAll;
     procedure Undo;
     procedure Redo;
@@ -1058,6 +1094,7 @@ constructor TParadeEdit.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   FHybridDefault := True;
+  FShapeDrag := -1;
   ControlStyle := ControlStyle + [csOpaque] - [csSetCaption];
   TabStop := True;
   Color := $00E0E0E0;
@@ -2082,6 +2119,8 @@ procedure TParadeEdit.ClickAt(Page: Integer; XPt, YPt: Double; Extend: Boolean);
 var
   P: pd_pos;
 begin
+  if not Extend and ClickPage(Page, PT(XPt), PT(YPt), []) then
+    Exit;
   if pd_layout_hit_test(FLayout, Page, PT(XPt), PT(YPt), P) = PD_OK then
     SetCaret(P, Extend);
 end;
@@ -5100,7 +5139,71 @@ var
   Ext: Boolean;
   P, After: pd_pos;
   BI, BJ: pd_block_info;
+  Boxes: TParadeShapeBoxes;
+  K, J: Integer;
 begin
+  if FShapeOn then
+    case Key of
+      VK_ESCAPE:    { a shape: back to its drawing; the drawing: back to the text }
+        begin
+          if FShapeSid >= 0 then
+          begin
+            FShapeSid := -1;
+            SelectRange(PdRange(FShapeAt, PdPos(FShapeAt.block, FShapeAt.offset + 3)));
+          end
+          else
+          begin
+            ClearShapeSelection;
+            SetCaret(PdPos(FShapeAt.block, FShapeAt.offset + 3), False);
+          end;
+          Invalidate;
+          Exit;
+        end;
+      VK_TAB:       { the next shape of the drawing (Shift: the one before) }
+        begin
+          Boxes := DrawingShapes(FShapeAt);
+          if Length(Boxes) > 0 then
+          begin
+            K := -1;
+            for J := 0 to High(Boxes) do
+              if Boxes[J].Sid = FShapeSid then
+                K := J;
+            if ssShift in Shift then
+              K := (K - 1 + Length(Boxes) + Ord(K < 0)) mod Length(Boxes)
+            else
+              K := (K + 1) mod Length(Boxes);
+            FShapeSid := Boxes[K].Sid;
+            SetCaret(FShapeAt, False);
+          end;
+          Invalidate;
+          Exit;
+        end;
+      VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN:   { a shape nudged: a point, ten with Shift }
+        if FShapeSid >= 0 then
+        begin
+          K := 1 + 9 * Ord(ssShift in Shift);
+          case Key of
+            VK_LEFT: NudgeShape(-K, 0);
+            VK_RIGHT: NudgeShape(K, 0);
+            VK_UP: NudgeShape(0, -K);
+          else
+            NudgeShape(0, K);
+          end;
+          Exit;
+        end
+        else
+          ClearShapeSelection;
+      VK_DELETE, VK_BACK:
+        if FShapeSid >= 0 then
+        begin
+          DeleteShape;
+          Exit;
+        end
+        else
+          ClearShapeSelection;
+    else
+      ClearShapeSelection;    { anything else is the text's: Delete takes a selected drawing as any text }
+    end;
   if (Key = VK_ESCAPE) and LeaveDrawingText then
     Exit;
   Ext := ssShift in Shift;
@@ -5205,6 +5308,13 @@ begin
     Key := 0;
     Exit;
   end;
+  if FShapeOn and ((Key in [VK_ESCAPE, VK_TAB]) or
+     ((FShapeSid >= 0) and (Key in [VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_DELETE, VK_BACK]))) then
+  begin
+    ProcessKey(Key, Shift);
+    Key := 0;
+    Exit;
+  end;
   if Key in [VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_RETURN, VK_BACK,
              VK_DELETE, VK_TAB] then
   begin
@@ -5229,10 +5339,715 @@ end;
 
 { ---------------- mouse ---------------- }
 
+{ ---------------- drawings: selecting them and their shapes ---------------- }
+
+{ the description of the drawing whose object is at P, parsed; nil when it is no drawing }
+function DrawingJson(Doc: Ppd_doc; const P: pd_pos): TJSONObject;
+var
+  O: pd_inline;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  S: RawByteString;
+  J: TJSONData;
+begin
+  Result := nil;
+  if (P.block = 0) or (pd_doc_inline_at(Doc, P, O) <> PD_OK) or (O.kind <> PD_INLINE_IMAGE) or
+     (pd_doc_resource(Doc, O.resource, @Mime, @Data, @Len) <> PD_OK) or
+     (StrComp(Mime, 'application/vnd.parade.drawing+json') <> 0) then
+    Exit;
+  SetString(S, PAnsiChar(Data), Len);
+  try
+    J := GetJSON(S);
+  except
+    Exit;
+  end;
+  if J is TJSONObject then
+    Result := TJSONObject(J)
+  else
+    J.Free;
+end;
+
+function TParadeEdit.DrawingShapes(const P: pd_pos): TParadeShapeBoxes;
+var
+  J: TJSONObject;
+  Items: TJSONArray;
+  It: TJSONObject;
+  B: TJSONArray;
+  I, N: Integer;
+begin
+  Result := nil;
+  J := DrawingJson(FDoc, P);
+  if J = nil then
+    Exit;
+  try
+    Items := J.Find('items') as TJSONArray;
+    N := 0;
+    if Items <> nil then
+      for I := 0 to Items.Count - 1 do
+        if (Items[I] is TJSONObject) and (TJSONObject(Items[I]).Find('sid') <> nil) then
+        begin
+          It := TJSONObject(Items[I]);
+          B := It.Find('box') as TJSONArray;
+          if (B = nil) or (B.Count < 4) then
+            Continue;
+          SetLength(Result, N + 1);
+          Result[N].Sid := It.Integers['sid'];
+          Result[N].X0 := B[0].AsFloat;
+          Result[N].Y0 := B[1].AsFloat;
+          Result[N].X1 := B[2].AsFloat;
+          Result[N].Y1 := B[3].AsFloat;
+          Inc(N);
+        end;
+  finally
+    J.Free;
+  end;
+end;
+
+{ where the drawing at P is on its page (sp), and the size its description draws it at (sp) }
+function TParadeEdit.DrawingPlace(const P: pd_pos; out Page: Int32; out X, Y, W, H: Double; out JW, JH: Double): Boolean;
+var
+  O: pd_inline;
+  J: TJSONObject;
+  CX, Base, Asc, Desc, IW, IH: pd_sp;
+begin
+  Result := False;
+  Page := 0; X := 0; Y := 0; W := 0; H := 0; JW := 0; JH := 0;
+  J := DrawingJson(FDoc, P);
+  if J = nil then
+    Exit;
+  try
+    JW := J.Get('w', 0.0);
+    JH := J.Get('h', 0.0);
+  finally
+    J.Free;
+  end;
+  if (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or
+     (pd_layout_caret(FLayout, P, Page, CX, Base, Asc, Desc) <> PD_OK) then
+    Exit;
+  pd_doc_image_display_size(FDoc, O, IW, IH);
+  X := CX;
+  Y := Base - IH;     { on its line's baseline }
+  W := IW;
+  H := IH;
+  Result := (W > 0) and (H > 0);
+end;
+
+{ the drawing on the page under a point (sp): its object's place }
+function TParadeEdit.DrawingAt(Page: Integer; SX, SY: pd_sp; out P: pd_pos): Boolean;
+var
+  Items: array of pd_draw;
+  N, I: Int32;
+  Q: pd_pos;
+  Pg: Int32;
+  X, Y, W, H, JW, JH: Double;
+  Seen: string;
+  Key: string;
+begin
+  Result := False;
+  P := PdPos(0, 0);
+  if pd_layout_page_items(FLayout, Page, nil, 0, N) <> PD_OK then
+    Exit;
+  SetLength(Items, N + 1);
+  pd_layout_page_items(FLayout, Page, @Items[0], N, N);
+  Seen := '';
+  for I := 0 to N - 1 do
+  begin
+    if Items[I].block = 0 then
+      Continue;
+    Key := '|' + IntToStr(Items[I].block) + ':' + IntToStr(Items[I].offset) + '|';
+    if Pos(Key, Seen) > 0 then
+      Continue;
+    Seen := Seen + Key;
+    Q := PdPos(Items[I].block, Items[I].offset);
+    if DrawingPlace(Q, Pg, X, Y, W, H, JW, JH) and (Pg = Page) and (SX >= X) and (SX <= X + W) and
+       (SY >= Y) and (SY <= Y + H) then
+    begin
+      P := Q;
+      Exit(True);
+    end;
+  end;
+end;
+
+{ the shape of the drawing at P under a point of the page (sp): the smallest box holding it; -1 for none }
+function TParadeEdit.PickShape(const P: pd_pos; Page: Integer; SX, SY: pd_sp): Integer;
+var
+  Boxes: TParadeShapeBoxes;
+  Pg: Int32;
+  X, Y, W, H, JW, JH, LX, LY, Best, A: Double;
+  I: Integer;
+begin
+  Result := -1;
+  if not DrawingPlace(P, Pg, X, Y, W, H, JW, JH) or (JW <= 0) or (JH <= 0) then
+    Exit;
+  LX := (SX - X) * JW / W;      { into the drawing's own units }
+  LY := (SY - Y) * JH / H;
+  Boxes := DrawingShapes(P);
+  Best := 1e300;
+  for I := 0 to High(Boxes) do
+    with Boxes[I] do
+      if (LX >= X0) and (LX <= X1) and (LY >= Y0) and (LY <= Y1) then
+      begin
+        A := (X1 - X0) * (Y1 - Y0);
+        if A < Best then
+        begin
+          Best := A;
+          Result := Sid;
+        end;
+      end;
+end;
+
+{ A click on a page (sp): a drawing selected -- the whole of it first, a shape of it when it is selected
+  already -- unless the click is in its text (a caption: the caret goes there). True when it was one. }
+function TParadeEdit.ClickPage(Page: Integer; SX, SY: pd_sp; Shift: TShiftState): Boolean;
+var
+  D, HP: pd_pos;
+  Info: pd_block_info;
+  StoryTop: pd_block_id;
+  CPage: Int32;
+  CX, Base, Asc, Desc: pd_sp;
+  Sid: Integer;
+begin
+  Result := False;
+  if not DrawingAt(Page, SX, SY, D) then
+  begin
+    if FShapeOn then
+      ClearShapeSelection;
+    Exit;
+  end;
+  { on a line of its text: the text's, as any text is clicked }
+  if pd_layout_hit_test(FLayout, Page, SX, SY, HP) = PD_OK then
+  begin
+    StoryTop := HP.block;
+    while (pd_doc_block_info(FDoc, StoryTop, Info) = PD_OK) and (Info.parent <> 0) do
+      StoryTop := Info.parent;
+    if (pd_doc_block_info(FDoc, StoryTop, Info) = PD_OK) and (Info.kind = PD_BLOCK_STORY) and
+       (pd_layout_caret(FLayout, HP, CPage, CX, Base, Asc, Desc) = PD_OK) and (CPage = Page) and
+       (SY >= Base - Asc) and (SY <= Base + Desc) then
+    begin
+      if FShapeOn then
+        ClearShapeSelection;
+      Exit;
+    end;
+  end;
+  if FShapeOn and (FShapeAt.block = D.block) and (FShapeAt.offset = D.offset) then
+    Sid := PickShape(D, Page, SX, SY)
+  else
+    Sid := -1;
+  FShapeOn := True;
+  FShapeAt := D;
+  FShapeSid := Sid;
+  if Sid < 0 then   { the whole drawing: its object selected, so delete, cut and copy take it }
+    SelectRange(PdRange(D, PdPos(D.block, D.offset + 3)))
+  else
+    SetCaret(D, False);
+  Invalidate;
+  Result := True;
+end;
+
+function TParadeEdit.SelectedShape(out At: pd_pos; out Sid: Integer): Boolean;
+begin
+  Result := FShapeOn;
+  At := FShapeAt;
+  Sid := FShapeSid;
+end;
+
+procedure TParadeEdit.ClearShapeSelection;
+begin
+  if not FShapeOn then
+    Exit;
+  FShapeOn := False;
+  FShapeSid := -1;
+  Invalidate;
+end;
+
+{ the selection's box and handles, over the drawn page (not into it: the view's pixels stay as they are) }
+procedure TParadeEdit.PaintShapeSelection;
+var
+  Pg: Int32;
+  X, Y, W, H, JW, JH, BX0, BY0, BX1, BY1: Double;
+  Boxes: TParadeShapeBoxes;
+  I, L, T, R, B, HX, HY, K: Integer;
+  Rc: TRect;
+begin
+  if not FShapeOn then
+    Exit;
+  if not DrawingPlace(FShapeAt, Pg, X, Y, W, H, JW, JH) then
+  begin
+    FShapeOn := False;    { gone: deleted, or no longer a drawing }
+    Exit;
+  end;
+  BX0 := X; BY0 := Y; BX1 := X + W; BY1 := Y + H;
+  if (FShapeSid >= 0) and (JW > 0) and (JH > 0) then
+  begin
+    Boxes := DrawingShapes(FShapeAt);
+    for I := 0 to High(Boxes) do
+      if Boxes[I].Sid = FShapeSid then
+      begin
+        BX0 := X + Boxes[I].X0 * W / JW;
+        BY0 := Y + Boxes[I].Y0 * H / JH;
+        BX1 := X + Boxes[I].X1 * W / JW;
+        BY1 := Y + Boxes[I].Y1 * H / JH;
+      end;
+  end;
+  L := PageLeft(Pg) + Round(BX0 * PxPerSp);
+  T := PageTop(Pg) + Round(BY0 * PxPerSp);
+  R := PageLeft(Pg) + Round(BX1 * PxPerSp);
+  B := PageTop(Pg) + Round(BY1 * PxPerSp);
+  Canvas.Brush.Style := bsClear;
+  Canvas.Pen.Color := $00D77800;
+  Canvas.Pen.Width := 1;
+  Canvas.Pen.Style := psSolid;
+  Canvas.Rectangle(L, T, R + 1, B + 1);
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Brush.Color := clWhite;
+  K := 3;
+  for I := 0 to 7 do    { the corners and the middles of the sides }
+  begin
+    case I of
+      0: begin HX := L; HY := T; end;
+      1: begin HX := (L + R) div 2; HY := T; end;
+      2: begin HX := R; HY := T; end;
+      3: begin HX := R; HY := (T + B) div 2; end;
+      4: begin HX := R; HY := B; end;
+      5: begin HX := (L + R) div 2; HY := B; end;
+      6: begin HX := L; HY := B; end;
+    else
+      begin HX := L; HY := (T + B) div 2; end;
+    end;
+    Canvas.Rectangle(HX - K, HY - K, HX + K + 1, HY + K + 1);
+  end;
+  if (FShapeDrag >= 0) and ShapeClientRect(FShapeNew, Rc) then
+  begin   { where the drag would put it }
+    Canvas.Brush.Style := bsClear;
+    Canvas.Pen.Style := psDash;
+    Canvas.Rectangle(Min(Rc.Left, Rc.Right), Min(Rc.Top, Rc.Bottom), Max(Rc.Left, Rc.Right) + 1,
+      Max(Rc.Top, Rc.Bottom) + 1);
+    Canvas.Pen.Style := psSolid;
+  end;
+end;
+
+{ the n-th shape element (wps:wsp or pic:pic) of kept drawing XML: where it starts and where it ends }
+function KeptShapeSpan(const Xml: string; N: Integer; out A, B: Integer): Boolean;
+var
+  I, K, Depth: Integer;
+  Tag: string;
+
+  function IsTag(At: Integer; const T: string): Boolean;
+  begin
+    Result := (Copy(Xml, At, Length(T)) = T) and (At + Length(T) <= Length(Xml)) and
+      (Xml[At + Length(T)] in ['>', ' ', '/', #9, #10, #13]);
+  end;
+
+begin
+  Result := False;
+  A := 0;
+  B := 0;
+  K := -1;
+  I := 1;
+  while I <= Length(Xml) do
+  begin
+    if (Xml[I] = '<') and (IsTag(I, '<wps:wsp') or IsTag(I, '<pic:pic')) then
+    begin
+      Inc(K);
+      if K = N then
+      begin
+        Tag := Copy(Xml, I + 1, 7);     { wps:wsp or pic:pic }
+        A := I;
+        Depth := 0;
+        while I <= Length(Xml) do
+        begin
+          if IsTag(I, '<' + Tag) then
+            Inc(Depth)
+          else if Copy(Xml, I, Length(Tag) + 3) = '</' + Tag + '>' then
+          begin
+            Dec(Depth);
+            if Depth = 0 then
+            begin
+              B := I + Length(Tag) + 3;
+              Exit(True);
+            end;
+          end;
+          Inc(I);
+        end;
+        Exit;
+      end;
+    end;
+    Inc(I);
+  end;
+end;
+
+{ an attribute's value in a tag starting at At (to its '>'): its place and length; 0 when it has none }
+function AttrSpan(const Xml: string; At: Integer; const Name: string; out VLen: Integer): Integer;
+var
+  E, P: Integer;
+begin
+  Result := 0;
+  VLen := 0;
+  E := At;
+  while (E <= Length(Xml)) and (Xml[E] <> '>') do
+    Inc(E);
+  P := At;
+  while P < E do
+  begin
+    if (Copy(Xml, P, Length(Name) + 3) = ' ' + Name + '="') then
+    begin
+      Result := P + Length(Name) + 3;
+      while (Result + VLen <= E) and (Xml[Result + VLen] <> '"') do
+        Inc(VLen);
+      Exit;
+    end;
+    Inc(P);
+  end;
+end;
+
+{ the kept XML's shape N moved by DX, DY and sized by KX, KY, in its own units (a:off, a:ext of its xfrm) }
+procedure PatchKeptXml(var Xml: string; N: Integer; DX, DY, KX, KY: Double);
+var
+  A, B, O, E, P, L: Integer;
+  V: Int64;
+
+  procedure Put(At, Len: Integer; Value: Int64);
+  begin
+    Delete(Xml, At, Len);
+    Insert(IntToStr(Value), Xml, At);
+  end;
+
+begin
+  if not KeptShapeSpan(Xml, N, A, B) then
+    Exit;
+  O := Pos('<a:off ', Copy(Xml, A, B - A));
+  if O = 0 then
+    Exit;
+  O := A + O - 1;
+  E := Pos('<a:ext ', Copy(Xml, O, B - O));
+  if E > 0 then
+    E := O + E - 1;
+  { the extent first: its place is after the offset's, and the offset's text may change length }
+  if E > 0 then
+  begin
+    P := AttrSpan(Xml, E, 'cy', L);
+    if P > 0 then
+    begin
+      V := StrToInt64Def(Copy(Xml, P, L), 0);
+      Put(P, L, Round(V * KY));
+    end;
+    P := AttrSpan(Xml, E, 'cx', L);
+    if P > 0 then
+    begin
+      V := StrToInt64Def(Copy(Xml, P, L), 0);
+      Put(P, L, Round(V * KX));
+    end;
+  end;
+  P := AttrSpan(Xml, O, 'y', L);
+  if P > 0 then
+  begin
+    V := StrToInt64Def(Copy(Xml, P, L), 0);
+    Put(P, L, V + Round(DY));
+  end;
+  P := AttrSpan(Xml, O, 'x', L);
+  if P > 0 then
+  begin
+    V := StrToInt64Def(Copy(Xml, P, L), 0);
+    Put(P, L, V + Round(DX));
+  end;
+end;
+
+function TParadeEdit.ShapeBox(Sid: Integer; out X0, Y0, X1, Y1: Double): Boolean;
+var
+  Boxes: TParadeShapeBoxes;
+  I: Integer;
+begin
+  Result := False;
+  X0 := 0; Y0 := 0; X1 := 0; Y1 := 0;
+  if not FShapeOn then
+    Exit;
+  Boxes := DrawingShapes(FShapeAt);
+  for I := 0 to High(Boxes) do
+    if Boxes[I].Sid = Sid then
+    begin
+      X0 := Boxes[I].X0; Y0 := Boxes[I].Y0; X1 := Boxes[I].X1; Y1 := Boxes[I].Y1;
+      Exit(True);
+    end;
+end;
+
+{ the drawing at P given a new description: the old object out and the new in, one step of undo }
+function TParadeEdit.ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
+var
+  O: pd_inline;
+  R: pd_res_id;
+begin
+  Result := False;
+  if FReadOnly or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or
+     (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(Json), Length(Json), R) <> PD_OK) then
+    Exit;
+  O.resource := R;
+  pd_doc_begin_group(FDoc, PAnsiChar(Lbl));
+  pd_doc_delete(FDoc, PdRange(P, PdPos(P.block, P.offset + 3)), nil);
+  Result := pd_doc_insert_inline(FDoc, P, O, nil) = PD_OK;
+  pd_doc_end_group(FDoc);
+  SetCaret(P, False);
+  Changed;
+end;
+
+function TParadeEdit.SetShapeBox(Sid: Integer; X0, Y0, X1, Y1: Double): Boolean;
+var
+  J, It, Mk: TJSONObject;
+  Items: TJSONArray;
+  I, K, Mi, Me: Integer;
+  OX0, OY0, OX1, OY1, KX, KY, FSX, FSY, C: Double;
+  Pts, Box, Fs: TJSONArray;
+  Xml: string;
+
+  function Map(V, O0, K, N0: Double): Int64;
+  begin
+    Result := Round(N0 + (V - O0) * K);
+  end;
+
+begin
+  Result := False;
+  if not FShapeOn or not ShapeBox(Sid, OX0, OY0, OX1, OY1) or (OX1 - OX0 <= 0) or (OY1 - OY0 <= 0) or
+     (X1 - X0 < 1) or (Y1 - Y0 < 1) then
+    Exit;
+  KX := (X1 - X0) / (OX1 - OX0);
+  KY := (Y1 - Y0) / (OY1 - OY0);
+  J := DrawingJson(FDoc, FShapeAt);
+  if J = nil then
+    Exit;
+  try
+    Items := J.Find('items') as TJSONArray;
+    Mi := -1;
+    Me := Items.Count;
+    for I := 0 to Items.Count - 1 do
+      if (Items[I] is TJSONObject) and (TJSONObject(Items[I]).Find('sid') <> nil) then
+        if TJSONObject(Items[I]).Integers['sid'] = Sid then
+          Mi := I
+        else if (Mi >= 0) and (I > Mi) and (Me = Items.Count) then
+          Me := I;
+    if Mi < 0 then
+      Exit;
+    Mk := TJSONObject(Items[Mi]);
+    { its pieces: every place and size, every point of a path, from the old box to the new }
+    for I := Mi + 1 to Me - 1 do
+      if Items[I] is TJSONObject then
+      begin
+        It := TJSONObject(Items[I]);
+        if It.Find('x') <> nil then It.Integers['x'] := Map(It.Get('x', 0.0), OX0, KX, X0);
+        if It.Find('y') <> nil then It.Integers['y'] := Map(It.Get('y', 0.0), OY0, KY, Y0);
+        if It.Find('w') <> nil then It.Integers['w'] := Round(It.Get('w', 0.0) * KX);
+        if It.Find('h') <> nil then It.Integers['h'] := Round(It.Get('h', 0.0) * KY);
+        Pts := It.Find('path') as TJSONArray;
+        if Pts <> nil then
+        begin
+          K := 0;
+          while K + 1 < Pts.Count do
+          begin
+            if Pts[K].AsInt64 <> -2147483648 then   { not a break between rings }
+            begin
+              Pts.Items[K] := TJSONIntegerNumber.Create(Map(Pts[K].AsFloat, OX0, KX, X0));
+              Pts.Items[K + 1] := TJSONIntegerNumber.Create(Map(Pts[K + 1].AsFloat, OY0, KY, Y0));
+            end;
+            Inc(K, 2);
+          end;
+        end;
+      end;
+    Box := Mk.Find('box') as TJSONArray;
+    Box.Items[0] := TJSONIntegerNumber.Create(Round(X0));
+    Box.Items[1] := TJSONIntegerNumber.Create(Round(Y0));
+    Box.Items[2] := TJSONIntegerNumber.Create(Round(X1));
+    Box.Items[3] := TJSONIntegerNumber.Create(Round(Y1));
+    { the shape as Word has it: its offset by the move, its extent by the scale, in its group's units }
+    if (J.Find('xml') <> nil) and (J.Find('xml').JSONType = jtString) then
+    begin
+      Fs := Mk.Find('fs') as TJSONArray;
+      FSX := 1; FSY := 1;
+      if (Fs <> nil) and (Fs.Count >= 2) and (Fs[0].AsFloat > 0) and (Fs[1].AsFloat > 0) then
+      begin
+        FSX := Fs[0].AsFloat / 1000000;
+        FSY := Fs[1].AsFloat / 1000000;
+      end;
+      C := 12700 / PD_SP_PER_PT;   { EMU a sp }
+      Xml := J.Strings['xml'];
+      PatchKeptXml(Xml, Sid, (X0 - OX0) * C / FSX, (Y0 - OY0) * C / FSY, KX, KY);
+      J.Strings['xml'] := Xml;
+    end;
+    Result := ReplaceDrawing(FShapeAt, J.AsJSON, 'Shape');
+    FShapeOn := True;     { the same shape, still selected }
+    FShapeSid := Sid;
+  finally
+    J.Free;
+  end;
+end;
+
+function TParadeEdit.DeleteShape: Boolean;
+var
+  J, It: TJSONObject;
+  Items: TJSONArray;
+  I, Mi, Me, Sid, A, B: Integer;
+  Xml: string;
+begin
+  Result := False;
+  if not FShapeOn or (FShapeSid < 0) then
+    Exit;
+  Sid := FShapeSid;
+  J := DrawingJson(FDoc, FShapeAt);
+  if J = nil then
+    Exit;
+  try
+    Items := J.Find('items') as TJSONArray;
+    Mi := -1;
+    Me := Items.Count;
+    for I := 0 to Items.Count - 1 do
+      if (Items[I] is TJSONObject) and (TJSONObject(Items[I]).Find('sid') <> nil) then
+        if TJSONObject(Items[I]).Integers['sid'] = Sid then
+          Mi := I
+        else if (Mi >= 0) and (I > Mi) and (Me = Items.Count) then
+          Me := I;
+    if Mi < 0 then
+      Exit;
+    for I := Me - 1 downto Mi do
+      Items.Delete(I);
+    for I := 0 to Items.Count - 1 do     { the shapes after it are one place earlier in the XML now }
+      if Items[I] is TJSONObject then
+      begin
+        It := TJSONObject(Items[I]);
+        if (It.Find('sid') <> nil) and (It.Integers['sid'] > Sid) then
+          It.Integers['sid'] := It.Integers['sid'] - 1;
+      end;
+    if (J.Find('xml') <> nil) and (J.Find('xml').JSONType = jtString) then
+    begin
+      Xml := J.Strings['xml'];
+      if KeptShapeSpan(Xml, Sid, A, B) then
+      begin
+        Delete(Xml, A, B - A);
+        J.Strings['xml'] := Xml;
+      end;
+    end;
+    Result := ReplaceDrawing(FShapeAt, J.AsJSON, 'Delete shape');
+    FShapeOn := True;     { the drawing, still selected }
+    FShapeSid := -1;
+    Invalidate;
+  finally
+    J.Free;
+  end;
+end;
+
+{ a box of the selected drawing (its units) in client pixels }
+function TParadeEdit.ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
+var
+  Pg: Int32;
+  X, Y, W, H, JW, JH: Double;
+begin
+  Result := FShapeOn and DrawingPlace(FShapeAt, Pg, X, Y, W, H, JW, JH) and (JW > 0) and (JH > 0);
+  if not Result then
+    Exit;
+  R.Left := PageLeft(Pg) + Round((X + B[0] * W / JW) * PxPerSp);
+  R.Top := PageTop(Pg) + Round((Y + B[1] * H / JH) * PxPerSp);
+  R.Right := PageLeft(Pg) + Round((X + B[2] * W / JW) * PxPerSp);
+  R.Bottom := PageTop(Pg) + Round((Y + B[3] * H / JH) * PxPerSp);
+end;
+
+{ a press on the selected shape: on a handle, a resize; inside it, a move. False when it is neither }
+function TParadeEdit.ShapeDragStart(X, Y: Integer): Boolean;
+var
+  R: TRect;
+  I, HX, HY: Integer;
+begin
+  Result := False;
+  if not FShapeOn or (FShapeSid < 0) or
+     not ShapeBox(FShapeSid, FShapeOld[0], FShapeOld[1], FShapeOld[2], FShapeOld[3]) or
+     not ShapeClientRect(FShapeOld, R) then
+    Exit;
+  FShapeNew := FShapeOld;
+  for I := 0 to 7 do    { the handles, as PaintShapeSelection draws them }
+  begin
+    case I of
+      0: begin HX := R.Left; HY := R.Top; end;
+      1: begin HX := (R.Left + R.Right) div 2; HY := R.Top; end;
+      2: begin HX := R.Right; HY := R.Top; end;
+      3: begin HX := R.Right; HY := (R.Top + R.Bottom) div 2; end;
+      4: begin HX := R.Right; HY := R.Bottom; end;
+      5: begin HX := (R.Left + R.Right) div 2; HY := R.Bottom; end;
+      6: begin HX := R.Left; HY := R.Bottom; end;
+    else
+      begin HX := R.Left; HY := (R.Top + R.Bottom) div 2; end;
+    end;
+    if (Abs(X - HX) <= 5) and (Abs(Y - HY) <= 5) then
+    begin
+      FShapeDrag := I;
+      FShapeFrom := Point(X, Y);
+      Exit(True);
+    end;
+  end;
+  if PtInRect(Rect(R.Left, R.Top, R.Right + 1, R.Bottom + 1), Point(X, Y)) then
+  begin
+    FShapeDrag := 8;
+    FShapeFrom := Point(X, Y);
+    Result := True;
+  end;
+end;
+
+{ the drag so far: the box it would give the shape (Shift: a resize keeps the proportions) }
+procedure TParadeEdit.ShapeDragMove(X, Y: Integer; Shift: TShiftState);
+var
+  Pg: Int32;
+  PX, PY, W, H, JW, JH, DX, DY, K: Double;
+begin
+  if (FShapeDrag < 0) or not DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) or (W <= 0) or (H <= 0) then
+    Exit;
+  DX := (X - FShapeFrom.X) / PxPerSp * JW / W;   { client pixels into the drawing's units }
+  DY := (Y - FShapeFrom.Y) / PxPerSp * JH / H;
+  FShapeNew := FShapeOld;
+  case FShapeDrag of
+    8: begin
+         FShapeNew[0] := FShapeOld[0] + DX; FShapeNew[2] := FShapeOld[2] + DX;
+         FShapeNew[1] := FShapeOld[1] + DY; FShapeNew[3] := FShapeOld[3] + DY;
+       end;
+  else
+    begin
+      if FShapeDrag in [0, 6, 7] then FShapeNew[0] := FShapeOld[0] + DX;
+      if FShapeDrag in [2, 3, 4] then FShapeNew[2] := FShapeOld[2] + DX;
+      if FShapeDrag in [0, 1, 2] then FShapeNew[1] := FShapeOld[1] + DY;
+      if FShapeDrag in [4, 5, 6] then FShapeNew[3] := FShapeOld[3] + DY;
+      if (ssShift in Shift) and (FShapeDrag in [0, 2, 4, 6]) and (FShapeOld[2] > FShapeOld[0]) and
+         (FShapeOld[3] > FShapeOld[1]) then
+      begin   { a corner: the proportions kept, by the larger change }
+        K := Max((FShapeNew[2] - FShapeNew[0]) / (FShapeOld[2] - FShapeOld[0]),
+                 (FShapeNew[3] - FShapeNew[1]) / (FShapeOld[3] - FShapeOld[1]));
+        if FShapeDrag in [0, 6] then
+          FShapeNew[0] := FShapeNew[2] - (FShapeOld[2] - FShapeOld[0]) * K
+        else
+          FShapeNew[2] := FShapeNew[0] + (FShapeOld[2] - FShapeOld[0]) * K;
+        if FShapeDrag in [0, 2] then
+          FShapeNew[1] := FShapeNew[3] - (FShapeOld[3] - FShapeOld[1]) * K
+        else
+          FShapeNew[3] := FShapeNew[1] + (FShapeOld[3] - FShapeOld[1]) * K;
+      end;
+    end;
+  end;
+  Invalidate;
+end;
+
+{ the selected shape moved by DX, DY points on the page }
+function TParadeEdit.NudgeShape(DX, DY: Double): Boolean;
+var
+  Pg: Int32;
+  PX, PY, W, H, JW, JH, X0, Y0, X1, Y1: Double;
+begin
+  Result := FShapeOn and (FShapeSid >= 0) and DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) and (W > 0) and
+            (H > 0) and ShapeBox(FShapeSid, X0, Y0, X1, Y1);
+  if not Result then
+    Exit;
+  DX := DX * PD_SP_PER_PT * JW / W;
+  DY := DY * PD_SP_PER_PT * JH / H;
+  Result := SetShapeBox(FShapeSid, X0 + DX, Y0 + DY, X1 + DX, Y1 + DY);
+end;
+
 procedure TParadeEdit.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   P: pd_pos;
-  I: Integer;
+  I, Page: Integer;
+  Info: pd_page_info;
 begin
   inherited MouseDown(Button, Shift, X, Y);
   SetFocus;
@@ -5243,6 +6058,19 @@ begin
         SelectRange(FBalloons[I].Range);
         Exit;
       end;
+  if (Button = mbLeft) and ShapeDragStart(X, Y) then
+    Exit;     { the selected shape: moved, or resized by a handle }
+  if (Button = mbLeft) and not (ssShift in Shift) then
+    for Page := 0 to PageCount - 1 do     { a drawing, or a shape of it: selected }
+    begin
+      pd_layout_page_info(FLayout, Page, Info);
+      if (Y < PageTop(Page) + Round(Info.height * PxPerSp) + FPageGap div 2) or (Page = PageCount - 1) then
+      begin
+        if ClickPage(Page, Round((X - PageLeft(Page)) / PxPerSp), Round((Y - PageTop(Page)) / PxPerSp), Shift) then
+          Exit;
+        Break;
+      end;
+    end;
   if (Button = mbLeft) and PointToPos(X, Y, P) then
   begin
     FHasDesiredX := False;
@@ -5258,6 +6086,11 @@ var
   P: pd_pos;
 begin
   inherited MouseMove(Shift, X, Y);
+  if FShapeDrag >= 0 then
+  begin
+    ShapeDragMove(X, Y, Shift);
+    Exit;
+  end;
   if FDragging and PointToPos(X, Y, P) then
   begin
     pd_doc_marker_set(FDoc, FCaret, P);
@@ -5269,6 +6102,15 @@ procedure TParadeEdit.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: In
 begin
   inherited MouseUp(Button, Shift, X, Y);
   FDragging := False;
+  if FShapeDrag >= 0 then
+  begin
+    FShapeDrag := -1;
+    if (Abs(X - FShapeFrom.X) > 2) or (Abs(Y - FShapeFrom.Y) > 2) then     { moved: the shape takes its box }
+      SetShapeBox(FShapeSid, Min(FShapeNew[0], FShapeNew[2]), Min(FShapeNew[1], FShapeNew[3]),
+        Max(FShapeNew[0], FShapeNew[2]), Max(FShapeNew[1], FShapeNew[3]));
+    Invalidate;
+    Exit;
+  end;
   if FPainter and (Button = mbLeft) and HasSelection then
     ApplyFormatPainter;     { the selection just made takes the copied look }
 end;
@@ -5891,12 +6733,13 @@ begin
   if R.Bottom > FBack.Height then R.Bottom := FBack.Height;
   if (R.Right > R.Left) and (R.Bottom > R.Top) then
     Canvas.CopyRect(R, FBack.Canvas, R);     { on the display's side: no pixels cross the connection }
-  if Focused and FCaretOn and CaretRect(R) then
+  if Focused and FCaretOn and CaretRect(R) and not FShapeOn then
   begin
     Canvas.Brush.Style := bsSolid;
     Canvas.Brush.Color := clBlack;
     Canvas.FillRect(R);
   end;
+  PaintShapeSelection;
 end;
 
 procedure TParadeEdit.RenderPage(Page: Integer; Bmp: TBitmap; Scale: Double);

@@ -100,6 +100,11 @@ var
   CapPage: Int32;
   CapX, CapBase, CapAsc, CapDesc: pd_sp;
   CapFile: string;
+  DrawP: pd_pos;
+  DrawSid: Integer;
+  DrawPara: pd_block_id;
+  BX0, BY0, BX1, BY1, NX0, NY0, NX1, NY1: Double;
+  NShapes: Integer;
   E: TParadeEdit;
   Dir, Sample, T: string;
   C: pd_pos;
@@ -364,12 +369,65 @@ begin
       E.ProcessKey(VK_ESCAPE, []);
       Check((E.CaretPos.block <> CapB) and (Pos(#$EF#$BF#$BC, E.ParaText(E.CaretPos.block)) > 0) and
         (E.CaretPos.offset = 3), 'Escape leaves the caption, just after its drawing');
+      { the drawing and its shapes, selected: one click the whole, the next a shape; Tab the next shape;
+        Escape back out; Delete takes the drawing as any text, and undo brings it back }
+      DrawPara := pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 1);
+      if pd_layout_caret(E.Layout, PdPos(DrawPara, 0), CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK then
+      begin
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        Check(E.SelectedShape(DrawP, DrawSid) and (DrawP.block = DrawPara) and (DrawSid = -1),
+          'a click on a drawing selects the whole of it');
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = 0), 'a second click the shape under it');
+        E.Invalidate;
+        E.Update;
+        Application.ProcessMessages;
+        ExecuteProcess('/usr/bin/import', ['-window', 'root', Dir + 'edit_shape.png']);
+        { moved by a point with the arrow key, back with undo; made twice as wide; taken out and put back }
+        Check(E.ShapeBox(0, BX0, BY0, BX1, BY1), 'the shape''s box');
+        E.ProcessKey(VK_RIGHT, []);
+        Check(E.ShapeBox(0, NX0, NY0, NX1, NY1) and (Abs(NX0 - BX0 - PD_SP_PER_PT) < 2) and (Abs(NY0 - BY0) < 2),
+          'the arrow key moves the shape a point');
+        E.Undo;
+        Check(E.ShapeBox(0, NX0, NY0, NX1, NY1) and (Abs(NX0 - BX0) < 2), 'undo puts it back');
+        NShapes := Length(E.DrawingShapes(PdPos(DrawPara, 0)));
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        E.ProcessKey(VK_DELETE, []);
+        Check(Length(E.DrawingShapes(PdPos(DrawPara, 0))) = NShapes - 1, 'Delete takes the shape out of the drawing');
+        E.Undo;
+        Check(Length(E.DrawingShapes(PdPos(DrawPara, 0))) = NShapes, 'and undo puts it back');
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        Check(E.SetShapeBox(0, BX0, BY0, BX0 + 2 * (BX1 - BX0), BY1), 'the shape made twice as wide');
+        E.ProcessKey(VK_TAB, []);
+        Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = 1), 'Tab the next shape');
+        E.ProcessKey(VK_ESCAPE, []);
+        Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = -1), 'Escape the drawing again');
+        E.ProcessKey(VK_DELETE, []);
+        Check(Pos(#$EF#$BF#$BC, E.ParaText(DrawPara)) = 0, 'Delete takes the selected drawing');
+        E.Undo;
+        Check(Pos(#$EF#$BF#$BC, E.ParaText(DrawPara)) = 1, 'and undo brings it back');
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        E.ProcessKey(VK_ESCAPE, []);
+        Check(not E.SelectedShape(DrawP, DrawSid), 'Escape from the drawing: nothing selected');
+      end
+      else
+        Check(False, 'the drawing is laid out');
       E.SaveToFile(Dir + 'edit_caption.docx');
       E.LoadFromFile(Dir + 'edit_caption.docx');
       Same := False;
       for I := 0 to pd_doc_story_count(E.Doc) - 1 do
         Same := Same or (Pos('NEW ', E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0))) > 0);
       Check(Same, 'saved: the edited caption comes back in the drawing');
+      { and the shape as Word will have it: twice as wide, read back from the XML kept for it }
+      DrawPara := pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 1);
+      Same := False;
+      for I := 0 to High(E.DrawingShapes(PdPos(DrawPara, 0))) do
+        with E.DrawingShapes(PdPos(DrawPara, 0))[I] do
+          if Sid = 0 then
+            Same := Abs((X1 - X0) - 2 * (BX1 - BX0)) < PD_SP_PER_PT;
+      Check(Same, 'saved: the resized shape comes back resized');
     end;
   end;
 
