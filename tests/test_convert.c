@@ -2225,6 +2225,92 @@ static void test_docx_group_turned_shapes(void) {
     pd_doc_free(d);
 }
 
+/* A canvas kept as Word wrote it: through DOCX its own XML comes back -- the 3-D, the preset shapes -- with its
+   picture's reference renamed to the new package's, and the styles only its text uses are the document's; a canvas
+   whose text the writer would renumber (a list) is made from the drawing instead. */
+static void test_docx_canvas_kept(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId7\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/styles.xml",
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/>"
+        "</w:style><w:style w:type=\"paragraph\" w:styleId=\"MCBodySP\"><w:name w:val=\"MC Body SP\"/><w:rPr>"
+        "<w:sz w:val=\"14\"/></w:rPr></w:style><w:style w:type=\"character\" w:styleId=\"FigCap\"><w:name "
+        "w:val=\"FigCap\"/><w:rPr><w:b/></w:rPr></w:style></w:styles>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\" xmlns:wpc=\"wpc\" "
+        "xmlns:wps=\"wps\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"1270000\"/><a:graphic><a:graphicData><wpc:wpc>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"roundRect\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val=\"808080\"/></a:solidFill>"
+        "<a:scene3d><a:camera prst=\"isometricOffAxis1Top\"/></a:scene3d><a:sp3d extrusionH=\"133350\"/></wps:spPr>"
+        "<wps:bodyPr/></wps:wsp>"
+        "<pic:pic><pic:blipFill><a:blip r:embed=\"rId7\"/></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"1270000\" y=\"0\"/>"
+        "<a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm></pic:spPr></pic:pic>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"700000\"/><a:ext cx=\"2540000\" cy=\"500000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:noFill/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:pStyle "
+        "w:val=\"MCBodySP\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"FigCap\"/></w:rPr><w:t>Fig. 2.</w:t></w:r></w:p>"
+        "</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"
+        "</wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"1270000\" cy=\"635000\"/><a:graphic><a:graphicData><wpc:wpc>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/>"
+        "<w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>listed</w:t></w:r></w:p></w:txbxContent></wps:txbx>"
+        "<wps:bodyPr/></wps:wsp></wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec;
+        pd_inline o;
+        char* js;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, sec, 0), 0), &o) == PD_OK);
+        js = drawing_json(d, o.resource);
+        CHECK(js != NULL);
+
+        if (js) {
+            const char* r = strstr(js, "\"rels\":{\"");
+            const char* mime = NULL;
+            const void* data = NULL;
+            size_t len = 0;
+
+            CHECK(strstr(js, "\"kind\":\"wpc\"") != NULL && strstr(js, "\"xml\":\"<wpc:wpc>") != NULL);
+            CHECK(strstr(js, "extrusionH=\\\"133350\\\"") != NULL && strstr(js, "prst=\\\"roundRect\\\"") != NULL);
+            CHECK(strstr(js, "{\"img\":") != NULL);     /* the picture still drawn */
+            CHECK(r != NULL);   /* and its reference a picture of the document */
+            if (r) {
+                const char* c = strchr(r + 9, ':');
+                pd_res_id res = c ? (pd_res_id)atoi(c + 1) : 0;
+
+                CHECK(res && pd_doc_resource(d, res, &mime, &data, &len) == PD_OK && !strcmp(mime, "image/png"));
+            }
+            free(js);
+        }
+
+        CHECK(pd_doc_style_find(d, "MC Body SP") != 0);     /* used in the drawing alone */
+        CHECK(pd_doc_style_find(d, "FigCap") != 0);
+
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, sec, 1), 0), &o) == PD_OK);
+        js = drawing_json(d, o.resource);
+        /* made, not kept, as read (once written, the drawing's XML is the writer's own: kept from then on) */
+        CHECK(js != NULL && (pass > 0 || strstr(js, "\"xml\"") == NULL) && strstr(js, "listed") != NULL);
+        free(js);
+    }
+
+    pd_doc_free(d);
+}
+
 /* A canvas as Word draws Fig. 3-style diagrams: its background and frame; a shape filled from its group (grpFill);
    a freeform whose points are guides; a box extruded and seen through an isometric camera (a prism: several faces);
    a curved connector (a curve, not a chord) with a medium arrowhead (three line widths long); a 60% pattern
@@ -4123,6 +4209,7 @@ int main(void) {
     test_docx_deleted_float();
     test_docx_group_turned_shapes();
     test_docx_canvas_3d();
+    test_docx_canvas_kept();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

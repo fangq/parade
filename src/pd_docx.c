@@ -297,7 +297,32 @@ static const char* W_NS =
     "xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" "
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" "
     "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" "
+    "xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\" "
+    "xmlns:wp14=\"http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing\" "
+    "xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\" "
+    "xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" "
+    "xmlns:a15=\"http://schemas.microsoft.com/office/drawing/2012/main\" "
+    "xmlns:a16=\"http://schemas.microsoft.com/office/drawing/2014/main\" "
+    "xmlns:v=\"urn:schemas-microsoft-com:vml\" "
+    "xmlns:o=\"urn:schemas-microsoft-com:office:office\" "
+    "xmlns:w10=\"urn:schemas-microsoft-com:office:word\" "
     "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"";
+
+/* the prefixes declared above, which a drawing's own XML, kept as it came, may use */
+static int dx_prefix_declared(const char* p, size_t n) {
+    static const char* const known[] = { "w", "r", "wp", "a", "pic", "mc", "wpg", "wps", "w14", "wpc", "wp14", "w15",
+                                         "a14", "a15", "a16", "v", "o", "w10", "m", "xml"
+                                       };
+    size_t i;
+
+    for (i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+        if (strlen(known[i]) == n && !memcmp(known[i], p, n)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
 static const char* XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
 
 typedef struct {
@@ -565,6 +590,7 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
 /* a picture as a run: inline, or anchored where a float is (fp) -- beside the text on the side the float
    wraps on, or across the column */
 static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx, long long cy);
+static void dx_kept_fallback(dxo* x, const void* data, size_t len);
 static int dx_ref_name(const pd_doc* d, pd_block_id para, char* out, size_t cap);
 
 static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
@@ -578,13 +604,16 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     pd_res_id pic = ob->resource;
     int m;
 
-    int chart = 0;
+    int chart = 0, wpc = 0;
 
     if (group) {    /* a metafile played into a drawing: the metafile itself goes back; a chart: the chart */
         pj_doc* jd = pj_parse(data, len, 0, NULL);
         const pj_node* jr = jd ? pj_root(jd) : NULL, *n;
         pd_res_id src = jr ? (pd_res_id)pj_int_or(pj_get(jr, "src"), 0) : 0;
         pd_res_id cres = jr ? (pd_res_id)pj_int_or(pj_get(jr, "chart"), 0) : 0;
+
+        n = jr ? pj_get(jr, "kind") : NULL;     /* a canvas kept as it came goes back as a canvas */
+        wpc = n && n->type == PJ_STR && n->len == 3 && !memcmp(n->s, "wpc", 3) && pj_get(jr, "xml");
 
         if (cres && x->ncharts < 64) {
             chart = ++x->ncharts;
@@ -652,8 +681,11 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     }
 
     if (group) {    /* Word keeps a group in markup it alone reads, and says so: after the run's opening */
-        static const char mc[] = "<mc:AlternateContent><mc:Choice Requires=\"wpg\">";
+        static const char mc_g[] = "<mc:AlternateContent><mc:Choice Requires=\"wpg\">";
+        static const char mc_c[] = "<mc:AlternateContent><mc:Choice Requires=\"wpc\">";
+        const char* mc = wpc ? mc_c : mc_g;
         size_t at = mark + strlen("<w:r>"), k = strlen(mc), tail = o->n - at;
+
 
         pb_put(o, mc, k);   /* room, then the drawing moved up behind it */
 
@@ -680,11 +712,12 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     }
 
     if (group) {
-        pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\">",
-                  fp ? "<wp:cNvGraphicFramePr/>" : "");
+        pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/%s\">",
+                  fp ? "<wp:cNvGraphicFramePr/>" : "", wpc ? "wordprocessingCanvas" : "wordprocessingGroup");
         dx_drawing_group(x, data, len, cx, cy);
-        pb_printf(o, "</a:graphicData></a:graphic>%s</w:drawing></mc:Choice></mc:AlternateContent></w:r>",
-                  fp ? "</wp:anchor>" : "</wp:inline>");
+        pb_printf(o, "</a:graphicData></a:graphic>%s</w:drawing></mc:Choice>", fp ? "</wp:anchor>" : "</wp:inline>");
+        dx_kept_fallback(x, data, len);     /* the VML beside it, kept as it came, for readers without DrawingML */
+        pb_puts(o, "</mc:AlternateContent></w:r>");
         return;
     }
 
@@ -876,11 +909,97 @@ static void dx_txbx_table(dxo* x, const pj_node* tbl, int depth) {
     pb_puts(o, "</w:tbl><w:p/>");   /* and so does a text box: after its table */
 }
 
+/* A drawing's own XML, kept as it came from a .docx, written back as it was: its references to pictures (r:embed,
+   r:link, r:id) renamed to this package's, the rest byte for byte. */
+static void dx_kept_xml(dxo* x, const char* s, size_t n, const pj_node* rels, const pj_node* styles) {
+    static const char* const styled[] = { "w:pStyle w:val=\"", "w:rStyle w:val=\"", "w:tblStyle w:val=\"" };
+    pd_buf* o = x->o;
+    size_t i = 0, from = 0, j;
+
+    while (i + 3 < n) {
+        for (j = 0; j < sizeof(styled) / sizeof(styled[0]); j++) {     /* a style, by the id written for it */
+            size_t sl = strlen(styled[j]);
+
+            if (i + sl < n && !memcmp(s + i, styled[j], sl)) {
+                const char* v0 = s + i + sl, *v1 = memchr(v0, '"', n - (size_t)(v0 - s));
+                const pj_node* st;
+                char id[64], out[80];
+
+                if (v1 && (size_t)(v1 - v0) < sizeof(id)) {
+                    memcpy(id, v0, (size_t)(v1 - v0));
+                    id[v1 - v0] = '\0';
+                    st = styles ? pj_get(styles, id) : NULL;
+
+                    if (st) {
+                        dx_sid(x->d, (pd_style_id)pj_int_or(st, 0), out, sizeof(out));
+                        pb_put(o, s + from, (size_t)(v0 - (s + from)));
+                        pb_puts(o, out);
+                        from = (size_t)(v1 - s);
+                    }
+                }
+
+                i += sl;
+                break;
+            }
+        }
+
+        if (((s[i] == 'r' && s[i + 1] == ':' && (!strncmp(s + i + 2, "embed=\"", 7) || !strncmp(s + i + 2, "link=\"", 6) ||
+                                                   !strncmp(s + i + 2, "id=\"", 4))) ||
+                (s[i] == 'o' && s[i + 1] == ':' && !strncmp(s + i + 2, "relid=\"", 7))) &&
+                (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t' || s[i - 1] == '\n')) {
+            const char* q = memchr(s + i, '"', n - i);
+            const char* e = q ? memchr(q + 1, '"', n - (size_t)(q + 1 - s)) : NULL;
+            const pj_node* r;
+            char rid[64];
+            const char* name;
+            int m = -1;
+
+            if (q && e && (size_t)(e - q - 1) < sizeof(rid)) {
+                memcpy(rid, q + 1, (size_t)(e - q - 1));
+                rid[e - q - 1] = '\0';
+                r = rels ? pj_get(rels, rid) : NULL;
+                m = r ? dx_media(x, (pd_res_id)pj_int_or(r, 0), &name) : -1;
+            }
+
+            if (m >= 0) {
+                pb_put(o, s + from, (size_t)(q + 1 - (s + from)));
+                pb_printf(o, "rIdm%d", m + 1);
+                from = (size_t)(e - s);
+                i = from;
+                continue;
+            }
+        }
+
+        i++;
+    }
+
+    pb_put(o, s + from, n - from);
+}
+
+/* a kept drawing's mc:Fallback, its references renamed as the drawing's are; nothing when there is none */
+static void dx_kept_fallback(dxo* x, const void* data, size_t len) {
+    pj_doc* doc = pj_parse(data, len, 0, NULL);
+    const pj_node* root = doc ? pj_root(doc) : NULL, *fb = root ? pj_get(root, "fallback") : NULL;
+
+    if (fb && fb->type == PJ_STR && fb->len > 0 && pj_get(root, "xml")) {
+        dx_kept_xml(x, fb->s, fb->len, pj_get(root, "rels"), pj_get(root, "styles"));
+    }
+
+    pj_free(doc);
+}
+
 static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx, long long cy) {
     pd_buf* o = x->o;
     pj_doc* doc = pj_parse(data, len, 0, NULL);
     const pj_node* root = doc ? pj_root(doc) : NULL, *items = root ? pj_get(root, "items") : NULL, *it;
+    const pj_node* xml = root ? pj_get(root, "xml") : NULL;
     int id = 1;
+
+    if (xml && xml->type == PJ_STR && xml->len > 0) {
+        dx_kept_xml(x, xml->s, xml->len, pj_get(root, "rels"), pj_get(root, "styles"));
+        pj_free(doc);
+        return;
+    }
 
     pb_printf(o, "<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
               "<a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm></wpg:grpSpPr>", cx, cy,
@@ -5168,13 +5287,14 @@ static void dw_table_props(dw* w) {
    name, based on Normal, holding what the style and those it is based on
    say: the paragraph then carries only what it sets itself, and keeps its
    style's name (and contextual spacing knows its neighbours' styles). */
-static void dw_custom_style(dw* w, pd_bld* b) {
-    const dstyle_x* st = find_style(w->X, w->pstyle);
-    const char* name = st && st->name[0] ? st->name : w->pstyle;
+/* Word's paragraph style WID as one of the document's, made from its chain on first use: its id, 0 if it is none */
+static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid) {
+    const dstyle_x* st = find_style(X, wid);
+    const char* name = st && st->name[0] ? st->name : wid;
     pd_style_id normal = pd_doc_style_find(b->d, "Normal"), sid = pd_doc_style_find(b->d, name);
 
     if (!st || st->type != 1 || !name[0] || strcmp(name, "Normal") == 0) {
-        return;
+        return sid;
     }
 
     if (!sid) {
@@ -5183,7 +5303,7 @@ static void dw_custom_style(dw* w, pd_bld* b) {
         pd_char_props rc;
 
         memset(&sty, 0, sizeof(sty));
-        style_chain(w->X, w->pstyle, &sty, 0);
+        style_chain(X, wid, &sty, 0);
         pd_doc_style_resolve(b->d, normal, &rp, &rc);
         line_finish(&sty, (sty.cp.mask & PD_CP_SIZE) ? sty.cp.size : rc.size);
         sty.pp.mask &= ~PD_PP_NEXT_STYLE;
@@ -5253,8 +5373,19 @@ static void dw_custom_style(dw* w, pd_bld* b) {
         }
 
         if (pd_doc_style_define(b->d, name, PD_STYLE_PARAGRAPH, normal, &sty.pp, &sty.cp, &sid) != PD_OK) {
-            return;
+            return 0;
         }
+    }
+
+    return sid;
+}
+
+static void dw_custom_style(dw* w, pd_bld* b) {
+    const dstyle_x* st = find_style(w->X, w->pstyle);
+    const char* name = st && st->name[0] ? st->name : w->pstyle;
+
+    if (!st || st->type != 1 || !name[0] || strcmp(name, "Normal") == 0 || !custom_style_define(w->X, b, w->pstyle)) {
+        return;
     }
 
     bld_para_style(b, name, PD_ROLE_BODY, 0);
@@ -6150,6 +6281,216 @@ static int dw_color(const dxi* X, const pd_markup* g, const char* t, uint32_t* o
     return 0;
 }
 
+/* N bytes of H holding the first of NN bytes of NEEDLE, or NULL */
+static const char* dw_memmem(const char* h, size_t n, const char* needle, size_t nn) {
+    size_t i;
+
+    for (i = 0; nn && i + nn <= n; i++) {
+        if (h[i] == needle[0] && !memcmp(h + i, needle, nn)) {
+            return h + i;
+        }
+    }
+
+    return NULL;
+}
+
+/* Whether markup RAW0..RAW1 can be written back as it is: every prefix one a written document declares, and every
+   reference (r:embed, r:id, r:link, o:relid) to a picture -- one read already (REL_ID), or, with LOAD, read now and
+   added. */
+static int dw_xml_writable(dxi* X, const char* raw0, const char* raw1, char (*rel_id)[24], pd_res_id* rel_res, int* nrel,
+                           int load) {
+    const char* q;
+    int ok = raw1 > raw0, k;
+
+    for (q = raw0; ok && q < raw1; q++) {
+        const char* e, *c;
+
+        if (*q != '<' || q + 1 >= raw1 || q[1] == '/' || q[1] == '?' || q[1] == '!') {
+            continue;
+        }
+
+        for (e = q + 1; e < raw1 && *e != '>'; e++) {
+            if (*e == '"') {    /* past a value, which may hold anything */
+                const char* ce = memchr(e + 1, '"', (size_t)(raw1 - e - 1));
+
+                e = ce ? ce : raw1 - 1;
+            }
+        }
+
+        for (c = q + 1; ok && c < e; c++) {
+            const char* b2;
+
+            if (*c == '"') {
+                const char* ce = memchr(c + 1, '"', (size_t)(e - c - 1));
+
+                c = ce ? ce : e;
+                continue;
+            }
+
+            if (*c != ':') {
+                continue;
+            }
+
+            for (b2 = c; b2 > q + 1 && (isalnum((unsigned char)b2[-1]) || b2[-1] == '_' || b2[-1] == '-'); b2--) {
+            }
+
+            if (c - b2 == 5 && !memcmp(b2, "xmlns", 5)) {
+                continue;
+            }
+
+            if (!dx_prefix_declared(b2, (size_t)(c - b2))) {
+                ok = 0;
+            } else if ((c - b2 == 1 && *b2 == 'r') || (c - b2 == 1 && *b2 == 'o' && !strncmp(c + 1, "relid=", 6))) {
+                const char* qv = memchr(c, '"', (size_t)(e - c));
+                const char* qe = qv ? memchr(qv + 1, '"', (size_t)(e - qv - 1)) : NULL;
+                int found = 0;
+
+                if (!qv || !qe || (size_t)(qe - qv - 1) >= sizeof(rel_id[0])) {
+                    ok = 0;
+                    continue;
+                }
+
+                for (k = 0; k < *nrel; k++) {
+                    found |= strlen(rel_id[k]) == (size_t)(qe - qv - 1) && !memcmp(rel_id[k], qv + 1, (size_t)(qe - qv - 1));
+                }
+
+                if (!found && load && *nrel < 64) {     /* a picture the fallback alone shows */
+                    char id[24];
+                    pd_res_id r;
+
+                    memcpy(id, qv + 1, (size_t)(qe - qv - 1));
+                    id[qe - qv - 1] = '\0';
+                    r = dw_resource(X, id);
+
+                    if (r) {
+                        snprintf(rel_id[*nrel], sizeof(rel_id[0]), "%s", id);
+                        rel_res[(*nrel)++] = r;
+                        found = 1;
+                    }
+                }
+
+                ok = found;
+            }
+        }
+
+        q = e;
+    }
+
+    return ok;
+}
+
+/* The group's own XML (RAW0 to RAW1) into its drawing, and the VML Word keeps beside it for readers without
+   DrawingML (FB0 to FB1, its mc:Fallback, or NULL), with the pictures they name by relationship id -- when every
+   reference is to a picture and every prefix one a written document declares, so that a .docx gets them back as
+   they came rather than the drawing made from them. Otherwise nothing, and the drawing is written. */
+static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, const char* fb0, const char* fb1,
+                        int canvas, int rel_ok, char (*rel_id)[24], pd_res_id* rel_res, int nrel) {
+    static const char* const renumbered[] = { "<w:numPr", "<w:commentRangeStart", "<w:commentReference",
+                                              "<w:footnoteReference", "<w:endnoteReference"
+                                            };
+    static const char* const styled[] = { "w:pStyle w:val=\"", "w:rStyle w:val=\"", "w:tblStyle w:val=\"" };
+    size_t rawn = (size_t)(raw1 - raw0), j;
+    int ok = rel_ok && rawn > 0 && rawn < 16u * 1024 * 1024, fb_ok = fb0 && fb1 > fb0, k, first = 1;
+
+    /* what the writer numbers afresh (lists, comments, notes) and so cannot keep pointing at: made, not kept */
+    for (j = 0; ok && j < sizeof(renumbered) / sizeof(renumbered[0]); j++) {
+        ok = dw_memmem(raw0, rawn, renumbered[j], strlen(renumbered[j])) == NULL;
+    }
+
+    ok = ok && dw_xml_writable(X, raw0, raw1, rel_id, rel_res, &nrel, 0);
+
+    if (!ok) {
+        return;
+    }
+
+    for (j = 0; fb_ok && j < sizeof(renumbered) / sizeof(renumbered[0]); j++) {
+        fb_ok = dw_memmem(fb0, (size_t)(fb1 - fb0), renumbered[j], strlen(renumbered[j])) == NULL;
+    }
+
+    fb_ok = fb_ok && dw_xml_writable(X, fb0, fb1, rel_id, rel_res, &nrel, 1);
+    pb_printf(o, ",\"kind\":\"%s\",\"rels\":{", canvas ? "wpc" : "wgp");
+
+    for (k = 0; k < nrel; k++) {
+        if (k) {
+            pb_putc(o, ',');
+        }
+
+        json_str(o, rel_id[k], strlen(rel_id[k]));
+        pb_printf(o, ":%d", (int)rel_res[k]);
+    }
+
+    /* the styles its text names, by Word's id, as the document's: the writer names them its own way */
+    pb_puts(o, "},\"styles\":{");
+
+    for (j = 0; j < sizeof(styled) / sizeof(styled[0]); j++) {
+        int part;
+
+        for (part = 0; part < (fb_ok ? 2 : 1); part++) {
+            const char* p = part ? fb0 : raw0, *end = part ? fb1 : raw1;
+            size_t sl = strlen(styled[j]);
+
+            while ((p = dw_memmem(p, (size_t)(end - p), styled[j], sl)) != NULL) {
+                const char* v0 = p + sl, *v1 = memchr(v0, '"', (size_t)(end - v0));
+                char id[64];
+                const dstyle_x* st;
+                pd_style_id sid;
+
+                p = v0;
+
+                if (!v1 || (size_t)(v1 - v0) >= sizeof(id)) {
+                    continue;
+                }
+
+                memcpy(id, v0, (size_t)(v1 - v0));
+                id[v1 - v0] = '\0';
+                st = find_style(X, id);
+                sid = pd_doc_style_find(X->b->d, st && st->name[0] ? st->name : id);
+
+                if (!sid && st && st->name[0] && islower((unsigned char)st->name[0])) {
+                    /* Word's built-in names are lower case (caption, heading 2): the document's own, capitalised */
+                    char cap[64];
+
+                    snprintf(cap, sizeof(cap), "%s", st->name);
+                    cap[0] = (char)toupper((unsigned char)cap[0]);
+                    sid = pd_doc_style_find(X->b->d, cap);
+                }
+
+                if (!sid && st && st->type == 1) {  /* used in the drawing alone: made now, as the body would */
+                    sid = custom_style_define(X, X->b, id);
+                } else if (!sid && st && st->type == 2) {   /* a character style: its properties, under its name */
+                    dprops cs;
+
+                    memset(&cs, 0, sizeof(cs));
+                    style_chain(X, id, &cs, 0);
+
+                    if (pd_doc_style_define(X->b->d, st->name[0] ? st->name : id, PD_STYLE_CHARACTER, 0, NULL, &cs.cp,
+                                            &sid) != PD_OK) {
+                        sid = 0;
+                    }
+                }
+
+                if (sid) {
+                    if (!first) {
+                        pb_putc(o, ',');
+                    }
+
+                    first = 0;
+                    json_str(o, id, strlen(id));
+                    pb_printf(o, ":%d", (int)sid);
+                }
+            }
+        }
+    }
+
+    pb_puts(o, "},\"xml\":");
+    json_str(o, raw0, rawn);
+
+    if (fb_ok) {
+        pb_puts(o, ",\"fallback\":");
+        json_str(o, fb0, (size_t)(fb1 - fb0));
+    }
+}
+
 /* A Word drawing canvas (wpc) or group (wpg) as one picture: its pictures,
    shapes and text boxes where the group's coordinates put them, written as
    a drawing resource (application/vnd.parade.drawing+json) the layout draws.
@@ -6172,6 +6513,10 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     uint32_t gfill[17], gfill_new = 0, *gclr = NULL;     /* each group's fill, for a shape's grpFill */
     int g_in_ln = 0;
     dw_guides gds;
+    const char* raw0;                                   /* the group's own XML, from its opening tag */
+    char rel_id[64][24];                                /* the pictures it names, by relationship id */
+    pd_res_id rel_res[64];
+    int nrel = 0, rel_ok = 1;
     double cg_xy[4096], cg_pt[6];   /* a custom geometry's points (its own space), NAN pairs between rings */
     long long cg_w = 0, cg_h = 0;
     int cg_n = 0, cg_npt = 0, cg_closed = 0, cg_new_ring = 1, k2;
@@ -6194,6 +6539,13 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
     memset(&xf, 0, sizeof(xf));
     memset(gfill, 0, sizeof(gfill));
+
+    /* where the group's opening tag began: its XML is kept whole, for a .docx written back as it was */
+    raw0 = m->s + (m->pos > 0 ? m->pos - 1 : 0);    /* the last character of the opening tag, its '>' */
+
+    while (raw0 > m->s && *raw0 != '<') {
+        raw0--;
+    }
     memset(&gds, 0, sizeof(gds));
     memset(&o, 0, sizeof(o));
     memset(&text, 0, sizeof(text));
@@ -6293,6 +6645,13 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     inl_blip[0] = '\0';
                 } else if (g.type == MT_CLOSE && !--in_inl && inl_blip[0] && inl_cx > 0 && inl_cy > 0) {
                     pd_res_id r = dw_resource(X, inl_blip);
+
+                    if (r && nrel < 64) {   /* by its id: the XML kept names it so */
+                        snprintf(rel_id[nrel], sizeof(rel_id[0]), "%.23s", inl_blip);
+                        rel_res[nrel++] = r;
+                    } else if (r) {
+                        rel_ok = 0;
+                    }
 
                     if (r) {
                         if (!para_open) {
@@ -6451,6 +6810,13 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
             if (kind == 1 && blip[0]) {
                 pd_res_id r = dw_resource(X, blip);
+
+                    if (r && nrel < 64) {   /* by its id: the XML kept names it so */
+                        snprintf(rel_id[nrel], sizeof(rel_id[0]), "%.23s", blip);
+                        rel_res[nrel++] = r;
+                    } else if (r) {
+                        rel_ok = 0;
+                    }
 
                 if (r) {
                     ITEM_SEP();
@@ -7109,8 +7475,32 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 #undef FR
 #undef ITEM_SEP
 
-    pb_puts(&o, "]}");
+    pb_puts(&o, "]");
     m->pos += g.pos;
+    {   /* the mc:Fallback after the mc:Choice this group is in: the VML of the same drawing */
+        const char* end = m->s + m->n, *cur = m->s + m->pos;
+        const char* ch = dw_memmem(cur, (size_t)(end - cur), "</mc:Choice>", 12), *fb0 = NULL, *fb1 = NULL;
+        const char* ac = dw_memmem(cur, (size_t)(end - cur), "</mc:AlternateContent>", 22);
+
+        if (ch && ac && ch < ac) {
+            fb0 = ch + 12;
+
+            while (fb0 < ac && isspace((unsigned char)*fb0)) {
+                fb0++;
+            }
+
+            fb1 = dw_memmem(fb0, (size_t)(ac - fb0), "</mc:Fallback>", 14);
+
+            if (fb1 && !strncmp(fb0, "<mc:Fallback", 12)) {
+                fb1 += 14;
+            } else {
+                fb0 = fb1 = NULL;
+            }
+        }
+
+        dw_keep_xml(X, &o, raw0, m->s + m->pos, fb0, fb1, canvas, rel_ok, rel_id, rel_res, nrel);
+    }
+    pb_putc(&o, '}');
 
     if (!o.err && pd_doc_add_resource(X->b->d, "application/vnd.parade.drawing+json", o.p, o.n, &w->drawing_res) != PD_OK) {
         w->drawing_res = 0;
