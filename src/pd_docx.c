@@ -375,6 +375,7 @@ typedef struct {
     } cb[64];                   /* comment range ends in the paragraph being written, in order */
     int ncb, cbi;
     int nrev;                   /* w:ins / w:del ids given out */
+    const pd_char_props* obj_cp;    /* the run an inline picture is in, while it is written */
 } dxo;
 
 static void xesc(pd_buf* o, const char* s, size_t n) {
@@ -507,7 +508,8 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_printf(o, "<w:szCs w:val=\"%d\"/>", (int)SCALE(c->size_cs, 2, 65536));
     }
 
-    if (c->underline != b->underline) {
+    if (c->underline != b->underline || (rstyle && !strcmp(rstyle, "Hyperlink") && !c->underline)) {
+        /* a link not underlined says so: the Hyperlink style it is written in underlines */
         pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name(c->underline));
     }
 
@@ -651,16 +653,22 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     cx = EMU(iw);
     cy = EMU(ih);
     x->docpr++;
-    mark = o->n;
+    pb_puts(o, "<w:r>");
+
+    if (x->obj_cp) {    /* the picture's run as formatted: its size sets its line's */
+        dx_rpr(x, x->obj_cp, &x->base, NULL);
+    }
+
+    mark = o->n;    /* where the run's content starts: after its properties */
 
     if (!fp) {
-        pb_printf(o, "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">"
+        pb_printf(o, "<w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">"
                   "<wp:extent cx=\"%lld\" cy=\"%lld\"/>", cx, cy);
     } else {
         long long gap = EMU(fp->gap);
         int off = (fp->placement & PD_PLACE_OFFSET) && fp->wrap != PD_WRAP_NONE;
 
-        pb_printf(o, "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"%lld\" distR=\"%lld\" "
+        pb_printf(o, "<w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"%lld\" distR=\"%lld\" "
                   "simplePos=\"0\" relativeHeight=\"%d\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" "
                   "allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\">",
                   gap, gap, x->docpr);
@@ -684,7 +692,7 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
         static const char mc_g[] = "<mc:AlternateContent><mc:Choice Requires=\"wpg\">";
         static const char mc_c[] = "<mc:AlternateContent><mc:Choice Requires=\"wpc\">";
         const char* mc = wpc ? mc_c : mc_g;
-        size_t at = mark + strlen("<w:r>"), k = strlen(mc), tail = o->n - at;
+        size_t at = mark, k = strlen(mc), tail = o->n - at;
 
 
         pb_put(o, mc, k);   /* room, then the drawing moved up behind it */
@@ -1486,32 +1494,42 @@ static void dx_comment_bounds(dxo* x, pd_block_id p) {
 }
 
 /* one run of text, inside w:ins or w:del when it is a tracked change */
-static void dx_run(dxo* x, const pd_span* sp, const char* t, size_t n) {
+/* the w:ins or w:del a tracked change's runs go in, opened: its kind (PD_REV_*), 0 when it is none */
+static int dx_rev_open(dxo* x, pd_rev_id rev) {
     pd_buf* o = x->o;
     pd_revision rv;
-    int kind = 0;
 
-    if (sp->cp.revision && pd_doc_revision_get(x->d, sp->cp.revision, &rv) == PD_OK) {
-        kind = rv.kind;
-        pb_printf(o, "<w:%s w:id=\"%d\" w:author=\"", kind == PD_REV_DELETE ? "del" : "ins", ++x->nrev);
-        xesc(o, rv.author, strlen(rv.author));
-
-        if (rv.date[0]) {
-            pb_puts(o, "\" w:date=\"");
-            xesc(o, rv.date, strlen(rv.date));
-        }
-
-        pb_puts(o, "\">");
+    if (!rev || pd_doc_revision_get(x->d, rev, &rv) != PD_OK) {
+        return 0;
     }
+
+    pb_printf(o, "<w:%s w:id=\"%d\" w:author=\"", rv.kind == PD_REV_DELETE ? "del" : "ins", ++x->nrev);
+    xesc(o, rv.author, strlen(rv.author));
+
+    if (rv.date[0]) {
+        pb_puts(o, "\" w:date=\"");
+        xesc(o, rv.date, strlen(rv.date));
+    }
+
+    pb_puts(o, "\">");
+    return rv.kind;
+}
+
+static void dx_rev_close(dxo* x, int kind) {
+    if (kind) {
+        pb_puts(x->o, kind == PD_REV_DELETE ? "</w:del>" : "</w:ins>");
+    }
+}
+
+static void dx_run(dxo* x, const pd_span* sp, const char* t, size_t n) {
+    pd_buf* o = x->o;
+    int kind = dx_rev_open(x, sp->cp.revision);
 
     pb_puts(o, "<w:r>");
     dx_rpr(x, &sp->cp, &x->base, x->in_link ? "Hyperlink" : NULL);
     dx_text_as(o, t, n, kind == PD_REV_DELETE ? "w:delText" : "w:t");
     pb_puts(o, "</w:r>");
-
-    if (kind) {
-        pb_puts(o, kind == PD_REV_DELETE ? "</w:del>" : "</w:ins>");
-    }
+    dx_rev_close(x, kind);
 }
 
 /* comments.xml (and commentsExtended.xml, for replies and resolved ones); 0 when there are none */
@@ -1757,9 +1775,15 @@ static int dx_span(void* user, const pd_span* sp) {
         const pd_inline* ob = &sp->obj;
 
         switch (ob->kind) {
-            case PD_INLINE_IMAGE:
+            case PD_INLINE_IMAGE: {     /* inserted or deleted with the text round it: in its w:ins or w:del */
+                int kind = dx_rev_open(x, sp->cp.revision);
+
+                x->obj_cp = &sp->cp;
                 dx_picture(x, ob, NULL);
+                x->obj_cp = NULL;
+                dx_rev_close(x, kind);
                 break;
+            }
 
             case PD_INLINE_EQUATION:     /* as Word's own math, a display one on its line */
                 if (ob->source && ob->source_len > 0) {
@@ -1823,6 +1847,40 @@ static int dx_span(void* user, const pd_span* sp) {
                         break;
                 }
 
+                if (instr && sp->cp.revision) {
+                    /* in a tracked change: the field's runs (begin, code, result, end) in its w:ins or w:del, which
+                       a w:fldSimple cannot be inside -- a deleted field's code and result as deleted text */
+                    int kind = dx_rev_open(x, sp->cp.revision);
+                    const char* it = kind == PD_REV_DELETE ? "w:delInstrText" : "w:instrText";
+                    char code[96];
+
+                    if (ob->field == PD_FIELD_SEQ) {
+                        snprintf(code, sizeof(code), " SEQ %.40s \\* ARABIC ", ob->name[0] ? ob->name : "Figure");
+                    } else if (ob->field == PD_FIELD_HEADING) {
+                        snprintf(code, sizeof(code), " STYLEREF \"Heading %d\" ", ob->level > 0 ? (int)ob->level : 1);
+                    } else {
+                        snprintf(code, sizeof(code), " %s ", instr);
+                    }
+
+                    /* each run in the text's own size and face: the field takes its format from the first */
+                    pb_puts(o, "<w:r>");
+                    dx_rpr(x, &sp->cp, &x->base, NULL);
+                    pb_printf(o, "<w:fldChar w:fldCharType=\"begin\"/></w:r><w:r>");
+                    dx_rpr(x, &sp->cp, &x->base, NULL);
+                    pb_printf(o, "<%s xml:space=\"preserve\">", it);
+                    xesc(o, code, strlen(code));
+                    pb_printf(o, "</%s></w:r><w:r>", it);
+                    dx_rpr(x, &sp->cp, &x->base, NULL);
+                    pb_puts(o, "<w:fldChar w:fldCharType=\"separate\"/></w:r><w:r>");
+                    dx_rpr(x, &sp->cp, &x->base, NULL);
+                    dx_text_as(o, v, strlen(v), kind == PD_REV_DELETE ? "w:delText" : "w:t");
+                    pb_puts(o, "</w:r><w:r>");
+                    dx_rpr(x, &sp->cp, &x->base, NULL);
+                    pb_puts(o, "<w:fldChar w:fldCharType=\"end\"/></w:r>");
+                    dx_rev_close(x, kind);
+                    break;
+                }
+
                 if (instr && ob->field == PD_FIELD_SEQ) {
                     pb_printf(o, "<w:fldSimple w:instr=\" SEQ %s \\* ARABIC \">", ob->name[0] ? ob->name : "Figure");
                 } else if (instr && ob->field == PD_FIELD_HEADING) {
@@ -1834,6 +1892,7 @@ static int dx_span(void* user, const pd_span* sp) {
 
                 if (v[0]) {
                     pb_puts(o, "<w:r>");
+                    dx_rpr(x, &sp->cp, &x->base, NULL);
                     dx_text(o, v, strlen(v));
                     pb_puts(o, "</w:r>");
                 }
@@ -2606,6 +2665,8 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
 
     if (sp->columns > 1) {
         pb_printf(o, "<w:cols w:num=\"%d\" w:space=\"%d\"/>", (int)sp->columns, TW(sp->column_gap));
+    } else {    /* the gap too, as Word always writes it: read again, it would be the default */
+        pb_printf(o, "<w:cols w:space=\"%d\"/>", TW(sp->column_gap));
     }
 
     if (sp->page_valign) {

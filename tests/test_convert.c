@@ -2267,6 +2267,62 @@ static void test_docx_group_turned_shapes(void) {
     pd_doc_free(d);
 }
 
+/* Through DOCX unchanged: a picture and a SEQ field inside a tracked deletion stay deleted (a figure deleted
+   came back on every save, and moved the pages after it), the field in its text's size; a link Word shows without
+   an underline stays without; a one-column section keeps its column gap. */
+static void test_docx_tracked_objects(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "<Relationship Id=\"rId9\" Type=\"t/hyperlink\" Target=\"https://example.org\" TargetMode=\"External\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">Kept </w:t></w:r><w:del w:id=\"1\" w:author=\"A\"><w:r><w:drawing>"
+        "<wp:inline><wp:extent cx=\"127000\" cy=\"127000\"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip "
+        "r:embed=\"rId5\"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+        "</w:del></w:p>"
+        "<w:p><w:del w:id=\"2\" w:author=\"A\"><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:delText xml:space=\"preserve\">Fig. "
+        "</w:delText></w:r><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r>"
+        "<w:rPr><w:sz w:val=\"20\"/></w:rPr><w:delInstrText> SEQ fig \\* ARABIC </w:delInstrText></w:r><w:r><w:rPr>"
+        "<w:sz w:val=\"20\"/></w:rPr><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:rPr><w:sz w:val=\"20\"/>"
+        "</w:rPr><w:delText>1</w:delText></w:r><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:fldChar "
+        "w:fldCharType=\"end\"/></w:r><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:delText>. Gone.</w:delText></w:r>"
+        "</w:del></w:p>"
+        "<w:p><w:hyperlink r:id=\"rId9\"><w:r><w:rPr><w:color w:val=\"0563C1\"/></w:rPr><w:t>plain link</w:t></w:r>"
+        "</w:hyperlink></w:p>"
+        "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:cols w:space=\"720\"/></w:sectPr>"
+        "</w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec, p0, p1, p2;
+        pd_char_props c;
+        pd_section_props sp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        p0 = pd_doc_child(d, sec, 0);
+        p1 = pd_doc_child(d, sec, 1);
+        p2 = pd_doc_child(d, sec, 2);
+        c = chars_at(d, p0, 5);     /* the picture, after "Kept " */
+        CHECK((c.mask & PD_CP_REVISION) && c.revision != 0);
+        c = chars_at(d, p1, 5);     /* the field, after "Fig. " */
+        CHECK((c.mask & PD_CP_REVISION) && c.revision != 0 && c.size == PD_PT(10));
+        CHECK(chars_at(d, p2, 0).underline == PD_UNDERLINE_NONE);
+        CHECK(pd_doc_section_props(d, sec, &sp) == PD_OK && sp.column_gap == PD_PT(36));
+    }
+
+    pd_doc_free(d);
+}
+
 /* A drawing's caption is a story: a copy of the drawing, pasted, has a caption of its own with the same text --
    editing it leaves the original's alone -- and one pasted into another document has its text too. */
 static void test_drawing_story_copy(void) {
@@ -4322,6 +4378,7 @@ int main(void) {
     test_docx_canvas_3d();
     test_docx_canvas_kept();
     test_drawing_story_copy();
+    test_docx_tracked_objects();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");
