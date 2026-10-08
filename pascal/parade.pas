@@ -825,6 +825,8 @@ function pd_doc_export_range(doc: Ppd_doc; range: pd_range; format: Int32; fn: p
 function pd_doc_import(data: Pointer; len: csize_t; format: Int32; out doc: Ppd_doc): pd_status; cdecl; PDEXT;
 function pd_doc_paste(doc: Ppd_doc; at: pd_pos; data: Pointer; len: csize_t; format: Int32; after: Ppd_pos): pd_status; cdecl; PDEXT;
 function pd_conv_detect(data: Pointer; len: csize_t): Int32; cdecl; PDEXT;
+function pd_docx_drawing_rebuild(doc: Ppd_doc; drawing: pd_res_id; xml: PAnsiChar; len: csize_t;
+  out res: pd_res_id): pd_status; cdecl; PDEXT;
 
 { helpers }
 function PT(v: Double): pd_sp; inline;

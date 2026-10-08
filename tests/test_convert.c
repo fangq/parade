@@ -2267,6 +2267,96 @@ static void test_docx_group_turned_shapes(void) {
     pd_doc_free(d);
 }
 
+/* A drawing made again from its kept XML: unchanged, the same drawing (its text box the same story); a shape's
+   offset changed in the XML, that shape moved. */
+static void test_docx_drawing_rebuild(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpc=\"wpc\" xmlns:wps=\"wps\"><w:body>"
+                    "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"1270000\"/><a:graphic><a:graphicData><wpc:wpc>"
+                    "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                    "<a:prstGeom prst=\"rect\"/><a:solidFill><a:schemeClr val=\"accent1\"/></a:solidFill></wps:spPr><wps:bodyPr/>"
+                    "</wps:wsp><wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"700000\"/><a:ext cx=\"2540000\" cy=\"500000\"/>"
+                    "</a:xfrm><a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Caption</w:t></w:r>"
+                    "</w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpc:wpc></a:graphicData></a:graphic></wp:inline>"
+                    "</w:drawing></w:r></w:p></w:body></w:document>",
+                    NULL);
+    pd_inline o;
+    char* js, *js2, *xml, *items0, *items1;
+    pd_res_id r2;
+    int32_t stories;
+    const char* mime;
+    const void* data;
+    size_t len;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+    js = drawing_json(d, o.resource);
+    CHECK(js != NULL && strstr(js, "\"xml\":\"<wpc:wpc>") != NULL && strstr(js, "\"theme\":[") != NULL);
+
+    if (js) {
+        const char* x0 = strstr(js, "\"xml\":\"") + 7, *x1 = strstr(x0, "</wpc:wpc>") + 10;
+        size_t xn = (size_t)(x1 - x0);
+        char* e;
+
+        /* the XML as it is in the drawing: unescaped (its quotes) */
+        xml = (char*)malloc(xn + 1);
+
+        for (e = xml; x0 < x1; x0++) {
+            if (*x0 == '\\' && x0 + 1 < x1) {
+                x0++;
+            }
+
+            *e++ = *x0;
+        }
+
+        *e = '\0';
+        stories = pd_doc_story_count(d);
+        items0 = strstr(js, "\"items\":[");
+        CHECK(pd_docx_drawing_rebuild(d, o.resource, xml, strlen(xml), &r2) == PD_OK && r2 != 0);
+        js2 = r2 ? drawing_json(d, r2) : NULL;
+        items1 = js2 ? strstr(js2, "\"items\":[") : NULL;
+        CHECK(items0 && items1 && !strncmp(items0, items1, (size_t)(strstr(items0, "],\"kind\"") - items0)));
+        CHECK(pd_doc_story_count(d) == stories);    /* the text box's story the same, none made */
+        free(js2);
+
+        /* the first shape moved half an inch right: its box with it */
+        e = strstr(xml, "<a:off x=\"0\" y=\"0\"/>");
+        CHECK(e != NULL);
+
+        if (e) {
+            char* moved = (char*)malloc(strlen(xml) + 16);
+
+            memcpy(moved, xml, (size_t)(e - xml));
+            strcpy(moved + (e - xml), "<a:off x=\"457200\" y=\"0\"/>");
+            strcat(moved, e + strlen("<a:off x=\"0\" y=\"0\"/>"));
+            CHECK(pd_docx_drawing_rebuild(d, o.resource, moved, strlen(moved), &r2) == PD_OK);
+            js2 = r2 ? drawing_json(d, r2) : NULL;
+            CHECK(js2 && pd_doc_resource(d, r2, &mime, &data, &len) == PD_OK);
+
+            if (js2) {
+                char want[64];
+
+                snprintf(want, sizeof(want), "{\"sid\":0,\"box\":[%d,0,", (int)PD_PT(36));
+                CHECK(strstr(js2, want) != NULL);
+            }
+
+            free(js2);
+            free(moved);
+        }
+
+        free(xml);
+        free(js);
+    }
+
+    pd_doc_free(d);
+}
+
 /* Through DOCX unchanged: a picture and a SEQ field inside a tracked deletion stay deleted (a figure deleted
    came back on every save, and moved the pages after it), the field in its text's size; a link Word shows without
    an underline stays without; a one-column section keeps its column gap. */
@@ -4379,6 +4469,7 @@ int main(void) {
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();
+    test_docx_drawing_rebuild();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

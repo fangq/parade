@@ -18,7 +18,7 @@ interface
 uses
   Classes, SysUtils, Controls, Graphics, LCLType, LCLIntf, ExtCtrls, StdCtrls, Forms, Clipbrd,
   IntfGraphics, GraphType, FPImage, LazFileUtils, LazUTF8, Math, ctypes, Menus, ExtDlgs, fpjson, jsonparser, parade,
-  paradefonts;
+  paradefonts, StrUtils;
 
 type
   TParadeFontEntry = record
@@ -76,6 +76,7 @@ type
     X0, Y0, X1, Y1: Double;
   end;
   TParadeShapeBoxes = array of TParadeShapeBox;
+  TIntegerArray = array of Integer;
 
   TBalloonHit = record
     R: TRect;
@@ -104,6 +105,7 @@ type
     FShapeOn: Boolean;             { a drawing selected, or a shape of it }
     FShapeAt: pd_pos;              { the drawing: its object in the text }
     FShapeSid: Integer;            { the shape (its sid), -1 the whole drawing }
+    FShapeMore: array of Integer;  { more shapes of the drawing, added with Shift+click }
     FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape }
     FShapeFrom: TPoint;            { where it began (client pixels) }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
@@ -238,6 +240,8 @@ type
     function ClickPage(Page: Integer; SX, SY: pd_sp; Shift: TShiftState): Boolean;
     procedure PaintShapeSelection;
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
+    function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
+    function ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
     function ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
     function ShapeDragStart(X, Y: Integer): Boolean;
     procedure ShapeDragMove(X, Y: Integer; Shift: TShiftState);
@@ -304,6 +308,21 @@ type
     function SetShapeBox(Sid: Integer; X0, Y0, X1, Y1: Double): Boolean;
     { the selected shape taken out of its drawing; one step of undo }
     function DeleteShape: Boolean;
+    { the selected shape filled with a colour (None: not filled), outlined (None: no line; Width in points, 0:
+      as it is; the colour clNone: as it is), moved in the order (0 forward, 1 backward, 2 to the front, 3 to the back); the selected shapes
+      (the shape and those added with Shift+click) made a group; the group the selected shape is in undone.
+      Each one step of undo, the drawing made again from its XML as Word will have it }
+    function SetShapeFill(AColor: TColor; None: Boolean): Boolean;
+    function SetShapeLine(AColor: TColor; WidthPt: Double; None: Boolean): Boolean;
+    function ShapeOrder(Mode: Integer): Boolean;
+    function GroupShapes: Boolean;
+    function UngroupShape: Boolean;
+    { the XML kept for Word of the selected drawing; False when it keeps none (made here, or not from a .docx) }
+    function KeptXml(out Xml: string): Boolean;
+    { the shapes selected: the one, and those added (Shift+click), as sids }
+    function SelectedShapes: TIntegerArray;
+    { a shape of the selected drawing added to the selection, or taken out if it is in it (Shift+click) }
+    function ToggleShape(Sid: Integer): Boolean;
     procedure SelectAll;
     procedure Undo;
     procedure Redo;
@@ -4847,8 +4866,9 @@ var
 begin
   if not Assigned(FOnSelectionChange) or FSelQueued then
     Exit;
-  Sig := SysUtils.Format('%d:%d %d:%d %d %d %d %d', [CaretPos.block, CaretPos.offset, AnchorPos.block,
-    AnchorPos.offset, pd_doc_revision(FDoc), FPending.mask, Ord(PendingHere), Ord(FPainter)]);
+  Sig := SysUtils.Format('%d:%d %d:%d %d %d %d %d %d %d %d', [CaretPos.block, CaretPos.offset, AnchorPos.block,
+    AnchorPos.offset, pd_doc_revision(FDoc), FPending.mask, Ord(PendingHere), Ord(FPainter), Ord(FShapeOn),
+    FShapeSid, Length(FShapeMore)]);
   if Sig = FSelSig then
     Exit;
   FSelSig := Sig;
@@ -5146,6 +5166,7 @@ begin
     case Key of
       VK_ESCAPE:    { a shape: back to its drawing; the drawing: back to the text }
         begin
+          SetLength(FShapeMore, 0);
           if FShapeSid >= 0 then
           begin
             FShapeSid := -1;
@@ -5173,6 +5194,7 @@ begin
             else
               K := (K + 1) mod Length(Boxes);
             FShapeSid := Boxes[K].Sid;
+            SetLength(FShapeMore, 0);
             SetCaret(FShapeAt, False);
           end;
           Invalidate;
@@ -5534,6 +5556,10 @@ begin
     Sid := PickShape(D, Page, SX, SY)
   else
     Sid := -1;
+  if (ssShift in Shift) and FShapeOn and (FShapeSid >= 0) and (Sid >= 0) and (FShapeAt.block = D.block) and
+     (FShapeAt.offset = D.offset) then
+    Exit(ToggleShape(Sid));    { one more shape of the drawing, for a group }
+  SetLength(FShapeMore, 0);
   FShapeOn := True;
   FShapeAt := D;
   FShapeSid := Sid;
@@ -5558,6 +5584,37 @@ begin
     Exit;
   FShapeOn := False;
   FShapeSid := -1;
+  SetLength(FShapeMore, 0);
+  Invalidate;
+end;
+
+function TParadeEdit.ToggleShape(Sid: Integer): Boolean;
+var
+  I, K: Integer;
+begin
+  Result := FShapeOn and (Sid >= 0);
+  if not Result then
+    Exit;
+  if FShapeSid < 0 then
+    FShapeSid := Sid
+  else if Sid <> FShapeSid then
+  begin
+    K := -1;
+    for I := 0 to High(FShapeMore) do
+      if FShapeMore[I] = Sid then
+        K := I;
+    if K >= 0 then
+    begin
+      FShapeMore[K] := FShapeMore[High(FShapeMore)];
+      SetLength(FShapeMore, Length(FShapeMore) - 1);
+    end
+    else
+    begin
+      SetLength(FShapeMore, Length(FShapeMore) + 1);
+      FShapeMore[High(FShapeMore)] := Sid;
+    end;
+  end;
+  SetCaret(FShapeAt, False);
   Invalidate;
 end;
 
@@ -5589,6 +5646,20 @@ begin
         BX1 := X + Boxes[I].X1 * W / JW;
         BY1 := Y + Boxes[I].Y1 * H / JH;
       end;
+  end;
+  if (Length(FShapeMore) > 0) and (JW > 0) and (JH > 0) then
+  begin   { the shapes added to it: a box each, without handles }
+    Canvas.Brush.Style := bsClear;
+    Canvas.Pen.Color := $00D77800;
+    Canvas.Pen.Width := 1;
+    Canvas.Pen.Style := psDot;
+    for I := 0 to High(Boxes) do
+      for K := 0 to High(FShapeMore) do
+        if Boxes[I].Sid = FShapeMore[K] then
+          Canvas.Rectangle(PageLeft(Pg) + Round((X + Boxes[I].X0 * W / JW) * PxPerSp),
+            PageTop(Pg) + Round((Y + Boxes[I].Y0 * H / JH) * PxPerSp),
+            PageLeft(Pg) + Round((X + Boxes[I].X1 * W / JW) * PxPerSp) + 1,
+            PageTop(Pg) + Round((Y + Boxes[I].Y1 * H / JH) * PxPerSp) + 1);
   end;
   L := PageLeft(Pg) + Round(BX0 * PxPerSp);
   T := PageTop(Pg) + Round(BY0 * PxPerSp);
@@ -5625,6 +5696,127 @@ begin
       Max(Rc.Top, Rc.Bottom) + 1);
     Canvas.Pen.Style := psSolid;
   end;
+end;
+
+type
+  { an element of kept drawing XML: where it starts (its '<') and ends (after its closing tag), its name, its parent }
+  TXmlEl = record
+    A, B: Integer;
+    Name: string;
+    Parent: Integer;
+  end;
+  TXmlEls = array of TXmlEl;
+
+{ every element of an XML fragment, in document order }
+function XmlElements(const Xml: string): TXmlEls;
+var
+  I, J, N, Cur: Integer;
+  Name: string;
+  Stack: array of Integer;
+  Depth: Integer;
+begin
+  Result := nil;
+  N := 0;
+  Depth := 0;
+  SetLength(Stack, 64);
+  I := 1;
+  while I <= Length(Xml) do
+  begin
+    if Xml[I] <> '<' then
+    begin
+      Inc(I);
+      Continue;
+    end;
+    if (I < Length(Xml)) and (Xml[I + 1] in ['?', '!']) then
+    begin
+      J := PosEx('>', Xml, I);
+      if J = 0 then Break;
+      I := J + 1;
+      Continue;
+    end;
+    J := I + 1;
+    while (J <= Length(Xml)) and (Xml[J] <> '>') do   { the tag's end, past quoted values }
+    begin
+      if Xml[J] = '"' then
+      begin
+        Inc(J);
+        while (J <= Length(Xml)) and (Xml[J] <> '"') do
+          Inc(J);
+      end;
+      Inc(J);
+    end;
+    if J > Length(Xml) then
+      Break;
+    if Xml[I + 1] = '/' then
+    begin   { a closing tag: the element open longest ago that is still open ends here }
+      if Depth > 0 then
+      begin
+        Dec(Depth);
+        Result[Stack[Depth]].B := J + 1;
+      end;
+    end
+    else
+    begin
+      Cur := I + 1;
+      while (Cur <= J) and not (Xml[Cur] in [' ', '>', '/', #9, #10, #13]) do
+        Inc(Cur);
+      Name := Copy(Xml, I + 1, Cur - I - 1);
+      SetLength(Result, N + 1);
+      Result[N].A := I;
+      Result[N].B := J + 1;
+      Result[N].Name := Name;
+      Result[N].Parent := -1;
+      if Depth > 0 then
+        Result[N].Parent := Stack[Depth - 1];
+      if Xml[J - 1] <> '/' then     { not empty: open until its closing tag }
+      begin
+        if Depth >= Length(Stack) then
+          SetLength(Stack, Depth * 2);
+        Stack[Depth] := N;
+        Inc(Depth);
+      end;
+      Inc(N);
+    end;
+    I := J + 1;
+  end;
+end;
+
+{ a shape of a drawing (what a selection or the order is about): a shape, a picture, a group }
+function IsShapeEl(const Name: string): Boolean;
+begin
+  Result := (Name = 'wps:wsp') or (Name = 'pic:pic') or (Name = 'wpg:grpSp') or (Name = 'wpg:wgp') or (Name = 'wpg:graphicFrame');
+end;
+
+{ the element of the n-th wps:wsp / pic:pic (a sid); -1 if none }
+function SidElement(const Els: TXmlEls; Sid: Integer): Integer;
+var
+  I, K: Integer;
+begin
+  Result := -1;
+  K := -1;
+  for I := 0 to High(Els) do
+    if (Els[I].Name = 'wps:wsp') or (Els[I].Name = 'pic:pic') then
+    begin
+      Inc(K);
+      if K = Sid then
+        Exit(I);
+    end;
+end;
+
+{ the sid of the first wps:wsp / pic:pic at or after a place of the XML }
+function SidAt(const Els: TXmlEls; At: Integer): Integer;
+var
+  I, K: Integer;
+begin
+  Result := -1;
+  K := -1;
+  for I := 0 to High(Els) do
+    if (Els[I].Name = 'wps:wsp') or (Els[I].Name = 'pic:pic') then
+    begin
+      Inc(K);
+      if Els[I].A >= At then
+        Exit(K);
+    end;
 end;
 
 { the n-th shape element (wps:wsp or pic:pic) of kept drawing XML: where it starts and where it ends }
@@ -5774,12 +5966,20 @@ end;
 { the drawing at P given a new description: the old object out and the new in, one step of undo }
 function TParadeEdit.ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
 var
-  O: pd_inline;
   R: pd_res_id;
 begin
+  Result := not FReadOnly and
+    (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(Json), Length(Json), R) = PD_OK) and
+    ReplaceDrawingRes(P, R, Lbl);
+end;
+
+{ the drawing at P with another description (a resource of the document): its object swapped, one step of undo }
+function TParadeEdit.ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
+var
+  O: pd_inline;
+begin
   Result := False;
-  if FReadOnly or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or
-     (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(Json), Length(Json), R) <> PD_OK) then
+  if FReadOnly or (R = 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
     Exit;
   O.resource := R;
   pd_doc_begin_group(FDoc, PAnsiChar(Lbl));
@@ -5788,6 +5988,405 @@ begin
   pd_doc_end_group(FDoc);
   SetCaret(P, False);
   Changed;
+end;
+
+{ ---------------- shapes edited in the XML kept for Word ---------------- }
+
+function TParadeEdit.KeptXml(out Xml: string): Boolean;
+var
+  J: TJSONObject;
+begin
+  Result := False;
+  Xml := '';
+  if not FShapeOn then
+    Exit;
+  J := DrawingJson(FDoc, FShapeAt);
+  if J = nil then
+    Exit;
+  try
+    if (J.Find('xml') <> nil) and (J.Find('xml').JSONType = jtString) then
+    begin
+      Xml := J.Strings['xml'];
+      Result := Xml <> '';
+    end;
+  finally
+    J.Free;
+  end;
+end;
+
+{ the selected drawing made again from edited XML: its object swapped, the shape NewSid selected (-1: the drawing) }
+function TParadeEdit.ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
+var
+  O: pd_inline;
+  R: pd_res_id;
+begin
+  Result := FShapeOn and (pd_doc_inline_at(FDoc, FShapeAt, O) = PD_OK) and
+    (pd_docx_drawing_rebuild(FDoc, O.resource, PAnsiChar(Xml), Length(Xml), R) = PD_OK) and
+    ReplaceDrawingRes(FShapeAt, R, Lbl);
+  if Result then
+  begin
+    FShapeOn := True;
+    FShapeSid := NewSid;
+    SetLength(FShapeMore, 0);
+    Invalidate;
+  end;
+end;
+
+function HexRGB(C: TColor): string;
+var
+  RGB: LongInt;
+begin
+  RGB := ColorToRGB(C);
+  Result := IntToHex(Red(RGB), 2) + IntToHex(Green(RGB), 2) + IntToHex(Blue(RGB), 2);
+end;
+
+{ the child of element E named N (its index); -1 if none }
+function ChildNamed(const Els: TXmlEls; E: Integer; const N: string): Integer;
+var
+  I: Integer;
+begin
+  Result := -1;
+  for I := E + 1 to High(Els) do
+    if (Els[I].Parent = E) and (Els[I].Name = N) then
+      Exit(I);
+end;
+
+{ the shape's properties element (wps:spPr, pic:spPr, wpg:grpSpPr) }
+function PropsOf(const Els: TXmlEls; E: Integer): Integer;
+var
+  I: Integer;
+begin
+  Result := -1;
+  for I := E + 1 to High(Els) do
+    if (Els[I].Parent = E) and ((Els[I].Name = 'wps:spPr') or (Els[I].Name = 'pic:spPr') or
+       (Els[I].Name = 'wpg:grpSpPr')) then
+      Exit(I);
+end;
+
+{ where in element E (not empty) its children end: its closing tag's start }
+function CloseOf(const Xml: string; const El: TXmlEl): Integer;
+begin
+  Result := El.B - 1;
+  while (Result > El.A) and (Xml[Result] <> '<') do
+    Dec(Result);
+end;
+
+{ a fill or a line put into a properties element: its old fill (of the kinds a fill is) replaced, or the new one
+  put before what follows a fill (the line, the effects, the 3-D); an empty element opened for it }
+function PutIntoProps(const Xml: string; const Els: TXmlEls; Pr: Integer; const Kinds: array of string;
+  const Before: array of string; const NewEl: string): string;
+var
+  I, K, At: Integer;
+begin
+  if Copy(Xml, Els[Pr].B - 2, 2) = '/>' then     { <wps:spPr/>: opened }
+    Exit(Copy(Xml, 1, Els[Pr].A - 1) + '<' + Els[Pr].Name + '>' + NewEl + '</' + Els[Pr].Name + '>' +
+      Copy(Xml, Els[Pr].B, MaxInt));
+  for I := Pr + 1 to High(Els) do
+    if Els[I].Parent = Pr then
+      for K := 0 to High(Kinds) do
+        if Els[I].Name = Kinds[K] then
+          Exit(Copy(Xml, 1, Els[I].A - 1) + NewEl + Copy(Xml, Els[I].B, MaxInt));
+  At := CloseOf(Xml, Els[Pr]);
+  for I := Pr + 1 to High(Els) do
+    if Els[I].Parent = Pr then
+      for K := 0 to High(Before) do
+        if (Els[I].Name = Before[K]) and (Els[I].A < At) then
+          At := Els[I].A;
+  Result := Copy(Xml, 1, At - 1) + NewEl + Copy(Xml, At, MaxInt);
+end;
+
+function TParadeEdit.SetShapeFill(AColor: TColor; None: Boolean): Boolean;
+var
+  Xml, F: string;
+  Els: TXmlEls;
+  E, Pr: Integer;
+begin
+  Result := False;
+  if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  Pr := PropsOf(Els, E);
+  if (E < 0) or (Pr < 0) then
+    Exit;
+  if None then
+    F := '<a:noFill/>'
+  else
+    F := '<a:solidFill><a:srgbClr val="' + HexRGB(AColor) + '"/></a:solidFill>';
+  Xml := PutIntoProps(Xml, Els, Pr, ['a:noFill', 'a:solidFill', 'a:gradFill', 'a:pattFill', 'a:blipFill', 'a:grpFill'],
+    ['a:ln', 'a:effectLst', 'a:effectDag', 'a:scene3d', 'a:sp3d', 'a:extLst'], F);
+  Result := ApplyKeptXml(Xml, 'Fill', FShapeSid);
+end;
+
+function TParadeEdit.SetShapeLine(AColor: TColor; WidthPt: Double; None: Boolean): Boolean;
+var
+  Xml, F, Ln, W: string;
+  Els, LEls: TXmlEls;
+  E, Pr, L, I, P, Len: Integer;
+begin
+  Result := False;
+  if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  Pr := PropsOf(Els, E);
+  if (E < 0) or (Pr < 0) then
+    Exit;
+  if None then
+    F := '<a:noFill/>'
+  else if AColor = clNone then
+    F := ''
+  else
+    F := '<a:solidFill><a:srgbClr val="' + HexRGB(AColor) + '"/></a:solidFill>';
+  L := ChildNamed(Els, Pr, 'a:ln');
+  if L < 0 then
+  begin
+    W := '';
+    if WidthPt > 0 then
+      W := ' w="' + IntToStr(Round(WidthPt * 12700)) + '"';
+    Xml := PutIntoProps(Xml, Els, Pr, [], ['a:effectLst', 'a:effectDag', 'a:scene3d', 'a:sp3d', 'a:extLst'],
+      '<a:ln' + W + '>' + F + '</a:ln>');
+  end
+  else
+  begin   { the line there: its width, and its fill (what colour it is) }
+    Ln := Copy(Xml, Els[L].A, Els[L].B - Els[L].A);
+    if Copy(Ln, Length(Ln) - 1, 2) = '/>' then
+      Ln := Copy(Ln, 1, Length(Ln) - 2) + '></a:ln>';
+    if WidthPt > 0 then
+    begin
+      P := AttrSpan(Ln, 1, 'w', Len);
+      if P > 0 then
+      begin
+        Delete(Ln, P, Len);
+        Insert(IntToStr(Round(WidthPt * 12700)), Ln, P);
+      end
+      else
+        Insert(' w="' + IntToStr(Round(WidthPt * 12700)) + '"', Ln, 6);
+    end;
+    LEls := XmlElements(Ln);
+    I := -1;
+    for P := 1 to High(LEls) do
+      if (LEls[P].Parent = 0) and ((LEls[P].Name = 'a:noFill') or (LEls[P].Name = 'a:solidFill') or
+         (LEls[P].Name = 'a:gradFill') or (LEls[P].Name = 'a:pattFill')) then
+      begin
+        I := P;
+        Break;
+      end;
+    if F = '' then
+    else if I >= 0 then
+      Ln := Copy(Ln, 1, LEls[I].A - 1) + F + Copy(Ln, LEls[I].B, MaxInt)
+    else
+      Ln := Copy(Ln, 1, PosEx('>', Ln, 1)) + F + Copy(Ln, PosEx('>', Ln, 1) + 1, MaxInt);
+    Xml := Copy(Xml, 1, Els[L].A - 1) + Ln + Copy(Xml, Els[L].B, MaxInt);
+  end;
+  Result := ApplyKeptXml(Xml, 'Line', FShapeSid);
+end;
+
+{ the shape's element among its parent's shapes, moved: 0 one forward, 1 one back, 2 to the front, 3 to the back }
+function TParadeEdit.ShapeOrder(Mode: Integer): Boolean;
+var
+  Xml, Mine, Rest: string;
+  Els: TXmlEls;
+  E, I, K, N, At: Integer;
+  Sibs: array of Integer;
+begin
+  Result := False;
+  if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  if E < 0 then
+    Exit;
+  N := 0;
+  K := -1;
+  for I := 0 to High(Els) do
+    if (Els[I].Parent = Els[E].Parent) and IsShapeEl(Els[I].Name) then
+    begin
+      SetLength(Sibs, N + 1);
+      Sibs[N] := I;
+      if I = E then
+        K := N;
+      Inc(N);
+    end;
+  if (K < 0) or ((Mode in [0, 2]) and (K = N - 1)) or ((Mode in [1, 3]) and (K = 0)) then
+    Exit;
+  Mine := Copy(Xml, Els[E].A, Els[E].B - Els[E].A);
+  Rest := Copy(Xml, 1, Els[E].A - 1) + Copy(Xml, Els[E].B, MaxInt);     { the XML without it }
+  case Mode of      { where it goes, in the XML without it }
+    0: At := Els[Sibs[K + 1]].B - (Els[E].B - Els[E].A);
+    1: At := Els[Sibs[K - 1]].A;
+    2: At := Els[Sibs[N - 1]].B - (Els[E].B - Els[E].A);
+  else
+    At := Els[Sibs[0]].A;
+  end;
+  Insert(Mine, Rest, At);
+  Result := ApplyKeptXml(Rest, 'Order', SidAt(XmlElements(Rest), At));
+end;
+
+{ an element's place and size (a:off, a:ext of the a:xfrm of its properties), in its parent's units }
+function XfrmOf(const S: string; out X, Y, CX, CY: Int64): Boolean;
+var
+  O, E, P, L: Integer;
+begin
+  X := 0; Y := 0; CX := 0; CY := 0;
+  O := Pos('<a:off ', S);
+  E := Pos('<a:ext ', S);
+  Result := (O > 0) and (E > 0);
+  if not Result then
+    Exit;
+  P := AttrSpan(S, O, 'x', L); if P > 0 then X := StrToInt64Def(Copy(S, P, L), 0);
+  P := AttrSpan(S, O, 'y', L); if P > 0 then Y := StrToInt64Def(Copy(S, P, L), 0);
+  P := AttrSpan(S, E, 'cx', L); if P > 0 then CX := StrToInt64Def(Copy(S, P, L), 0);
+  P := AttrSpan(S, E, 'cy', L); if P > 0 then CY := StrToInt64Def(Copy(S, P, L), 0);
+end;
+
+{ an element given a place and size (its first a:off, a:ext) }
+procedure SetXfrm(var S: string; X, Y, CX, CY: Int64);
+var
+  O, E, P, L: Integer;
+begin
+  E := Pos('<a:ext ', S);
+  if E > 0 then
+  begin
+    P := AttrSpan(S, E, 'cy', L); if P > 0 then begin Delete(S, P, L); Insert(IntToStr(CY), S, P); end;
+    P := AttrSpan(S, E, 'cx', L); if P > 0 then begin Delete(S, P, L); Insert(IntToStr(CX), S, P); end;
+  end;
+  O := Pos('<a:off ', S);
+  if O > 0 then
+  begin
+    P := AttrSpan(S, O, 'y', L); if P > 0 then begin Delete(S, P, L); Insert(IntToStr(Y), S, P); end;
+    P := AttrSpan(S, O, 'x', L); if P > 0 then begin Delete(S, P, L); Insert(IntToStr(X), S, P); end;
+  end;
+end;
+
+function TParadeEdit.SelectedShapes: TIntegerArray;
+var
+  I: Integer;
+begin
+  Result := nil;
+  if not FShapeOn or (FShapeSid < 0) then
+    Exit;
+  SetLength(Result, 1 + Length(FShapeMore));
+  Result[0] := FShapeSid;
+  for I := 0 to High(FShapeMore) do
+    Result[I + 1] := FShapeMore[I];
+end;
+
+{ the selected shapes (siblings: of one parent) made one group, its child space their own }
+function TParadeEdit.GroupShapes: Boolean;
+var
+  Xml, G, GTag: string;
+  Els: TXmlEls;
+  Ids: array of Integer;
+  Sids: TIntegerArray;
+  I, J, T, Par: Integer;
+  X, Y, CX, CY, X0, Y0, X1, Y1: Int64;
+begin
+  Result := False;
+  Sids := SelectedShapes;
+  if (Length(Sids) < 2) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  SetLength(Ids, Length(Sids));
+  for I := 0 to High(Sids) do
+  begin
+    Ids[I] := SidElement(Els, Sids[I]);
+    { a shape inside a group is that group's: the group is what is grouped }
+    while (Ids[I] >= 0) and (Els[Ids[I]].Parent >= 0) and (Els[Els[Ids[I]].Parent].Name = 'wpg:grpSp') and
+          (I > 0) and (Els[Ids[I]].Parent <> Els[Ids[0]].Parent) do
+      Ids[I] := Els[Ids[I]].Parent;
+    if Ids[I] < 0 then
+      Exit;
+  end;
+  Par := Els[Ids[0]].Parent;
+  for I := 1 to High(Ids) do
+    if Els[Ids[I]].Parent <> Par then
+      Exit;     { not siblings: no one group holds them }
+  for I := 0 to High(Ids) do    { in document order }
+    for J := I + 1 to High(Ids) do
+      if Els[Ids[J]].A < Els[Ids[I]].A then
+      begin
+        T := Ids[I]; Ids[I] := Ids[J]; Ids[J] := T;
+      end;
+  X0 := High(Int64); Y0 := High(Int64); X1 := Low(Int64); Y1 := Low(Int64);
+  G := '';
+  for I := 0 to High(Ids) do
+  begin
+    if not XfrmOf(Copy(Xml, Els[Ids[I]].A, Els[Ids[I]].B - Els[Ids[I]].A), X, Y, CX, CY) then
+      Exit;
+    X0 := Min(X0, X); Y0 := Min(Y0, Y); X1 := Max(X1, X + CX); Y1 := Max(Y1, Y + CY);
+    G := G + Copy(Xml, Els[Ids[I]].A, Els[Ids[I]].B - Els[Ids[I]].A);
+  end;
+  if (Par >= 0) and (Els[Par].Name = 'wpc:wpc') then
+    GTag := 'wpg:wgp'    { a canvas's groups }
+  else
+    GTag := 'wpg:grpSp';
+  G := '<' + GTag + '><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="' + IntToStr(X0) + '" y="' + IntToStr(Y0) +
+    '"/><a:ext cx="' + IntToStr(X1 - X0) + '" cy="' + IntToStr(Y1 - Y0) + '"/><a:chOff x="' + IntToStr(X0) +
+    '" y="' + IntToStr(Y0) + '"/><a:chExt cx="' + IntToStr(X1 - X0) + '" cy="' + IntToStr(Y1 - Y0) +
+    '"/></a:xfrm></wpg:grpSpPr>' + G + '</' + GTag + '>';
+  for I := High(Ids) downto 1 do
+    Delete(Xml, Els[Ids[I]].A, Els[Ids[I]].B - Els[Ids[I]].A);
+  Delete(Xml, Els[Ids[0]].A, Els[Ids[0]].B - Els[Ids[0]].A);
+  Insert(G, Xml, Els[Ids[0]].A);
+  Result := ApplyKeptXml(Xml, 'Group', SidAt(XmlElements(Xml), Els[Ids[0]].A));
+end;
+
+{ the group the selected shape is in: its shapes put in its place, in its parent's units }
+function TParadeEdit.UngroupShape: Boolean;
+var
+  Xml, Kids, K: string;
+  Els: TXmlEls;
+  E, G, Pr, I: Integer;
+  GX, GY, GCX, GCY, OX, OY, OCX, OCY, X, Y, CX, CY: Int64;
+  Xf: string;
+  P, L: Integer;
+  SX, SY: Double;
+begin
+  Result := False;
+  if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  if E < 0 then
+    Exit;
+  G := Els[E].Parent;
+  if (G < 0) or (Els[G].Parent < 0) or not ((Els[G].Name = 'wpg:grpSp') or (Els[G].Name = 'wpg:wgp')) then
+    Exit;     { not in a group (the drawing's own top is not one to undo) }
+  Pr := ChildNamed(Els, G, 'wpg:grpSpPr');
+  if Pr < 0 then
+    Exit;
+  Xf := Copy(Xml, Els[Pr].A, Els[Pr].B - Els[Pr].A);
+  if not XfrmOf(Xf, GX, GY, GCX, GCY) then
+    Exit;
+  OX := GX; OY := GY; OCX := GCX; OCY := GCY;     { the child space: chOff, chExt (the same when none) }
+  P := Pos('<a:chOff ', Xf);
+  if P > 0 then
+  begin
+    I := AttrSpan(Xf, P, 'x', L); if I > 0 then OX := StrToInt64Def(Copy(Xf, I, L), GX);
+    I := AttrSpan(Xf, P, 'y', L); if I > 0 then OY := StrToInt64Def(Copy(Xf, I, L), GY);
+  end;
+  P := Pos('<a:chExt ', Xf);
+  if P > 0 then
+  begin
+    I := AttrSpan(Xf, P, 'cx', L); if I > 0 then OCX := StrToInt64Def(Copy(Xf, I, L), GCX);
+    I := AttrSpan(Xf, P, 'cy', L); if I > 0 then OCY := StrToInt64Def(Copy(Xf, I, L), GCY);
+  end;
+  SX := 1; SY := 1;
+  if OCX > 0 then SX := GCX / OCX;
+  if OCY > 0 then SY := GCY / OCY;
+  Kids := '';
+  for I := G + 1 to High(Els) do
+    if (Els[I].Parent = G) and IsShapeEl(Els[I].Name) then
+    begin
+      K := Copy(Xml, Els[I].A, Els[I].B - Els[I].A);
+      if XfrmOf(K, X, Y, CX, CY) then
+        SetXfrm(K, GX + Round((X - OX) * SX), GY + Round((Y - OY) * SY), Round(CX * SX), Round(CY * SY));
+      Kids := Kids + K;
+    end;
+  Delete(Xml, Els[G].A, Els[G].B - Els[G].A);
+  Insert(Kids, Xml, Els[G].A);
+  Result := ApplyKeptXml(Xml, 'Ungroup', SidAt(XmlElements(Xml), Els[G].A));
 end;
 
 function TParadeEdit.SetShapeBox(Sid: Integer; X0, Y0, X1, Y1: Double): Boolean;

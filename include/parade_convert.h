@@ -68,6 +68,13 @@ PD_API pd_status pd_doc_import(const void* data, size_t len, pd_conv_format form
 /** insert imported content at a position (splitting the paragraph for multi-paragraph content) */
 PD_API pd_status pd_doc_paste(pd_doc* doc, pd_pos at, const void* data, size_t len, pd_conv_format format,
                               pd_pos* after);
+/**
+ * A drawing read from DOCX (a canvas or group whose Word XML is kept with it) made again from edited XML: the
+ * same pictures, styles, text boxes' stories and fallback, its shapes as the new XML has them. Its new
+ * description is a new resource (*out); the old one is left as it is (an editor swaps the object's resource,
+ * which undo can take back).
+ */
+PD_API pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xml, size_t len, pd_res_id* out);
 /** guess the format of data from its first bytes (DOCX zip, RTF, HTML, JData; else Markdown or text) */
 PD_API pd_conv_format pd_conv_detect(const void* data, size_t len);
 

@@ -105,6 +105,7 @@ var
   DrawPara: pd_block_id;
   BX0, BY0, BX1, BY1, NX0, NY0, NX1, NY1: Double;
   NShapes: Integer;
+  Xml: string;
   E: TParadeEdit;
   Dir, Sample, T: string;
   C: pd_pos;
@@ -428,6 +429,52 @@ begin
           if Sid = 0 then
             Same := Abs((X1 - X0) - 2 * (BX1 - BX0)) < PD_SP_PER_PT;
       Check(Same, 'saved: the resized shape comes back resized');
+      { filled, outlined, put in front, grouped and ungrouped: each in the XML Word gets, each undone }
+      if pd_layout_caret(E.Layout, PdPos(DrawPara, 0), CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK then
+      begin
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = 0), 'the shape selected again');
+        Check(E.SetShapeFill(clRed, False) and E.KeptXml(Xml) and (Pos('<a:srgbClr val="FF0000"/>', Xml) > 0),
+          'a fill: red in the shape''s XML');
+        Check(Length(E.DrawingShapes(PdPos(DrawPara, 0))) = NShapes, 'the drawing made again keeps its shapes');
+        E.Undo;
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT + 20, CapBase / PD_SP_PER_PT - 144 + 20);
+        Check(E.KeptXml(Xml) and (Pos('FF0000', Xml) = 0), 'and undo takes it out');
+        Check(E.SetShapeLine(clBlue, 3, False) and E.KeptXml(Xml) and (Pos('w="38100"', Xml) > 0) and
+          (Pos('<a:srgbClr val="0000FF"/>', Xml) > 0), 'an outline: blue, three points wide');
+        Check(E.SetShapeLine(clNone, 1.5, False) and E.KeptXml(Xml) and (Pos('w="19050"', Xml) > 0) and
+          (Pos('<a:srgbClr val="0000FF"/>', Xml) > 0), 'a width alone: the colour kept');
+        Check(E.ShapeBox(0, BX0, BY0, BX1, BY1), 'the box of the first shape');
+        Check(E.ShapeOrder(2) and E.SelectedShape(DrawP, DrawSid) and (DrawSid = NShapes - 1),
+          'brought to the front: the last shape drawn, still selected');
+        Check(E.ShapeBox(DrawSid, NX0, NY0, NX1, NY1) and (Abs(NX0 - BX0) < 2) and (Abs(NY1 - BY1) < 2),
+          'and where it was');
+        Check(E.ShapeOrder(3) and E.SelectedShape(DrawP, DrawSid) and (DrawSid = 0), 'sent to the back again');
+        Check(not E.GroupShapes, 'one shape is no group');
+        Check(E.ToggleShape(1) and (Length(E.SelectedShapes) = 2), 'Shift+click adds a second shape');
+        Check(E.GroupShapes and E.KeptXml(Xml) and (Pos('<wpg:wgp><wpg:cNvGrpSpPr/>', Xml) > 0),
+          'the two made a group');
+        Check(Length(E.DrawingShapes(PdPos(DrawPara, 0))) = NShapes, 'the group keeps its shapes');
+        Check(E.ShapeBox(0, NX0, NY0, NX1, NY1) and (Abs(NX0 - BX0) < 2) and (Abs(NX1 - BX1) < 2) and
+          (Abs(NY0 - BY0) < 2), 'and leaves them where they were');
+        Check(E.UngroupShape and E.KeptXml(Xml) and (Pos('<wpg:wgp>', Xml) = 0), 'ungrouped');
+        Check(E.ShapeBox(0, NX0, NY0, NX1, NY1) and (Abs(NX0 - BX0) < 2) and (Abs(NX1 - BX1) < 2),
+          'and still where they were');
+        E.Undo;
+        Check(E.KeptXml(Xml) and (Pos('<wpg:wgp>', Xml) > 0), 'undo: the group again');
+        E.SaveToFile(Dir + 'edit_group.docx');
+        E.LoadFromFile(Dir + 'edit_group.docx');
+        DrawPara := pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 1);
+        Same := False;
+        for I := 0 to High(E.DrawingShapes(PdPos(DrawPara, 0))) do
+          with E.DrawingShapes(PdPos(DrawPara, 0))[I] do
+            if Sid = 0 then
+              Same := (Abs(X0 - BX0) < PD_SP_PER_PT) and (Abs(X1 - BX1) < PD_SP_PER_PT);
+        Check(Same and (Length(E.DrawingShapes(PdPos(DrawPara, 0))) = NShapes),
+          'saved: the grouped shapes come back where they were');
+      end;
     end;
   end;
 

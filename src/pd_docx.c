@@ -3869,6 +3869,9 @@ typedef struct {
     }* cm;
     int ncm, capcm;
     pd_rev_id float_rev;        /* the tracked change a float being read sits in: its content's */
+    const pj_node* rebuild;     /* a drawing made again from its edited XML: its description as it was (pictures,
+                                   styles, text boxes, fallback), in place of the package it was read from */
+    int rebuild_story;          /* the next of its text boxes' stories */
 } dxi;
 
 /* ------------------------------------------------------------------ */
@@ -5949,7 +5952,15 @@ static void dw_floats(dw* w) {
 
 /* a picture part the relationship id names, as a resource of the document; 0 if none */
 static pd_res_id dw_resource(dxi* X, const char* rid) {
-    const char* target = rel_target(X, rid, NULL);
+    const char* target;
+
+    if (X->rebuild) {   /* made again: the pictures it had, by the ids its XML names them by */
+        const pj_node* r = pj_get(pj_get(X->rebuild, "rels"), rid);
+
+        return r ? (pd_res_id)pj_int_or(r, 0) : 0;
+    }
+
+    target = rel_target(X, rid, NULL);
     char path[300];
     unsigned char* data;
     size_t len = 0;
@@ -6434,6 +6445,21 @@ static int dw_color(const dxi* X, const pd_markup* g, const char* t, uint32_t* o
     return 0;
 }
 
+/* a drawing made again: the story of its next text box, as the description it had names them in order */
+static pd_block_id dw_rebuild_story(dxi* X) {
+    const pj_node* it, *items = pj_get(X->rebuild, "items");
+    int k = 0;
+
+    for (it = items ? items->child : NULL; it; it = it->next) {
+        if (pj_get(it, "story") && k++ == X->rebuild_story) {
+            X->rebuild_story++;
+            return (pd_block_id)pj_int_or(pj_get(it, "story"), 0);
+        }
+    }
+
+    return 0;
+}
+
 /* N bytes of H holding the first of NN bytes of NEEDLE, or NULL */
 static const char* dw_memmem(const char* h, size_t n, const char* needle, size_t nn) {
     size_t i;
@@ -6561,7 +6587,13 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
     }
 
     fb_ok = fb_ok && dw_xml_writable(X, fb0, fb1, rel_id, rel_res, &nrel, 1);
-    pb_printf(o, ",\"kind\":\"%s\",\"rels\":{", canvas ? "wpc" : "wgp");
+    pb_printf(o, ",\"kind\":\"%s\",\"theme\":[", canvas ? "wpc" : "wgp");
+
+    for (k = 0; k < 12; k++) {  /* the theme's colours: the drawing made again from its XML has them */
+        pb_printf(o, "%s%u", k ? "," : "", (unsigned)X->theme_clr[k]);
+    }
+
+    pb_puts(o, "],\"rels\":{");
 
     for (k = 0; k < nrel; k++) {
         if (k) {
@@ -6574,6 +6606,30 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
 
     /* the styles its text names, by Word's id, as the document's: the writer names them its own way */
     pb_puts(o, "},\"styles\":{");
+
+    if (X->rebuild) {   /* made again: the styles it had, and its fallback (not beside this XML: kept with it) */
+        const pj_node* st = pj_get(X->rebuild, "styles"), *c, *fbn = pj_get(X->rebuild, "fallback");
+
+        for (c = st ? st->child : NULL; c; c = c->next) {
+            if (!first) {
+                pb_putc(o, ',');
+            }
+
+            first = 0;
+            json_str(o, c->key, c->keylen);
+            pb_printf(o, ":%d", (int)pj_int_or(c, 0));
+        }
+
+        pb_puts(o, "},\"xml\":");
+        json_str(o, raw0, rawn);
+
+        if (fbn && fbn->type == PJ_STR) {
+            pb_puts(o, ",\"fallback\":");
+            json_str(o, fbn->s, fbn->len);
+        }
+
+        return;
+    }
 
     for (j = 0; j < sizeof(styled) / sizeof(styled[0]); j++) {
         int part;
@@ -7214,16 +7270,20 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
                 if (tx_a && tx_b > tx_a && X->depth < 3) {
                     /* the text box's content as a story of the document, read as the body is -- tables, pictures,
-                       styles, fields -- and edited in place; the drawing says where it goes */
+                       styles, fields -- and edited in place; the drawing says where it goes. Made again from
+                       edited XML: the story it had, as edited */
                     pd_char_props keep = X->b->cp;
-                    pd_block_id story = bld_story_begin(X->b);
+                    pd_block_id story = X->rebuild ? dw_rebuild_story(X) : bld_story_begin(X->b);
 
-                    if (story) {
+                    if (story && !X->rebuild) {
                         X->depth++;
                         dw_parse(X, tx_a, (size_t)(tx_b - tx_a), 1);
                         X->depth--;
                         bld_end_para(X->b);
                         bld_story_end(X->b);
+                    }
+
+                    if (story) {
                         ITEM_SEP();
                         pb_printf(&o, "{\"story\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"ins\":[%d,%d,%d,%d],"
                                   "\"anchor\":\"%s\"}", (int)story, (int)emu_sp(x), (int)emu_sp(y), (int)emu_sp(cw),
@@ -9644,5 +9704,77 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     free(X.notes);
     free(X.en_xml);
     free(X.en);
+    return st;
+}
+
+pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xml, size_t len, pd_res_id* out) {
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t dlen = 0;
+    pj_doc* jd;
+    const pj_node* root, *th;
+    dxi* X;
+    pd_bld b;
+    dw w;
+    pd_markup m;
+    int k, canvas = -1;
+    pd_status st = PD_ERR_FORMAT;
+
+    if (!doc || !xml || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = 0;
+
+    if (pd_doc_resource(doc, drawing, &mime, &data, &dlen) != PD_OK ||
+            strcmp(mime, "application/vnd.parade.drawing+json") != 0 || (jd = pj_parse(data, dlen, 0, NULL)) == NULL) {
+        return PD_ERR_ARG;
+    }
+
+    root = pj_root(jd);
+    X = (dxi*)calloc(1, sizeof(dxi));
+
+    if (!X || !root || !pj_get(root, "xml")) {
+        free(X);
+        pj_free(jd);
+        return X ? PD_ERR_ARG : PD_ERR_NOMEM;
+    }
+
+    memset(&b, 0, sizeof(b));
+    b.d = doc;
+    X->b = &b;
+    X->rebuild = root;
+    theme_defaults(X->theme_clr);
+    th = pj_get(root, "theme");
+
+    for (k = 0; th && k < 12; k++) {
+        if (pj_at(th, k)) {
+            X->theme_clr[k] = (uint32_t)pj_int_or(pj_at(th, k), 0);
+        }
+    }
+
+    memset(&w, 0, sizeof(w));
+    w.X = X;
+    w.cx = (long long)(pj_int_or(pj_get(root, "w"), 0) * 12700LL / 65536);    /* the drawing's extent, in EMU */
+    w.cy = (long long)(pj_int_or(pj_get(root, "h"), 0) * 12700LL / 65536);
+    mu_init(&m, xml, len, 0);
+
+    while (mu_next(&m) != MT_END) {     /* to the canvas's or group's own opening tag */
+        const char* t = mu_local(m.name);
+
+        if (m.type == MT_OPEN && (!strcmp(t, "wpc") || !strcmp(t, "wgp"))) {
+            canvas = !strcmp(t, "wpc");
+            break;
+        }
+    }
+
+    if (canvas >= 0 && w.cx > 0 && w.cy > 0) {
+        dw_drawing_group(&w, &m, canvas);
+        *out = w.drawing_res;
+        st = *out ? PD_OK : PD_ERR_FORMAT;
+    }
+
+    free(X);
+    pj_free(jd);
     return st;
 }
