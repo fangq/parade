@@ -74,6 +74,7 @@ type
   TParadeShapeBox = record
     Sid: Integer;
     X0, Y0, X1, Y1: Double;
+    Story: pd_block_id;      { a text box's: the story of its text; 0 for a shape without }
   end;
   TParadeShapeBoxes = array of TParadeShapeBox;
   TIntegerArray = array of Integer;
@@ -111,6 +112,11 @@ type
     FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape }
     FShapeFrom: TPoint;            { where it began (client pixels) }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
+    FFrameKey: string;             { the text box the caret is in, as last looked up: story and revision }
+    FFrameAt: pd_pos;              { its drawing (block 0: the caret is in none) }
+    FFrameSid: Integer;            { and its shape }
+    FFrameCursor: Boolean;         { the cursor is the move cursor, over that frame's edge }
+    FFrameOldCursor: TCursor;
     FBlink: TTimer;
     FCaretOn: Boolean;
     FGlyphs: array of PGlyphBmp;   { open-addressing hash table by font, glyph, size and subpixel position }
@@ -241,6 +247,13 @@ type
     function PickShape(const P: pd_pos; Page: Integer; SX, SY: pd_sp): Integer;
     function ClickPage(Page: Integer; SX, SY: pd_sp; Shift: TShiftState): Boolean;
     procedure PaintShapeSelection;
+    { the drawing whose text box holds a story, and that text box's shape }
+    function StoryDrawing(Story: pd_block_id; out D: pd_pos): Boolean;
+    function StoryTopOf(B: pd_block_id): pd_block_id;
+    function CaretTextBox(out D: pd_pos; out Sid: Integer): Boolean;
+    { a text box's edge under a point of the page (sp), in the drawing at D: its shape, or -1 }
+    function TextBoxEdgeAt(const D: pd_pos; SX, SY: pd_sp): Integer;
+    procedure PaintTextBoxFrame;
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
     function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
     procedure OnlyShape;
@@ -263,6 +276,7 @@ type
     procedure MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
     function DoMouseWheel(Shift: TShiftState; WheelDelta: Integer; MousePos: TPoint): Boolean; override;
     procedure DblClick; override;
+    procedure TripleClick; override;
     procedure MouseEnter; override;
     procedure DoEnter; override;
     procedure DoExit; override;
@@ -300,6 +314,11 @@ type
     { the caret in a drawing's text box: back to the text, just after the drawing (Escape). False when the
       caret is not in one }
     function LeaveDrawingText: Boolean;
+    { the caret in a drawing's text box: that text box selected, as a shape to move, size or delete (Escape, as
+      Word has it). False when the caret is not in one }
+    function SelectTextBox: Boolean;
+    { where a shape of the drawing at D is on its page (sp); Sid -1 the whole drawing }
+    function ShapePageBox(const D: pd_pos; Sid: Integer; out Page: Int32; out X0, Y0, X1, Y1: Double): Boolean;
     { the drawing selected, or a shape of it: True with its object's place and the shape (-1: the whole drawing) }
     function SelectedShape(out At: pd_pos; out Sid: Integer): Boolean;
     procedure ClearShapeSelection;
@@ -1137,7 +1156,7 @@ begin
   inherited Create(AOwner);
   FHybridDefault := True;
   FShapeDrag := -1;
-  ControlStyle := ControlStyle + [csOpaque] - [csSetCaption];
+  ControlStyle := ControlStyle + [csOpaque, csTripleClicks] - [csSetCaption];
   TabStop := True;
   Color := $00E0E0E0;
   Cursor := crIBeam;       { a text editor's: the scroll bar has its own, below }
@@ -2457,6 +2476,7 @@ begin
   SetTempCursor(crIBeam);
   SetTempCursor(Cursor);
   FSelSig := '';
+  FFrameKey := '';     { a text box of the document before is not one of this }
   CheckSelection;
 end;
 
@@ -2469,6 +2489,7 @@ begin
   SetTempCursor(crArrow);
   SetTempCursor(Cursor);
   FSelSig := '';
+  FFrameKey := '';     { a text box of the document before is not one of this }
   CheckSelection;
 end;
 
@@ -5140,10 +5161,20 @@ begin
     InsertText(Clipboard.AsText);
 end;
 
-function TParadeEdit.LeaveDrawingText: Boolean;
+function TParadeEdit.StoryTopOf(B: pd_block_id): pd_block_id;
 var
-  StoryTop, B: pd_block_id;
   Info: pd_block_info;
+begin
+  Result := B;
+  while (pd_doc_block_info(FDoc, Result, Info) = PD_OK) and (Info.parent <> 0) do
+    Result := Info.parent;
+  if (pd_doc_block_info(FDoc, Result, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_STORY) then
+    Result := 0;
+end;
+
+function TParadeEdit.StoryDrawing(Story: pd_block_id; out D: pd_pos): Boolean;
+var
+  B: pd_block_id;
   T, Key: string;
   I, J: Integer;
   O: pd_inline;
@@ -5153,12 +5184,10 @@ var
   S: RawByteString;
 begin
   Result := False;
-  StoryTop := CaretPos.block;     { the story the caret is in: the top of its blocks }
-  while (pd_doc_block_info(FDoc, StoryTop, Info) = PD_OK) and (Info.parent <> 0) do
-    StoryTop := Info.parent;
-  if (pd_doc_block_info(FDoc, StoryTop, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_STORY) then
+  D := PdPos(0, 0);
+  if Story = 0 then
     Exit;
-  Key := '"story":' + IntToStr(StoryTop);
+  Key := '"story":' + IntToStr(Story);
   B := pd_doc_next_paragraph(FDoc, 0);
   while B <> 0 do
   begin
@@ -5172,8 +5201,8 @@ begin
       begin
         SetString(S, PAnsiChar(Data), Len);
         if (Pos(Key + ',', S) > 0) or (Pos(Key + '}', S) > 0) then
-        begin   { just after the drawing that holds it }
-          SetCaret(PdPos(B, I - 1 + 3), False);
+        begin
+          D := PdPos(B, I - 1);
           Exit(True);
         end;
       end;
@@ -5185,6 +5214,144 @@ begin
     end;
     B := pd_doc_next_paragraph(FDoc, B);
   end;
+end;
+
+function TParadeEdit.LeaveDrawingText: Boolean;
+var
+  D: pd_pos;
+begin
+  Result := StoryDrawing(StoryTopOf(CaretPos.block), D);
+  if Result then
+    SetCaret(PdPos(D.block, D.offset + 3), False);   { just after the drawing that holds it }
+end;
+
+{ the text box the caret is in: its drawing and its shape (-1 when the drawing names no shape for it) }
+function TParadeEdit.CaretTextBox(out D: pd_pos; out Sid: Integer): Boolean;
+var
+  Story: pd_block_id;
+  Boxes: TParadeShapeBoxes;
+  I: Integer;
+  Key: string;
+begin
+  Story := StoryTopOf(CaretPos.block);
+  Key := IntToStr(Story) + ':' + IntToStr(pd_doc_revision(FDoc));
+  if Key <> FFrameKey then
+  begin   { looked up again only when the caret changes story or the document changes }
+    FFrameKey := Key;
+    FFrameSid := -1;
+    if not StoryDrawing(Story, FFrameAt) then
+      FFrameAt := PdPos(0, 0)
+    else
+    begin
+      Boxes := DrawingShapes(FFrameAt);
+      for I := 0 to High(Boxes) do
+        if Boxes[I].Story = Story then
+          FFrameSid := Boxes[I].Sid;
+    end;
+  end;
+  D := FFrameAt;
+  Sid := FFrameSid;
+  Result := D.block <> 0;
+end;
+
+function TParadeEdit.SelectTextBox: Boolean;
+var
+  D: pd_pos;
+  Sid: Integer;
+begin
+  Result := CaretTextBox(D, Sid);
+  if not Result then
+    Exit;
+  SetLength(FShapeMore, 0);
+  FShapeOn := True;
+  FShapeAt := D;
+  FShapeSid := Sid;
+  if Sid < 0 then
+    SelectRange(PdRange(D, PdPos(D.block, D.offset + 3)))
+  else
+    SetCaret(D, False);
+  Invalidate;
+end;
+
+function TParadeEdit.ShapePageBox(const D: pd_pos; Sid: Integer; out Page: Int32; out X0, Y0, X1, Y1: Double): Boolean;
+var
+  Boxes: TParadeShapeBoxes;
+  X, Y, W, H, JW, JH: Double;
+  I: Integer;
+begin
+  X0 := 0; Y0 := 0; X1 := 0; Y1 := 0;
+  Result := DrawingPlace(D, Page, X, Y, W, H, JW, JH) and (JW > 0) and (JH > 0);
+  if not Result then
+    Exit;
+  X0 := X; Y0 := Y; X1 := X + W; Y1 := Y + H;
+  if Sid < 0 then
+    Exit;
+  Result := False;
+  Boxes := DrawingShapes(D);
+  for I := 0 to High(Boxes) do
+    if Boxes[I].Sid = Sid then
+    begin
+      X0 := X + Boxes[I].X0 * W / JW;
+      Y0 := Y + Boxes[I].Y0 * H / JH;
+      X1 := X + Boxes[I].X1 * W / JW;
+      Y1 := Y + Boxes[I].Y1 * H / JH;
+      Result := True;
+    end;
+end;
+
+function TParadeEdit.TextBoxEdgeAt(const D: pd_pos; SX, SY: pd_sp): Integer;
+var
+  Boxes: TParadeShapeBoxes;
+  Pg: Int32;
+  X, Y, W, H, JW, JH, M, Mi, L, T, R, B: Double;
+  I: Integer;
+begin
+  Result := -1;
+  if not DrawingPlace(D, Pg, X, Y, W, H, JW, JH) or (JW <= 0) or (JH <= 0) then
+    Exit;
+  M := 4 / PxPerSp;     { four pixels outside the edge, two inside it: a click at the text's start is the text's }
+  Mi := 2 / PxPerSp;
+  Boxes := DrawingShapes(D);
+  for I := High(Boxes) downto 0 do    { the one drawn last first: on top }
+    if Boxes[I].Story <> 0 then
+    begin
+      L := X + Boxes[I].X0 * W / JW;
+      T := Y + Boxes[I].Y0 * H / JH;
+      R := X + Boxes[I].X1 * W / JW;
+      B := Y + Boxes[I].Y1 * H / JH;
+      if (SX >= L - M) and (SX <= R + M) and (SY >= T - M) and (SY <= B + M) and
+         ((SX <= L + Mi) or (SX >= R - Mi) or (SY <= T + Mi) or (SY >= B - Mi)) then
+        Exit(Boxes[I].Sid);
+    end;
+end;
+
+{ the text box the caret is in: its edge dashed, as Word shows the one being typed in -- where it is taken to be
+  moved or sized }
+procedure TParadeEdit.PaintTextBoxFrame;
+var
+  D: pd_pos;
+  Sid, I: Integer;
+  Pg: Int32;
+  X, Y, W, H, JW, JH: Double;
+  Boxes: TParadeShapeBoxes;
+begin
+  if FShapeOn or not CaretTextBox(D, Sid) or (Sid < 0) or not DrawingPlace(D, Pg, X, Y, W, H, JW, JH) or
+     (JW <= 0) or (JH <= 0) then
+    Exit;
+  Boxes := DrawingShapes(D);
+  for I := 0 to High(Boxes) do
+    if Boxes[I].Sid = Sid then
+    begin
+      Canvas.Brush.Style := bsClear;
+      Canvas.Pen.Color := $00D77800;
+      Canvas.Pen.Width := 1;
+      Canvas.Pen.Style := psDash;
+      Canvas.Rectangle(PageLeft(Pg) + Round((X + Boxes[I].X0 * W / JW) * PxPerSp) - 1,
+        PageTop(Pg) + Round((Y + Boxes[I].Y0 * H / JH) * PxPerSp) - 1,
+        PageLeft(Pg) + Round((X + Boxes[I].X1 * W / JW) * PxPerSp) + 2,
+        PageTop(Pg) + Round((Y + Boxes[I].Y1 * H / JH) * PxPerSp) + 2);
+      Canvas.Pen.Style := psSolid;
+    end;
 end;
 
 procedure TParadeEdit.ProcessKey(Key: Word; Shift: TShiftState);
@@ -5265,7 +5432,7 @@ begin
     else
       ClearShapeSelection;    { anything else is the text's: Delete takes a selected drawing as any text }
     end;
-  if (Key = VK_ESCAPE) and LeaveDrawingText then
+  if (Key = VK_ESCAPE) and (SelectTextBox or LeaveDrawingText) then
     Exit;
   Ext := ssShift in Shift;
   if ssCtrl in Shift then
@@ -5364,7 +5531,7 @@ begin
     Key := 0;
     Exit;
   end;
-  if (Key = VK_ESCAPE) and LeaveDrawingText then
+  if (Key = VK_ESCAPE) and not FShapeOn and (SelectTextBox or LeaveDrawingText) then
   begin
     Key := 0;
     Exit;
@@ -5458,8 +5625,13 @@ begin
           Result[N].Y0 := B[1].AsFloat;
           Result[N].X1 := B[2].AsFloat;
           Result[N].Y1 := B[3].AsFloat;
+          Result[N].Story := 0;
           Inc(N);
-        end;
+        end
+        else if (N > 0) and (Items[I] is TJSONObject) and (TJSONObject(Items[I]).Find('story') <> nil) and
+          (Result[N - 1].Story = 0) then
+          { a text box's text: after its shape's box, the shape's }
+          Result[N - 1].Story := TJSONObject(Items[I]).Get('story', Int64(0));
   finally
     J.Free;
   end;
@@ -5584,6 +5756,18 @@ begin
     if FShapeOn then
       ClearShapeSelection;
     Exit;
+  end;
+  { on a text box's edge: that text box, at once -- to move, size or delete; inside it, its text }
+  Sid := TextBoxEdgeAt(D, SX, SY);
+  if (Sid >= 0) and not (ssShift in Shift) then
+  begin
+    SetLength(FShapeMore, 0);
+    FShapeOn := True;
+    FShapeAt := D;
+    FShapeSid := Sid;
+    SetCaret(D, False);
+    Invalidate;
+    Exit(True);
   end;
   { on a line of its text: the text's, as any text is clicked -- unless what is clicked is in that text itself
     (a picture in a text box) }
@@ -7062,13 +7246,32 @@ end;
 
 procedure TParadeEdit.MouseMove(Shift: TShiftState; X, Y: Integer);
 var
-  P: pd_pos;
+  P, D: pd_pos;
+  Sid: Integer;
+  Pg: Int32;
+  PX, PY, W, H, JW, JH: Double;
+  Edge: Boolean;
 begin
   inherited MouseMove(Shift, X, Y);
   if FShapeDrag >= 0 then
   begin
     ShapeDragMove(X, Y, Shift);
     Exit;
+  end;
+  { over the edge of the text box being typed in: the move cursor, where a press takes the box }
+  Edge := not FDragging and not FShapeOn and CaretTextBox(D, Sid) and (Sid >= 0) and
+    DrawingPlace(D, Pg, PX, PY, W, H, JW, JH) and
+    (TextBoxEdgeAt(D, Round((X - PageLeft(Pg)) / PxPerSp), Round((Y - PageTop(Pg)) / PxPerSp)) = Sid);
+  if Edge and not FFrameCursor then
+  begin
+    FFrameOldCursor := Cursor;
+    Cursor := crSizeAll;
+    FFrameCursor := True;
+  end
+  else if not Edge and FFrameCursor then
+  begin
+    Cursor := FFrameOldCursor;
+    FFrameCursor := False;
   end;
   if FDragging and PointToPos(X, Y, P) then
   begin
@@ -7079,7 +7282,9 @@ end;
 
 procedure TParadeEdit.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
-  D: Integer;
+  D, I: Integer;
+  P: pd_pos;
+  Boxes: TParadeShapeBoxes;
   Moved: Boolean;
   K: string;
   Pg: Int32;
@@ -7113,7 +7318,18 @@ begin
     end
     else if Moved then     { moved: the shape takes its box }
       SetShapeBox(FShapeSid, Min(FShapeNew[0], FShapeNew[2]), Min(FShapeNew[1], FShapeNew[3]),
-        Max(FShapeNew[0], FShapeNew[2]), Max(FShapeNew[1], FShapeNew[3]));
+        Max(FShapeNew[0], FShapeNew[2]), Max(FShapeNew[1], FShapeNew[3]))
+    else if (D = 8) and (FShapeSid >= 0) and PointToPos(X, Y, P) and (StoryTopOf(P.block) <> 0) then
+    begin   { a click, not a drag, on the selected text box's text: the caret there, to type }
+      Boxes := DrawingShapes(FShapeAt);
+      for I := 0 to High(Boxes) do
+        if (Boxes[I].Sid = FShapeSid) and (Boxes[I].Story = StoryTopOf(P.block)) then
+        begin
+          ClearShapeSelection;
+          SetCaret(P, False);
+          Break;
+        end;
+    end;
     Invalidate;
     Exit;
   end;
@@ -7143,6 +7359,22 @@ begin
     Inc(B);
   pd_doc_marker_set(FDoc, FAnchor, PdPos(CaretPos.block, A));
   pd_doc_marker_set(FDoc, FCaret, PdPos(CaretPos.block, B));
+  Invalidate;
+end;
+
+{ a third click: the paragraph, as a second is the word }
+procedure TParadeEdit.TripleClick;
+var
+  B: pd_block_id;
+begin
+  inherited TripleClick;
+  FDragging := False;
+  if FShapeOn then
+    Exit;
+  B := CaretPos.block;
+  pd_doc_marker_set(FDoc, FAnchor, PdPos(B, 0));
+  pd_doc_marker_set(FDoc, FCaret, PdPos(B, Length(ParaText(B))));
+  FHasDesiredX := False;
   Invalidate;
 end;
 
@@ -7745,6 +7977,7 @@ begin
     Canvas.Brush.Color := clBlack;
     Canvas.FillRect(R);
   end;
+  PaintTextBoxFrame;
   PaintShapeSelection;
 end;
 

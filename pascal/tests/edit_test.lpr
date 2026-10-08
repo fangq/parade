@@ -105,6 +105,8 @@ var
   DrawPara: pd_block_id;
   BX0, BY0, BX1, BY1, NX0, NY0, NX1, NY1: Double;
   NShapes: Integer;
+  TbSid: Integer;
+  TbPage: Int32;
   Xml: string;
   NStories, J, PickOk, PickAll, PickPg: Integer;
   PickSeen: string;
@@ -409,14 +411,76 @@ begin
     begin
       E.ClickAt(CapPage, CapX / PD_SP_PER_PT, (CapBase - CapAsc / 2) / PD_SP_PER_PT);
       Check(E.CaretPos.block = CapB, 'a click in the caption puts the caret there');
+      E.Invalidate;     { its text box's edge dashed, for a look }
+      E.Update;
+      Application.ProcessMessages;
+      ExecuteProcess('/usr/bin/import', ['-window', 'root', Dir + 'edit_tbframe.png']);
       E.InsertText('NEW ');
       Check(Pos('NEW ', E.ParaText(CapB)) > 0, 'what is typed goes into the caption: ' + E.ParaText(CapB));
       E.Undo;
       Check(Pos('NEW', E.ParaText(CapB)) = 0, 'and undo takes it out');
       E.Redo;
+      { the caption's text box as a shape: Escape from its text, its edge clicked; moved by a drag, a click on
+        its text to type again, deleted; Escape out to the drawing and past it }
       E.ProcessKey(VK_ESCAPE, []);
-      Check((E.CaretPos.block <> CapB) and (Pos(#$EF#$BF#$BC, E.ParaText(E.CaretPos.block)) > 0) and
-        (E.CaretPos.offset = 3), 'Escape leaves the caption, just after its drawing');
+      TbSid := -1;
+      if E.SelectedShape(DrawP, DrawSid) then
+        for I := 0 to High(E.DrawingShapes(DrawP)) do
+          if (E.DrawingShapes(DrawP)[I].Sid = DrawSid) and (E.DrawingShapes(DrawP)[I].Story <> 0) and
+             (pd_doc_child(E.Doc, E.DrawingShapes(DrawP)[I].Story, 0) = CapB) then
+            TbSid := DrawSid;
+      Check(TbSid >= 0, 'Escape from the caption''s text selects its text box');
+      if (TbSid >= 0) and E.ShapePageBox(DrawP, TbSid, TbPage, BX0, BY0, BX1, BY1) then
+      begin
+        Pt0 := E.PageToClient(TbPage, (BX0 + BX1) / 2 / PD_SP_PER_PT, (BY0 + BY1) / 2 / PD_SP_PER_PT);
+        TParadeWheel(E).MouseDown(mbLeft, [], Pt0.X, Pt0.Y);
+        TParadeWheel(E).MouseMove([ssLeft], Pt0.X + 10, Pt0.Y + 10);
+        TParadeWheel(E).MouseMove([ssLeft], Pt0.X + 20, Pt0.Y + 20);
+        TParadeWheel(E).MouseUp(mbLeft, [], Pt0.X + 20, Pt0.Y + 20);
+        Check(E.ShapePageBox(DrawP, TbSid, TbPage, NX0, NY0, NX1, NY1) and (NX0 > BX0 + PD_SP_PER_PT) and
+          (NY0 > BY0 + PD_SP_PER_PT) and (Abs((NX1 - NX0) - (BX1 - BX0)) < PD_SP_PER_PT),
+          'the text box moved by dragging it');
+        E.Undo;
+        Check(E.ShapePageBox(DrawP, TbSid, TbPage, NX0, NY0, NX1, NY1) and (Abs(NX0 - BX0) < PD_SP_PER_PT),
+          'and back with undo');
+        Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = TbSid), 'still selected');
+        if pd_layout_caret(E.Layout, PdPos(CapB, 4), CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK then
+        begin
+          Pt0 := E.PageToClient(CapPage, CapX / PD_SP_PER_PT, (CapBase - CapAsc / 2) / PD_SP_PER_PT);
+          TParadeWheel(E).MouseDown(mbLeft, [], Pt0.X, Pt0.Y);
+          TParadeWheel(E).MouseUp(mbLeft, [], Pt0.X, Pt0.Y);
+          Check(not E.SelectedShape(DrawP, DrawSid) and (E.CaretPos.block = CapB),
+            'a click on its text, not a drag: the caret in the text again');
+        end;
+        { its edge, from the text: the box at once }
+        Pt0 := E.PageToClient(TbPage, BX0 / PD_SP_PER_PT, (BY0 + BY1) / 2 / PD_SP_PER_PT);
+        TParadeWheel(E).MouseDown(mbLeft, [], Pt0.X, Pt0.Y);
+        TParadeWheel(E).MouseUp(mbLeft, [], Pt0.X, Pt0.Y);
+        Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = TbSid), 'a click on its edge selects the text box');
+        NShapes := Length(E.DrawingShapes(DrawP));
+        E.ProcessKey(VK_DELETE, []);
+        Check(Length(E.DrawingShapes(DrawP)) = NShapes - 1, 'Delete takes the text box out');
+        E.Undo;
+        Check(Length(E.DrawingShapes(DrawP)) = NShapes, 'and undo puts it back');
+        TParadeWheel(E).MouseDown(mbLeft, [], Pt0.X, Pt0.Y);
+        TParadeWheel(E).MouseUp(mbLeft, [], Pt0.X, Pt0.Y);
+        E.ProcessKey(VK_ESCAPE, []);
+        Check(E.SelectedShape(DrawP, DrawSid) and (DrawSid = -1), 'Escape from the text box: the drawing');
+        E.ProcessKey(VK_ESCAPE, []);
+        Check(not E.SelectedShape(DrawP, DrawSid) and (Pos(#$EF#$BF#$BC, E.ParaText(E.CaretPos.block)) > 0) and
+          (E.CaretPos.offset = 3), 'Escape again: the text, just after the drawing');
+      end;
+      { a word by a double click, the paragraph by a third }
+      Bk := pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0);
+      if pd_layout_caret(E.Layout, PdPos(Bk, 3), CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK then
+      begin
+        E.ClickAt(CapPage, CapX / PD_SP_PER_PT, (CapBase - CapAsc / 2) / PD_SP_PER_PT);
+        TParadeWheel(E).DblClick;
+        Check((E.SelectedText <> '') and (Pos(' ', E.SelectedText) = 0), 'a double click: a word, ' + E.SelectedText);
+        TParadeWheel(E).TripleClick;
+        Check(E.SelectedText = E.ParaText(Bk), 'a triple click: the paragraph, ' + E.SelectedText);
+        E.ProcessKey(VK_RIGHT, []);
+      end;
       { the drawing and its shapes, selected: one click the whole, the next a shape; Tab the next shape;
         Escape back out; Delete takes the drawing as any text, and undo brings it back }
       DrawPara := pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 1);
