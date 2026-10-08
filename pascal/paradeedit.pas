@@ -265,6 +265,9 @@ type
     procedure InsertText(const S: string);
     procedure ProcessKey(Key: Word; Shift: TShiftState);
     procedure ClickAt(Page: Integer; XPt, YPt: Double; Extend: Boolean = False);
+    { the caret in a drawing's text box: back to the text, just after the drawing (Escape). False when the
+      caret is not in one }
+    function LeaveDrawingText: Boolean;
     procedure SelectAll;
     procedure Undo;
     procedure Redo;
@@ -5045,12 +5048,61 @@ begin
     InsertText(Clipboard.AsText);
 end;
 
+function TParadeEdit.LeaveDrawingText: Boolean;
+var
+  StoryTop, B: pd_block_id;
+  Info: pd_block_info;
+  T, Key: string;
+  I, J: Integer;
+  O: pd_inline;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  S: RawByteString;
+begin
+  Result := False;
+  StoryTop := CaretPos.block;     { the story the caret is in: the top of its blocks }
+  while (pd_doc_block_info(FDoc, StoryTop, Info) = PD_OK) and (Info.parent <> 0) do
+    StoryTop := Info.parent;
+  if (pd_doc_block_info(FDoc, StoryTop, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_STORY) then
+    Exit;
+  Key := '"story":' + IntToStr(StoryTop);
+  B := pd_doc_next_paragraph(FDoc, 0);
+  while B <> 0 do
+  begin
+    T := ParaText(B);
+    I := Pos(#$EF#$BF#$BC, T);
+    while I > 0 do
+    begin
+      if (pd_doc_inline_at(FDoc, PdPos(B, I - 1), O) = PD_OK) and (O.kind = PD_INLINE_IMAGE) and
+         (pd_doc_resource(FDoc, O.resource, @Mime, @Data, @Len) = PD_OK) and
+         (StrComp(Mime, 'application/vnd.parade.drawing+json') = 0) then
+      begin
+        SetString(S, PAnsiChar(Data), Len);
+        if (Pos(Key + ',', S) > 0) or (Pos(Key + '}', S) > 0) then
+        begin   { just after the drawing that holds it }
+          SetCaret(PdPos(B, I - 1 + 3), False);
+          Exit(True);
+        end;
+      end;
+      J := Pos(#$EF#$BF#$BC, Copy(T, I + 3, MaxInt));    { the next object in the paragraph }
+      if J > 0 then
+        I := I + 2 + J
+      else
+        I := 0;
+    end;
+    B := pd_doc_next_paragraph(FDoc, B);
+  end;
+end;
+
 procedure TParadeEdit.ProcessKey(Key: Word; Shift: TShiftState);
 var
   Ext: Boolean;
   P, After: pd_pos;
   BI, BJ: pd_block_info;
 begin
+  if (Key = VK_ESCAPE) and LeaveDrawingText then
+    Exit;
   Ext := ssShift in Shift;
   if ssCtrl in Shift then
   begin
@@ -5145,6 +5197,11 @@ begin
   if (Key = VK_ESCAPE) and FPainter then
   begin
     StopFormatPainter;
+    Key := 0;
+    Exit;
+  end;
+  if (Key = VK_ESCAPE) and LeaveDrawingText then
+  begin
     Key := 0;
     Exit;
   end;
@@ -5328,7 +5385,7 @@ var
     NB := 0;
     SetLength(Bands, 0);
     for I := 0 to N - 1 do
-      if ((Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE)) and (Items[I].region = 0) then
+      if ((Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE)) and (Items[I].region in [0, 3, 4, 5]) then
       begin
         { the band of this line: the last one, or a new one }
         K := NB - 1;

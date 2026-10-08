@@ -368,7 +368,7 @@ typedef struct {
     int mirror;                 /* some section mirrors its margins */
     int nbookmarks;
     pd_buf* hf_rels[8];
-    struct {
+    struct dxcb {
         uint32_t off;
         int end;                /* 0: the range starts, 1: it ends */
         pd_comment_id id;
@@ -909,14 +909,82 @@ static void dx_txbx_table(dxo* x, const pj_node* tbl, int depth) {
     pb_puts(o, "</w:tbl><w:p/>");   /* and so does a text box: after its table */
 }
 
+static void dx_flush_anchors(dxo* x);
+
+/* A story's blocks as the inside of a w:txbxContent, written in the middle of a run: the paragraph under way is
+   left as it was found. An empty story is one empty paragraph, as Word wants one. */
+static void dx_story_content(dxo* x, pd_block_id story) {
+    pd_block_id para = x->para;
+    pd_char_props base = x->base;
+    int in_link = x->in_link, in_note = x->in_note, nctl = x->nctl, nruby = x->nruby, page_break = x->page_break;
+    int ncb = x->ncb, cbi = x->cbi, npending = x->npending, k;
+    pd_block_id pending[8];
+    struct dxcb cb[64];
+    pd_block_info bi;
+
+    memcpy(cb, x->cb, sizeof(cb));
+    memcpy(pending, x->pending, sizeof(pending));
+    x->in_link = x->in_note = x->nctl = x->nruby = x->page_break = 0;
+    x->ncb = x->cbi = 0;
+    x->npending = 0;
+
+    if (pd_doc_block_info(x->d, story, &bi) == PD_OK && bi.child_count > 0) {
+        for (k = 0; k < bi.child_count; k++) {
+            dx_block(x, pd_doc_child(x->d, story, k));
+        }
+
+        dx_flush_anchors(x);
+    } else {
+        pb_puts(x->o, "<w:p/>");
+    }
+
+    x->para = para;
+    x->base = base;
+    x->in_link = in_link;
+    x->in_note = in_note;
+    x->nctl = nctl;
+    x->nruby = nruby;
+    x->page_break = page_break;
+    x->ncb = ncb;
+    x->cbi = cbi;
+    memcpy(x->cb, cb, sizeof(cb));
+    memcpy(x->pending, pending, sizeof(pending));
+    x->npending = npending;
+}
+
 /* A drawing's own XML, kept as it came from a .docx, written back as it was: its references to pictures (r:embed,
    r:link, r:id) renamed to this package's, the rest byte for byte. */
-static void dx_kept_xml(dxo* x, const char* s, size_t n, const pj_node* rels, const pj_node* styles) {
+static void dx_kept_xml(dxo* x, const char* s, size_t n, const pj_node* rels, const pj_node* styles,
+                        const pd_block_id* stories, int nstories) {
     static const char* const styled[] = { "w:pStyle w:val=\"", "w:rStyle w:val=\"", "w:tblStyle w:val=\"" };
     pd_buf* o = x->o;
     size_t i = 0, from = 0, j;
+    int next_story = 0;
 
     while (i + 3 < n) {
+        /* a text box's content: its story's, as edited, in the order the boxes come */
+        if (s[i] == '<' && next_story < nstories && i + 16 < n && !memcmp(s + i, "<w:txbxContent", 14) &&
+                (s[i + 14] == '>' || s[i + 14] == ' ')) {
+            const char* gt = memchr(s + i, '>', n - i);
+            size_t at, depth = 1;
+
+            for (at = gt ? (size_t)(gt + 1 - s) : n; at + 15 < n && depth > 0; at++) {     /* its closing tag */
+                if (!memcmp(s + at, "<w:txbxContent", 14) && (s[at + 14] == '>' || s[at + 14] == ' ')) {
+                    depth++;
+                } else if (!memcmp(s + at, "</w:txbxContent>", 16) && --depth == 0) {
+                    break;
+                }
+            }
+
+            if (gt && depth == 0) {
+                pb_put(o, s + from, (size_t)(gt + 1 - (s + from)));
+                dx_story_content(x, stories[next_story++]);
+                from = at;
+                i = at;
+                continue;
+            }
+        }
+
         for (j = 0; j < sizeof(styled) / sizeof(styled[0]); j++) {     /* a style, by the id written for it */
             size_t sl = strlen(styled[j]);
 
@@ -976,13 +1044,30 @@ static void dx_kept_xml(dxo* x, const char* s, size_t n, const pj_node* rels, co
     pb_put(o, s + from, n - from);
 }
 
+/* the stories of a drawing's text boxes, in the order its items have them (the order of their w:txbxContent) */
+static int dx_drawing_stories(const pj_node* root, pd_block_id* out, int cap) {
+    const pj_node* it, *items = root ? pj_get(root, "items") : NULL;
+    int n = 0;
+
+    for (it = items ? items->child : NULL; it && n < cap; it = it->next) {
+        if (pj_get(it, "story")) {
+            out[n++] = (pd_block_id)pj_int_or(pj_get(it, "story"), 0);
+        }
+    }
+
+    return n;
+}
+
 /* a kept drawing's mc:Fallback, its references renamed as the drawing's are; nothing when there is none */
 static void dx_kept_fallback(dxo* x, const void* data, size_t len) {
     pj_doc* doc = pj_parse(data, len, 0, NULL);
     const pj_node* root = doc ? pj_root(doc) : NULL, *fb = root ? pj_get(root, "fallback") : NULL;
 
     if (fb && fb->type == PJ_STR && fb->len > 0 && pj_get(root, "xml")) {
-        dx_kept_xml(x, fb->s, fb->len, pj_get(root, "rels"), pj_get(root, "styles"));
+        pd_block_id st[128];
+        int nst = dx_drawing_stories(root, st, 128);
+
+        dx_kept_xml(x, fb->s, fb->len, pj_get(root, "rels"), pj_get(root, "styles"), st, nst);
     }
 
     pj_free(doc);
@@ -996,7 +1081,10 @@ static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx,
     int id = 1;
 
     if (xml && xml->type == PJ_STR && xml->len > 0) {
-        dx_kept_xml(x, xml->s, xml->len, pj_get(root, "rels"), pj_get(root, "styles"));
+        pd_block_id st[128];
+        int nst = dx_drawing_stories(root, st, 128);
+
+        dx_kept_xml(x, xml->s, xml->len, pj_get(root, "rels"), pj_get(root, "styles"), st, nst);
         pj_free(doc);
         return;
     }
@@ -1144,14 +1232,18 @@ static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx,
             xesc(o, t->s, t->len);
             pb_puts(o, "</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" "
                     "anchor=\"b\"/></wps:wsp>");
-        } else if (pj_get(it, "text")) {
+        } else if (pj_get(it, "text") || pj_get(it, "story")) {
             const pj_node* ins = pj_get(it, "ins"), *an = pj_get(it, "anchor");
 
             pb_printf(o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Text Box %d\"/><wps:cNvSpPr txBox=\"1\"/><wps:spPr>%s"
                       "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>"
                       "<wps:txbx><w:txbxContent>", id, id, xfrm);
 
-            dx_txbx_paras(x, pj_get(it, "text"), 0);
+            if (pj_get(it, "story")) {  /* the text box's story, as edited */
+                dx_story_content(x, (pd_block_id)pj_int_or(pj_get(it, "story"), 0));
+            } else {
+                dx_txbx_paras(x, pj_get(it, "text"), 0);
+            }
             pb_printf(o, "</w:txbxContent></wps:txbx><wps:bodyPr lIns=\"%lld\" tIns=\"%lld\" rIns=\"%lld\" bIns=\"%lld\" "
                       "anchor=\"%s\"/></wps:wsp>", EMU(pj_int_or(pj_at(ins, 0), 0)), EMU(pj_int_or(pj_at(ins, 1), 0)),
                       EMU(pj_int_or(pj_at(ins, 2), 0)), EMU(pj_int_or(pj_at(ins, 3), 0)),
@@ -6517,6 +6609,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     char rel_id[64][24];                                /* the pictures it names, by relationship id */
     pd_res_id rel_res[64];
     int nrel = 0, rel_ok = 1;
+    const char* tx_a = NULL, *tx_b = NULL;              /* a text box's w:txbxContent: its inside, read into a story */
+    int tx_depth = 0;
     double cg_xy[4096], cg_pt[6];   /* a custom geometry's points (its own space), NAN pairs between rings */
     long long cg_w = 0, cg_h = 0;
     int cg_n = 0, cg_npt = 0, cg_closed = 0, cg_new_ring = 1, k2;
@@ -6767,6 +6861,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             strcpy(geom, "rect");
             have_fill = have_line = style_fill = style_line = 0;
             head_arrow = tail_arrow = 0;
+            tx_a = tx_b = NULL;
+            tx_depth = 0;
             arrow_w[0] = arrow_w[1] = arrow_len[0] = arrow_len[1] = 3;
             ext_h = 0;
             ext_clr = 0;
@@ -7035,6 +7131,29 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                               (unsigned)l, (int)emu_sp(lwd));
                 }
 
+                if (tx_a && tx_b > tx_a && X->depth < 3) {
+                    /* the text box's content as a story of the document, read as the body is -- tables, pictures,
+                       styles, fields -- and edited in place; the drawing says where it goes */
+                    pd_char_props keep = X->b->cp;
+                    pd_block_id story = bld_story_begin(X->b);
+
+                    if (story) {
+                        X->depth++;
+                        dw_parse(X, tx_a, (size_t)(tx_b - tx_a), 1);
+                        X->depth--;
+                        bld_end_para(X->b);
+                        bld_story_end(X->b);
+                        ITEM_SEP();
+                        pb_printf(&o, "{\"story\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"ins\":[%d,%d,%d,%d],"
+                                  "\"anchor\":\"%s\"}", (int)story, (int)emu_sp(x), (int)emu_sp(y), (int)emu_sp(cw),
+                                  (int)emu_sp(ch), (int)emu_sp((double)ins[0]), (int)emu_sp((double)ins[1]),
+                                  (int)emu_sp((double)ins[2]), (int)emu_sp((double)ins[3]), anchor);
+                        nopara = 1;     /* not also drawn from the copy read above */
+                    }
+
+                    X->b->cp = keep;
+                }
+
                 if (!nopara) {
                     ITEM_SEP();
                     pb_puts(&o, "{\"text\":[");
@@ -7181,6 +7300,16 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
         } else if (!strcmp(t, "txbxContent")) {
             in_txbx = g.type == MT_OPEN;
+
+            if (g.type == MT_OPEN && tx_depth++ == 0) {
+                tx_a = g.s + g.pos;     /* just after the opening tag */
+            } else if (g.type == MT_CLOSE && tx_depth > 0 && --tx_depth == 0) {
+                tx_b = g.s + g.pos;
+
+                while (tx_b > tx_a && *tx_b != '<') {   /* back to the closing tag's start */
+                    tx_b--;
+                }
+            }
         } else if (!strcmp(t, "fillRef")) {
             in_fillref = g.type == MT_OPEN && attr_int(&g, "idx", 0) > 0;
         } else if (!strcmp(t, "lnRef")) {

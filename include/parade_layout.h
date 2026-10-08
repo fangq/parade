@@ -94,7 +94,7 @@ typedef struct {
     pd_res_id resource;
     pd_block_id block;          /**< source paragraph */
     uint32_t offset;            /**< source byte offset */
-    int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float, 4 footnote */
+    int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float, 4 footnote, 5 a text box in a drawing */
     uint32_t text;              /**< glyphs: the code point shown (also for generated text), 0 if none */
     int32_t scale;              /**< glyphs: horizontal scale, 65536 = 1 (font expansion) */
     const pd_sp* points;        /**< paths: x, y pairs on the page; valid until the page is laid out or listed again */

@@ -194,6 +194,7 @@ struct pd_layout {
     int32_t prev_npages;
     int want_rerun;
     int32_t stable;             /* hybrid line breaking: -1 as the document says, 0 off, 1 on */
+    int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
 };
 
 /* filler state for one section */
@@ -564,6 +565,26 @@ static int add_rule(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp
     return 0;
 }
 
+static void place_stack(pd_layout* L, pd_block_id container, pd_sp width, int32_t page, pd_sp x, pd_sp y,
+                        int32_t region);
+static pd_sp stack_height(pd_layout* L, pd_block_id container, pd_sp width, pd_status* st);
+static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int32_t line, pd_sp ox, pd_sp oy);
+static pd_sp jsp(const pj_node* o, const char* k);
+
+/* whether N bytes of DATA hold the K bytes of KEY */
+static int pd_memfind(const void* data, size_t n, const char* key, size_t k) {
+    const char* p = (const char*)data;
+    size_t i;
+
+    for (i = 0; k && i + k <= n; i++) {
+        if (p[i] == key[0] && !memcmp(p + i, key, k)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static int add_line(pd_layout* L, int32_t page, pcache* pc, int32_t line, pd_sp ox, pd_sp oy, int32_t region) {
     ppage* p = &L->pages[page];
     pline* l;
@@ -599,7 +620,92 @@ static int add_line(pd_layout* L, int32_t page, pcache* pc, int32_t line, pd_sp 
         }
     }
 
+    place_drawing_text(L, page, pc, line, ox, oy);
     return 0;
+}
+
+/* The text boxes of the drawings in a line just placed: each one's story laid out where the drawing puts the box,
+   as lines of the page (region 5) -- drawn, found by a click and edited as any text is. Their insets, and the
+   box's anchor (top, middle, bottom), as the drawing says. */
+static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int32_t line, pd_sp ox, pd_sp oy) {
+    const blk* b = pd_doc_blk(L->doc, pc->block);
+    pd_glyph* g;
+    int32_t n = 0, i, k, any = 0;
+
+    if (!b || b->st.ninl == 0 || L->dtext_depth >= 3) {
+        return;
+    }
+
+    for (k = 0; k < b->st.ninl && !any; k++) {  /* a drawing with a story in it, or nothing to do */
+        const char* mime = NULL;
+        const void* data = NULL;
+        size_t len = 0;
+
+        any = b->st.inl[k].obj.kind == PD_INLINE_IMAGE &&
+              pd_doc_resource(L->doc, b->st.inl[k].obj.resource, &mime, &data, &len) == PD_OK &&
+              !strcmp(mime, "application/vnd.parade.drawing+json") && pd_memfind(data, len, "\"story\":", 8);
+    }
+
+    if (!any || pd_para_get_glyphs(pc->para, line, NULL, 0, &n) != PD_OK || n <= 0 ||
+            (g = (pd_glyph*)malloc((size_t)n * sizeof(pd_glyph))) == NULL) {
+        return;
+    }
+
+    pd_para_get_glyphs(pc->para, line, g, n, &n);
+
+    for (i = 0; i < n; i++) {
+        const dinline* q = g[i].kind == PD_OBJECT && g[i].user >= 0 && g[i].user < b->st.ninl ? &b->st.inl[g[i].user] :
+                           NULL;
+        const char* mime = NULL;
+        const void* data = NULL;
+        size_t len = 0;
+        pj_doc* jd;
+        const pj_node* root, *it;
+        pd_sp iw, ih, x0, y0;
+        double sx, sy;
+
+        if (!q || q->obj.kind != PD_INLINE_IMAGE ||
+                pd_doc_resource(L->doc, q->obj.resource, &mime, &data, &len) != PD_OK ||
+                strcmp(mime, "application/vnd.parade.drawing+json") || !pd_memfind(data, len, "\"story\":", 8)) {
+            continue;
+        }
+
+        pd_doc_image_size(L->doc, &q->obj, &iw, &ih);
+        x0 = ox + g[i].x;
+        y0 = oy + g[i].y - ih;
+        jd = pj_parse(data, len, 0, NULL);
+        root = jd ? pj_root(jd) : NULL;
+        sx = root && jsp(root, "w") > 0 ? (double)iw / jsp(root, "w") : 1;
+        sy = root && jsp(root, "h") > 0 ? (double)ih / jsp(root, "h") : 1;
+
+        for (it = root && pj_get(root, "items") ? pj_get(root, "items")->child : NULL; it; it = it->next) {
+            const pj_node* ins = pj_get(it, "ins"), *an = pj_get(it, "anchor");
+            pd_block_id story = (pd_block_id)pj_int_or(pj_get(it, "story"), 0);
+            pd_sp bx = x0 + (pd_sp)(jsp(it, "x") * sx), by = y0 + (pd_sp)(jsp(it, "y") * sy);
+            pd_sp bw = (pd_sp)(jsp(it, "w") * sx), bh = (pd_sp)(jsp(it, "h") * sy);
+            pd_sp il = (pd_sp)(pj_int_or(pj_at(ins, 0), 0) * sx), it_ = (pd_sp)(pj_int_or(pj_at(ins, 1), 0) * sy);
+            pd_sp ir = (pd_sp)(pj_int_or(pj_at(ins, 2), 0) * sx), ib = (pd_sp)(pj_int_or(pj_at(ins, 3), 0) * sy);
+            pd_sp width = bw - il - ir, top = by + it_, h;
+            pd_status st;
+
+            if (!story || !pd_doc_blk(L->doc, story) || width <= 0) {
+                continue;
+            }
+
+            if (an && an->type == PJ_STR && an->len >= 1 && (an->s[0] == 'c' || an->s[0] == 'b')) {
+                h = stack_height(L, story, width, &st);
+                top = an->s[0] == 'c' ? by + (bh - h) / 2 : by + bh - ib - h;
+            }
+
+            L->dtext_depth++;
+            place_stack(L, story, width, page, bx + il, top, 5);
+            L->dtext_depth--;
+        }
+
+        pj_free(jd);
+    }
+
+    free(g);
 }
 
 /* all paragraphs of a container block, depth first (tables are stacked for now) */
@@ -5099,7 +5205,9 @@ pd_status pd_layout_hit_test(const pd_layout* L, int32_t page, pd_sp x, pd_sp y,
         dx = x < left ? left - x : (x > right ? x - right : 0);
         dist = dy * 4 + dx;
 
-        if (!best || dist < best_d) {
+        /* a text box's line wins a tie with the line its drawing sits in, which a click inside the drawing also
+           falls in: the caption is what the click was for */
+        if (!best || dist < best_d || (dist == best_d && l->region == 5 && best->region != 5)) {
             best = l;
             best_d = dist;
         }

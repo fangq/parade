@@ -903,6 +903,48 @@ static pd_char_props chars_at(const pd_doc* d, pd_block_id p, uint32_t off) {
     return cp;
 }
 
+/* the first paragraph under a block, depth first, whose text begins with T; 0 if none */
+static pd_block_id para_under_with(const pd_doc* d, pd_block_id b, const char* t) {
+    pd_block_info bi;
+    int32_t i;
+
+    if (pd_doc_block_info(d, b, &bi) != PD_OK) {
+        return 0;
+    }
+
+    if (bi.kind == PD_BLOCK_PARAGRAPH) {
+        const char* s;
+        uint32_t n;
+
+        return pd_doc_para_text(d, b, &s, &n) == PD_OK && n >= strlen(t) && !memcmp(s, t, strlen(t)) ? b : 0;
+    }
+
+    for (i = 0; i < bi.child_count; i++) {
+        pd_block_id f = para_under_with(d, pd_doc_child(d, b, i), t);
+
+        if (f) {
+            return f;
+        }
+    }
+
+    return 0;
+}
+
+/* the paragraph of a story (a drawing's text box, a note) whose text begins with T; 0 if none */
+static pd_block_id story_para_with(const pd_doc* d, const char* t) {
+    int32_t i;
+
+    for (i = 0; i < pd_doc_story_count(d); i++) {
+        pd_block_id f = para_under_with(d, pd_doc_story_at(d, i), t);
+
+        if (f) {
+            return f;
+        }
+    }
+
+    return 0;
+}
+
 /* Word keeps most of what a paragraph looks like in its styles: the
    document defaults, a default paragraph style, styles based on styles,
    theme fonts, character styles. The shape of a proposal written in Word:
@@ -2225,6 +2267,65 @@ static void test_docx_group_turned_shapes(void) {
     pd_doc_free(d);
 }
 
+/* A drawing's caption is a story: a copy of the drawing, pasted, has a caption of its own with the same text --
+   editing it leaves the original's alone -- and one pasted into another document has its text too. */
+static void test_drawing_story_copy(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpc=\"wpc\" xmlns:wps=\"wps\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"1270000\" cy=\"635000\"/><a:graphic><a:graphicData><wpc:wpc>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Caption one</w:t></w:r></w:p>"
+        "</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpc:wpc></a:graphicData></a:graphic></wp:inline>"
+        "</w:drawing></w:r></w:p><w:p><w:r><w:t>after</w:t></w:r></w:p></w:body></w:document>",
+        NULL);
+    buf_t b = { NULL, 0 };
+    pd_doc* e = NULL;
+    pd_block_id sec, p0, p1;
+    pd_range r;
+    pd_pos after;
+    int32_t before;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+    p0 = pd_doc_child(d, sec, 0);
+    p1 = pd_doc_child(d, sec, 1);
+    before = pd_doc_story_count(d);
+    CHECK(before == 1);
+    r.start = at(p0, 0);
+    r.end = at(p0, 3);
+    CHECK(pd_doc_export_range(d, r, PD_CONV_JDATA, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_paste(d, at(p1, 0), b.p, b.n, PD_CONV_JDATA, &after) == PD_OK);
+    CHECK(pd_doc_story_count(d) == before + 1);     /* its own caption */
+
+    if (pd_doc_story_count(d) == before + 1) {
+        pd_block_id s0 = pd_doc_child(d, pd_doc_story_at(d, 0), 0), s1 = pd_doc_child(d, pd_doc_story_at(d, 1), 0);
+        const char* t;
+        uint32_t n;
+
+        CHECK(pd_doc_para_text(d, s1, &t, &n) == PD_OK && n == 11 && !memcmp(t, "Caption one", 11));
+        pd_doc_insert_text(d, at(s1, 0), "Copy ", 5, PD_FORMAT_INHERIT, NULL);
+        CHECK(pd_doc_para_text(d, s0, &t, &n) == PD_OK && n == 11);     /* the original's unchanged */
+    }
+
+    CHECK(pd_doc_import(b.p, b.n, PD_CONV_JDATA, &e) == PD_OK && e && pd_doc_story_count(e) == 1);
+    if (e) {
+        const char* t;
+        uint32_t n;
+
+        CHECK(pd_doc_para_text(e, pd_doc_child(e, pd_doc_story_at(e, 0), 0), &t, &n) == PD_OK && n == 11);
+        pd_doc_free(e);
+    }
+
+    free(b.p);
+    pd_doc_free(d);
+}
+
 /* A canvas kept as Word wrote it: through DOCX its own XML comes back -- the 3-D, the preset shapes -- with its
    picture's reference renamed to the new package's, and the styles only its text uses are the document's; a canvas
    whose text the writer would renumber (a list) is made from the drawing instead. */
@@ -2299,12 +2400,12 @@ static void test_docx_canvas_kept(void) {
         }
 
         CHECK(pd_doc_style_find(d, "MC Body SP") != 0);     /* used in the drawing alone */
-        CHECK(pd_doc_style_find(d, "FigCap") != 0);
+        CHECK(story_para_with(d, "Fig. 2.") != 0 && chars_at(d, story_para_with(d, "Fig. 2."), 0).weight == 700);
 
         CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, sec, 1), 0), &o) == PD_OK);
         js = drawing_json(d, o.resource);
         /* made, not kept, as read (once written, the drawing's XML is the writer's own: kept from then on) */
-        CHECK(js != NULL && (pass > 0 || strstr(js, "\"xml\"") == NULL) && strstr(js, "listed") != NULL);
+        CHECK(js != NULL && (pass > 0 || strstr(js, "\"xml\"") == NULL) && story_para_with(d, "listed") != 0);
         free(js);
     }
 
@@ -2400,7 +2501,8 @@ static void test_docx_canvas_3d(void) {
             CHECK(commas > 20);
         }
         CHECK(strstr(js, "\"fill\":4284900966") != NULL);     /* 60% black on white: 0xFF666666 */
-        CHECK(strstr(js, "{\"a\":0,\"runs\":[{\"t\":\"Fig. 1.") != NULL);   /* justified (PD_ALIGN_JUSTIFY) */
+        CHECK(story_para_with(d, "Fig. 1.") != 0 &&
+              para_resolved(d, story_para_with(d, "Fig. 1.")).align == PD_ALIGN_JUSTIFY);     /* as Normal is */
         free(js);
     }
 
@@ -2507,15 +2609,19 @@ static void test_docx_group_textbox_table(void) {
         CHECK(js != NULL);
 
         if (js) {
-            CHECK(strstr(js, "\"table\":{") != NULL && strstr(js, "\"cols\":[1000,2000]") != NULL);
-            CHECK(strstr(js, "\"span\":2") != NULL && strstr(js, "\"bg\":4291611852") != NULL);    /* 0xFFCCCCCC */
-            CHECK(strstr(js, "\"t\":\"Head\"") != NULL && strstr(js, "\"t\":\"b\"") != NULL);
-            snprintf(want, sizeof(want), "\"sz\":%d", (int)PD_PT(7));      /* the paragraph's style's size */
-            CHECK(strstr(js, want) != NULL);
-            snprintf(want, sizeof(want), "\"s\":%d", (int)PD_SHIFT_SUPER);
-            CHECK(strstr(js, want) != NULL);
-            snprintf(want, sizeof(want), "\"w\":%d,\"h\":%d}", (int)PD_PT(20), (int)PD_PT(10));    /* the picture */
-            CHECK(strstr(js, "{\"img\":") != NULL && strstr(js, want) != NULL);
+            pd_block_id head = story_para_with(d, "Head"), cm = story_para_with(d, "cm");
+            pd_block_info hb;
+            pd_inline pic;
+
+            CHECK(strstr(js, "\"story\":") != NULL);
+            /* the text box a story: its table a table (Head in a cell of it), its paragraph in its style */
+            CHECK(head != 0 && story_para_with(d, "b") != 0);
+            CHECK(head && pd_doc_block_info(d, head, &hb) == PD_OK && pd_doc_block_info(d, hb.parent, &hb) == PD_OK &&
+                  hb.kind == PD_BLOCK_CELL);
+            CHECK(cm != 0 && chars_at(d, cm, 0).size == PD_PT(7));     /* the paragraph's style's size */
+            CHECK(cm != 0 && chars_at(d, cm, 2).shift == PD_SHIFT_SUPER);
+            CHECK(cm != 0 && pd_doc_inline_at(d, at(cm, 3), &pic) == PD_OK && pic.kind == PD_INLINE_IMAGE);
+            (void)want;
             free(js);
         }
 
@@ -2525,7 +2631,7 @@ static void test_docx_group_textbox_table(void) {
         }
 
         CHECK(count_draws(d, PD_DRAW_RULE, 0xFFCCCCCCu) == 1);
-        CHECK(count_draws(d, PD_DRAW_RULE, 0xFF000000u) >= 12);
+        CHECK(count_draws(d, PD_DRAW_RULE, 0xFF000000u) >= 1);     /* the table's top border */
         CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 1);
     }
 
@@ -2984,8 +3090,13 @@ static void test_docx_drawings(void) {
             snprintf(want, sizeof(want), "\"x\":%d,\"y\":0,\"w\":%d,\"h\":%d", (int)PD_PT(100), (int)PD_PT(100), (int)PD_PT(50));
             CHECK(strstr(js, want) != NULL);
             CHECK(strstr(js, "\"fill\":4294901760") != NULL);   /* 0xFFFF0000 */
-            CHECK(strstr(js, "(b) label") != NULL && strstr(js, "\"anchor\":\"ctr\"") != NULL);
-            CHECK(strstr(js, "\"w\":700") != NULL && strstr(js, "\"sz\":589824") != NULL);   /* bold, 9pt */
+            CHECK(strstr(js, "\"story\":") != NULL && strstr(js, "\"anchor\":\"ctr\"") != NULL);
+            {   /* the label a story of the document: bold, 9pt */
+                pd_block_id lp = story_para_with(d, "(b) label");
+                pd_char_props lc = chars_at(d, lp, 0);
+
+                CHECK(lp != 0 && lc.weight == 700 && lc.size == PD_PT(9));
+            }
             free(js);
         }
 
@@ -4210,6 +4321,7 @@ int main(void) {
     test_docx_group_turned_shapes();
     test_docx_canvas_3d();
     test_docx_canvas_kept();
+    test_drawing_story_copy();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

@@ -96,6 +96,10 @@ end;
 var
   Form: TForm;
   Same: Boolean;
+  CapB: pd_block_id;
+  CapPage: Int32;
+  CapX, CapBase, CapAsc, CapDesc: pd_sp;
+  CapFile: string;
   E: TParadeEdit;
   Dir, Sample, T: string;
   C: pd_pos;
@@ -335,6 +339,40 @@ begin
   for I := 1 to 120 do
     E.InsertText('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor. ');
   Check(E.PageCount >= 2, 'second page');
+  { a caption in a drawing canvas is text of the document: clicked into, typed in, undone, and saved back into
+    the drawing }
+  CapFile := ExpandFileName(Dir + '../../tests/data/canvas_caption.docx');
+  if FileExists(CapFile) then
+  begin
+    E.LoadFromFile(CapFile);
+    CapB := 0;
+    for I := 0 to pd_doc_story_count(E.Doc) - 1 do
+      if (CapB = 0) and (Pos('Fig. 1.', E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0))) = 1) then
+        CapB := pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0);
+    Check(CapB <> 0, 'the caption is a story of the document');
+    Check((CapB <> 0) and (pd_layout_caret(E.Layout, PdPos(CapB, 4), CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK),
+      'and is laid out on the page');
+    if CapB <> 0 then
+    begin
+      E.ClickAt(CapPage, CapX / PD_SP_PER_PT, (CapBase - CapAsc / 2) / PD_SP_PER_PT);
+      Check(E.CaretPos.block = CapB, 'a click in the caption puts the caret there');
+      E.InsertText('NEW ');
+      Check(Pos('NEW ', E.ParaText(CapB)) > 0, 'what is typed goes into the caption: ' + E.ParaText(CapB));
+      E.Undo;
+      Check(Pos('NEW', E.ParaText(CapB)) = 0, 'and undo takes it out');
+      E.Redo;
+      E.ProcessKey(VK_ESCAPE, []);
+      Check((E.CaretPos.block <> CapB) and (Pos(#$EF#$BF#$BC, E.ParaText(E.CaretPos.block)) > 0) and
+        (E.CaretPos.offset = 3), 'Escape leaves the caption, just after its drawing');
+      E.SaveToFile(Dir + 'edit_caption.docx');
+      E.LoadFromFile(Dir + 'edit_caption.docx');
+      Same := False;
+      for I := 0 to pd_doc_story_count(E.Doc) - 1 do
+        Same := Same or (Pos('NEW ', E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0))) > 0);
+      Check(Same, 'saved: the edited caption comes back in the drawing');
+    end;
+  end;
+
   { scrolled a wheel step at a time: the view moves and only the strip that
     comes into view is drawn, which is what a redraw of all of it gives }
   E.ProcessKey(VK_HOME, [ssCtrl]);

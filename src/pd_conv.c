@@ -1073,6 +1073,50 @@ static pd_status copy_children(copier* C, pd_block_id src, pd_block_id dst) {
     return st;
 }
 
+/* A drawing whose text boxes are stories: the stories copied too, and the drawing made again naming the copies --
+   each copy of a drawing its own text, not the original's (nor, in another document, nothing) */
+static int copy_drawing_stories(copier* C, const char* data, size_t len, pd_res_id* out) {
+    pd_buf b;
+    size_t i = 0, from = 0;
+    int ok = 1;
+
+    memset(&b, 0, sizeof(b));
+
+    while (i + 8 < len) {
+        if (!memcmp(data + i, "\"story\":", 8)) {
+            size_t j = i + 8;
+            long v = 0;
+            pd_block_id story = 0;
+
+            while (j < len && data[j] >= '0' && data[j] <= '9') {
+                v = v * 10 + (data[j++] - '0');
+            }
+
+            if (pd_doc_insert_block(C->d, 0, -1, PD_BLOCK_STORY, &story) != PD_OK) {
+                ok = 0;
+                break;
+            }
+
+            if (v > 0) {
+                copy_children(C, (pd_block_id)v, story);
+            }
+
+            pb_put(&b, data + from, i + 8 - from);
+            pb_printf(&b, "%d", (int)story);
+            from = j;
+            i = j;
+            continue;
+        }
+
+        i++;
+    }
+
+    pb_put(&b, data + from, len - from);
+    ok = ok && !b.err && pd_doc_add_resource(C->d, "application/vnd.parade.drawing+json", b.p, b.n, out) == PD_OK;
+    pb_free(&b);
+    return ok;
+}
+
 static int copy_object(copier* C, const pd_inline* o, pd_inline* out) {
     *out = *o;
 
@@ -1083,6 +1127,17 @@ static int copy_object(copier* C, const pd_inline* o, pd_inline* out) {
 
         if (o->resource >= 1024 || pd_doc_resource(C->s, o->resource, &mime, &data, &len) != PD_OK) {
             return 0;
+        }
+
+        if (!strcmp(mime, "application/vnd.parade.drawing+json") && len > 8) {
+            const char* p = (const char*)data;
+            size_t k;
+
+            for (k = 0; k + 8 <= len; k++) {
+                if (p[k] == '"' && !memcmp(p + k, "\"story\":", 8)) {
+                    return copy_drawing_stories(C, p, len, &out->resource);
+                }
+            }
         }
 
         if (!C->rmap[o->resource] && pd_doc_add_resource(C->d, mime, data, len, &C->rmap[o->resource]) != PD_OK) {
