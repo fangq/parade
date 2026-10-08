@@ -2225,6 +2225,103 @@ static void test_docx_group_turned_shapes(void) {
     pd_doc_free(d);
 }
 
+/* A canvas as Word draws Fig. 3-style diagrams: its background and frame; a shape filled from its group (grpFill);
+   a freeform whose points are guides; a box extruded and seen through an isometric camera (a prism: several faces);
+   a curved connector (a curve, not a chord) with a medium arrowhead (three line widths long); a 60% pattern
+   (its colours mixed); and a text box's paragraph justified as the default paragraph style is. */
+static void test_docx_canvas_3d(void) {
+    pd_doc* d = docx_doc(
+        "word/styles.xml",
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/>"
+        "<w:pPr><w:jc w:val=\"both\"/></w:pPr></w:style></w:styles>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpc=\"wpc\" xmlns:wpg=\"wpg\" xmlns:wps=\"wps\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"2540000\"/><a:graphic><a:graphicData><wpc:wpc>"
+        "<wpc:bg><a:solidFill><a:prstClr val=\"white\"/></a:solidFill></wpc:bg>"
+        "<wpc:whole><a:ln><a:solidFill><a:srgbClr val=\"000000\"/></a:solidFill></a:ln></wpc:whole>"
+        "<wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/><a:chOff x=\"0\" y=\"0\"/>"
+        "<a:chExt cx=\"635000\" cy=\"635000\"/></a:xfrm><a:solidFill><a:srgbClr val=\"808000\"/></a:solidFill></wpg:grpSpPr>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:grpFill/></wps:spPr><wps:bodyPr/></wps:wsp></wpg:wgp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm><a:custGeom>"
+        "<a:gdLst><a:gd name=\"gx\" fmla=\"*/ 1 w 2\"/><a:gd name=\"gy\" fmla=\"+- h 0 0\"/></a:gdLst><a:pathLst>"
+        "<a:path w=\"635000\" h=\"635000\"><a:moveTo><a:pt x=\"0\" y=\"0\"/></a:moveTo><a:lnTo><a:pt x=\"gx\" y=\"gy\"/>"
+        "</a:lnTo><a:lnTo><a:pt x=\"w\" y=\"0\"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom>"
+        "<a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:solidFill><a:srgbClr val=\"0000FF\"/></a:solidFill><a:scene3d><a:camera "
+        "prst=\"isometricOffAxis1Top\"/></a:scene3d><a:sp3d extrusionH=\"254000\"/></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"317500\"/></a:xfrm>"
+        "<a:prstGeom prst=\"curvedConnector3\"/><a:ln w=\"25400\"><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill>"
+        "<a:tailEnd type=\"triangle\"/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1905000\" y=\"1905000\"/><a:ext cx=\"317500\" cy=\"317500\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:pattFill prst=\"pct60\"><a:fgClr><a:srgbClr val=\"000000\"/></a:fgClr><a:bgClr>"
+        "<a:srgbClr val=\"FFFFFF\"/></a:bgClr></a:pattFill></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"2000000\"/><a:ext cx=\"1270000\" cy=\"500000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:noFill/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Fig. 1. A caption.</w:t>"
+        "</w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"
+        "</wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>",
+        NULL);
+    pd_inline o;
+    char* js;
+    char want[96];
+    const char* p;
+    int faces = 0, bluish = 0;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+    js = drawing_json(d, o.resource);
+    CHECK(js != NULL);
+
+    if (js) {
+        /* the background first, white, and the frame */
+        CHECK(strstr(js, "\"shape\":\"rect\",\"x\":0,\"y\":0") != NULL && strstr(js, "\"fill\":4294967295") != NULL);
+        CHECK(strstr(js, "\"fill\":0,\"line\":4278190080") != NULL);
+        CHECK(strstr(js, "\"fill\":4286611456") != NULL);         /* the group's olive, 0xFF808000 */
+        /* the freeform's middle point from its guides: half the width, the full height (50 pt, 50 pt into it) */
+        snprintf(want, sizeof(want), "%d,%d", (int)(PD_PT(100) + PD_PT(25)), (int)PD_PT(50));
+        CHECK(strstr(js, want) != NULL);
+        /* the extruded box: a front face and more, all blue or shaded from it */
+        for (p = js; (p = strstr(p, "\"fill\":")) != NULL; p++) {
+            unsigned long c = strtoul(p + 7, NULL, 10);
+
+            if ((c & 0xFFFF00) == 0 && (c & 0xFF) > 0x40) {
+                bluish++;
+            }
+        }
+
+        CHECK(bluish >= 4);
+        faces = bluish;
+        /* the connector a curve: a path of many points ending at the box's far corner */
+        CHECK(strstr(js, "\"line\":4294901760") != NULL);
+        p = strstr(js, "\"line\":4294901760");
+        while (p && p > js && strncmp(p, "{\"path\"", 7)) {
+            p--;
+        }
+        if (p) {
+            int commas = 0;
+            const char* e = strchr(p, ']');
+
+            for (; e && p < e; p++) {
+                commas += *p == ',';
+            }
+
+            CHECK(commas > 20);
+        }
+        CHECK(strstr(js, "\"fill\":4284900966") != NULL);     /* 60% black on white: 0xFF666666 */
+        CHECK(strstr(js, "{\"a\":0,\"runs\":[{\"t\":\"Fig. 1.") != NULL);   /* justified (PD_ALIGN_JUSTIFY) */
+        free(js);
+    }
+
+    (void)faces;
+    pd_doc_free(d);
+}
+
 static pd_font* layout_font;
 
 static const pd_font* layout_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -4025,6 +4122,7 @@ int main(void) {
     test_docx_group_textbox_table();
     test_docx_deleted_float();
     test_docx_group_turned_shapes();
+    test_docx_canvas_3d();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

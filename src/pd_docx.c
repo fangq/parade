@@ -5747,7 +5747,7 @@ static dxform fr_then(const dxform* f, const dxform* g) {
 static dxform fr_box(double cx, double cy, int rot, int fliph, int flipv, const double* lin) {
     double t = rot / 60000.0 * 3.14159265358979 / 180, ct = cos(t), st = sin(t);
     double fa = fliph ? -1 : 1, fd = flipv ? -1 : 1;
-    double l0 = lin ? lin[0] : 1, l1 = lin ? lin[1] : 0, l2 = lin ? lin[2] : 0, l3 = lin ? lin[3] : 1;
+    double l0 = lin ? lin[0] : 1, l1 = lin ? lin[1] : 0, l2 = lin ? lin[3] : 0, l3 = lin ? lin[4] : 1;
     dxform r;
 
     /* flipped first, then projected, then turned: R * L * F */
@@ -5764,8 +5764,9 @@ static dxform fr_box(double cx, double cy, int rot, int fliph, int flipv, const 
     return r;
 }
 
-/* A 3-D camera (scene3d) seen in parallel: the 2x2 its rotation does to the shape's plane, from the preset (Office's
-   values, as LibreOffice reads them) and an explicit rot over it. 0 when there is none, or it is head-on. */
+/* A 3-D camera (scene3d) seen in parallel: its rotation (3x3, row by row: x, y on the page, then depth toward the
+   viewer), from the preset (Office's values, as LibreOffice reads them) and an explicit rot over it; fr_box takes
+   the part in the shape's plane. 0 when there is none, or it is head-on. */
 static int camera_lin(const char* prst, int has_rot, double lat, double lon, double rev, double* lin) {
     static const struct {
         const char* n;
@@ -5840,10 +5841,10 @@ static int camera_lin(const char* prst, int has_rot, double lat, double lon, dou
         }
     }
 
-    lin[0] = M[0];
-    lin[1] = M[1];
-    lin[2] = M[3];
-    lin[3] = M[4];
+    for (k = 0; k < 9; k++) {
+        lin[k] = M[k];
+    }
+
     return 1;
 }
 
@@ -5898,6 +5899,257 @@ static void json_str(pd_buf* o, const char* s, size_t n) {
     pb_putc(o, '"');
 }
 
+/* An extruded shape (sp3d extrusionH) seen through its camera, drawn as a prism: the outline (px, py, in the
+   group's child space, np points, closed) as the front face, the same moved back by the depth, and a side for each
+   edge, every face as a path, far ones first, each shaded by how it faces a light from the upper left and the
+   front. The front keeps the shape's fill and outline; the sides and back take the extrusion colour. */
+static void dw_extruded(pd_buf* o, int* first, const dxform* FR, const double* M, double cx, double cy, int rot,
+                        int fliph, int flipv, const double* px, const double* py, int np, double depth, uint32_t fill,
+                        uint32_t side, uint32_t line, double lwd) {
+    double t = rot / 60000.0 * 3.14159265358979 / 180, ct = cos(t), st = sin(t), fa = fliph ? -1 : 1,
+           fd = flipv ? -1 : 1, area = 0, L[3] = { -0.35, -0.55, 1 }, ll, front_nl;
+    double fx[64], fy[64], bx[64], by[64], fz[64];
+    struct {
+        int i;          /* -1 front, -2 back, else the side from point i */
+        double z, nl;
+    } face[66], tmp;
+    int n = 0, i, j, k;
+
+    if (np < 3 || np > 64) {
+        return;
+    }
+
+    ll = sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
+
+    for (i = 0; i < 3; i++) {
+        L[i] /= ll;
+    }
+
+    for (i = 0; i < np; i++) {      /* each point, at the front and at the back */
+        double u = (px[i] - cx) * fa, v = (py[i] - cy) * fd, X, Y, rx, ry;
+
+        for (k = 0; k < 2; k++) {
+            double z = k ? -depth : 0;
+
+            X = M[0] * u + M[1] * v + M[2] * z;
+            Y = M[3] * u + M[4] * v + M[5] * z;
+            rx = ct * X - st * Y + cx;
+            ry = st * X + ct * Y + cy;
+            fr_pt(FR, rx, ry, k ? &bx[i] : &fx[i], k ? &by[i] : &fy[i]);
+        }
+
+        fz[i] = M[6] * u + M[7] * v;
+        area += (px[i] - cx) * fa * ((py[(i + 1) % np] - cy) * fd) - ((px[(i + 1) % np] - cx) * fa) * ((py[i] - cy) * fd);
+    }
+
+    front_nl = M[2] * L[0] + M[5] * L[1] + M[8] * L[2];
+    face[n].i = -1;
+    face[n].z = 0;
+    face[n++].nl = front_nl;
+    face[n].i = -2;
+    face[n].z = -depth * M[8];
+    face[n++].nl = -front_nl;
+
+    for (i = 0; i < np; i++) {      /* the sides: their outward normals turned by the camera */
+        int i2 = (i + 1) % np;
+        double ex = (px[i2] - px[i]) * fa, ey = (py[i2] - py[i]) * fd, nx = ey, ny = -ex, nn, cnx, cny, cnz;
+
+        if (area < 0) {
+            nx = -nx;
+            ny = -ny;
+        }
+
+        nn = sqrt(nx * nx + ny * ny);
+
+        if (nn <= 0) {
+            continue;
+        }
+
+        nx /= nn;
+        ny /= nn;
+        cnx = M[0] * nx + M[1] * ny;
+        cny = M[3] * nx + M[4] * ny;
+        cnz = M[6] * nx + M[7] * ny;
+        face[n].i = i;
+        face[n].z = (fz[i] + fz[i2]) / 2 - depth * M[8] / 2 + cnz * 1e-3;
+        face[n++].nl = cnx * L[0] + cny * L[1] + cnz * L[2];
+    }
+
+    for (i = 1; i < n; i++) {       /* far to near: the nearer drawn over */
+        for (j = i; j > 0 && face[j - 1].z > face[j].z; j--) {
+            tmp = face[j];
+            face[j] = face[j - 1];
+            face[j - 1] = tmp;
+        }
+    }
+
+    for (i = 0; i < n; i++) {
+        uint32_t base = face[i].i == -1 ? fill : side, c;
+        double shade = (0.45 + 0.55 * (face[i].nl > 0 ? face[i].nl : 0)) / (0.45 + 0.55 * (front_nl > 0 ? front_nl : 0));
+        int r, g, b;
+
+        if (!base) {
+            continue;
+        }
+
+        if (face[i].i == -1) {
+            shade = 1;
+        }
+
+        shade = shade > 1.25 ? 1.25 : shade;
+        r = (int)(((base >> 16) & 255) * shade);
+        g = (int)(((base >> 8) & 255) * shade);
+        b = (int)((base & 255) * shade);
+        c = (base & 0xFF000000u) | (uint32_t)(r > 255 ? 255 : r) << 16 | (uint32_t)(g > 255 ? 255 : g) << 8 |
+            (uint32_t)(b > 255 ? 255 : b);
+
+        if (!*first) {
+            pb_putc(o, ',');
+        }
+
+        *first = 0;
+        pb_puts(o, "{\"path\":[");
+
+        if (face[i].i < 0) {
+            for (k = 0; k < np; k++) {
+                pb_printf(o, "%s%d,%d", k ? "," : "", (int)emu_sp(face[i].i == -1 ? fx[k] : bx[k]),
+                          (int)emu_sp(face[i].i == -1 ? fy[k] : by[k]));
+            }
+        } else {
+            int a = face[i].i, b2 = (a + 1) % np;
+
+            pb_printf(o, "%d,%d,%d,%d,%d,%d,%d,%d", (int)emu_sp(fx[a]), (int)emu_sp(fy[a]), (int)emu_sp(fx[b2]),
+                      (int)emu_sp(fy[b2]), (int)emu_sp(bx[b2]), (int)emu_sp(by[b2]), (int)emu_sp(bx[a]),
+                      (int)emu_sp(by[a]));
+        }
+
+        /* the sides and the back outlined in their own colour, a hairline: neighbouring faces of a curved side
+           otherwise show the background through the anti-aliased seam between them */
+        pb_printf(o, "],\"closed\":1,\"fill\":%u,\"line\":%u,\"lw\":%d}", (unsigned)c,
+                  (unsigned)(face[i].i == -1 ? line : c), (int)emu_sp(face[i].i == -1 ? lwd : 6350));
+    }
+}
+
+/* DrawingML shape guides: a name's value -- one of the shape's own guides, or a built-in (w, h, hc, ss, wd2, ...)
+   from its width and height -- or a number written out. */
+typedef struct {
+    char name[48][40];
+    double val[48];
+    int n;
+    double w, h;
+} dw_guides;
+
+static double dw_guide_arg(const dw_guides* G, const char* a) {
+    double w = G->w, h = G->h, ss = w < h ? w : h, ls = w > h ? w : h;
+    int i;
+
+    if ((a[0] >= '0' && a[0] <= '9') || a[0] == '-' || a[0] == '+' || a[0] == '.') {
+        return atof(a);
+    }
+
+    for (i = G->n - 1; i >= 0; i--) {
+        if (!strcmp(G->name[i], a)) {
+            return G->val[i];
+        }
+    }
+
+    if (!strcmp(a, "w") || !strcmp(a, "r")) return w;
+    if (!strcmp(a, "h") || !strcmp(a, "b")) return h;
+    if (!strcmp(a, "l") || !strcmp(a, "t")) return 0;
+    if (!strcmp(a, "hc")) return w / 2;
+    if (!strcmp(a, "vc")) return h / 2;
+    if (!strcmp(a, "ss")) return ss;
+    if (!strcmp(a, "ls")) return ls;
+    if (!strncmp(a, "wd", 2)) return w / atof(a + 2);
+    if (!strncmp(a, "hd", 2)) return h / atof(a + 2);
+    if (!strncmp(a, "ssd", 3)) return ss / atof(a + 3);
+    if (!strcmp(a, "cd2")) return 10800000;
+    if (!strcmp(a, "cd4")) return 5400000;
+    if (!strcmp(a, "cd8")) return 2700000;
+    if (!strcmp(a, "3cd4")) return 16200000;
+    if (!strcmp(a, "3cd8")) return 8100000;
+    if (!strcmp(a, "5cd8")) return 13500000;
+    if (!strcmp(a, "7cd8")) return 18900000;
+    return 0;
+}
+
+/* a guide's formula (multiply-divide, add-subtract, "val n", min, max, pin, ...) evaluated, and kept under its
+   name */
+static double dw_guide_add(dw_guides* G, const char* name, const char* fmla) {
+    char op[8] = "", a[3][40];
+    double x, y, z, r = 0;
+    int n;
+
+    a[0][0] = a[1][0] = a[2][0] = '\0';
+    n = sscanf(fmla, "%7s %39s %39s %39s", op, a[0], a[1], a[2]);
+    x = n > 1 ? dw_guide_arg(G, a[0]) : 0;
+    y = n > 2 ? dw_guide_arg(G, a[1]) : 0;
+    z = n > 3 ? dw_guide_arg(G, a[2]) : 0;
+
+    if (!strcmp(op, "*/")) r = z != 0 ? x * y / z : 0;
+    else if (!strcmp(op, "+-")) r = x + y - z;
+    else if (!strcmp(op, "+/")) r = z != 0 ? (x + y) / z : 0;
+    else if (!strcmp(op, "val")) r = x;
+    else if (!strcmp(op, "abs")) r = fabs(x);
+    else if (!strcmp(op, "sqrt")) r = x > 0 ? sqrt(x) : 0;
+    else if (!strcmp(op, "min")) r = x < y ? x : y;
+    else if (!strcmp(op, "max")) r = x > y ? x : y;
+    else if (!strcmp(op, "pin")) r = y < x ? x : y > z ? z : y;
+    else if (!strcmp(op, "?:")) r = x > 0 ? y : z;
+    else if (!strcmp(op, "mod")) r = sqrt(x * x + y * y + z * z);
+
+    if (G->n < 48) {
+        snprintf(G->name[G->n], sizeof(G->name[0]), "%s", name);
+        G->val[G->n++] = r;
+    } else {    /* the oldest go: a freeform's guides are used near where they are made */
+        memmove(G->name[0], G->name[1], sizeof(G->name[0]) * 47);
+        memmove(&G->val[0], &G->val[1], sizeof(G->val[0]) * 47);
+        snprintf(G->name[47], sizeof(G->name[0]), "%s", name);
+        G->val[47] = r;
+    }
+
+    return r;
+}
+
+/* A DrawingML colour element (srgbClr, schemeClr, sysClr, prstClr) as ARGB; 0 if T is none of them. */
+static int dw_color(const dxi* X, const pd_markup* g, const char* t, uint32_t* out) {
+    static const struct {
+        const char* n;
+        uint32_t c;
+    } prst[] = {
+        { "white", 0xFFFFFF }, { "black", 0x000000 }, { "red", 0xFF0000 }, { "green", 0x008000 }, { "blue", 0x0000FF },
+        { "yellow", 0xFFFF00 }, { "gray", 0x808080 }, { "grey", 0x808080 }, { "orange", 0xFFA500 },
+        { "ltGray", 0xD3D3D3 }, { "dkGray", 0xA9A9A9 }, { "silver", 0xC0C0C0 }, { "navy", 0x000080 }
+    };
+    char v[64];
+    size_t i;
+
+    if (!strcmp(t, "srgbClr") || !strcmp(t, "sysClr")) {
+        *out = mu_attr(g, !strcmp(t, "sysClr") ? "lastClr" : "val", v, sizeof(v)) ?
+               0xFF000000u | (uint32_t)strtoul(v, NULL, 16) : 0xFF000000u;
+        return 1;
+    }
+
+    if (!strcmp(t, "schemeClr")) {
+        *out = mu_attr(g, "val", v, sizeof(v)) ? scheme_color(X, v) : 0xFF000000u;
+        return 1;
+    }
+
+    if (!strcmp(t, "prstClr")) {
+        *out = 0xFF000000u;
+
+        for (i = 0; mu_attr(g, "val", v, sizeof(v)) && i < sizeof(prst) / sizeof(prst[0]); i++) {
+            if (!strcmp(v, prst[i].n)) {
+                *out = 0xFF000000u | prst[i].c;
+            }
+        }
+
+        return 1;
+    }
+
+    return 0;
+}
+
 /* A Word drawing canvas (wpc) or group (wpg) as one picture: its pictures,
    shapes and text boxes where the group's coordinates put them, written as
    a drawing resource (application/vnd.parade.drawing+json) the layout draws.
@@ -5911,6 +6163,15 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int nfr = 1, depth = 1, in_grpsppr = 0, root_frame = !canvas, kind = 0, in_sppr = 0, in_ln = 0, in_txbx = 0;
     int in_rpr = 0, in_body_t = 0, para_open = 0, first_item = 1, have_fill = 0, have_line = 0, style_fill = 0;
     int style_line = 0, in_fillref = 0, in_lnref = 0, in_gs = 0, nopara = 1, head_arrow = 0, tail_arrow = 0;
+    int arrow_w[2] = { 3, 3 }, arrow_len[2] = { 3, 3 };  /* head, tail: in line widths, Word's sm 2, med 3, lg 5 */
+    long long ext_h = 0, adj1 = -1;                     /* extrusion depth; a preset's first adjustment */
+    uint32_t ext_clr = 0, patt_fg = 0, patt_bg = 0, cv_bg = 0, cv_line = 0;
+    int in_extclr = 0, in_patt = 0, patt_part = 0, patt_pct = 50, in_cvbg = 0, in_cvwhole = 0;
+    long long cv_lw = 9525;
+    char conn[24] = "";                                 /* a connector's preset: its path, not a straight line */
+    uint32_t gfill[17], gfill_new = 0, *gclr = NULL;     /* each group's fill, for a shape's grpFill */
+    int g_in_ln = 0;
+    dw_guides gds;
     double cg_xy[4096], cg_pt[6];   /* a custom geometry's points (its own space), NAN pairs between rings */
     long long cg_w = 0, cg_h = 0;
     int cg_n = 0, cg_npt = 0, cg_closed = 0, cg_new_ring = 1, k2;
@@ -5923,7 +6184,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     long long lw = 9525, ins[4] = { 91440, 45720, 91440, 45720 };
     pd_char_props base, pbase, rcp;     /* the text boxes' Normal, the paragraph's style's, the run's own */
     pd_buf text;
-    int jc = PD_ALIGN_LEFT;
+    int jc = PD_ALIGN_LEFT, def_jc = PD_ALIGN_LEFT;
     int tb_depth = 0, tb_pr = 0, tb_tcpr = 0, tb_head = 0, tb_row0 = 1, tb_cell0 = 1, tb_jc = PD_ALIGN_LEFT;
     int tb_span = 1, tb_rule = 0, tb_grid = 0;
     int in_inl = 0;                 /* a picture in a text box's paragraph: its size and image */
@@ -5932,6 +6193,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     uint32_t tb_bg = 0;
 
     memset(&xf, 0, sizeof(xf));
+    memset(gfill, 0, sizeof(gfill));
+    memset(&gds, 0, sizeof(gds));
     memset(&o, 0, sizeof(o));
     memset(&text, 0, sizeof(text));
     fr[0].ox = fr[0].oy = 0;
@@ -5942,6 +6205,18 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     /* the text boxes' default characters: Normal's, which is the document's default paragraph style by now */
     pd_doc_style_resolve(X->b->d, pd_doc_style_find(X->b->d, "Normal"), NULL, &base);
     pbase = base;
+
+    {   /* the default paragraph style's alignment: a text box's paragraph without its own has it (justified,
+           in many a document) */
+        dprops dp;
+
+        memset(&dp, 0, sizeof(dp));
+        style_chain(X, X->def_pstyle, &dp, 0);
+
+        if (dp.pp.mask & PD_PP_ALIGN) {
+            def_jc = dp.pp.align;
+        }
+    }
 
     pb_printf(&o, "{\"w\":%d,\"h\":%d,\"items\":[", (int)emu_sp((double)w->cx), (int)emu_sp((double)w->cy));
     mu_init(&g, m->s + m->pos, m->n - m->pos, 0);
@@ -6047,6 +6322,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             if (g.type == MT_OPEN) {
                 in_grpsppr = 1;
                 memset(&xf, 0, sizeof(xf));
+                gfill_new = gfill[nfr - 1];     /* a group with no fill of its own passes its parent's on */
+                gclr = NULL;
+                g_in_ln = 0;
             } else if (g.type == MT_CLOSE) {
                 double sx = xf.chext[0] > 0 ? (double)xf.ext[0] / xf.chext[0] : 1;
                 double sy = xf.chext[1] > 0 ? (double)xf.ext[1] / xf.chext[1] : 1;
@@ -6064,6 +6342,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     fr[0].ox = -xf.choff[0] * sx;
                     fr[0].oy = -xf.choff[1] * sy;
                     root_frame = 0;
+                    gfill[0] = gfill_new;
                 } else if (nfr < 17) {
                     /* a nested group: off + (child - chOff) * ext / chExt, then turned and flipped about its box's
                        centre, in its parent */
@@ -6078,6 +6357,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                                  NULL);
                     both = fr_then(&box, &gmap);
                     fr[nfr] = fr_then(&fr[nfr - 1], &both);
+                    gfill[nfr] = gfill_new;
                     nfr++;
                 }
             }
@@ -6091,6 +6371,26 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         }
 
         if (in_grpsppr) {
+            uint32_t c;
+
+            if (!strcmp(t, "ln")) {
+                g_in_ln = g.type == MT_OPEN;
+            } else if (g_in_ln) {
+                /* the group's outline: not a fill */
+            } else if (open && !strcmp(t, "noFill")) {
+                gfill_new = 0;
+            } else if (open && dw_color(X, &g, t, &c)) {
+                if (gclr == NULL) {     /* the first colour: a solid fill's, a gradient's first stop */
+                    gfill_new = c;
+                    gclr = g.type == MT_OPEN ? &gfill_new : NULL;
+                }
+            } else if (gclr && open && strcmp(t, "gs")) {
+                *gclr = pd_conv_clr_modify(*gclr, t, &g);
+            } else if (!open && (!strcmp(t, "srgbClr") || !strcmp(t, "schemeClr") || !strcmp(t, "sysClr") ||
+                                 !strcmp(t, "prstClr"))) {
+                gclr = gclr == &gfill_new ? (uint32_t*)1 : gclr;   /* done with its modifiers */
+            }
+
             if (open) {
                 xfrm_attr(&g, t, &xf);
             }
@@ -6108,6 +6408,12 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             strcpy(geom, "rect");
             have_fill = have_line = style_fill = style_line = 0;
             head_arrow = tail_arrow = 0;
+            arrow_w[0] = arrow_w[1] = arrow_len[0] = arrow_len[1] = 3;
+            ext_h = 0;
+            ext_clr = 0;
+            adj1 = -1;
+            gds.n = 0;
+            conn[0] = '\0';
             cg_n = cg_npt = cg_closed = 0;
             cg_w = cg_h = 0;
             cg_new_ring = 1;
@@ -6124,7 +6430,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
         if ((!strcmp(t, "pic") || !strcmp(t, "wsp")) && g.type == MT_CLOSE && kind) {
             /* the shape's own map: its box turned, flipped and seen through its camera, in its group's */
-            double lin[4], bx0 = (double)xf.off[0], by0 = (double)xf.off[1], bw = (double)xf.ext[0], bh = (double)xf.ext[1];
+            double lin[9], bx0 = (double)xf.off[0], by0 = (double)xf.off[1], bw = (double)xf.ext[0], bh = (double)xf.ext[1];
             int cam = camera_lin(cam_prst[0] ? cam_prst : NULL, cam_has_rot, cam_lat, cam_lon, cam_rev, lin);
             dxform box = fr_box(bx0 + bw / 2, by0 + bh / 2, xf.rot, xf.fliph, xf.flipv, cam ? lin : NULL);
             dxform sm = fr_then(FR, &box);
@@ -6156,6 +6462,58 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 int isline = !strcmp(geom, "line"), k;
                 double lwd = lw * (FR->sx + FR->sy) / 2;
 
+                if (cam && ext_h > 0 && (f || l) && !isline) {
+                    /* extruded and seen through a camera: a prism, its outline in the box as the front face */
+                    double px[64], py[64], gx = cg_w > 0 ? bw / cg_w : 1, gy = cg_h > 0 ? bh / cg_h : 1;
+                    double fs = (FR->sx + FR->sy) / 2;
+                    int np = 0;
+
+                    if (!strcmp(geom, "cust") && cg_n >= 3) {
+                        int n0 = 0, step;
+
+                        while (n0 < cg_n && !isnan(cg_xy[2 * n0])) {
+                            n0++;   /* the first ring */
+                        }
+
+                        step = (n0 + 63) / 64;
+
+                        for (k = 0; k < n0 && np < 64; k += step) {
+                            px[np] = bx0 + cg_xy[2 * k] * gx;
+                            py[np++] = by0 + cg_xy[2 * k + 1] * gy;
+                        }
+                    } else if (!strcmp(geom, "ellipse")) {
+                        for (k = 0; k < 48; k++) {
+                            px[np] = bx0 + bw / 2 + bw / 2 * cos(k * 6.2831853 / 48);
+                            py[np++] = by0 + bh / 2 + bh / 2 * sin(k * 6.2831853 / 48);
+                        }
+                    } else if (!strcmp(geom, "roundRect")) {
+                        double r = (bw < bh ? bw : bh) * (adj1 >= 0 ? adj1 : 16667) / 100000.0;
+                        static const double cxs[4] = { 1, 1, 0, 0 }, cys[4] = { 0, 1, 1, 0 };
+                        int c, q;
+
+                        for (c = 0; c < 4; c++) {   /* each corner a quarter circle, clockwise from the top right */
+                            double ccx = bx0 + (cxs[c] ? bw - r : r), ccy = by0 + (cys[c] ? bh - r : r);
+
+                            for (q = 0; q <= 6; q++) {
+                                double a = (c * 90 - 90 + q * 15) * 3.14159265358979 / 180;
+
+                                px[np] = ccx + r * cos(a);
+                                py[np++] = ccy + r * sin(a);
+                            }
+                        }
+                    } else {
+                        px[0] = bx0; py[0] = by0;
+                        px[1] = bx0 + bw; py[1] = by0;
+                        px[2] = bx0 + bw; py[2] = by0 + bh;
+                        px[3] = bx0; py[3] = by0 + bh;
+                        np = 4;
+                    }
+
+                    dw_extruded(&o, &first_item, FR, lin, bx0 + bw / 2, by0 + bh / 2, xf.rot, xf.fliph, xf.flipv, px, py,
+                                np, fs > 0 ? ext_h / fs : (double)ext_h, f, ext_clr ? ext_clr : f, l, lwd);
+                    f = l = 0;
+                }
+
                 if (!strcmp(geom, "cust") && cg_n >= 2 && (f || l)) {     /* custom geometry: its path in the box */
                     double gx = cg_w > 0 ? bw / cg_w : 1, gy = cg_h > 0 ? bh / cg_h : 1, qx, qy;
 
@@ -6176,12 +6534,52 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     f = l = 0;
                 }
 
-                if ((f || l) && (!straight || isline)) {
-                    /* a turned or projected box or ellipse, or a line: as a path through the shape's map */
+                if ((f || l) && (!straight || isline || conn[0] || !strcmp(geom, "roundRect"))) {
+                    /* a turned or projected box or ellipse, a line or a connector: as a path through the shape's map */
                     double px[64], py[64];
                     int np = 0;
 
-                    if (isline) {   /* corner to corner; the flips are in the map */
+                    if (isline && conn[0]) {    /* a connector's own path, corner to corner through its bends */
+                        double a = (adj1 >= 0 ? adj1 : 50000) / 100000.0, x2 = bw * a;
+
+                        if (strstr(conn, "curved")) {
+                            double c[2][8];
+                            int seg, q, nseg = strstr(conn, "2") ? 1 : 2;
+
+                            if (nseg == 1) {
+                                double c1[8] = { 0, 0, bw / 2, 0, bw, bh / 2, bw, bh };
+
+                                memcpy(c[0], c1, sizeof(c1));
+                            } else {
+                                double c1[8] = { 0, 0, x2 / 2, 0, x2, bh / 4, x2, bh / 2 };
+                                double c2[8] = { x2, bh / 2, x2, bh * 3 / 4, (bw + x2) / 2, bh, bw, bh };
+
+                                memcpy(c[0], c1, sizeof(c1));
+                                memcpy(c[1], c2, sizeof(c2));
+                            }
+
+                            for (seg = 0; seg < nseg; seg++) {
+                                for (q = seg ? 1 : 0; q <= 16; q++) {
+                                    double u = q / 16.0, w0 = (1 - u) * (1 - u) * (1 - u), w1 = 3 * u * (1 - u) * (1 - u),
+                                           w2 = 3 * u * u * (1 - u), w3 = u * u * u;
+
+                                    px[np] = bx0 + w0 * c[seg][0] + w1 * c[seg][2] + w2 * c[seg][4] + w3 * c[seg][6];
+                                    py[np++] = by0 + w0 * c[seg][1] + w1 * c[seg][3] + w2 * c[seg][5] + w3 * c[seg][7];
+                                }
+                            }
+                        } else if (strstr(conn, "bentConnector2")) {
+                            px[0] = bx0; py[0] = by0;
+                            px[1] = bx0 + bw; py[1] = by0;
+                            px[2] = bx0 + bw; py[2] = by0 + bh;
+                            np = 3;
+                        } else {    /* bent, three segments (and the four- and five-segment ones as near as that) */
+                            px[0] = bx0; py[0] = by0;
+                            px[1] = bx0 + x2; py[1] = by0;
+                            px[2] = bx0 + x2; py[2] = by0 + bh;
+                            px[3] = bx0 + bw; py[3] = by0 + bh;
+                            np = 4;
+                        }
+                    } else if (isline) {   /* corner to corner; the flips are in the map */
                         px[0] = bx0;
                         py[0] = by0;
                         px[1] = bx0 + bw;
@@ -6194,6 +6592,21 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         }
 
                         np = 48;
+                    } else if (!strcmp(geom, "roundRect")) {
+                        double r = (bw < bh ? bw : bh) * (adj1 >= 0 ? adj1 : 16667) / 100000.0;
+                        static const double cxs[4] = { 1, 1, 0, 0 }, cys[4] = { 0, 1, 1, 0 };
+                        int c, q;
+
+                        for (c = 0; c < 4; c++) {
+                            double ccx = bx0 + (cxs[c] ? bw - r : r), ccy = by0 + (cys[c] ? bh - r : r);
+
+                            for (q = 0; q <= 6; q++) {
+                                double an = (c * 90 - 90 + q * 15) * 3.14159265358979 / 180;
+
+                                px[np] = ccx + r * cos(an);
+                                py[np++] = ccy + r * sin(an);
+                            }
+                        }
                     } else {
                         px[0] = bx0; py[0] = by0;
                         px[1] = bx0 + bw; py[1] = by0;
@@ -6202,41 +6615,46 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         np = 4;
                     }
 
-                    ITEM_SEP();
-                    pb_puts(&o, "{\"path\":[");
-
                     for (k = 0; k < np; k++) {
                         double rx, ry;
 
                         fr_pt(&sm, px[k], py[k], &rx, &ry);
                         px[k] = rx;
                         py[k] = ry;
-                        pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(rx), (int)emu_sp(ry));
                     }
 
-                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", isline ? 0 : 1,
-                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd));
-
-                    /* arrowheads: a filled triangle at the end the line says */
-                    for (k = 0; isline && l && k < 2; k++) {
+                    /* arrowheads: a filled triangle at the end the line says, as long and wide as Word makes them
+                       (2, 3 or 5 line widths: sm, med, lg); the line stops short of its point */
+                    for (k = 0; isline && l && np >= 2 && k < 2; k++) {
                         if ((k == 0 && head_arrow) || (k == 1 && tail_arrow)) {
-                            double tx = k ? px[1] : px[0], ty = k ? py[1] : py[0];
-                            double fx = k ? px[0] : px[1], fy = k ? py[0] : py[1];
-                            double dx = tx - fx, dy = ty - fy, len = sqrt(dx * dx + dy * dy);
-                            double s3 = lwd * 3 > 50800 ? lwd * 3 : 50800;
+                            int ti = k ? np - 1 : 0, fi = k ? np - 2 : 1;
+                            double tx = px[ti], ty = py[ti], dx = tx - px[fi], dy = ty - py[fi],
+                                   len = sqrt(dx * dx + dy * dy), unit = lwd > 19050 ? lwd : 19050,
+                                   hl = unit * arrow_len[k], hw = unit * arrow_w[k] / 2;
 
                             if (len > 0) {
                                 dx /= len;
                                 dy /= len;
                                 ITEM_SEP();
                                 pb_printf(&o, "{\"path\":[%d,%d,%d,%d,%d,%d],\"closed\":1,\"fill\":%u,\"line\":0,\"lw\":0}",
-                                          (int)emu_sp(tx), (int)emu_sp(ty), (int)emu_sp(tx - dx * s3 * 2 - dy * s3),
-                                          (int)emu_sp(ty - dy * s3 * 2 + dx * s3), (int)emu_sp(tx - dx * s3 * 2 + dy * s3),
-                                          (int)emu_sp(ty - dy * s3 * 2 - dx * s3), (unsigned)l);
+                                          (int)emu_sp(tx), (int)emu_sp(ty), (int)emu_sp(tx - dx * hl - dy * hw),
+                                          (int)emu_sp(ty - dy * hl + dx * hw), (int)emu_sp(tx - dx * hl + dy * hw),
+                                          (int)emu_sp(ty - dy * hl - dx * hw), (unsigned)l);
+                                px[ti] = tx - dx * hl * 0.8;
+                                py[ti] = ty - dy * hl * 0.8;
                             }
                         }
                     }
 
+                    ITEM_SEP();
+                    pb_puts(&o, "{\"path\":[");
+
+                    for (k = 0; k < np; k++) {
+                        pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(px[k]), (int)emu_sp(py[k]));
+                    }
+
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", isline ? 0 : 1,
+                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd));
                     f = l = 0;  /* drawn */
                 }
 
@@ -6265,7 +6683,123 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             continue;
         }
 
+        /* the canvas's own background and frame, ahead of its shapes */
+        if (canvas && !kind && (!strcmp(t, "bg") || !strcmp(t, "whole"))) {
+            if (t[0] == 'b') {
+                in_cvbg = g.type == MT_OPEN;
+            } else {
+                in_cvwhole = g.type == MT_OPEN;
+            }
+
+            if (g.type == MT_CLOSE && ((t[0] == 'b' && cv_bg) || (t[0] == 'w' && cv_line))) {
+                ITEM_SEP();
+                pb_printf(&o, "{\"shape\":\"rect\",\"x\":0,\"y\":0,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}",
+                          (int)emu_sp((double)w->cx), (int)emu_sp((double)w->cy), (unsigned)(t[0] == 'b' ? cv_bg : 0),
+                          (unsigned)(t[0] == 'w' ? cv_line : 0), (int)emu_sp((double)cv_lw));
+            }
+
+            continue;
+        }
+
+        if (!kind && (in_cvbg || in_cvwhole)) {
+            uint32_t c;
+
+            if (in_cvwhole && !strcmp(t, "ln") && open) {
+                cv_lw = mu_attr(&g, "w", v, sizeof(v)) ? atoll(v) : 9525;
+            } else if (open && dw_color(X, &g, t, &c)) {
+                if (in_cvbg) {
+                    cv_bg = c;
+                } else {
+                    cv_line = c;
+                }
+            }
+
+            continue;
+        }
+
         if (!kind) {
+            continue;
+        }
+
+        /* extrusion, its colour, and pattern fills: read before the colours below take them for the fill */
+        if (in_sppr && !strcmp(t, "sp3d")) {
+            if (open) {
+                ext_h = mu_attr(&g, "extrusionH", v, sizeof(v)) ? atoll(v) : 0;
+            }
+
+            continue;
+        } else if (in_sppr && !strcmp(t, "bevelT") && open) {
+            /* a top bevel raises the face by its height: counted with the depth (its rounding is not drawn) */
+            if (ext_h > 0 && mu_attr(&g, "h", v, sizeof(v))) {
+                ext_h += atoll(v);
+            }
+
+            continue;
+        } else if (in_sppr && !strcmp(t, "extrusionClr")) {
+            in_extclr = g.type == MT_OPEN;
+            continue;
+        } else if (in_extclr) {
+            if (open && dw_color(X, &g, t, &ext_clr)) {
+                cur_clr = g.type == MT_OPEN ? &ext_clr : NULL;
+            } else if (cur_clr && open) {
+                *cur_clr = pd_conv_clr_modify(*cur_clr, t, &g);
+            }
+
+            continue;
+        } else if (in_sppr && !in_ln && !strcmp(t, "pattFill")) {
+            if (open) {     /* a pattern, seen from afar: its colours mixed in the proportion it covers */
+                in_patt = 1;
+                patt_fg = 0xFF000000u;
+                patt_bg = 0xFFFFFFFFu;
+                patt_pct = 50;
+
+                if (mu_attr(&g, "prst", v, sizeof(v)) && !strncmp(v, "pct", 3)) {
+                    patt_pct = atoi(v + 3);
+                } else if (mu_attr(&g, "prst", v, sizeof(v)) && (!strncmp(v, "lt", 2) || !strncmp(v, "narrow", 6))) {
+                    patt_pct = 25;
+                } else if (mu_attr(&g, "prst", v, sizeof(v)) && !strncmp(v, "dk", 2)) {
+                    patt_pct = 75;
+                }
+            }
+
+            if (g.type != MT_OPEN) {
+                double f = patt_pct / 100.0;
+
+                in_patt = 0;
+                have_fill = 1;
+                fill = 0xFF000000u | (uint32_t)((((patt_fg >> 16) & 255) * f + ((patt_bg >> 16) & 255) * (1 - f)) + 0.5) << 16 |
+                       (uint32_t)((((patt_fg >> 8) & 255) * f + ((patt_bg >> 8) & 255) * (1 - f)) + 0.5) << 8 |
+                       (uint32_t)(((patt_fg & 255) * f + (patt_bg & 255) * (1 - f)) + 0.5);
+            }
+
+            continue;
+        } else if (in_patt) {
+            if (!strcmp(t, "fgClr") || !strcmp(t, "bgClr")) {
+                patt_part = g.type == MT_OPEN ? (t[0] == 'f' ? 1 : 2) : 0;
+            } else if (patt_part && open && dw_color(X, &g, t, patt_part == 1 ? &patt_fg : &patt_bg)) {
+                cur_clr = g.type == MT_OPEN ? (patt_part == 1 ? &patt_fg : &patt_bg) : NULL;
+            } else if (cur_clr && open) {
+                *cur_clr = pd_conv_clr_modify(*cur_clr, t, &g);
+            }
+
+            continue;
+        } else if (in_sppr && !strcmp(t, "gd") && open && mu_attr(&g, "fmla", v, sizeof(v))) {
+            char gn[40] = "";
+            double r;
+
+            mu_attr(&g, "name", gn, sizeof(gn));
+            gds.w = (double)xf.ext[0];
+            gds.h = (double)xf.ext[1];
+            r = dw_guide_add(&gds, gn, v);
+
+            if (adj1 < 0 && !strncmp(gn, "adj", 3)) {
+                adj1 = (long long)r;
+            }
+
+            continue;
+        } else if (in_sppr && !in_ln && !strcmp(t, "grpFill") && open) {
+            have_fill = 1;      /* the enclosing group's */
+            fill = gfill[nfr - 1];
             continue;
         }
 
@@ -6419,7 +6953,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (in_sppr && !strcmp(geom, "cust") && !strcmp(t, "close")) {
             cg_closed = 1;
         } else if (in_sppr && !strcmp(geom, "cust") && !strcmp(t, "pt") && cg_n + 4 < 2048) {
-            double px = mu_attr(&g, "x", v, sizeof(v)) ? atof(v) : 0, py = mu_attr(&g, "y", v, sizeof(v)) ? atof(v) : 0;
+            double px = mu_attr(&g, "x", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0,
+                   py = mu_attr(&g, "y", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0;
 
             cg_pt[2 * cg_npt] = px;
             cg_pt[2 * cg_npt + 1] = py;
@@ -6466,7 +7001,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
         } else if (in_sppr && !strcmp(t, "prstGeom") && mu_attr(&g, "prst", v, sizeof(v))) {
             snprintf(geom, sizeof(geom), "%s", !strcmp(v, "ellipse") ? "ellipse" : !strcmp(v, "line") ||
-                     strstr(v, "Connector") ? "line" : "rect");
+                     strstr(v, "Connector") ? "line" : !strcmp(v, "roundRect") ? "roundRect" : "rect");
+            snprintf(conn, sizeof(conn), "%.23s", strstr(v, "Connector") && strcmp(v, "straightConnector1") ? v : "");
         } else if (!strcmp(t, "srgbClr") || !strcmp(t, "schemeClr") || !strcmp(t, "sysClr")) {
             uint32_t c = !strcmp(t, "schemeClr") ? (mu_attr(&g, "val", v, sizeof(v)) ? scheme_color(X, v) :
                                                     0xFF000000u) :
@@ -6499,12 +7035,20 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                                !strcmp(t, "shade") || !strcmp(t, "alpha"))) {
             *cur_clr = pd_conv_clr_modify(*cur_clr, t, &g);
         } else if (in_ln && (!strcmp(t, "headEnd") || !strcmp(t, "tailEnd"))) {
-            int arrow = mu_attr(&g, "type", v, sizeof(v)) && strcmp(v, "none") != 0;
+            int arrow = mu_attr(&g, "type", v, sizeof(v)) && strcmp(v, "none") != 0, e = t[0] == 'h' ? 0 : 1;
 
             if (t[0] == 'h') {
                 head_arrow = arrow;
             } else {
                 tail_arrow = arrow;
+            }
+
+            if (mu_attr(&g, "w", v, sizeof(v))) {
+                arrow_w[e] = !strcmp(v, "sm") ? 2 : !strcmp(v, "lg") ? 5 : 3;
+            }
+
+            if (mu_attr(&g, "len", v, sizeof(v))) {
+                arrow_len[e] = !strcmp(v, "sm") ? 2 : !strcmp(v, "lg") ? 5 : 3;
             }
         } else if (in_sppr && !in_ln && !strcmp(t, "noFill")) {
             have_fill = 1;
@@ -6534,7 +7078,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
 
             if (!strcmp(t, "p")) {
-                jc = PD_ALIGN_LEFT;
+                jc = def_jc;
                 pbase = base;
                 memset(&rcp, 0, sizeof(rcp));
             } else if (!strcmp(t, "pStyle") && mu_attr(&g, "w:val", v, sizeof(v))) {
@@ -6544,6 +7088,10 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 a.cp = base;
                 style_chain(X, v, &a, 0);
                 pbase = a.cp;
+
+                if (a.pp.mask & PD_PP_ALIGN) {
+                    jc = a.pp.align;
+                }
             } else if (!strcmp(t, "jc") && mu_attr(&g, "w:val", v, sizeof(v))) {
                 jc = !strcmp(v, "center") ? PD_ALIGN_CENTER : !strcmp(v, "right") || !strcmp(v, "end") ? PD_ALIGN_RIGHT :
                      !strcmp(v, "both") ? PD_ALIGN_JUSTIFY : PD_ALIGN_LEFT;

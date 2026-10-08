@@ -1683,8 +1683,9 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 return st;
             }
 
-            /* text wraps only beside a float that leaves it room */
-            if (f->fp.wrap != PD_WRAP_NONE && (int64_t)float_taken(&f->fp, f->w, F->colw, &ox) * 4 > (int64_t)F->colw * 3) {
+            /* text wraps only beside a float that leaves it room: an inch, as Word fills a gap a line of a few
+               words fits in (a figure taking four-fifths of the column has text beside it there) */
+            if (f->fp.wrap != PD_WRAP_NONE && F->colw - float_taken(&f->fp, f->w, F->colw, &ox) < PD_PT(72)) {
                 f->fp.wrap = PD_WRAP_NONE;
             }
 
