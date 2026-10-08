@@ -510,6 +510,8 @@ type
     procedure GetHeadings(List: TStrings);
     { the caret to a position, scrolled into view }
     procedure GoToPos(const P: pd_pos);
+    { the selection's two ends, in document order; False when there is none (only the caret) }
+    function SelectionRange(out A, B: pd_pos): Boolean;
     function SelectedText: string;
     procedure CopyToClipboard;
     procedure CutToClipboard;
@@ -4995,6 +4997,16 @@ begin
   pd_doc_marker_set(FDoc, FAnchor, PdPos(FirstPara, 0));
   pd_doc_marker_set(FDoc, FCaret, LastPos);
   Invalidate;
+end;
+
+function TParadeEdit.SelectionRange(out A, B: pd_pos): Boolean;
+begin
+  Result := HasSelection;
+  if Result then
+  begin
+    A := SelStart;
+    B := SelEnd;
+  end;
 end;
 
 function TParadeEdit.SelectedText: string;
