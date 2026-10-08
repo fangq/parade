@@ -92,6 +92,7 @@ type
     FZoom: Double;
     FScrollY: Integer;
     FScrollBar: TScrollBar;
+    FScrollHost: TPanel;           { the scroll bar's own window, for its own cursor }
     FBlink: TTimer;
     FCaretOn: Boolean;
     FGlyphs: array of PGlyphBmp;   { open-addressing hash table by font, glyph, size and subpixel position }
@@ -1057,7 +1058,7 @@ begin
   ControlStyle := ControlStyle + [csOpaque] - [csSetCaption];
   TabStop := True;
   Color := $00E0E0E0;
-  Cursor := crIBeam;       { a text editor's: the scroll bar keeps its own }
+  Cursor := crIBeam;       { a text editor's: the scroll bar has its own, below }
   FZoom := 1.0;
   FPageGap := 16;
   FAuthor := GetEnvironmentVariable('USER');
@@ -1065,10 +1066,22 @@ begin
     FAuthor := GetEnvironmentVariable('USERNAME');
   if FAuthor = '' then
     FAuthor := 'Author';
+  { The scroll bar in a panel of its own, as wide as it is.  A GTK scroll bar
+    has no window of its own and shows the cursor of the window it is in --
+    this control's I-beam, which is what the pointer showed over the bar.
+    The panel is a window, with the arrow. }
+  FScrollHost := TPanel.Create(Self);
+  FScrollHost.BevelOuter := bvNone;
+  FScrollHost.Caption := '';
+  FScrollHost.Align := alRight;
+  FScrollHost.AutoSize := True;
+  FScrollHost.Cursor := crArrow;
+  FScrollHost.Parent := Self;
   FScrollBar := TScrollBar.Create(Self);
   FScrollBar.Kind := sbVertical;
   FScrollBar.Align := alRight;
-  FScrollBar.Parent := Self;
+  FScrollBar.Cursor := crArrow;
+  FScrollBar.Parent := FScrollHost;
   FScrollBar.OnChange := @ScrollBarChange;
   FBlink := TTimer.Create(Self);
   FBlink.Interval := 530;
