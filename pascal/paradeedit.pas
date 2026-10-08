@@ -241,6 +241,7 @@ type
     procedure PaintShapeSelection;
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
     function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
+    procedure OnlyShape;
     function ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
     function ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
     function ShapeDragStart(X, Y: Integer): Boolean;
@@ -6095,12 +6096,28 @@ begin
   Result := Copy(Xml, 1, At - 1) + NewEl + Copy(Xml, At, MaxInt);
 end;
 
+{ the whole drawing selected, and it has one shape: that shape is what a shape edit is for }
+procedure TParadeEdit.OnlyShape;
+var
+  Boxes: TParadeShapeBoxes;
+begin
+  if not FShapeOn or (FShapeSid >= 0) then
+    Exit;
+  Boxes := DrawingShapes(FShapeAt);
+  if Length(Boxes) = 1 then
+  begin
+    FShapeSid := Boxes[0].Sid;
+    SetCaret(FShapeAt, False);
+  end;
+end;
+
 function TParadeEdit.SetShapeFill(AColor: TColor; None: Boolean): Boolean;
 var
   Xml, F: string;
   Els: TXmlEls;
   E, Pr: Integer;
 begin
+  OnlyShape;
   Result := False;
   if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
     Exit;
@@ -6124,6 +6141,7 @@ var
   Els, LEls: TXmlEls;
   E, Pr, L, I, P, Len: Integer;
 begin
+  OnlyShape;
   Result := False;
   if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
     Exit;
@@ -6190,6 +6208,7 @@ var
   E, I, K, N, At: Integer;
   Sibs: array of Integer;
 begin
+  OnlyShape;
   Result := False;
   if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
     Exit;
@@ -6343,6 +6362,7 @@ var
   P, L: Integer;
   SX, SY: Double;
 begin
+  OnlyShape;
   Result := False;
   if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
     Exit;
