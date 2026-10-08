@@ -592,7 +592,9 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
 /* a picture as a run: inline, or anchored where a float is (fp) -- beside the text on the side the float
    wraps on, or across the column */
 static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx, long long cy);
-static void dx_kept_fallback(dxo* x, const void* data, size_t len);
+static int dx_kept_fallback(dxo* x, const void* data, size_t len);
+static void dx_vml_fallback(dxo* x, const void* data, size_t len, long long cx, long long cy,
+                            const pd_float_props* fp);
 static int dx_ref_name(const pd_doc* d, pd_block_id para, char* out, size_t cap);
 
 static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
@@ -724,7 +726,10 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
                   fp ? "<wp:cNvGraphicFramePr/>" : "", wpc ? "wordprocessingCanvas" : "wordprocessingGroup");
         dx_drawing_group(x, data, len, cx, cy);
         pb_printf(o, "</a:graphicData></a:graphic>%s</w:drawing></mc:Choice>", fp ? "</wp:anchor>" : "</wp:inline>");
-        dx_kept_fallback(x, data, len);     /* the VML beside it, kept as it came, for readers without DrawingML */
+        if (!dx_kept_fallback(x, data, len) && wpc) {   /* the VML beside it, for readers without DrawingML: kept */
+            dx_vml_fallback(x, data, len, cx, cy, fp);  /* as it came, or made from what the canvas draws */
+        }
+
         pb_puts(o, "</mc:AlternateContent></w:r>");
         return;
     }
@@ -1067,17 +1072,179 @@ static int dx_drawing_stories(const pj_node* root, pd_block_id* out, int cap) {
 }
 
 /* a kept drawing's mc:Fallback, its references renamed as the drawing's are; nothing when there is none */
-static void dx_kept_fallback(dxo* x, const void* data, size_t len) {
+static int dx_kept_fallback(dxo* x, const void* data, size_t len) {
     pj_doc* doc = pj_parse(data, len, 0, NULL);
     const pj_node* root = doc ? pj_root(doc) : NULL, *fb = root ? pj_get(root, "fallback") : NULL;
+    int done = 0;
 
     if (fb && fb->type == PJ_STR && fb->len > 0 && pj_get(root, "xml")) {
         pd_block_id st[128];
         int nst = dx_drawing_stories(root, st, 128);
 
         dx_kept_xml(x, fb->s, fb->len, pj_get(root, "rels"), pj_get(root, "styles"), st, nst);
+        done = 1;
     }
 
+    pj_free(doc);
+    return done;
+}
+
+/* sp as the hundredths of a point a VML fallback's group counts in */
+static long long vml_u(long long sp) {
+    return sp * 100 / 65536;
+}
+
+/* a VML shape's fill and stroke from a drawing's colours (0: none) */
+static void vml_paint(pd_buf* o, uint32_t fill, uint32_t line, long long lw) {
+    if (fill & 0xFF000000u) {
+        pb_printf(o, " fillcolor=\"#%06X\"", (unsigned)(fill & 0xFFFFFF));
+    } else {
+        pb_puts(o, " filled=\"f\"");
+    }
+
+    if (line & 0xFF000000u) {
+        pb_printf(o, " strokecolor=\"#%06X\" strokeweight=\"%.2fpt\"", (unsigned)(line & 0xFFFFFF),
+                  (double)lw / 65536);
+    } else {
+        pb_puts(o, " stroked=\"f\"");
+    }
+}
+
+/* the alpha of a VML shape's fill, when it is not opaque */
+static void vml_opacity(pd_buf* o, uint32_t fill) {
+    unsigned a = fill >> 24;
+
+    if (a && a < 255) {
+        pb_printf(o, "<v:fill opacity=\"%.3f\"/>", a / 255.0);
+    }
+}
+
+/* A canvas's mc:Fallback made from what it draws, for the readers that show a Word canvas only as VML
+   (LibreOffice): one v:group counting in hundredths of a point, its boxes, ellipses and paths, its
+   pictures and its text boxes with their stories, where the drawing has them. */
+static void dx_vml_fallback(dxo* x, const void* data, size_t len, long long cx, long long cy,
+                            const pd_float_props* fp) {
+    pd_buf* o = x->o;
+    pj_doc* doc = pj_parse(data, len, 0, NULL);
+    const pj_node* root = doc ? pj_root(doc) : NULL, *items = root ? pj_get(root, "items") : NULL, *it;
+    long long W = root ? vml_u(jnum(root, "w")) : 0, H = root ? vml_u(jnum(root, "h")) : 0;
+
+    if (W <= 0 || H <= 0) {
+        pj_free(doc);
+        return;
+    }
+
+    pb_printf(o, "<mc:Fallback><w:pict><v:group editas=\"canvas\" coordorigin=\"0,0\" coordsize=\"%lld,%lld\" "
+              "style=\"", W, H);
+
+    if (fp) {   /* a float: beside the text as the drawing is */
+        int off = (fp->placement & PD_PLACE_OFFSET) && fp->wrap != PD_WRAP_NONE;
+
+        pb_puts(o, "position:absolute;");
+
+        if (off) {
+            pb_printf(o, "margin-left:%.2fpt;", (double)fp->offset_x / 65536);
+        } else {
+            pb_printf(o, "mso-position-horizontal:%s;", fp->wrap == PD_WRAP_LEFT ? "left" : fp->wrap == PD_WRAP_RIGHT ?
+                      "right" : "center");
+        }
+
+        pb_printf(o, "margin-top:0;width:%.2fpt;height:%.2fpt;z-index:%d;mso-position-horizontal-relative:text;"
+                  "mso-position-vertical-relative:paragraph\">", cx / 12700.0, cy / 12700.0, x->docpr);
+        pb_puts(o, fp->wrap == PD_WRAP_NONE ? "<w10:wrap type=\"topAndBottom\"/>" : "<w10:wrap type=\"square\"/>");
+    } else {
+        pb_printf(o, "width:%.2fpt;height:%.2fpt;mso-position-horizontal-relative:char;"
+                  "mso-position-vertical-relative:line\">", cx / 12700.0, cy / 12700.0);
+    }
+
+    for (it = items ? items->child : NULL; it; it = it->next) {
+        long long ix = vml_u(jnum(it, "x")), iy = vml_u(jnum(it, "y")), iw = vml_u(jnum(it, "w")),
+                  ih = vml_u(jnum(it, "h"));
+        uint32_t fill = (uint32_t)jnum(it, "fill"), line = (uint32_t)jnum(it, "line");
+        char box[160];
+
+        snprintf(box, sizeof(box), "position:absolute;left:%lld;top:%lld;width:%lld;height:%lld", ix, iy, iw, ih);
+
+        if (pj_get(it, "img")) {
+            const char* name;
+            pd_res_id cr = (pd_res_id)jnum(it, "img");
+            const char* cm = "";
+            const void* cd = NULL;
+            size_t cn = 0;
+            int m;
+
+            if (pd_doc_resource(x->d, cr, &cm, &cd, &cn) == PD_OK && strcmp(cm, PD_DRAWING_MIME) == 0) {
+                pj_doc* jd = pj_parse(cd, cn, 0, NULL);    /* a metafile in the canvas: the metafile itself */
+
+                cr = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
+                pj_free(jd);
+            }
+
+            m = cr ? dx_media(x, cr, &name) : -1;
+
+            if (m >= 0) {
+                pb_printf(o, "<v:rect style=\"%s\" filled=\"f\" stroked=\"f\"><v:imagedata r:id=\"rIdm%d\" o:title=\"\"/>"
+                          "</v:rect>", box, m + 1);
+            }
+        } else if (pj_get(it, "shape")) {
+            const pj_node* sh = pj_get(it, "shape");
+            int ell = sh->type == PJ_STR && sh->len == 7 && !memcmp(sh->s, "ellipse", 7);
+            int rr = sh->type == PJ_STR && sh->len == 9 && !memcmp(sh->s, "roundRect", 9);
+
+            pb_printf(o, "<v:%s style=\"%s\"%s", ell ? "oval" : rr ? "roundrect" : "rect", box,
+                      rr ? " arcsize=\"10923f\"" : "");
+            vml_paint(o, fill, line, jnum(it, "lw"));
+            pb_putc(o, '>');
+            vml_opacity(o, fill);
+            pb_printf(o, "</v:%s>", ell ? "oval" : rr ? "roundrect" : "rect");
+        } else if (pj_get(it, "path")) {    /* in the group's own units: a shape the size of the canvas */
+            const pj_node* q;
+            int start = 1, closed = (int)jnum(it, "closed"), any = 0;
+
+            pb_printf(o, "<v:shape style=\"position:absolute;left:0;top:0;width:%lld;height:%lld\" coordsize=\"%lld,%lld\" "
+                      "path=\"", W, H, W, H);
+
+            for (q = pj_get(it, "path")->child; q && q->next; q = q->next->next) {
+                long long px = pj_int_or(q, 0), py = pj_int_or(q->next, 0);
+
+                if (px == INT32_MIN) {
+                    pb_puts(o, !start && closed ? "x" : "");
+                    start = 1;
+                    continue;
+                }
+
+                /* as Word writes it, the points of a run of lines after one l, all by commas */
+                pb_printf(o, "%s%lld,%lld", start ? "m" : any == 1 ? "l" : ",", vml_u(px), vml_u(py));
+                any = start ? 1 : 2;
+                start = 0;
+            }
+
+            pb_printf(o, "%se\"", !start && closed ? "x" : "");
+            vml_paint(o, closed ? fill : 0, line, jnum(it, "lw"));
+            pb_putc(o, '>');
+            vml_opacity(o, closed ? fill : 0);
+            pb_puts(o, "</v:shape>");
+        } else if (pj_get(it, "story") || pj_get(it, "text")) {
+            const pj_node* ins = pj_get(it, "ins"), *an = pj_get(it, "anchor");
+            const char* va = an && an->type == PJ_STR && an->len >= 3 && !memcmp(an->s, "ctr", 3) ? "middle" :
+                              an && an->type == PJ_STR && an->len >= 1 && an->s[0] == 'b' ? "bottom" : "top";
+
+            pb_printf(o, "<v:rect style=\"%s;v-text-anchor:%s\" filled=\"f\" stroked=\"f\"><v:textbox inset=\"%.2fpt,%.2fpt,"
+                      "%.2fpt,%.2fpt\"><w:txbxContent>", box, va, (double)pj_int_or(pj_at(ins, 0), 0) / 65536,
+                      (double)pj_int_or(pj_at(ins, 1), 0) / 65536, (double)pj_int_or(pj_at(ins, 2), 0) / 65536,
+                      (double)pj_int_or(pj_at(ins, 3), 0) / 65536);
+
+            if (pj_get(it, "story")) {
+                dx_story_content(x, (pd_block_id)pj_int_or(pj_get(it, "story"), 0));
+            } else {
+                dx_txbx_paras(x, pj_get(it, "text"), 0);
+            }
+
+            pb_puts(o, "</w:txbxContent></v:textbox></v:rect>");
+        }
+    }
+
+    pb_puts(o, "</v:group></w:pict></mc:Fallback>");
     pj_free(doc);
 }
 
@@ -6640,8 +6807,8 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
     /* the styles its text names, by Word's id, as the document's: the writer names them its own way */
     pb_puts(o, "},\"styles\":{");
 
-    if (X->rebuild) {   /* made again: the styles it had, and its fallback (not beside this XML: kept with it) */
-        const pj_node* st = pj_get(X->rebuild, "styles"), *c, *fbn = pj_get(X->rebuild, "fallback");
+    if (X->rebuild) {   /* made again: the styles it had; not its fallback, the VML of the drawing as it was */
+        const pj_node* st = pj_get(X->rebuild, "styles"), *c;
 
         for (c = st ? st->child : NULL; c; c = c->next) {
             if (!first) {
@@ -6655,11 +6822,6 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
 
         pb_puts(o, "},\"xml\":");
         json_str(o, raw0, rawn);
-
-        if (fbn && fbn->type == PJ_STR) {
-            pb_puts(o, ",\"fallback\":");
-            json_str(o, fbn->s, fbn->len);
-        }
 
         return;
     }

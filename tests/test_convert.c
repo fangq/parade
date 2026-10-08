@@ -2400,6 +2400,78 @@ static void test_docx_drawing_rebuild(void) {
     pd_doc_free(d);
 }
 
+/* A canvas without VML beside it (one made in the editor, or edited: its old VML is not kept) written with a
+   fallback made from what it draws, for the readers that show a canvas only as VML: its box, its picture, its
+   text box with the story's text. */
+static void test_docx_canvas_fallback(void) {
+    static const char canvas[] = "<wpc:wpc><wpc:bg/><wpc:whole/>"
+                                 "<pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/>"
+                                 "<a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm></pic:spPr></pic:pic>"
+                                 "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                                 "<a:prstGeom prst=\"ellipse\"/><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></wps:spPr>"
+                                 "<wps:bodyPr/></wps:wsp>"
+                                 "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"700000\"/><a:ext cx=\"2540000\" cy=\"500000\"/></a:xfrm>"
+                                 "<a:prstGeom prst=\"triangle\"/><a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill></wps:spPr>"
+                                 "<wps:txbx><w:txbxContent><w:p><w:r><w:t>Caption</w:t></w:r></w:p></w:txbxContent></wps:txbx>"
+                                 "<wps:bodyPr/></wps:wsp></wpc:wpc>";
+    char doc[4096];
+    pd_doc* d;
+    int pass;
+
+    snprintf(doc, sizeof(doc), "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\" "
+             "xmlns:wpc=\"wpc\" xmlns:wps=\"wps\"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" "
+             "cy=\"1270000\"/><a:graphic><a:graphicData>%s</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
+             "</w:body></w:document>", canvas);
+    d = docx_doc("word/_rels/document.xml.rels",
+                 "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                 "</Relationships>",
+                 "word/media/image1.png", "tests/data/rgba.png", "word/document.xml", doc, NULL);
+    CHECK(d != NULL);
+
+    for (pass = 0; pass < 2 && d; pass++) {
+        pd_inline o;
+        char* js;
+
+        d = docx_again(d);
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+        js = drawing_json(d, o.resource);
+        CHECK(js && strstr(js, "\"fallback\":\"<mc:Fallback><w:pict><v:group editas=\\\"canvas\\\"") != NULL);
+
+        if (js) {   /* read back as VML: kept as it came the second time round */
+            const char* fb = strstr(js, "\"fallback\":");
+
+            CHECK(fb && strstr(fb, "coordsize=\\\"20000,10000\\\"") && strstr(fb, "style=\\\"width:200.00pt;height:100.00pt;"));
+            CHECK(fb && strstr(fb, "<v:imagedata r:id=\\\"rIdm1\\\"") != NULL);
+            CHECK(fb && strstr(fb, "<v:oval style=\\\"position:absolute;left:10000;top:0;width:5000;height:5000\\\" "
+                               "fillcolor=\\\"#FF0000\\\"") != NULL);
+            CHECK(fb && strstr(fb, "fillcolor=\\\"#00FF00\\\"") && strstr(fb, "path=\\\"m"));     /* the triangle */
+            CHECK(fb && strstr(fb, "<v:textbox") && strstr(fb, "Caption</w:t>"));
+            free(js);
+        }
+    }
+
+    if (d) {    /* made again from its XML (edited): the VML it had not kept with it */
+        pd_inline o;
+        pd_res_id r2 = 0;
+        char* js, edited[2048];
+
+        /* without the picture (named rId5 here, not as the package written has it) */
+        snprintf(edited, sizeof(edited), "<wpc:wpc><wpc:bg/><wpc:whole/>%s", strstr(canvas, "</pic:pic>") + 10);
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+        CHECK(pd_docx_drawing_rebuild(d, o.resource, edited, strlen(edited), &r2) == PD_OK && r2 != 0);
+        js = r2 ? drawing_json(d, r2) : NULL;
+        CHECK(js && strstr(js, "\"xml\":") && !strstr(js, "\"fallback\""));
+        free(js);
+        pd_doc_free(d);
+    }
+}
+
 /* Through DOCX unchanged: a picture and a SEQ field inside a tracked deletion stay deleted (a figure deleted
    came back on every save, and moved the pages after it), the field in its text's size; a link Word shows without
    an underline stays without; a one-column section keeps its column gap. */
@@ -4513,6 +4585,7 @@ int main(void) {
     test_drawing_story_copy();
     test_docx_tracked_objects();
     test_docx_drawing_rebuild();
+    test_docx_canvas_fallback();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");
