@@ -6632,6 +6632,122 @@ static pd_block_id dw_rebuild_story(dxi* X) {
     return 0;
 }
 
+/* a preset's adjustment by name ("adj", "adj1", ...), as the shape's avLst gave it; D when it gave none */
+static double dw_adj(const dw_guides* G, const char* name, double d) {
+    int i;
+
+    for (i = G->n - 1; i >= 0; i--) {
+        if (!strcmp(G->name[i], name)) {
+            return G->val[i];
+        }
+    }
+
+    return d;
+}
+
+static double dw_pin(double lo, double v, double hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+/* The polygon presets whose corners move with their adjustments, as Office's preset definitions place them: the
+   corners of preset PRST in a W by H box (EMU) into XY, their number returned; 0 for a preset not among them */
+static int dw_preset_adj(const char* prst, double w, double h, const dw_guides* G, double* xy) {
+    double ss = w < h ? w : h, hc = w / 2, vc = h / 2, a, a1, a2, x1, x2, y1, y2, d;
+    int n = 0, k;
+
+#define PT(X, Y) (xy[2 * n] = (X), xy[2 * n + 1] = (Y), n++)
+
+    if (ss <= 0) {
+        return 0;
+    }
+
+    if (!strcmp(prst, "triangle")) {
+        a = dw_pin(0, dw_adj(G, "adj", 50000), 100000);
+        PT(0, h); PT(w * a / 100000, 0); PT(w, h);
+    } else if (!strcmp(prst, "parallelogram") || !strcmp(prst, "trapezoid")) {
+        int par = prst[0] == 'p';
+
+        a = dw_pin(0, dw_adj(G, "adj", 25000), (par ? 100000 : 50000) * w / ss);
+        x2 = ss * a / 100000;
+
+        if (par) {
+            PT(0, h); PT(x2, 0); PT(w, 0); PT(w - x2, h);
+        } else {
+            PT(0, h); PT(x2, 0); PT(w - x2, 0); PT(w, h);
+        }
+    } else if (!strcmp(prst, "hexagon")) {
+        a = dw_pin(0, dw_adj(G, "adj", 25000), 50000 * w / ss);
+        x1 = ss * a / 100000;
+        PT(0, vc); PT(x1, 0); PT(w - x1, 0); PT(w, vc); PT(w - x1, h); PT(x1, h);
+    } else if (!strcmp(prst, "octagon")) {
+        a = dw_pin(0, dw_adj(G, "adj", 29289), 50000);
+        x1 = ss * a / 100000;
+        PT(0, x1); PT(x1, 0); PT(w - x1, 0); PT(w, x1); PT(w, h - x1); PT(w - x1, h); PT(x1, h); PT(0, h - x1);
+    } else if (!strcmp(prst, "homePlate") || !strcmp(prst, "chevron")) {
+        a = dw_pin(0, dw_adj(G, "adj", 50000), 100000 * w / ss);
+        x1 = ss * a / 100000;
+
+        if (prst[0] == 'h') {
+            PT(0, 0); PT(w - x1, 0); PT(w, vc); PT(w - x1, h); PT(0, h);
+        } else {
+            PT(0, 0); PT(w - x1, 0); PT(w, vc); PT(w - x1, h); PT(0, h); PT(x1, vc);
+        }
+    } else if (!strcmp(prst, "plus")) {
+        a = dw_pin(0, dw_adj(G, "adj", 25000), 50000);
+        x1 = ss * a / 100000;
+        x2 = w - x1;
+        y2 = h - x1;
+        PT(0, x1); PT(x1, x1); PT(x1, 0); PT(x2, 0); PT(x2, x1); PT(w, x1);
+        PT(w, y2); PT(x2, y2); PT(x2, h); PT(x1, h); PT(x1, y2); PT(0, y2);
+    } else if (!strcmp(prst, "rightArrow") || !strcmp(prst, "leftArrow")) {
+        a1 = dw_pin(0, dw_adj(G, "adj1", 50000), 100000);
+        a2 = dw_pin(0, dw_adj(G, "adj2", 50000), 100000 * w / ss);
+        d = ss * a2 / 100000;
+        y1 = vc - h * a1 / 200000;
+        y2 = vc + h * a1 / 200000;
+
+        if (prst[0] == 'r') {
+            PT(0, y1); PT(w - d, y1); PT(w - d, 0); PT(w, vc); PT(w - d, h); PT(w - d, y2); PT(0, y2);
+        } else {
+            PT(w, y1); PT(d, y1); PT(d, 0); PT(0, vc); PT(d, h); PT(d, y2); PT(w, y2);
+        }
+    } else if (!strcmp(prst, "upArrow") || !strcmp(prst, "downArrow")) {
+        a1 = dw_pin(0, dw_adj(G, "adj1", 50000), 100000);
+        a2 = dw_pin(0, dw_adj(G, "adj2", 50000), 100000 * h / ss);
+        d = ss * a2 / 100000;
+        x1 = hc - w * a1 / 200000;
+        x2 = hc + w * a1 / 200000;
+
+        if (prst[0] == 'u') {
+            PT(x1, h); PT(x1, d); PT(0, d); PT(hc, 0); PT(w, d); PT(x2, d); PT(x2, h);
+        } else {
+            PT(x1, 0); PT(x1, h - d); PT(0, h - d); PT(hc, h); PT(w, h - d); PT(x2, h - d); PT(x2, 0);
+        }
+    } else if (!strcmp(prst, "leftRightArrow")) {
+        a1 = dw_pin(0, dw_adj(G, "adj1", 50000), 100000);
+        a2 = dw_pin(0, dw_adj(G, "adj2", 50000), 50000 * w / ss);
+        d = ss * a2 / 100000;
+        y1 = vc - h * a1 / 200000;
+        y2 = vc + h * a1 / 200000;
+        PT(0, vc); PT(d, 0); PT(d, y1); PT(w - d, y1); PT(w - d, 0); PT(w, vc); PT(w - d, h); PT(w - d, y2);
+        PT(d, y2); PT(d, h);
+    } else if (!strcmp(prst, "star5")) {
+        double swd2 = w / 2 * 1.05146, shd2 = h / 2 * 1.10557, svc = vc * 1.10557, r;
+
+        a = dw_pin(0, dw_adj(G, "adj", 19098), 50000);
+
+        for (k = 0; k < 10; k++) {
+            double an = (-90 + 36 * k) * 3.14159265358979 / 180;
+
+            r = k % 2 ? a / 50000 : 1;
+            PT(hc + swd2 * r * cos(an), svc + shd2 * r * sin(an));
+        }
+    }
+
+#undef PT
+    return n;
+}
+
 /* Office's preset shapes that are polygons: their corners in a box of 1000 by 1000 (the adjustments at their
    defaults), drawn as a custom geometry is */
 static const struct {
@@ -6910,6 +7026,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int style_line = 0, in_fillref = 0, in_lnref = 0, in_gs = 0, nopara = 1, head_arrow = 0, tail_arrow = 0;
     int arrow_w[2] = { 3, 3 }, arrow_len[2] = { 3, 3 };  /* head, tail: in line widths, Word's sm 2, med 3, lg 5 */
     long long ext_h = 0, adj1 = -1;                     /* extrusion depth; a preset's first adjustment */
+    char prst[32] = "";                                 /* the shape's preset, for one whose corners its adjustments move */
     uint32_t ext_clr = 0, patt_fg = 0, patt_bg = 0, cv_bg = 0, cv_line = 0;
     int in_extclr = 0, in_patt = 0, patt_part = 0, patt_pct = 50, in_cvbg = 0, in_cvwhole = 0;
     long long cv_lw = 9525;
@@ -7181,6 +7298,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             ext_h = 0;
             ext_clr = 0;
             adj1 = -1;
+            prst[0] = '\0';
             gds.n = 0;
             conn[0] = '\0';
             cg_n = cg_npt = cg_closed = 0;
@@ -7306,6 +7424,16 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     dw_extruded(&o, &first_item, FR, lin, bx0 + bw / 2, by0 + bh / 2, xf.rot, xf.fliph, xf.flipv, px, py,
                                 np, fs > 0 ? ext_h / fs : (double)ext_h, f, ext_clr ? ext_clr : f, l, lwd);
                     f = l = 0;
+                }
+
+                if (prst[0] && !strcmp(geom, "cust") && bw > 0 && bh > 0) {   /* a preset's corners where its adjustments put them */
+                    int np = dw_preset_adj(prst, bw, bh, &gds, cg_xy);
+
+                    if (np > 0) {
+                        cg_n = np;
+                        cg_w = (long long)bw;
+                        cg_h = (long long)bh;
+                    }
                 }
 
                 if (!strcmp(geom, "cust") && cg_n >= 2 && (f || l)) {     /* custom geometry: its path in the box */
@@ -7842,6 +7970,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 cg_npt = 0;
             }
         } else if (in_sppr && !strcmp(t, "prstGeom") && mu_attr(&g, "prst", v, sizeof(v))) {
+            snprintf(prst, sizeof(prst), "%.31s", v);
             snprintf(geom, sizeof(geom), "%s", !strcmp(v, "ellipse") ? "ellipse" : !strcmp(v, "line") ||
                      strstr(v, "Connector") ? "line" : !strcmp(v, "roundRect") ? "roundRect" : "rect");
             snprintf(conn, sizeof(conn), "%.23s", strstr(v, "Connector") && strcmp(v, "straightConnector1") ? v : "");

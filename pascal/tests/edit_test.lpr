@@ -199,6 +199,128 @@ begin
     Result := Info.child_count;
 end;
 
+{ the story at the top of a block's parents (0: the body's) }
+function StoryTopOfTest(E: TParadeEdit; B: pd_block_id): pd_block_id;
+var
+  Info: pd_block_info;
+begin
+  while (pd_doc_block_info(E.Doc, B, Info) = PD_OK) and (Info.parent <> 0) do
+    B := Info.parent;
+  if (pd_doc_block_info(E.Doc, B, Info) = PD_OK) and (Info.kind = PD_BLOCK_STORY) then
+    Result := B
+  else
+    Result := 0;
+end;
+
+{ a canvas in a new document: clicked while empty, a shape drawn, its handles (the cursor over them, the corner's
+  radius, the turn), its points edited with a double click, a text box typed in as soon as it is drawn }
+procedure TestShapeHandles(E: TParadeEdit);
+var
+  CP, D: pd_pos;
+  Sid: Integer;
+  CPage: Int32;
+  CX, Base, Asc, Desc: pd_sp;
+  Pt, P2: TPoint;
+  G: TParadeShapeGeom;
+  Xml: string;
+  W0: Double;
+
+  function At(XPt, YPt: Double): TPoint;
+  begin
+    pd_layout_caret(E.Layout, CP, CPage, CX, Base, Asc, Desc);
+    Result := E.PageToClient(CPage, CX / PD_SP_PER_PT + XPt, Base / PD_SP_PER_PT - 216 + YPt);
+  end;
+
+  procedure Drag(A, B: TPoint);
+  begin
+    TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+    TParadeWheel(E).MouseMove([ssLeft], (A.X + B.X) div 2, (A.Y + B.Y) div 2);
+    TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y);
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertText('Before');
+  E.ProcessKey(VK_RETURN, []);
+  Check(E.InsertCanvas, 'a canvas in a new document');
+  CP := PdPos(E.CaretPos.block, 0);
+  E.ProcessKey(VK_ESCAPE, []);
+  E.Repaint;
+  Application.ProcessMessages;
+  Check(not E.SelectedShape(D, Sid), 'the canvas let go');
+  Pt := At(20, 20);
+  TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  Check(E.SelectedShape(D, Sid) and (Sid = -1) and (D.block = CP.block), 'an empty canvas clicked: selected');
+  E.InsertShape('roundRect');
+  Drag(At(100, 40), At(250, 140));
+  Check(E.SelectedShapeGeom(G) and (G.Prst = 'roundRect') and (Length(G.AdjN) = 1) and
+    (Abs(G.W - 150 * PD_SP_PER_PT) < 2 * PD_SP_PER_PT), 'a rounded rectangle drawn');
+  Check(E.ShapeHandlePoint('s', 0, Pt), 'its top left handle');
+  TParadeWheel(E).MouseMove([], Pt.X, Pt.Y);
+  Check(E.Cursor = crSizeNWSE, 'over it: the diagonal sizing cursor');
+  E.ShapeHandlePoint('s', 3, Pt);
+  TParadeWheel(E).MouseMove([], Pt.X, Pt.Y);
+  Check(E.Cursor = crSizeWE, 'over the right one: the sideways one');
+  Pt := At(175, 90);
+  TParadeWheel(E).MouseMove([], Pt.X, Pt.Y);
+  Check(E.Cursor = crSizeAll, 'inside: the move cursor');
+  Check(E.ShapeHandlePoint('a', 0, Pt), 'a handle for the corners'' radius');
+  TParadeWheel(E).MouseMove([], Pt.X, Pt.Y);
+  Check(E.Cursor = crHandPoint, 'over it: the hand');
+  Drag(Pt, Point(Pt.X + 30, Pt.Y));
+  Check(E.SelectedShapeGeom(G) and (G.AdjV[0] > 30000) and E.KeptXml(Xml) and
+    (Pos('<a:gd name="adj" fmla="val ', Xml) > 0), Format('dragged: rounder (%.0f)', [G.AdjV[0]]));
+  E.Undo;
+  Check(E.KeptXml(Xml) and (Pos('<a:gd name="adj"', Xml) = 0), 'and back with undo');
+  E.Redo;
+  if not E.SelectedShape(D, Sid) or (Sid < 0) then
+  begin
+    Pt := At(175, 90);
+    TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+    TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  end;
+  Check(E.ShapeHandlePoint('r', 0, Pt), 'a handle to turn it');
+  P2 := At(175, 90);
+  Drag(Pt, Point(P2.X + 120, P2.Y));
+  Check(E.SelectedShapeGeom(G) and (Abs(G.Rot - 90) < 3) and E.KeptXml(Xml) and (Pos(' rot="', Xml) > 0),
+    Format('turned a quarter by its handle (%.1f)', [G.Rot]));
+  Check(E.RotateShape(30) and E.SelectedShapeGeom(G) and (Abs(G.Rot - 30) < 0.01), 'turned to 30 degrees');
+  Check(E.FlipShape(True) and E.SelectedShapeGeom(G) and G.FlipH, 'flipped');
+  E.FlipShape(True);
+  E.RotateShape(0);
+  W0 := G.W;
+  Pt := At(175, 90);
+  TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  TParadeWheel(E).DblClick;
+  Check(E.EditingPoints and E.KeptXml(Xml) and (Pos('<a:custGeom>', Xml) > 0) and (Pos('<a:prstGeom', Xml) = 0),
+    'a double click: its points, a custom geometry');
+  Check(E.ShapeHandlePoint('n', 0, Pt), 'its first point');
+  Drag(Pt, Point(Pt.X - 40, Pt.Y - 40));
+  Check(E.EditingPoints and E.SelectedShapeGeom(G) and (G.W > W0 + 2 * PD_SP_PER_PT),
+    Format('a point dragged out: the shape wider (%.1f, was %.1f)', [G.W / PD_SP_PER_PT, W0 / PD_SP_PER_PT]));
+  E.ProcessKey(VK_ESCAPE, []);
+  Check(not E.EditingPoints and E.SelectedShape(D, Sid) and (Sid >= 0), 'Escape: the shape, without its points');
+  E.ShapeFillColor := $0047AD70;
+  E.InsertShape('textbox');
+  Drag(At(300, 20), At(420, 70));
+  Check(not E.SelectedShape(D, Sid) and (StoryTopOfTest(E, E.CaretPos.block) <> 0),
+    'a text box drawn: the caret in it');
+  E.InsertText('Typed');
+  Check(E.ParaText(E.CaretPos.block) = 'Typed', 'typed in at once');
+  SavePage(E, 0, ExtractFilePath(ParamStr(0)) + 'edit_handles.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+  E.SaveToFile(ExtractFilePath(ParamStr(0)) + 'edit_handles.docx');
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + 'edit_handles.docx');
+  Xml := '';
+  for Sid := 0 to pd_doc_story_count(E.Doc) - 1 do
+    Xml := Xml + E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, Sid), 0));
+  Check(Pos('Typed', Xml) > 0, 'saved and read back: the text box''s text');
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -474,10 +596,18 @@ begin
       Bk := pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0);
       if pd_layout_caret(E.Layout, PdPos(Bk, 3), CapPage, CapX, CapBase, CapAsc, CapDesc) = PD_OK then
       begin
-        E.ClickAt(CapPage, CapX / PD_SP_PER_PT, (CapBase - CapAsc / 2) / PD_SP_PER_PT);
+        { as the LCL sends them: down, up; down (double), the double click, up; the triple click, then down (triple) }
+        Pt0 := E.PageToClient(CapPage, CapX / PD_SP_PER_PT, (CapBase - CapAsc / 2) / PD_SP_PER_PT);
+        TParadeWheel(E).MouseDown(mbLeft, [], Pt0.X, Pt0.Y);
+        TParadeWheel(E).MouseUp(mbLeft, [], Pt0.X, Pt0.Y);
+        TParadeWheel(E).MouseDown(mbLeft, [ssDouble], Pt0.X, Pt0.Y);
         TParadeWheel(E).DblClick;
+        TParadeWheel(E).MouseUp(mbLeft, [], Pt0.X, Pt0.Y);
         Check((E.SelectedText <> '') and (Pos(' ', E.SelectedText) = 0), 'a double click: a word, ' + E.SelectedText);
         TParadeWheel(E).TripleClick;
+        TParadeWheel(E).MouseDown(mbLeft, [ssTriple], Pt0.X, Pt0.Y);
+        TParadeWheel(E).MouseMove([ssLeft], Pt0.X + 1, Pt0.Y);
+        TParadeWheel(E).MouseUp(mbLeft, [], Pt0.X, Pt0.Y);
         Check(E.SelectedText = E.ParaText(Bk), 'a triple click: the paragraph, ' + E.SelectedText);
         E.ProcessKey(VK_RIGHT, []);
       end;
@@ -1473,6 +1603,7 @@ begin
     ExecuteProcess('/usr/bin/import', ['-window', 'root', Dir + 'edit_review_inline.png']);
     E.MarkupMode := PD_MARKUP_BALLOONS;
   end;
+  TestShapeHandles(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

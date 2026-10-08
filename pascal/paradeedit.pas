@@ -79,6 +79,26 @@ type
   TParadeShapeBoxes = array of TParadeShapeBox;
   TIntegerArray = array of Integer;
 
+  { a shape as Word places it: its box before it is turned, the turn and the flips, its geometry }
+  TParadeShapeGeom = record
+    Sid: Integer;
+    CX, CY: Double;          { its centre in the drawing (drawing units) }
+    W, H: Double;            { its box, not turned (drawing units) }
+    EX, EY: Double;          { the same in its own units (EMU, its a:ext) }
+    Rot: Double;             { the turn, degrees clockwise }
+    FlipH, FlipV: Boolean;
+    Prst: string;            { its preset geometry; 'cust' a custom one; '' neither }
+    AdjN: array of string;   { the preset's adjustments this editor moves, and their values }
+    AdjV: array of Double;
+    Pic, TextBox: Boolean;
+  end;
+
+  { where a drawing is: its page, its top left there (sp), sp a unit of its own }
+  TParadeDrawMap = record
+    Pg: Int32;
+    X, Y, KX, KY: Double;
+  end;
+
   TBalloonHit = record
     R: TRect;
     Range: pd_range;
@@ -109,7 +129,8 @@ type
     FShapeMore: array of Integer;  { more shapes of the drawing, added with Shift+click }
     FDrawKind: string;             { a shape to draw by dragging in the selected canvas; '' none }
     FDrawCursor: TCursor;          { the cursor before drawing began }
-    FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape }
+    FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape,
+                                     9 a shape drawn, 10 a turn, 11 an adjustment, 12 a point }
     FShapeFrom: TPoint;            { where it began (client pixels) }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
     FFrameKey: string;             { the text box the caret is in, as last looked up: story and revision }
@@ -117,6 +138,18 @@ type
     FFrameSid: Integer;            { and its shape }
     FFrameCursor: Boolean;         { the cursor is the move cursor, over that frame's edge }
     FFrameOldCursor: TCursor;
+    FNodeOn: Boolean;              { the selected shape's points shown, to be dragged (Edit Points) }
+    FDragIdx: Integer;             { a drag of an adjustment or a point: which }
+    FDragGeom: TParadeShapeGeom;   { the shape as the drag found it }
+    FDragMap: TParadeDrawMap;
+    FRotFrom, FRotNew: Double;     { a turn: the press's angle from the centre (radians), the turn as dragged (degrees) }
+    FAdjNew: Double;               { an adjustment as dragged }
+    FNodeX, FNodeY: Double;        { a point as dragged (its path's units) }
+    FDragPW, FDragPH: Double;      { and that path's units: its width and height }
+    FGeomKey: string;              { ShapeGeom's last answer, and for what }
+    FGeomLast: TParadeShapeGeom;
+    FGeomOk: Boolean;
+    FShapeFillDef, FShapeLineDef: TColor;   { what a new shape is filled and outlined with }
     FBlink: TTimer;
     FCaretOn: Boolean;
     FGlyphs: array of PGlyphBmp;   { open-addressing hash table by font, glyph, size and subpixel position }
@@ -263,6 +296,18 @@ type
     function ShapeDragStart(X, Y: Integer): Boolean;
     procedure ShapeDragMove(X, Y: Integer; Shift: TShiftState);
     function NudgeShape(DX, DY: Double): Boolean;
+    function ShapeGeom(Sid: Integer; out G: TParadeShapeGeom): Boolean;
+    function DrawMap(out M: TParadeDrawMap): Boolean;
+    function MapToClient(const M: TParadeDrawMap; DX, DY: Double): TPoint;
+    function GeomToClient(const M: TParadeDrawMap; const G: TParadeShapeGeom; U, V, Rot: Double): TPoint;
+    procedure ClientToGeom(const M: TParadeDrawMap; const G: TParadeShapeGeom; PX, PY: Integer; out U, V: Double);
+    function RotHandle(const M: TParadeDrawMap; const G: TParadeShapeGeom; Rot: Double; out ATop, P: TPoint): Boolean;
+    function ShapeHandleAt(X, Y: Integer; out Idx: Integer): Integer;
+    procedure PaintShapeExtras;
+    procedure HoverCursor(C: TCursor);
+    function EnterTextBox(Sid: Integer; const At: pd_pos; UseAt, AtEnd: Boolean): Boolean;
+    function MoveShapePoint(N: Integer; NX, NY: Double): Boolean;
+    function ShapeHandleXY(N: Integer; out PX, PY: Double): Boolean;
     procedure DrawView(Img: TLazIntfImage; ATop, AHeight: Integer; PagesToo: Boolean);
     procedure RebuildBack;
     function CaretRect(out R: TRect): Boolean;
@@ -353,6 +398,25 @@ type
       FlipH/FlipV: from the right, from the bottom); selected }
     function AddShape(const Kind: string; X0, Y0, X1, Y1: Double; FlipH: Boolean = False;
       FlipV: Boolean = False): Boolean;
+    { the selected shape turned to Deg degrees (clockwise), flipped (Horizontal, else vertically): one step of undo }
+    function RotateShape(Deg: Double): Boolean;
+    function FlipShape(Horizontal: Boolean): Boolean;
+    { the selected shape as Word places it: its box before it is turned, the turn, its preset and adjustments }
+    function SelectedShapeGeom(out G: TParadeShapeGeom): Boolean;
+    { a preset's adjustment (adj, adj1, ...: a corner's radius, an arrow's head) set, in Word's units: one step of undo }
+    function SetShapeAdjust(const AName: string; Value: Double): Boolean;
+    { the selected shape's points shown to be dragged (Word's Edit Points): a preset made a custom geometry first.
+      False for a picture, a text box, or a geometry of guides }
+    function EditShapePoints: Boolean;
+    property EditingPoints: Boolean read FNodeOn;
+    { a handle of the selected shape in the control's pixels: Kind 's' a sizing one (0..7), 'r' the turning one,
+      'a' an adjustment's, 'n' a point's (Edit Points) }
+    function ShapeHandlePoint(Kind: Char; Index: Integer; out P: TPoint): Boolean;
+    { what a new shape is filled and outlined with }
+    property ShapeFillColor: TColor read FShapeFillDef write FShapeFillDef;
+    property ShapeLineColor: TColor read FShapeLineDef write FShapeLineDef;
+    { the selected shape filled and outlined at once: one step of undo }
+    function SetShapeStyle(AFill, ALine: TColor): Boolean;
     { a point of a page (points from its top left) in the control's pixels, as the view is now }
     function PageToClient(Page: Integer; XPt, YPt: Double): TPoint;
     { the shape kind waiting for a drag in the canvas ('' none) }
@@ -1156,6 +1220,8 @@ begin
   inherited Create(AOwner);
   FHybridDefault := True;
   FShapeDrag := -1;
+  FShapeFillDef := $00C47244;    { Office's blue (4472C4), outlined darker (2F528F) }
+  FShapeLineDef := $008F522F;
   ControlStyle := ControlStyle + [csOpaque, csTripleClicks] - [csSetCaption];
   TabStop := True;
   Color := $00E0E0E0;
@@ -4896,6 +4962,10 @@ begin
     if (pd_layout_caret(FLayout, PdPos(B, Length(ParaText(B))), CPage, CX, CBase, CAsc, CDesc) = PD_OK) and
        (CPage = Page) then
     begin
+      { as tall as the text: a picture or a drawing on the line raises its ascent, not its descent }
+      if CDesc > 0 then
+        CAsc := Min(CAsc, 4 * CDesc);
+      CAsc := Min(CAsc, 32 * PD_SP_PER_PT);
       G := GetGlyphBmp(FFonts[0].Font, Glyph, Round((CAsc + CDesc) * 0.85 * PxScale * PD_SP_PER_PT), 0);
       if G^.W > 0 then
         BlendGlyph(Img, G, OX + Round(CX * PxScale) + 2, OY + Round(CBase * PxScale), $9AA9C4);
@@ -5372,6 +5442,12 @@ begin
             Cursor := FDrawCursor;
             Exit;
           end;
+          if FNodeOn then
+          begin   { Edit Points done: the shape still selected }
+            FNodeOn := False;
+            Invalidate;
+            Exit;
+          end;
           SetLength(FShapeMore, 0);
           if FShapeSid >= 0 then
           begin
@@ -5561,7 +5637,11 @@ procedure TParadeEdit.UTF8KeyPress(var UTF8Key: TUTF8Char);
 begin
   inherited UTF8KeyPress(UTF8Key);
   if (Length(UTF8Key) > 0) and (Ord(UTF8Key[1]) >= 32) and (UTF8Key <> #127) then
+  begin
+    if FShapeOn and (FShapeSid >= 0) and (Length(FShapeMore) = 0) then
+      EnterTextBox(FShapeSid, CaretPos, False, True);    { a text box selected: typed at the end of its text }
     InsertText(UTF8Key);
+  end;
   UTF8Key := '';
 end;
 
@@ -5708,6 +5788,23 @@ begin
       Result := True;
     end;
   end;
+  if Result or (pd_layout_hit_test(FLayout, Page, SX, SY, Q) <> PD_OK) then
+    Exit;
+  { a drawing that draws nothing (a canvas just put in) is no item of the page: the object the point is at, on
+    either side of it }
+  for I := 0 to 1 do
+  begin
+    if (I = 1) and (Q.offset < 3) then
+      Break;
+    if I = 1 then
+      Q.offset := Q.offset - 3;
+    if DrawingPlace(Q, Pg, X, Y, W, H, JW, JH) and (Pg = Page) and (SX >= X) and (SX <= X + W) and
+       (SY >= Y) and (SY <= Y + H) then
+    begin
+      P := Q;
+      Exit(True);
+    end;
+  end;
 end;
 
 { the shape of the drawing at P under a point of the page (sp): the smallest box holding it; -1 for none }
@@ -5796,6 +5893,8 @@ begin
   if (ssShift in Shift) and FShapeOn and (FShapeSid >= 0) and (Sid >= 0) and (FShapeAt.block = D.block) and
      (FShapeAt.offset = D.offset) then
     Exit(ToggleShape(Sid));    { one more shape of the drawing, for a group }
+  if (Sid <> FShapeSid) or (FShapeAt.block <> D.block) or (FShapeAt.offset <> D.offset) then
+    FNodeOn := False;
   SetLength(FShapeMore, 0);
   FShapeOn := True;
   FShapeAt := D;
@@ -5822,6 +5921,7 @@ begin
     FDrawKind := '';
     Cursor := FDrawCursor;
   end;
+  FNodeOn := False;
   if not FShapeOn then
     Exit;
   FShapeOn := False;
@@ -5903,6 +6003,11 @@ begin
             PageLeft(Pg) + Round((X + Boxes[I].X1 * W / JW) * PxPerSp) + 1,
             PageTop(Pg) + Round((Y + Boxes[I].Y1 * H / JH) * PxPerSp) + 1);
   end;
+  if FNodeOn then
+  begin   { Edit Points: the points, not the box }
+    PaintShapeExtras;
+    Exit;
+  end;
   L := PageLeft(Pg) + Round(BX0 * PxPerSp);
   T := PageTop(Pg) + Round(BY0 * PxPerSp);
   R := PageLeft(Pg) + Round(BX1 * PxPerSp);
@@ -5930,7 +6035,8 @@ begin
     end;
     Canvas.Rectangle(HX - K, HY - K, HX + K + 1, HY + K + 1);
   end;
-  if (FShapeDrag >= 0) and ShapeClientRect(FShapeNew, Rc) then
+  PaintShapeExtras;
+  if (FShapeDrag in [0..9]) and ShapeClientRect(FShapeNew, Rc) then
   begin   { where the drag would put it }
     Canvas.Brush.Style := bsClear;
     Canvas.Pen.Style := psDash;
@@ -6809,6 +6915,7 @@ begin
     FShapeSid := -1;    { into the drawing the shape is in }
   if FShapeOn and CanvasSelected then
   begin   { the next drag in the canvas draws it }
+    HoverCursor(crDefault);
     if FDrawKind = '' then
       FDrawCursor := Cursor;
     FDrawKind := Kind;
@@ -6828,10 +6935,13 @@ begin
   else
     Result := AddShape(Kind, JW / 2 - 54 * PD_SP_PER_PT, JH / 2 - 36 * PD_SP_PER_PT, JW / 2 + 54 * PD_SP_PER_PT,
       JH / 2 + 36 * PD_SP_PER_PT);
+  if Result and (Kind = 'textbox') then
+    EnterTextBox(FShapeSid, CaretPos, False, False);    { typed in at once, as Word has a new text box }
 end;
 
 { a shape's DrawingML, as Word writes one in a canvas (EMU) }
-function ShapeXml(const Kind: string; Id: Integer; X, Y, CX, CY: Int64; FlipH, FlipV: Boolean): string;
+function ShapeXml(const Kind: string; Id: Integer; X, Y, CX, CY: Int64; FlipH, FlipV: Boolean;
+  const Fill, Line: string): string;
 const
   Body = '<wps:bodyPr rot="0" vert="horz" wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" ' +
     'anchor="ctr" anchorCtr="0"><a:noAutofit/></wps:bodyPr>';
@@ -6847,7 +6957,7 @@ begin
     Exit('<wps:wsp><wps:cNvPr id="' + IntToStr(Id) + '" name="' + IfThen(Kind = 'arrow', 'Straight Arrow Connector ',
       'Straight Connector ') + IntToStr(Id) + '"/><wps:cNvCnPr/><wps:spPr>' + Xf +
       '<a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr ' +
-      'val="4472C4"/></a:solidFill>' + IfThen(Kind = 'arrow', '<a:tailEnd type="triangle"/>', '') +
+      'val="' + Fill + '"/></a:solidFill>' + IfThen(Kind = 'arrow', '<a:tailEnd type="triangle"/>', '') +
       '</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>');
   if Kind = 'textbox' then
     Exit('<wps:wsp><wps:cNvPr id="' + IntToStr(Id) + '" name="Text Box ' + IntToStr(Id) +
@@ -6868,7 +6978,8 @@ begin
   end;
   Result := '<wps:wsp><wps:cNvPr id="' + IntToStr(Id) + '" name="' + Name + IntToStr(Id) +
     '"/><wps:cNvSpPr/><wps:spPr>' + Xf + '<a:prstGeom prst="' + Geom + '"><a:avLst/></a:prstGeom><a:solidFill>' +
-    '<a:srgbClr val="4472C4"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="2F528F"/></a:solidFill>' +
+    '<a:srgbClr val="' + Fill + '"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="' + Line +
+    '"/></a:solidFill>' +
     '</a:ln></wps:spPr>' + Body + '</wps:wsp>';
 end;
 
@@ -6906,7 +7017,7 @@ begin
     P := PosEx('id="', Xml, P + 4);
   end;
   Sh := ShapeXml(Kind, Id, Round(X0 * Emu), Round(Y0 * Emu), Max(1, Round((X1 - X0) * Emu)),
-    Round((Y1 - Y0) * Emu), FlipH, FlipV);
+    Round((Y1 - Y0) * Emu), FlipH, FlipV, HexRGB(FShapeFillDef), HexRGB(FShapeLineDef));
   if Copy(Xml, Els[Root].B - 2, 2) = '/>' then
   begin   { <wpc:wpc/>: opened }
     At := Els[Root].A;
@@ -7062,6 +7173,1335 @@ begin
   end;
 end;
 
+{ ---------------- a shape turned, adjusted, its points edited ---------------- }
+
+type
+  { a step of a custom geometry's path: m (move), l (line), c (a cubic: two controls and its end), q, z (close) }
+  TPathCmd = record
+    Cmd: Char;
+    X, Y: array[0..2] of Double;
+    N: Integer;
+  end;
+  TPathCmds = array of TPathCmd;
+  TPathFlat = array of Double;
+
+{ an attribute of the tag at At set: its value replaced, or put after the tag's name }
+procedure SetAttr(var Xml: string; At: Integer; const Name, Value: string);
+var
+  P, L, E: Integer;
+begin
+  P := AttrSpan(Xml, At, Name, L);
+  if P > 0 then
+  begin
+    Delete(Xml, P, L);
+    Insert(Value, Xml, P);
+    Exit;
+  end;
+  E := At + 1;
+  while (E <= Length(Xml)) and not (Xml[E] in [' ', '>', '/', #9, #10, #13]) do
+    Inc(E);
+  Insert(' ' + Name + '="' + Value + '"', Xml, E);
+end;
+
+function AttrOf(const Xml: string; At: Integer; const Name: string): string;
+var
+  P, L: Integer;
+begin
+  P := AttrSpan(Xml, At, Name, L);
+  if P > 0 then
+    Result := Copy(Xml, P, L)
+  else
+    Result := '';
+end;
+
+{ the adjustments of a preset this editor moves, at what each is when the shape gives none }
+procedure PresetAdjs(var G: TParadeShapeGeom);
+
+  procedure Add(const N: string; V: Double);
+  begin
+    SetLength(G.AdjN, Length(G.AdjN) + 1);
+    SetLength(G.AdjV, Length(G.AdjV) + 1);
+    G.AdjN[High(G.AdjN)] := N;
+    G.AdjV[High(G.AdjV)] := V;
+  end;
+
+begin
+  SetLength(G.AdjN, 0);
+  SetLength(G.AdjV, 0);
+  case G.Prst of
+    'roundRect': Add('adj', 16667);
+    'triangle', 'homePlate', 'chevron': Add('adj', 50000);
+    'parallelogram', 'trapezoid', 'hexagon', 'plus': Add('adj', 25000);
+    'octagon': Add('adj', 29289);
+    'star5': Add('adj', 19098);
+    'rightArrow', 'leftArrow', 'upArrow', 'downArrow', 'leftRightArrow':
+      begin
+        Add('adj1', 50000);
+        Add('adj2', 50000);
+      end;
+  end;
+end;
+
+{ the most an adjustment can be, as Office's preset definitions pin it }
+function AdjMax(const G: TParadeShapeGeom; I: Integer): Double;
+var
+  SS: Double;
+begin
+  SS := Max(1e-9, Min(G.W, G.H));
+  Result := 100000;
+  case G.Prst of
+    'roundRect', 'octagon', 'plus', 'star5': Result := 50000;
+    'parallelogram', 'homePlate', 'chevron': Result := 100000 * G.W / SS;
+    'trapezoid', 'hexagon': Result := 50000 * G.W / SS;
+    'rightArrow', 'leftArrow': if I = 1 then Result := 100000 * G.W / SS;
+    'upArrow', 'downArrow': if I = 1 then Result := 100000 * G.H / SS;
+    'leftRightArrow': if I = 1 then Result := 50000 * G.W / SS;
+  end;
+end;
+
+function AdjOf(const G: TParadeShapeGeom; I: Integer): Double;
+begin
+  Result := EnsureRange(G.AdjV[I], 0, AdjMax(G, I));
+end;
+
+{ where an adjustment's handle is, in the shape's box before it is turned (drawing units) }
+procedure AdjPos(const G: TParadeShapeGeom; I: Integer; out U, V: Double);
+var
+  W, H, SS, A, D: Double;
+begin
+  W := G.W;
+  H := G.H;
+  SS := Min(W, H);
+  A := AdjOf(G, I);
+  U := 0;
+  V := 0;
+  case G.Prst of
+    'roundRect', 'parallelogram', 'trapezoid', 'hexagon', 'octagon', 'plus': U := SS * A / 100000;
+    'triangle': U := W * A / 100000;
+    'homePlate', 'chevron': U := W - SS * A / 100000;
+    'star5':
+      begin
+        U := W / 2;
+        V := H / 2 * 1.10557 * (1 - A / 50000);
+      end;
+    'rightArrow', 'leftArrow', 'leftRightArrow':
+      if I = 0 then
+      begin
+        V := H / 2 - H * A / 200000;
+        if G.Prst = 'rightArrow' then
+          U := 0
+        else if G.Prst = 'leftArrow' then
+          U := W
+        else
+          U := W - SS * AdjOf(G, 1) / 100000;
+      end
+      else
+      begin
+        D := SS * A / 100000;
+        if G.Prst = 'rightArrow' then
+          U := W - D
+        else
+          U := D;
+      end;
+    'upArrow', 'downArrow':
+      if I = 0 then
+      begin
+        U := W / 2 - W * A / 200000;
+        if G.Prst = 'upArrow' then
+          V := H;
+      end
+      else
+      begin
+        D := SS * A / 100000;
+        if G.Prst = 'upArrow' then
+          V := D
+        else
+          V := H - D;
+      end;
+  end;
+end;
+
+{ the adjustment a handle dragged to U, V gives (Word's units, pinned) }
+function AdjFrom(const G: TParadeShapeGeom; I: Integer; U, V: Double): Double;
+var
+  W, H, SS: Double;
+begin
+  W := Max(G.W, 1e-9);
+  H := Max(G.H, 1e-9);
+  SS := Min(W, H);
+  Result := G.AdjV[I];
+  case G.Prst of
+    'roundRect', 'parallelogram', 'trapezoid', 'hexagon', 'octagon', 'plus': Result := U * 100000 / SS;
+    'triangle': Result := U * 100000 / W;
+    'homePlate', 'chevron': Result := (W - U) * 100000 / SS;
+    'star5': Result := (1 - V / (H / 2 * 1.10557)) * 50000;
+    'rightArrow', 'leftArrow', 'leftRightArrow':
+      if I = 0 then
+        Result := (H / 2 - V) * 200000 / H
+      else if G.Prst = 'rightArrow' then
+        Result := (W - U) * 100000 / SS
+      else
+        Result := U * 100000 / SS;
+    'upArrow', 'downArrow':
+      if I = 0 then
+        Result := (W / 2 - U) * 200000 / W
+      else if G.Prst = 'upArrow' then
+        Result := V * 100000 / SS
+      else
+        Result := (H - V) * 100000 / SS;
+  end;
+  Result := Round(EnsureRange(Result, 0, AdjMax(G, I)));
+end;
+
+procedure AddCmd(var C: TPathCmds; Cmd: Char; const P: array of Double);
+var
+  K: Integer;
+begin
+  SetLength(C, Length(C) + 1);
+  C[High(C)].Cmd := Cmd;
+  C[High(C)].N := Length(P) div 2;
+  for K := 0 to C[High(C)].N - 1 do
+  begin
+    C[High(C)].X[K] := P[2 * K];
+    C[High(C)].Y[K] := P[2 * K + 1];
+  end;
+end;
+
+{ a preset's outline as a path in its own units (EMU, 0..EX by 0..EY), its adjustments as they are: what a custom
+  geometry made of it starts as, and what a drag of an adjustment shows }
+function PresetPath(const G: TParadeShapeGeom): TPathCmds;
+const
+  K = 0.5523;     { a quarter circle's controls, of its radius }
+var
+  W, H, SS, A, A1, A2, D, X1, X2, Y1, Y2, R, Rr, An: Double;
+  Pts: array of Double;
+  I: Integer;
+
+  procedure P(X, Y: Double);
+  begin
+    SetLength(Pts, Length(Pts) + 2);
+    Pts[High(Pts) - 1] := X;
+    Pts[High(Pts)] := Y;
+  end;
+
+begin
+  Result := nil;
+  Pts := nil;
+  W := Max(G.EX, 1);
+  H := Max(G.EY, 0);
+  SS := Max(Min(W, H), 1e-9);
+  if Length(G.AdjV) > 0 then A := AdjOf(G, 0) else A := 0;
+  if Length(G.AdjV) > 1 then A2 := AdjOf(G, 1) else A2 := 0;
+  A1 := A;
+  case G.Prst of
+    'ellipse':
+      begin
+        AddCmd(Result, 'm', [W / 2, 0]);
+        AddCmd(Result, 'c', [W / 2 + K * W / 2, 0, W, H / 2 - K * H / 2, W, H / 2]);
+        AddCmd(Result, 'c', [W, H / 2 + K * H / 2, W / 2 + K * W / 2, H, W / 2, H]);
+        AddCmd(Result, 'c', [W / 2 - K * W / 2, H, 0, H / 2 + K * H / 2, 0, H / 2]);
+        AddCmd(Result, 'c', [0, H / 2 - K * H / 2, W / 2 - K * W / 2, 0, W / 2, 0]);
+        AddCmd(Result, 'z', []);
+        Exit;
+      end;
+    'roundRect':
+      begin
+        R := SS * A / 100000;
+        AddCmd(Result, 'm', [R, 0]);
+        AddCmd(Result, 'l', [W - R, 0]);
+        AddCmd(Result, 'c', [W - R + K * R, 0, W, R - K * R, W, R]);
+        AddCmd(Result, 'l', [W, H - R]);
+        AddCmd(Result, 'c', [W, H - R + K * R, W - R + K * R, H, W - R, H]);
+        AddCmd(Result, 'l', [R, H]);
+        AddCmd(Result, 'c', [R - K * R, H, 0, H - R + K * R, 0, H - R]);
+        AddCmd(Result, 'l', [0, R]);
+        AddCmd(Result, 'c', [0, R - K * R, R - K * R, 0, R, 0]);
+        AddCmd(Result, 'z', []);
+        Exit;
+      end;
+    'line', 'straightConnector1':
+      begin
+        AddCmd(Result, 'm', [0, 0]);
+        AddCmd(Result, 'l', [W, H]);
+        Exit;
+      end;
+    'triangle':
+      begin P(0, H); P(W * A / 100000, 0); P(W, H); end;
+    'rtTriangle':
+      begin P(0, 0); P(W, H); P(0, H); end;
+    'diamond', 'flowChartDecision':
+      begin P(W / 2, 0); P(W, H / 2); P(W / 2, H); P(0, H / 2); end;
+    'parallelogram':
+      begin X2 := SS * A / 100000; P(0, H); P(X2, 0); P(W, 0); P(W - X2, H); end;
+    'trapezoid':
+      begin X2 := SS * A / 100000; P(0, H); P(X2, 0); P(W - X2, 0); P(W, H); end;
+    'hexagon':
+      begin X1 := SS * A / 100000; P(0, H / 2); P(X1, 0); P(W - X1, 0); P(W, H / 2); P(W - X1, H); P(X1, H); end;
+    'octagon':
+      begin
+        X1 := SS * A / 100000;
+        P(0, X1); P(X1, 0); P(W - X1, 0); P(W, X1); P(W, H - X1); P(W - X1, H); P(X1, H); P(0, H - X1);
+      end;
+    'pentagon':
+      begin P(W / 2, 0); P(W, H * 0.382); P(W * 0.809, H); P(W * 0.191, H); P(0, H * 0.382); end;
+    'homePlate':
+      begin X1 := SS * A / 100000; P(0, 0); P(W - X1, 0); P(W, H / 2); P(W - X1, H); P(0, H); end;
+    'chevron':
+      begin X1 := SS * A / 100000; P(0, 0); P(W - X1, 0); P(W, H / 2); P(W - X1, H); P(0, H); P(X1, H / 2); end;
+    'plus':
+      begin
+        X1 := SS * A / 100000; X2 := W - X1; Y2 := H - X1;
+        P(0, X1); P(X1, X1); P(X1, 0); P(X2, 0); P(X2, X1); P(W, X1);
+        P(W, Y2); P(X2, Y2); P(X2, H); P(X1, H); P(X1, Y2); P(0, Y2);
+      end;
+    'rightArrow', 'leftArrow':
+      begin
+        D := SS * A2 / 100000;
+        Y1 := H / 2 - H * A1 / 200000;
+        Y2 := H / 2 + H * A1 / 200000;
+        if G.Prst = 'rightArrow' then
+        begin P(0, Y1); P(W - D, Y1); P(W - D, 0); P(W, H / 2); P(W - D, H); P(W - D, Y2); P(0, Y2); end
+        else
+        begin P(W, Y1); P(D, Y1); P(D, 0); P(0, H / 2); P(D, H); P(D, Y2); P(W, Y2); end;
+      end;
+    'upArrow', 'downArrow':
+      begin
+        D := SS * A2 / 100000;
+        X1 := W / 2 - W * A1 / 200000;
+        X2 := W / 2 + W * A1 / 200000;
+        if G.Prst = 'upArrow' then
+        begin P(X1, H); P(X1, D); P(0, D); P(W / 2, 0); P(W, D); P(X2, D); P(X2, H); end
+        else
+        begin P(X1, 0); P(X1, H - D); P(0, H - D); P(W / 2, H); P(W, H - D); P(X2, H - D); P(X2, 0); end;
+      end;
+    'leftRightArrow':
+      begin
+        D := SS * A2 / 100000;
+        Y1 := H / 2 - H * A1 / 200000;
+        Y2 := H / 2 + H * A1 / 200000;
+        P(0, H / 2); P(D, 0); P(D, Y1); P(W - D, Y1); P(W - D, 0); P(W, H / 2); P(W - D, H); P(W - D, Y2);
+        P(D, Y2); P(D, H);
+      end;
+    'star5':
+      for I := 0 to 9 do
+      begin
+        An := (-90 + 36 * I) * Pi / 180;
+        if Odd(I) then Rr := A / 50000 else Rr := 1;
+        P(W / 2 + W / 2 * 1.05146 * Rr * Cos(An), H / 2 * 1.10557 + H / 2 * 1.10557 * Rr * Sin(An));
+      end;
+  else
+    begin P(0, 0); P(W, 0); P(W, H); P(0, H); end;    { a rectangle, and what is drawn as one }
+  end;
+  for I := 0 to Length(Pts) div 2 - 1 do
+    if I = 0 then
+      AddCmd(Result, 'm', [Pts[0], Pts[1]])
+    else
+      AddCmd(Result, 'l', [Pts[2 * I], Pts[2 * I + 1]]);
+  AddCmd(Result, 'z', []);
+end;
+
+{ a path's steps as DrawingML (what goes inside its a:path) }
+function PathXml(const C: TPathCmds): string;
+const
+  Names: array[0..3] of string = ('a:moveTo', 'a:lnTo', 'a:cubicBezTo', 'a:quadBezTo');
+var
+  I, K, N: Integer;
+begin
+  Result := '';
+  for I := 0 to High(C) do
+  begin
+    case C[I].Cmd of
+      'm': N := 0;
+      'l': N := 1;
+      'c': N := 2;
+      'q': N := 3;
+    else
+      begin
+        Result := Result + '<a:close/>';
+        Continue;
+      end;
+    end;
+    Result := Result + '<' + Names[N] + '>';
+    for K := 0 to C[I].N - 1 do
+      Result := Result + '<a:pt x="' + IntToStr(Round(C[I].X[K])) + '" y="' + IntToStr(Round(C[I].Y[K])) + '"/>';
+    Result := Result + '</' + Names[N] + '>';
+  end;
+end;
+
+function CustGeomXml(const C: TPathCmds; PW, PH: Double): string;
+begin
+  Result := '<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="l" t="t" r="r" b="b"/><a:pathLst>' +
+    '<a:path w="' + IntToStr(Round(PW)) + '" h="' + IntToStr(Round(PH)) + '">' + PathXml(C) +
+    '</a:path></a:pathLst></a:custGeom>';
+end;
+
+{ the first path of a shape's custom geometry (Pr its properties element): its element, steps and units; False when
+  it has none, or one of guides or arcs this editor does not move }
+function ParsePath(const Xml: string; const Els: TXmlEls; Pr: Integer; out PathEl: Integer; out C: TPathCmds;
+  out PW, PH: Double): Boolean;
+var
+  Cg, Pl, I, K: Integer;
+  Cmd: Char;
+  X, Y: Double;
+begin
+  Result := False;
+  C := nil;
+  PathEl := -1;
+  PW := 0;
+  PH := 0;
+  Cg := ChildNamed(Els, Pr, 'a:custGeom');
+  if Cg < 0 then Exit;
+  Pl := ChildNamed(Els, Cg, 'a:pathLst');
+  if Pl < 0 then Exit;
+  PathEl := ChildNamed(Els, Pl, 'a:path');
+  if PathEl < 0 then Exit;
+  PW := StrToFloatDef(AttrOf(Xml, Els[PathEl].A, 'w'), 0);
+  PH := StrToFloatDef(AttrOf(Xml, Els[PathEl].A, 'h'), 0);
+  for I := PathEl + 1 to High(Els) do
+    if Els[I].Parent = PathEl then
+    begin
+      case Els[I].Name of
+        'a:moveTo': Cmd := 'm';
+        'a:lnTo': Cmd := 'l';
+        'a:cubicBezTo': Cmd := 'c';
+        'a:quadBezTo': Cmd := 'q';
+        'a:close': Cmd := 'z';
+      else
+        Exit;     { an arc: not a point to drag }
+      end;
+      SetLength(C, Length(C) + 1);
+      C[High(C)].Cmd := Cmd;
+      C[High(C)].N := 0;
+      for K := I + 1 to High(Els) do
+        if (Els[K].Parent = I) and (Els[K].Name = 'a:pt') and (C[High(C)].N < 3) then
+        begin
+          X := StrToFloatDef(AttrOf(Xml, Els[K].A, 'x'), NaN);
+          Y := StrToFloatDef(AttrOf(Xml, Els[K].A, 'y'), NaN);
+          if IsNan(X) or IsNan(Y) then
+            Exit;   { a guide's name: not a number to move }
+          C[High(C)].X[C[High(C)].N] := X;
+          C[High(C)].Y[C[High(C)].N] := Y;
+          Inc(C[High(C)].N);
+        end;
+    end;
+  Result := Length(C) > 0;
+end;
+
+{ whether point K of a step is where the path goes (an anchor), not a curve's control }
+function IsAnchor(const S: TPathCmd; K: Integer): Boolean;
+begin
+  Result := (K = S.N - 1) and (S.Cmd in ['m', 'l', 'c', 'q']);
+end;
+
+{ the point of a path numbered N (counting every point of every step): its step and its place there }
+function PathPoint(const C: TPathCmds; N: Integer; out Ci, Ki: Integer): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  Ci := -1;
+  Ki := -1;
+  for I := 0 to High(C) do
+  begin
+    if N < C[I].N then
+    begin
+      Ci := I;
+      Ki := N;
+      Exit(True);
+    end;
+    Dec(N, C[I].N);
+  end;
+end;
+
+{ a path flattened: its points in its units, a NaN pair between rings }
+function FlattenPath(const C: TPathCmds): TPathFlat;
+var
+  I, K, N: Integer;
+  X0, Y0, SX, SY, T, U: Double;
+
+  procedure Put(X, Y: Double);
+  begin
+    SetLength(Result, Length(Result) + 2);
+    Result[High(Result) - 1] := X;
+    Result[High(Result)] := Y;
+  end;
+
+begin
+  Result := nil;
+  X0 := 0; Y0 := 0; SX := 0; SY := 0;
+  for I := 0 to High(C) do
+    case C[I].Cmd of
+      'm':
+        begin
+          if Length(Result) > 0 then
+            Put(NaN, NaN);
+          X0 := C[I].X[0]; Y0 := C[I].Y[0]; SX := X0; SY := Y0;
+          Put(X0, Y0);
+        end;
+      'l':
+        begin
+          X0 := C[I].X[0]; Y0 := C[I].Y[0];
+          Put(X0, Y0);
+        end;
+      'c', 'q':
+        begin
+          N := 12;
+          for K := 1 to N do
+          begin
+            T := K / N;
+            U := 1 - T;
+            if C[I].Cmd = 'c' then
+              Put(U * U * U * X0 + 3 * U * U * T * C[I].X[0] + 3 * U * T * T * C[I].X[1] + T * T * T * C[I].X[2],
+                U * U * U * Y0 + 3 * U * U * T * C[I].Y[0] + 3 * U * T * T * C[I].Y[1] + T * T * T * C[I].Y[2])
+            else
+              Put(U * U * X0 + 2 * U * T * C[I].X[0] + T * T * C[I].X[1], U * U * Y0 + 2 * U * T * C[I].Y[0] +
+                T * T * C[I].Y[1]);
+          end;
+          X0 := C[I].X[C[I].N - 1];
+          Y0 := C[I].Y[C[I].N - 1];
+        end;
+      'z':
+        begin
+          Put(SX, SY);
+          X0 := SX; Y0 := SY;
+        end;
+    end;
+end;
+
+function TParadeEdit.ShapeGeom(Sid: Integer; out G: TParadeShapeGeom): Boolean;
+var
+  Xml, V, Key: string;
+  Els: TXmlEls;
+  E, Pr, Xf, Ext, Pg, Av, I, K: Integer;
+  J, It: TJSONObject;
+  Items, B, Fs: TJSONArray;
+  KX, KY: Double;
+  Found: Boolean;
+begin
+  Result := False;
+  G.Sid := Sid;
+  G.CX := 0; G.CY := 0; G.W := 0; G.H := 0; G.EX := 0; G.EY := 0; G.Rot := 0;
+  G.FlipH := False; G.FlipV := False; G.Prst := ''; G.Pic := False; G.TextBox := False;
+  SetLength(G.AdjN, 0);
+  SetLength(G.AdjV, 0);
+  if not FShapeOn or (Sid < 0) then
+    Exit;
+  Key := Format('%d:%d:%d:%d', [FShapeAt.block, FShapeAt.offset, Sid, pd_doc_revision(FDoc)]);
+  if Key = FGeomKey then
+  begin
+    G := FGeomLast;
+    Exit(FGeomOk);
+  end;
+  FGeomKey := Key;
+  FGeomOk := False;
+  FGeomLast := G;
+  if not KeptXml(Xml) then
+    Exit;
+  { its centre (its box's, turned or not) and its group's scale, from the description }
+  Found := False;
+  KX := PD_SP_PER_PT / 12700;
+  KY := KX;
+  J := DrawingJson(FDoc, FShapeAt);
+  if J = nil then
+    Exit;
+  try
+    Items := J.Find('items') as TJSONArray;
+    if Items <> nil then
+      for I := 0 to Items.Count - 1 do
+        if (Items[I] is TJSONObject) and (TJSONObject(Items[I]).Find('sid') <> nil) and
+           (TJSONObject(Items[I]).Integers['sid'] = Sid) then
+        begin
+          It := TJSONObject(Items[I]);
+          B := It.Find('box') as TJSONArray;
+          if (B = nil) or (B.Count < 4) then
+            Break;
+          G.CX := (B[0].AsFloat + B[2].AsFloat) / 2;
+          G.CY := (B[1].AsFloat + B[3].AsFloat) / 2;
+          Fs := It.Find('fs') as TJSONArray;
+          if (Fs <> nil) and (Fs.Count >= 2) and (Fs[0].AsFloat > 0) and (Fs[1].AsFloat > 0) then
+          begin
+            KX := KX * Fs[0].AsFloat / 1000000;
+            KY := KY * Fs[1].AsFloat / 1000000;
+          end;
+          Found := True;
+          Break;
+        end;
+  finally
+    J.Free;
+  end;
+  if not Found then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, Sid);
+  if E < 0 then
+    Exit;
+  Pr := PropsOf(Els, E);
+  if Pr < 0 then
+    Exit;
+  Xf := ChildNamed(Els, Pr, 'a:xfrm');
+  if Xf < 0 then
+    Exit;
+  Ext := ChildNamed(Els, Xf, 'a:ext');
+  if Ext < 0 then
+    Exit;
+  G.EX := StrToFloatDef(AttrOf(Xml, Els[Ext].A, 'cx'), 0);
+  G.EY := StrToFloatDef(AttrOf(Xml, Els[Ext].A, 'cy'), 0);
+  G.W := G.EX * KX;
+  G.H := G.EY * KY;
+  G.Rot := StrToFloatDef(AttrOf(Xml, Els[Xf].A, 'rot'), 0) / 60000;
+  V := AttrOf(Xml, Els[Xf].A, 'flipH');
+  G.FlipH := (V = '1') or (V = 'true');
+  V := AttrOf(Xml, Els[Xf].A, 'flipV');
+  G.FlipV := (V = '1') or (V = 'true');
+  G.Pic := Els[E].Name = 'pic:pic';
+  G.TextBox := Pos('<wps:txbx', Copy(Xml, Els[E].A, Els[E].B - Els[E].A)) > 0;
+  Pg := ChildNamed(Els, Pr, 'a:prstGeom');
+  if Pg >= 0 then
+  begin
+    G.Prst := AttrOf(Xml, Els[Pg].A, 'prst');
+    PresetAdjs(G);
+    Av := ChildNamed(Els, Pg, 'a:avLst');
+    if Av >= 0 then
+      for I := Av + 1 to High(Els) do
+        if (Els[I].Parent = Av) and (Els[I].Name = 'a:gd') then
+        begin
+          V := AttrOf(Xml, Els[I].A, 'fmla');
+          for K := 0 to High(G.AdjN) do
+            if (G.AdjN[K] = AttrOf(Xml, Els[I].A, 'name')) and (Copy(V, 1, 4) = 'val ') then
+              G.AdjV[K] := StrToFloatDef(Copy(V, 5, MaxInt), G.AdjV[K]);
+        end;
+  end
+  else if ChildNamed(Els, Pr, 'a:custGeom') >= 0 then
+    G.Prst := 'cust';
+  FGeomLast := G;
+  FGeomOk := True;
+  Result := True;
+end;
+
+function TParadeEdit.SelectedShapeGeom(out G: TParadeShapeGeom): Boolean;
+begin
+  OnlyShape;
+  Result := FShapeOn and (FShapeSid >= 0) and ShapeGeom(FShapeSid, G);
+end;
+
+function TParadeEdit.DrawMap(out M: TParadeDrawMap): Boolean;
+var
+  W, H, JW, JH: Double;
+begin
+  Result := FShapeOn and DrawingPlace(FShapeAt, M.Pg, M.X, M.Y, W, H, JW, JH) and (JW > 0) and (JH > 0);
+  if Result then
+  begin
+    M.KX := W / JW;
+    M.KY := H / JH;
+  end;
+end;
+
+function TParadeEdit.MapToClient(const M: TParadeDrawMap; DX, DY: Double): TPoint;
+begin
+  Result.X := PageLeft(M.Pg) + Round((M.X + DX * M.KX) * PxPerSp);
+  Result.Y := PageTop(M.Pg) + Round((M.Y + DY * M.KY) * PxPerSp);
+end;
+
+{ a point of a shape's box before it is turned (U, V: drawing units from its top left) where the shape, flipped and
+  turned by Rot, puts it in the control }
+function TParadeEdit.GeomToClient(const M: TParadeDrawMap; const G: TParadeShapeGeom; U, V, Rot: Double): TPoint;
+var
+  X, Y, C, S: Double;
+begin
+  X := U - G.W / 2;
+  Y := V - G.H / 2;
+  if G.FlipH then X := -X;
+  if G.FlipV then Y := -Y;
+  C := Cos(Rot * Pi / 180);
+  S := Sin(Rot * Pi / 180);
+  Result := MapToClient(M, G.CX + X * C - Y * S, G.CY + X * S + Y * C);
+end;
+
+procedure TParadeEdit.ClientToGeom(const M: TParadeDrawMap; const G: TParadeShapeGeom; PX, PY: Integer;
+  out U, V: Double);
+var
+  X, Y, C, S, X2, Y2: Double;
+begin
+  X := ((PX - PageLeft(M.Pg)) / PxPerSp - M.X) / M.KX - G.CX;
+  Y := ((PY - PageTop(M.Pg)) / PxPerSp - M.Y) / M.KY - G.CY;
+  C := Cos(G.Rot * Pi / 180);
+  S := Sin(G.Rot * Pi / 180);
+  X2 := X * C + Y * S;
+  Y2 := -X * S + Y * C;
+  if G.FlipH then X2 := -X2;
+  if G.FlipV then Y2 := -Y2;
+  U := X2 + G.W / 2;
+  V := Y2 + G.H / 2;
+end;
+
+{ the turning handle: above the middle of the shape's top, as it is turned }
+function TParadeEdit.RotHandle(const M: TParadeDrawMap; const G: TParadeShapeGeom; Rot: Double;
+  out ATop, P: TPoint): Boolean;
+var
+  Up, S, C, DX, DY: Double;
+begin
+  Result := True;
+  ATop := GeomToClient(M, G, G.W / 2, 0, Rot);
+  if G.FlipV then Up := 1 else Up := -1;
+  C := Cos(Rot * Pi / 180);
+  S := Sin(Rot * Pi / 180);
+  DX := -Up * S;
+  DY := Up * C;
+  P := Point(ATop.X + Round(DX * 22), ATop.Y + Round(DY * 22));
+end;
+
+{ what of the selected shape is under a point of the control: 0..7 a sizing handle, 8 the shape (to move), 10 the
+  turning handle, 11 an adjustment's (Idx), 12 a point (Idx, Edit Points); -1 none }
+function TParadeEdit.ShapeHandleAt(X, Y: Integer; out Idx: Integer): Integer;
+var
+  G: TParadeShapeGeom;
+  M: TParadeDrawMap;
+  B: array[0..3] of Double;
+  R: TRect;
+  I, HX, HY, N, K: Integer;
+  T, P: TPoint;
+  C: TPathCmds;
+  PW, PH, U, V: Double;
+  Xml: string;
+  Els: TXmlEls;
+  PathEl, E: Integer;
+begin
+  Result := -1;
+  Idx := -1;
+  if not FShapeOn or (FDrawKind <> '') then
+    Exit;
+  if (FShapeSid >= 0) and (Length(FShapeMore) = 0) and ShapeGeom(FShapeSid, G) and DrawMap(M) then
+  begin
+    if FNodeOn then
+    begin
+      if KeptXml(Xml) then
+      begin
+        Els := XmlElements(Xml);
+        E := SidElement(Els, FShapeSid);
+        if (E >= 0) and ParsePath(Xml, Els, PropsOf(Els, E), PathEl, C, PW, PH) then
+        begin
+          N := 0;
+          for I := 0 to High(C) do
+            for K := 0 to C[I].N - 1 do
+            begin
+              if PW > 0 then U := C[I].X[K] * G.W / PW else U := 0;
+              if PH > 0 then V := C[I].Y[K] * G.H / PH else V := 0;
+              P := GeomToClient(M, G, U, V, G.Rot);
+              if (Abs(X - P.X) <= 5) and (Abs(Y - P.Y) <= 5) then
+              begin
+                Idx := N;
+                Exit(12);
+              end;
+              Inc(N);
+            end;
+        end;
+      end;
+      Exit;
+    end;
+    if RotHandle(M, G, G.Rot, T, P) and (Abs(X - P.X) <= 6) and (Abs(Y - P.Y) <= 6) then
+      Exit(10);
+    for I := 0 to High(G.AdjN) do
+    begin
+      AdjPos(G, I, U, V);
+      P := GeomToClient(M, G, U, V, G.Rot);
+      if (Abs(X - P.X) <= 5) and (Abs(Y - P.Y) <= 5) then
+      begin
+        Idx := I;
+        Exit(11);
+      end;
+    end;
+  end;
+  if FShapeSid < 0 then
+  begin
+    if not DrawMap(M) then
+      Exit;
+    B[0] := 0; B[1] := 0; B[2] := M.KX; B[3] := M.KY;
+    { the whole object: its box in its own units }
+    B[2] := 0; B[3] := 0;
+    if not DrawingPlace(FShapeAt, M.Pg, M.X, M.Y, U, V, B[2], B[3]) then
+      Exit;
+  end
+  else if not ShapeBox(FShapeSid, B[0], B[1], B[2], B[3]) then
+    Exit;
+  if not ShapeClientRect(B, R) then
+    Exit;
+  for I := 0 to 7 do    { the handles, as PaintShapeSelection draws them }
+  begin
+    case I of
+      0: begin HX := R.Left; HY := R.Top; end;
+      1: begin HX := (R.Left + R.Right) div 2; HY := R.Top; end;
+      2: begin HX := R.Right; HY := R.Top; end;
+      3: begin HX := R.Right; HY := (R.Top + R.Bottom) div 2; end;
+      4: begin HX := R.Right; HY := R.Bottom; end;
+      5: begin HX := (R.Left + R.Right) div 2; HY := R.Bottom; end;
+      6: begin HX := R.Left; HY := R.Bottom; end;
+    else
+      begin HX := R.Left; HY := (R.Top + R.Bottom) div 2; end;
+    end;
+    if (Abs(X - HX) <= 5) and (Abs(Y - HY) <= 5) then
+      Exit(I);
+  end;
+  if (FShapeSid >= 0) and PtInRect(Rect(R.Left, R.Top, R.Right + 1, R.Bottom + 1), Point(X, Y)) then
+    Result := 8;
+end;
+
+function TParadeEdit.ShapeHandlePoint(Kind: Char; Index: Integer; out P: TPoint): Boolean;
+var
+  G: TParadeShapeGeom;
+  M: TParadeDrawMap;
+  T: TPoint;
+  U, V, PW, PH: Double;
+  B: array[0..3] of Double;
+  R: TRect;
+  Xml: string;
+  Els: TXmlEls;
+  E, PathEl, Ci, Ki: Integer;
+  C: TPathCmds;
+begin
+  Result := False;
+  P := Point(0, 0);
+  if Kind = 's' then
+  begin
+    if (FShapeSid < 0) or not ShapeBox(FShapeSid, B[0], B[1], B[2], B[3]) or not ShapeClientRect(B, R) then
+      Exit;
+    case Index of
+      0: P := Point(R.Left, R.Top);
+      1: P := Point((R.Left + R.Right) div 2, R.Top);
+      2: P := Point(R.Right, R.Top);
+      3: P := Point(R.Right, (R.Top + R.Bottom) div 2);
+      4: P := Point(R.Right, R.Bottom);
+      5: P := Point((R.Left + R.Right) div 2, R.Bottom);
+      6: P := Point(R.Left, R.Bottom);
+    else
+      P := Point(R.Left, (R.Top + R.Bottom) div 2);
+    end;
+    Exit(True);
+  end;
+  if (FShapeSid < 0) or not ShapeGeom(FShapeSid, G) or not DrawMap(M) then
+    Exit;
+  case Kind of
+    'r': Result := RotHandle(M, G, G.Rot, T, P);
+    'a':
+      if (Index >= 0) and (Index <= High(G.AdjN)) then
+      begin
+        AdjPos(G, Index, U, V);
+        P := GeomToClient(M, G, U, V, G.Rot);
+        Result := True;
+      end;
+    'n':
+      if KeptXml(Xml) then
+      begin
+        Els := XmlElements(Xml);
+        E := SidElement(Els, FShapeSid);
+        if (E >= 0) and ParsePath(Xml, Els, PropsOf(Els, E), PathEl, C, PW, PH) and PathPoint(C, Index, Ci, Ki) then
+        begin
+          if PW > 0 then U := C[Ci].X[Ki] * G.W / PW else U := 0;
+          if PH > 0 then V := C[Ci].Y[Ki] * G.H / PH else V := 0;
+          P := GeomToClient(M, G, U, V, G.Rot);
+          Result := True;
+        end;
+      end;
+  end;
+end;
+
+{ over the selection's box: the turning handle, the adjustments' handles, a turned shape's outline, Edit Points'
+  points, and what a drag of one of them would make }
+procedure TParadeEdit.PaintShapeExtras;
+var
+  G, GA: TParadeShapeGeom;
+  M: TParadeDrawMap;
+  T, P, Q: TPoint;
+  I, K, N, E, PathEl: Integer;
+  U, V, PW, PH, Rot: Double;
+  C: TPathCmds;
+  Xml: string;
+  Els: TXmlEls;
+  Ci, Ki: Integer;
+
+  procedure Outline(const Cmds: TPathCmds; const GG: TParadeShapeGeom; PathW, PathH, R: Double);
+  var
+    F: TPathFlat;
+    J, NP: Integer;
+    Pts: array of TPoint;
+  begin
+    F := FlattenPath(Cmds);
+    SetLength(Pts, Length(F) div 2);
+    NP := 0;
+    J := 0;
+    while J + 1 <= High(F) do
+    begin
+      if IsNan(F[J]) then
+      begin
+        if NP > 1 then Canvas.Polyline(Pts, 0, NP);
+        NP := 0;
+      end
+      else
+      begin
+        if PathW > 0 then U := F[J] * GG.W / PathW else U := 0;
+        if PathH > 0 then V := F[J + 1] * GG.H / PathH else V := 0;
+        Pts[NP] := GeomToClient(M, GG, U, V, R);
+        Inc(NP);
+      end;
+      Inc(J, 2);
+    end;
+    if NP > 1 then Canvas.Polyline(Pts, 0, NP);
+  end;
+
+  procedure Box(const GG: TParadeShapeGeom; R: Double);
+  begin
+    Canvas.Polyline([GeomToClient(M, GG, 0, 0, R), GeomToClient(M, GG, GG.W, 0, R), GeomToClient(M, GG, GG.W, GG.H, R),
+      GeomToClient(M, GG, 0, GG.H, R), GeomToClient(M, GG, 0, 0, R)]);
+  end;
+
+begin
+  if (FShapeSid < 0) or (Length(FShapeMore) > 0) or (FDrawKind <> '') or not ShapeGeom(FShapeSid, G) or
+     not DrawMap(M) then
+    Exit;
+  Canvas.Brush.Style := bsClear;
+  Canvas.Pen.Width := 1;
+  Canvas.Pen.Color := $00D77800;
+  if FNodeOn then
+  begin
+    if not KeptXml(Xml) then
+      Exit;
+    Els := XmlElements(Xml);
+    E := SidElement(Els, FShapeSid);
+    if (E < 0) or not ParsePath(Xml, Els, PropsOf(Els, E), PathEl, C, PW, PH) then
+      Exit;
+    if (FShapeDrag = 12) and PathPoint(C, FDragIdx, Ci, Ki) then
+    begin   { where the drag would put the point }
+      C[Ci].X[Ki] := FNodeX;
+      C[Ci].Y[Ki] := FNodeY;
+    end;
+    Canvas.Pen.Style := psSolid;
+    Outline(C, G, PW, PH, G.Rot);
+    { a curve's controls, tied to their ends }
+    Canvas.Pen.Style := psDot;
+    for I := 0 to High(C) do
+      if C[I].Cmd = 'c' then
+      begin
+        if I > 0 then
+        begin
+          P := GeomToClient(M, G, IfThen(PW > 0, C[I - 1].X[C[I - 1].N - 1] * G.W / PW, 0),
+            IfThen(PH > 0, C[I - 1].Y[C[I - 1].N - 1] * G.H / PH, 0), G.Rot);
+          Q := GeomToClient(M, G, IfThen(PW > 0, C[I].X[0] * G.W / PW, 0), IfThen(PH > 0, C[I].Y[0] * G.H / PH, 0),
+            G.Rot);
+          Canvas.Line(P, Q);
+        end;
+        P := GeomToClient(M, G, IfThen(PW > 0, C[I].X[1] * G.W / PW, 0), IfThen(PH > 0, C[I].Y[1] * G.H / PH, 0), G.Rot);
+        Q := GeomToClient(M, G, IfThen(PW > 0, C[I].X[2] * G.W / PW, 0), IfThen(PH > 0, C[I].Y[2] * G.H / PH, 0), G.Rot);
+        Canvas.Line(P, Q);
+      end;
+    Canvas.Pen.Style := psSolid;
+    Canvas.Pen.Color := clBlack;
+    N := 0;
+    for I := 0 to High(C) do
+      for K := 0 to C[I].N - 1 do
+      begin
+        P := GeomToClient(M, G, IfThen(PW > 0, C[I].X[K] * G.W / PW, 0), IfThen(PH > 0, C[I].Y[K] * G.H / PH, 0), G.Rot);
+        Canvas.Brush.Style := bsSolid;
+        if IsAnchor(C[I], K) then
+        begin   { a point the path goes through: a square, filled black while it is dragged }
+          if (FShapeDrag = 12) and (FDragIdx = N) then Canvas.Brush.Color := clBlack else Canvas.Brush.Color := clWhite;
+          Canvas.Rectangle(P.X - 3, P.Y - 3, P.X + 4, P.Y + 4);
+        end
+        else
+        begin
+          Canvas.Brush.Color := clWhite;
+          Canvas.Ellipse(P.X - 3, P.Y - 3, P.X + 4, P.Y + 4);
+        end;
+        Inc(N);
+      end;
+    Exit;
+  end;
+  if Abs(G.Rot) > 0.01 then
+  begin   { turned: its own box, as it is turned }
+    Canvas.Pen.Style := psDot;
+    Box(G, G.Rot);
+  end;
+  Rot := G.Rot;
+  if FShapeDrag = 10 then
+  begin   { where the turn would put it }
+    Rot := FRotNew;
+    Canvas.Pen.Style := psDash;
+    Box(G, Rot);
+  end;
+  if FShapeDrag = 11 then
+  begin   { the outline the adjustment would give }
+    GA := G;
+    SetLength(GA.AdjV, Length(G.AdjV));
+    for I := 0 to High(G.AdjV) do
+      GA.AdjV[I] := G.AdjV[I];
+    if FDragIdx <= High(GA.AdjV) then
+      GA.AdjV[FDragIdx] := FAdjNew;
+    Canvas.Pen.Style := psDash;
+    Outline(PresetPath(GA), GA, Max(GA.EX, 1), Max(GA.EY, 0), G.Rot);
+    G := GA;
+  end;
+  { the turning handle, tied to the top }
+  if RotHandle(M, G, Rot, T, P) then
+  begin
+    Canvas.Pen.Style := psSolid;
+    Canvas.Pen.Color := $00D77800;
+    Canvas.Line(T, P);
+    Canvas.Brush.Style := bsSolid;
+    Canvas.Brush.Color := clWhite;
+    Canvas.Ellipse(P.X - 5, P.Y - 5, P.X + 6, P.Y + 6);
+    Canvas.Arc(P.X - 3, P.Y - 3, P.X + 4, P.Y + 4, P.X + 4, P.Y, P.X, P.Y - 4);
+  end;
+  { the adjustments: yellow diamonds }
+  Canvas.Pen.Style := psSolid;
+  Canvas.Pen.Color := clBlack;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Brush.Color := clYellow;
+  for I := 0 to High(G.AdjN) do
+  begin
+    AdjPos(G, I, U, V);
+    P := GeomToClient(M, G, U, V, G.Rot);
+    Canvas.Polygon([Point(P.X, P.Y - 5), Point(P.X + 5, P.Y), Point(P.X, P.Y + 5), Point(P.X - 5, P.Y)]);
+  end;
+end;
+
+{ the cursor a place under the mouse asks for (crDefault: the control's own) }
+procedure TParadeEdit.HoverCursor(C: TCursor);
+begin
+  if C = crDefault then
+  begin
+    if FFrameCursor then
+    begin
+      Cursor := FFrameOldCursor;
+      FFrameCursor := False;
+    end;
+    Exit;
+  end;
+  if not FFrameCursor then
+  begin
+    FFrameOldCursor := Cursor;
+    FFrameCursor := True;
+  end;
+  if Cursor <> C then
+    Cursor := C;
+end;
+
+function TParadeEdit.RotateShape(Deg: Double): Boolean;
+var
+  Xml: string;
+  Els: TXmlEls;
+  E, Pr, Xf: Integer;
+  R: Int64;
+begin
+  OnlyShape;
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  Pr := PropsOf(Els, E);
+  if (E < 0) or (Pr < 0) then
+    Exit;
+  Xf := ChildNamed(Els, Pr, 'a:xfrm');
+  if Xf < 0 then
+    Exit;
+  R := Round(Deg * 60000) mod 21600000;
+  if R < 0 then
+    Inc(R, 21600000);
+  SetAttr(Xml, Els[Xf].A, 'rot', IntToStr(R));
+  Result := ApplyKeptXml(Xml, 'Rotate', FShapeSid);
+end;
+
+function TParadeEdit.FlipShape(Horizontal: Boolean): Boolean;
+var
+  Xml, N, V: string;
+  Els: TXmlEls;
+  E, Pr, Xf: Integer;
+begin
+  OnlyShape;
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  Pr := PropsOf(Els, E);
+  if (E < 0) or (Pr < 0) then
+    Exit;
+  Xf := ChildNamed(Els, Pr, 'a:xfrm');
+  if Xf < 0 then
+    Exit;
+  if Horizontal then N := 'flipH' else N := 'flipV';
+  V := AttrOf(Xml, Els[Xf].A, N);
+  if (V = '1') or (V = 'true') then
+    SetAttr(Xml, Els[Xf].A, N, '0')
+  else
+    SetAttr(Xml, Els[Xf].A, N, '1');
+  Result := ApplyKeptXml(Xml, 'Flip', FShapeSid);
+end;
+
+function TParadeEdit.SetShapeAdjust(const AName: string; Value: Double): Boolean;
+var
+  Xml, Gd: string;
+  Els: TXmlEls;
+  E, Pr, Pg, Av, I, P: Integer;
+  Done: Boolean;
+begin
+  OnlyShape;
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  Pr := PropsOf(Els, E);
+  if (E < 0) or (Pr < 0) then
+    Exit;
+  Pg := ChildNamed(Els, Pr, 'a:prstGeom');
+  if Pg < 0 then
+    Exit;
+  Gd := '<a:gd name="' + AName + '" fmla="val ' + IntToStr(Round(Value)) + '"/>';
+  Av := ChildNamed(Els, Pg, 'a:avLst');
+  if Av < 0 then
+  begin
+    if Copy(Xml, Els[Pg].B - 2, 2) = '/>' then
+      Xml := Copy(Xml, 1, Els[Pg].B - 3) + '><a:avLst>' + Gd + '</a:avLst></a:prstGeom>' + Copy(Xml, Els[Pg].B, MaxInt)
+    else
+    begin
+      P := PosEx('>', Xml, Els[Pg].A);
+      Insert('<a:avLst>' + Gd + '</a:avLst>', Xml, P + 1);
+    end;
+  end
+  else if Copy(Xml, Els[Av].B - 2, 2) = '/>' then
+    Xml := Copy(Xml, 1, Els[Av].A - 1) + '<a:avLst>' + Gd + '</a:avLst>' + Copy(Xml, Els[Av].B, MaxInt)
+  else
+  begin
+    Done := False;
+    for I := Av + 1 to High(Els) do
+      if (Els[I].Parent = Av) and (Els[I].Name = 'a:gd') and (AttrOf(Xml, Els[I].A, 'name') = AName) then
+      begin
+        Xml := Copy(Xml, 1, Els[I].A - 1) + Gd + Copy(Xml, Els[I].B, MaxInt);
+        Done := True;
+        Break;
+      end;
+    if not Done then
+      Insert(Gd, Xml, CloseOf(Xml, Els[Av]));
+  end;
+  Result := ApplyKeptXml(Xml, 'Adjust', FShapeSid);
+end;
+
+function TParadeEdit.EditShapePoints: Boolean;
+var
+  G: TParadeShapeGeom;
+  Xml: string;
+  Els: TXmlEls;
+  E, Pr, Pg, PathEl: Integer;
+  C: TPathCmds;
+  PW, PH: Double;
+begin
+  OnlyShape;
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) or (Length(FShapeMore) > 0) or not ShapeGeom(FShapeSid, G) or
+     G.Pic or G.TextBox or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  Pr := PropsOf(Els, E);
+  if (E < 0) or (Pr < 0) then
+    Exit;
+  if G.Prst = 'cust' then
+  begin
+    if not ParsePath(Xml, Els, Pr, PathEl, C, PW, PH) then
+      Exit;
+  end
+  else
+  begin   { a preset: its outline as a custom geometry, as Word makes it for Edit Points }
+    Pg := ChildNamed(Els, Pr, 'a:prstGeom');
+    if Pg < 0 then
+      Exit;
+    Xml := Copy(Xml, 1, Els[Pg].A - 1) + CustGeomXml(PresetPath(G), Max(G.EX, 1), Max(G.EY, 1)) +
+      Copy(Xml, Els[Pg].B, MaxInt);
+    if not ApplyKeptXml(Xml, 'Edit points', FShapeSid) then
+      Exit;
+  end;
+  FNodeOn := True;
+  Invalidate;
+  Result := True;
+end;
+
+{ point N of the selected shape's path dragged to NX, NY (its path's units): an end with the controls beside it, and
+  any end at the same place (a closed path's first and last); the box made again to hold the path }
+function TParadeEdit.MoveShapePoint(N: Integer; NX, NY: Double): Boolean;
+var
+  G: TParadeShapeGeom;
+  Xml: string;
+  Els: TXmlEls;
+  E, Pr, PathEl, Xf, Off, Ext, Ci, Ki, I, K, A, B: Integer;
+  C: TPathCmds;
+  PW, PH, OX, OY, DX, DY, MinX, MinY, MaxX, MaxY, SX, SY, NEX, NEY, LX, LY, CR, SR, RX, RY, OffX, OffY: Double;
+
+  procedure Shift(Ii, Kk: Integer);
+  begin
+    if (Ii >= 0) and (Ii <= High(C)) and (Kk >= 0) and (Kk < C[Ii].N) then
+    begin
+      C[Ii].X[Kk] := C[Ii].X[Kk] + DX;
+      C[Ii].Y[Kk] := C[Ii].Y[Kk] + DY;
+    end;
+  end;
+
+begin
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not ShapeGeom(FShapeSid, G) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  Pr := PropsOf(Els, E);
+  if (E < 0) or (Pr < 0) or not ParsePath(Xml, Els, Pr, PathEl, C, PW, PH) or not PathPoint(C, N, Ci, Ki) then
+    Exit;
+  OX := C[Ci].X[Ki];
+  OY := C[Ci].Y[Ki];
+  DX := NX - OX;
+  DY := NY - OY;
+  if IsAnchor(C[Ci], Ki) then
+  begin
+    for I := 0 to High(C) do
+      if (C[I].N > 0) and IsAnchor(C[I], C[I].N - 1) and (Abs(C[I].X[C[I].N - 1] - OX) < 0.5) and
+         (Abs(C[I].Y[C[I].N - 1] - OY) < 0.5) then
+      begin
+        Shift(I, C[I].N - 1);
+        if C[I].Cmd = 'c' then
+          Shift(I, 1);            { the control coming into it }
+        if (I < High(C)) and (C[I + 1].Cmd = 'c') then
+          Shift(I + 1, 0);        { and the one going out }
+      end;
+  end
+  else
+  begin
+    C[Ci].X[Ki] := NX;
+    C[Ci].Y[Ki] := NY;
+  end;
+  { the box around the points again }
+  MinX := 1e300; MinY := 1e300; MaxX := -1e300; MaxY := -1e300;
+  for I := 0 to High(C) do
+    for K := 0 to C[I].N - 1 do
+    begin
+      MinX := Min(MinX, C[I].X[K]); MaxX := Max(MaxX, C[I].X[K]);
+      MinY := Min(MinY, C[I].Y[K]); MaxY := Max(MaxY, C[I].Y[K]);
+    end;
+  if MinX > MaxX then
+    Exit;
+  for I := 0 to High(C) do
+    for K := 0 to C[I].N - 1 do
+    begin
+      C[I].X[K] := C[I].X[K] - MinX;
+      C[I].Y[K] := C[I].Y[K] - MinY;
+    end;
+  if PW > 0 then SX := G.EX / PW else SX := 1;
+  if PH > 0 then SY := G.EY / PH else SY := 1;
+  NEX := (MaxX - MinX) * SX;
+  NEY := (MaxY - MinY) * SY;
+  { the centre moved, in the shape's own units, flipped and turned as it is, into its group's }
+  LX := (MinX + MaxX) / 2 * SX - G.EX / 2;
+  LY := (MinY + MaxY) / 2 * SY - G.EY / 2;
+  if G.FlipH then LX := -LX;
+  if G.FlipV then LY := -LY;
+  CR := Cos(G.Rot * Pi / 180);
+  SR := Sin(G.Rot * Pi / 180);
+  RX := LX * CR - LY * SR;
+  RY := LX * SR + LY * CR;
+  { written from the end back, so that what is written does not move what is still to be }
+  A := Els[PathEl].A;
+  B := CloseOf(Xml, Els[PathEl]);
+  if Copy(Xml, Els[PathEl].B - 2, 2) <> '/>' then
+  begin
+    I := PosEx('>', Xml, A);
+    Xml := Copy(Xml, 1, I) + PathXml(C) + Copy(Xml, B, MaxInt);
+  end;
+  SetAttr(Xml, A, 'h', IntToStr(Max(1, Round(MaxY - MinY))));
+  SetAttr(Xml, A, 'w', IntToStr(Max(1, Round(MaxX - MinX))));
+  Xf := ChildNamed(Els, Pr, 'a:xfrm');
+  if Xf < 0 then
+    Exit;
+  Off := ChildNamed(Els, Xf, 'a:off');
+  Ext := ChildNamed(Els, Xf, 'a:ext');
+  if (Off < 0) or (Ext < 0) then
+    Exit;
+  OffX := StrToFloatDef(AttrOf(Xml, Els[Off].A, 'x'), 0);
+  OffY := StrToFloatDef(AttrOf(Xml, Els[Off].A, 'y'), 0);
+  SetAttr(Xml, Els[Ext].A, 'cy', IntToStr(Round(NEY)));
+  SetAttr(Xml, Els[Ext].A, 'cx', IntToStr(Round(NEX)));
+  SetAttr(Xml, Els[Off].A, 'y', IntToStr(Round(OffY + G.EY / 2 + RY - NEY / 2)));
+  SetAttr(Xml, Els[Off].A, 'x', IntToStr(Round(OffX + G.EX / 2 + RX - NEX / 2)));
+  Result := ApplyKeptXml(Xml, 'Edit points', FShapeSid);
+end;
+
+{ point N of the selected shape's path, in its units (which it keeps for a drag) }
+function TParadeEdit.ShapeHandleXY(N: Integer; out PX, PY: Double): Boolean;
+var
+  Xml: string;
+  Els: TXmlEls;
+  E, PathEl, Ci, Ki: Integer;
+  C: TPathCmds;
+begin
+  Result := False;
+  PX := 0;
+  PY := 0;
+  if (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  if (E < 0) or not ParsePath(Xml, Els, PropsOf(Els, E), PathEl, C, FDragPW, FDragPH) or
+     not PathPoint(C, N, Ci, Ki) then
+    Exit;
+  PX := C[Ci].X[Ki];
+  PY := C[Ci].Y[Ki];
+  Result := True;
+end;
+
+function TParadeEdit.SetShapeStyle(AFill, ALine: TColor): Boolean;
+begin
+  OnlyShape;
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Shape style');
+  try
+    Result := SetShapeFill(AFill, False);
+    Result := SetShapeLine(ALine, 0, False) and Result;
+  finally
+    pd_doc_end_group(FDoc);
+  end;
+end;
+
+{ the text box Sid of the selected drawing: the caret in its text -- at At when that is in it (UseAt), else at its
+  start or (AtEnd) its end. False for a shape without text }
+function TParadeEdit.EnterTextBox(Sid: Integer; const At: pd_pos; UseAt, AtEnd: Boolean): Boolean;
+var
+  Boxes: TParadeShapeBoxes;
+  I: Integer;
+  St, B: pd_block_id;
+begin
+  Result := False;
+  if not FShapeOn then
+    Exit;
+  Boxes := DrawingShapes(FShapeAt);
+  St := 0;
+  for I := 0 to High(Boxes) do
+    if Boxes[I].Sid = Sid then
+      St := Boxes[I].Story;
+  if St = 0 then
+    Exit;
+  if AtEnd then
+    B := pd_doc_child(FDoc, St, Max(0, ChildCount(St) - 1))
+  else
+    B := pd_doc_child(FDoc, St, 0);
+  if B = 0 then
+    Exit;
+  ClearShapeSelection;
+  if UseAt and (StoryTopOf(At.block) = St) then
+    SetCaret(At, False)
+  else if AtEnd then
+    SetCaret(PdPos(B, Length(ParaText(B))), False)
+  else
+    SetCaret(PdPos(B, 0), False);
+  Result := True;
+end;
+
 { a box of the selected drawing (its units) in client pixels }
 function TParadeEdit.ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
 var
@@ -7080,8 +8520,8 @@ end;
 { a press on the selected shape: on a handle, a resize; inside it, a move. False when it is neither }
 function TParadeEdit.ShapeDragStart(X, Y: Integer): Boolean;
 var
-  R: TRect;
-  I, HX, HY: Integer;
+  I, K: Integer;
+  HP: TPoint;
   Pg: Int32;
   PX, PY, W, H, JW, JH: Double;
 begin
@@ -7107,6 +8547,35 @@ begin
     Cursor := FDrawCursor;
     Exit;
   end;
+  K := ShapeHandleAt(X, Y, I);
+  if K < 0 then
+  begin
+    if FNodeOn then
+    begin   { pressed off the points: Edit Points done }
+      FNodeOn := False;
+      Invalidate;
+    end;
+    Exit;
+  end;
+  if K >= 10 then
+  begin   { a turn, an adjustment, a point }
+    if not ShapeGeom(FShapeSid, FDragGeom) or not DrawMap(FDragMap) then
+      Exit;
+    FDragIdx := I;
+    if K = 10 then
+    begin
+      HP := GeomToClient(FDragMap, FDragGeom, FDragGeom.W / 2, FDragGeom.H / 2, FDragGeom.Rot);
+      FRotFrom := ArcTan2(Y - HP.Y, X - HP.X);
+      FRotNew := FDragGeom.Rot;
+    end
+    else if K = 11 then
+      FAdjNew := FDragGeom.AdjV[I]
+    else if not ShapeHandleXY(I, FNodeX, FNodeY) then
+      Exit;
+    FShapeDrag := K;
+    FShapeFrom := Point(X, Y);
+    Exit(True);
+  end;
   if FShapeSid < 0 then
   begin   { the whole object: its box, resized by its handles }
     if not DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) then
@@ -7115,35 +8584,10 @@ begin
   end
   else if not ShapeBox(FShapeSid, FShapeOld[0], FShapeOld[1], FShapeOld[2], FShapeOld[3]) then
     Exit;
-  if not ShapeClientRect(FShapeOld, R) then
-    Exit;
   FShapeNew := FShapeOld;
-  for I := 0 to 7 do    { the handles, as PaintShapeSelection draws them }
-  begin
-    case I of
-      0: begin HX := R.Left; HY := R.Top; end;
-      1: begin HX := (R.Left + R.Right) div 2; HY := R.Top; end;
-      2: begin HX := R.Right; HY := R.Top; end;
-      3: begin HX := R.Right; HY := (R.Top + R.Bottom) div 2; end;
-      4: begin HX := R.Right; HY := R.Bottom; end;
-      5: begin HX := (R.Left + R.Right) div 2; HY := R.Bottom; end;
-      6: begin HX := R.Left; HY := R.Bottom; end;
-    else
-      begin HX := R.Left; HY := (R.Top + R.Bottom) div 2; end;
-    end;
-    if (Abs(X - HX) <= 5) and (Abs(Y - HY) <= 5) then
-    begin
-      FShapeDrag := I;
-      FShapeFrom := Point(X, Y);
-      Exit(True);
-    end;
-  end;
-  if (FShapeSid >= 0) and PtInRect(Rect(R.Left, R.Top, R.Right + 1, R.Bottom + 1), Point(X, Y)) then
-  begin
-    FShapeDrag := 8;
-    FShapeFrom := Point(X, Y);
-    Result := True;
-  end;
+  FShapeDrag := K;
+  FShapeFrom := Point(X, Y);
+  Result := True;
 end;
 
 { the drag so far: the box it would give the shape (Shift: a resize keeps the proportions) }
@@ -7151,9 +8595,35 @@ procedure TParadeEdit.ShapeDragMove(X, Y: Integer; Shift: TShiftState);
 var
   Pg: Int32;
   PX, PY, W, H, JW, JH, DX, DY, K: Double;
+  Cp: TPoint;
 begin
   if (FShapeDrag < 0) or not DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) or (W <= 0) or (H <= 0) then
     Exit;
+  if FShapeDrag = 10 then
+  begin   { turned by the angle the mouse has gone round the centre (Shift: by fifteen degrees) }
+    Cp := GeomToClient(FDragMap, FDragGeom, FDragGeom.W / 2, FDragGeom.H / 2, FDragGeom.Rot);
+    K := FDragGeom.Rot + (ArcTan2(Y - Cp.Y, X - Cp.X) - FRotFrom) * 180 / Pi;
+    if ssShift in Shift then
+      K := Round(K / 15) * 15;
+    FRotNew := K - 360 * Floor(K / 360);
+    Invalidate;
+    Exit;
+  end;
+  if FShapeDrag = 11 then
+  begin
+    ClientToGeom(FDragMap, FDragGeom, X, Y, DX, DY);
+    FAdjNew := AdjFrom(FDragGeom, FDragIdx, DX, DY);
+    Invalidate;
+    Exit;
+  end;
+  if FShapeDrag = 12 then
+  begin   { into the path's units }
+    ClientToGeom(FDragMap, FDragGeom, X, Y, DX, DY);
+    if FDragGeom.W > 0 then FNodeX := DX * FDragPW / FDragGeom.W else FNodeX := 0;
+    if FDragGeom.H > 0 then FNodeY := DY * FDragPH / FDragGeom.H else FNodeY := 0;
+    Invalidate;
+    Exit;
+  end;
   DX := (X - FShapeFrom.X) / PxPerSp * JW / W;   { client pixels into the drawing's units }
   DY := (Y - FShapeFrom.Y) / PxPerSp * JH / H;
   FShapeNew := FShapeOld;
@@ -7221,6 +8691,15 @@ begin
         SelectRange(FBalloons[I].Range);
         Exit;
       end;
+  if (Button = mbLeft) and (ssTriple in Shift) and not FShapeOn and PointToPos(X, Y, P) then
+  begin   { the third press: the paragraph (the LCL calls TripleClick before this press, which would undo it) }
+    FDragging := False;
+    pd_doc_marker_set(FDoc, FAnchor, PdPos(P.block, 0));
+    pd_doc_marker_set(FDoc, FCaret, PdPos(P.block, Length(ParaText(P.block))));
+    FHasDesiredX := False;
+    Invalidate;
+    Exit;
+  end;
   if (Button = mbLeft) and ShapeDragStart(X, Y) then
     Exit;     { the selected shape: moved, or resized by a handle }
   if (Button = mbLeft) and (not (ssShift in Shift) or (FShapeOn and (FShapeSid >= 0))) then
@@ -7248,6 +8727,7 @@ procedure TParadeEdit.MouseMove(Shift: TShiftState; X, Y: Integer);
 var
   P, D: pd_pos;
   Sid: Integer;
+  Want: TCursor;
   Pg: Int32;
   PX, PY, W, H, JW, JH: Double;
   Edge: Boolean;
@@ -7258,20 +8738,27 @@ begin
     ShapeDragMove(X, Y, Shift);
     Exit;
   end;
-  { over the edge of the text box being typed in: the move cursor, where a press takes the box }
-  Edge := not FDragging and not FShapeOn and CaretTextBox(D, Sid) and (Sid >= 0) and
-    DrawingPlace(D, Pg, PX, PY, W, H, JW, JH) and
-    (TextBoxEdgeAt(D, Round((X - PageLeft(Pg)) / PxPerSp), Round((Y - PageTop(Pg)) / PxPerSp)) = Sid);
-  if Edge and not FFrameCursor then
+  { over the edge of the text box being typed in: the move cursor, where a press takes the box; over a handle of
+    the selected shape, what a drag of it does }
+  if FDrawKind = '' then
   begin
-    FFrameOldCursor := Cursor;
-    Cursor := crSizeAll;
-    FFrameCursor := True;
-  end
-  else if not Edge and FFrameCursor then
-  begin
-    Cursor := FFrameOldCursor;
-    FFrameCursor := False;
+    Want := crDefault;
+    Edge := not FDragging and not FShapeOn and CaretTextBox(D, Sid) and (Sid >= 0) and
+      DrawingPlace(D, Pg, PX, PY, W, H, JW, JH) and
+      (TextBoxEdgeAt(D, Round((X - PageLeft(Pg)) / PxPerSp), Round((Y - PageTop(Pg)) / PxPerSp)) = Sid);
+    if Edge then
+      Want := crSizeAll
+    else if not FDragging and FShapeOn then
+      case ShapeHandleAt(X, Y, Sid) of
+        0, 4: Want := crSizeNWSE;
+        2, 6: Want := crSizeNESW;
+        1, 5: Want := crSizeNS;
+        3, 7: Want := crSizeWE;
+        8: Want := crSizeAll;
+        10, 11: Want := crHandPoint;
+        12: Want := crCross;
+      end;
+    HoverCursor(Want);
   end;
   if FDragging and PointToPos(X, Y, P) then
   begin
@@ -7307,8 +8794,24 @@ begin
         FShapeNew[2] := FShapeNew[0] + PD_SP_PER_PT * 72;
         FShapeNew[3] := FShapeNew[1] + PD_SP_PER_PT * IfThen((K = 'line') or (K = 'arrow'), 0, 54);
       end;
-      AddShape(K, Min(FShapeNew[0], FShapeNew[2]), Min(FShapeNew[1], FShapeNew[3]), Max(FShapeNew[0], FShapeNew[2]),
-        Max(FShapeNew[1], FShapeNew[3]), FShapeNew[2] < FShapeNew[0], FShapeNew[3] < FShapeNew[1]);
+      if AddShape(K, Min(FShapeNew[0], FShapeNew[2]), Min(FShapeNew[1], FShapeNew[3]), Max(FShapeNew[0], FShapeNew[2]),
+        Max(FShapeNew[1], FShapeNew[3]), FShapeNew[2] < FShapeNew[0], FShapeNew[3] < FShapeNew[1]) and (K = 'textbox') then
+        EnterTextBox(FShapeSid, CaretPos, False, False);    { a text box drawn: typed in at once }
+    end
+    else if D = 10 then
+    begin
+      if Moved then
+        RotateShape(FRotNew);
+    end
+    else if D = 11 then
+    begin
+      if Moved then
+        SetShapeAdjust(FDragGeom.AdjN[FDragIdx], FAdjNew);
+    end
+    else if D = 12 then
+    begin
+      if Moved then
+        MoveShapePoint(FDragIdx, FNodeX, FNodeY);
     end
     else if Moved and (FShapeSid < 0) then
     begin   { the whole object: its new size }
@@ -7341,6 +8844,7 @@ procedure TParadeEdit.DblClick;
 var
   S: string;
   A, B: UInt32;
+  Q: pd_pos;
 
   function IsWord(I: UInt32): Boolean;
   begin
@@ -7350,6 +8854,18 @@ var
 begin
   inherited DblClick;
   FDragging := False;
+  if FShapeOn and (FShapeSid >= 0) and (Length(FShapeMore) = 0) then
+  begin   { a shape: a text box's text to type in, the points of any other }
+    FShapeDrag := -1;
+    with ScreenToClient(Mouse.CursorPos) do
+      if not PointToPos(X, Y, Q) then
+        Q := CaretPos;
+    if not EnterTextBox(FShapeSid, Q, True, False) then
+      EditShapePoints;
+    Exit;
+  end;
+  if FShapeOn then
+    Exit;
   S := ParaText(CaretPos.block);
   A := CaretPos.offset;
   B := A;

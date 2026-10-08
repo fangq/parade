@@ -2403,6 +2403,44 @@ static void test_docx_drawing_rebuild(void) {
 /* A canvas without VML beside it (one made in the editor, or edited: its old VML is not kept) written with a
    fallback made from what it draws, for the readers that show a canvas only as VML: its box, its picture, its
    text box with the story's text. */
+/* a preset's adjustments move its corners: a triangle's apex where adj puts it, at the middle without one */
+static void test_docx_preset_adjust(void) {
+    static const char* avs[2] = { "<a:avLst/>", "<a:avLst><a:gd name=\"adj\" fmla=\"val 0\"/></a:avLst>" };
+    int k;
+
+    for (k = 0; k < 2; k++) {
+        char doc[2048];
+        pd_doc* d;
+        pd_inline o;
+        char* js;
+        const char* p;
+        int a[4] = { -1, -1, -1, -1 };
+
+        snprintf(doc, sizeof(doc), "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpc=\"wpc\" "
+                 "xmlns:wps=\"wps\"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"1270000\"/>"
+                 "<a:graphic><a:graphicData><wpc:wpc><wpc:bg/><wpc:whole/><wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" "
+                 "y=\"0\"/><a:ext cx=\"2540000\" cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"triangle\">%s</a:prstGeom>"
+                 "<a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp></wpc:wpc>"
+                 "</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>", avs[k]);
+        d = docx_doc("word/document.xml", doc, NULL);
+        CHECK(d != NULL);
+
+        if (!d) {
+            continue;
+        }
+
+        CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+        js = drawing_json(d, o.resource);
+        p = js ? strstr(js, "\"path\":[") : NULL;
+        CHECK(p && sscanf(p + 8, "%d,%d,%d,%d", &a[0], &a[1], &a[2], &a[3]) == 4);
+        /* from the bottom left corner to the apex, at the top: in the middle (200 pt across), or over the corner */
+        CHECK(a[0] == 0 && a[3] == 0 && a[1] > 0);
+        CHECK(k == 0 ? abs(a[2] - 100 * 65536) <= 2 : a[2] == 0);
+        free(js);
+        pd_doc_free(d);
+    }
+}
+
 static void test_docx_canvas_fallback(void) {
     static const char canvas[] = "<wpc:wpc><wpc:bg/><wpc:whole/>"
                                  "<pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/>"
@@ -4586,6 +4624,7 @@ int main(void) {
     test_docx_tracked_objects();
     test_docx_drawing_rebuild();
     test_docx_canvas_fallback();
+    test_docx_preset_adjust();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");
