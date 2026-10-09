@@ -386,6 +386,11 @@ PD_API pd_status pd_doc_theme(const pd_doc* doc, pd_theme* out);
 /** set the document's theme: one undoable step; every linked colour and font changes with it */
 PD_API pd_status pd_doc_set_theme(pd_doc* doc, const pd_theme* theme);
 
+/** themes after Office's own (Office, Office 2007, Office 2023, Grayscale, Blue, Green, Red Orange, Violet,
+ *  Paper): how many, and each by its index into out (1, 0 past the last) */
+PD_API int32_t   pd_theme_preset_count(void);
+PD_API int32_t   pd_theme_preset(int32_t index, pd_theme* out);
+
 /**
  * A theme colour reference: a slot (PD_THEME_*) with its luminance scaled
  * and moved as DrawingML's lumMod and lumOff do (in 1/100000; 100000 and 0

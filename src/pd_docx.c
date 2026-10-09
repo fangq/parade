@@ -11342,6 +11342,36 @@ pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xm
 /* the zip reader and writer, for the other OOXML packages (pd_pptx.c) */
 /* ------------------------------------------------------------------ */
 
+pd_status pd_theme_read(const void* data, size_t len, pd_theme* out) {
+    static const char* const where[] = { "theme/theme/theme1.xml", "word/theme/theme1.xml", "ppt/theme/theme1.xml" };
+    zipr z;
+    size_t k, n = 0;
+    char* xml = NULL;
+    int ok = 0;
+
+    if (!data || !out) {
+        return PD_ERR_ARG;
+    }
+
+    memset(&z, 0, sizeof(z));
+
+    if (zip_open(&z, (const unsigned char*)data, len)) {
+        return PD_ERR_FORMAT;
+    }
+
+    for (k = 0; k < sizeof(where) / sizeof(where[0]) && !xml; k++) {
+        xml = (char*)zip_read(&z, where[k], &n);
+    }
+
+    if (xml) {
+        ok = dx_theme_of_xml(xml, n, out);
+        free(xml);
+    }
+
+    free(z.e);
+    return ok ? PD_OK : PD_ERR_FORMAT;
+}
+
 unsigned char* pd_zip_get(const unsigned char* zip, size_t n, const char* name, size_t* len) {
     zipr z;
     unsigned char* out;

@@ -2237,6 +2237,23 @@ static void test_theme_links(void) {
 
     pd_doc_free(d);
 
+    {   /* the presets, and a theme read from a package */
+        pd_theme q0, q1;
+        buf_t z = { NULL, 0 };
+        pd_doc* n = NULL;
+
+        CHECK(pd_theme_preset_count() >= 8 && pd_theme_preset(0, &q0) && !pd_theme_preset(-1, &q0) &&
+              !pd_theme_preset(pd_theme_preset_count(), &q0));
+        CHECK(pd_theme_preset(1, &q1) && !strcmp(q1.name, "Office 2007") && q1.color[PD_THEME_ACCENT1] == 0xFF4F81BDu &&
+              !strcmp(q1.major, "Cambria"));
+        CHECK(pd_doc_new(&n) == PD_OK && pd_doc_set_theme(n, &q1) == PD_OK);
+        CHECK(pd_doc_export(n, PD_CONV_DOCX, to_buf, &z) == PD_OK && pd_theme_read(z.p, z.n, &q0) == PD_OK &&
+              q0.color[PD_THEME_ACCENT1] == 0xFF4F81BDu && !strcmp(q0.minor, "Calibri"));
+        CHECK(pd_theme_read("junk", 4, &q0) == PD_ERR_FORMAT);
+        free(z.p);
+        pd_doc_free(n);
+    }
+
     {   /* a document of Parade's own given a theme: written with a theme part made for it */
         pd_doc* n = NULL;
         buf_t b = { NULL, 0 };

@@ -94,6 +94,8 @@ PD_API size_t pd_preset_json(const char* name, double w, double h, const char* a
  *  buf as pd_preset_json does; 0 when there is no such handle */
 PD_API size_t pd_preset_drag(const char* name, double w, double h, const char* adj, int handle, double u, double v,
                              char* buf, size_t cap);
+/** the theme of a package: an Office theme (.thmx), or the theme of a .docx/.dotx or (the first master's) .pptx/.potx */
+PD_API pd_status pd_theme_read(const void* data, size_t len, pd_theme* out);
 /** guess the format of data from its first bytes (DOCX zip, RTF, HTML, JData; else Markdown or text) */
 PD_API pd_conv_format pd_conv_detect(const void* data, size_t len);
 

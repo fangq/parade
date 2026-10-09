@@ -264,6 +264,10 @@ const
   PD_FONT_THEME_NONE = 0;
   PD_FONT_THEME_MAJOR = 1;
   PD_FONT_THEME_MINOR = 2;
+  { what pd_doc_adopt takes from a template }
+  PD_ADOPT_STYLES = 1;
+  PD_ADOPT_THEME = 2;
+  PD_ADOPT_PAGE = 4;
 
   { table styles: their parts, in the order they apply; a table's look }
   PD_TPART_WHOLE = 0;
@@ -795,6 +799,9 @@ function pd_doc_style_define(doc: Ppd_doc; name: PAnsiChar; kind: Int32; parent:
   chr: Ppd_char_props; out_style: PUInt32): pd_status; cdecl; PDEXT;
 function pd_doc_style_find(doc: Ppd_doc; name: PAnsiChar): pd_style_id; cdecl; PDEXT;
 procedure pd_theme_init(theme: Ppd_theme); cdecl; PDEXT;
+function pd_theme_preset_count: Int32; cdecl; PDEXT;
+function pd_theme_preset(index: Int32; out_: Ppd_theme): Int32; cdecl; PDEXT;
+function pd_doc_adopt(doc: Ppd_doc; from: Ppd_doc; what: UInt32): pd_status; cdecl; PDEXT;
 procedure pd_table_style_init(ts: Ppd_table_style); cdecl; PDEXT;
 function pd_doc_table_style_define(doc: Ppd_doc; name: PAnsiChar; parent: pd_style_id; ts: Ppd_table_style;
   out_: Ppd_style_id): pd_status; cdecl; PDEXT;
@@ -950,6 +957,8 @@ function pd_doc_export_range(doc: Ppd_doc; range: pd_range; format: Int32; fn: p
 function pd_doc_import(data: Pointer; len: csize_t; format: Int32; out doc: Ppd_doc): pd_status; cdecl; PDEXT;
 function pd_doc_paste(doc: Ppd_doc; at: pd_pos; data: Pointer; len: csize_t; format: Int32; after: Ppd_pos): pd_status; cdecl; PDEXT;
 function pd_conv_detect(data: Pointer; len: csize_t): Int32; cdecl; PDEXT;
+{ the theme of a .thmx, .docx/.dotx or .pptx/.potx }
+function pd_theme_read(data: Pointer; len: csize_t; out_: Ppd_theme): pd_status; cdecl; PDEXT;
 { Office's preset shapes: how many, each one's name; one at a size with its adjustments as JSON (its adjustments,
   handles and paths), a handle dragged to a point as the adjustments that put it there -- each written into buf,
   the length it needs returned }

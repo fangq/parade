@@ -1968,6 +1968,55 @@ void pd_theme_init(pd_theme* t) {
     strcpy(t->minor, "Calibri");
 }
 
+/* themes after Office's: name, the twelve colours, the heading and body fonts */
+static const struct {
+    const char* name;
+    uint32_t c[PD_THEME_COLORS];
+    const char* major, *minor;
+} presets[] = {
+    { "Office Theme", { 0x000000, 0xFFFFFF, 0x44546A, 0xE7E6E6, 0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47,
+                        0x0563C1, 0x954F72 }, "Calibri Light", "Calibri" },
+    { "Office 2007", { 0x000000, 0xFFFFFF, 0x1F497D, 0xEEECE1, 0x4F81BD, 0xC0504D, 0x9BBB59, 0x8064A2, 0x4BACC6, 0xF79646,
+                       0x0000FF, 0x800080 }, "Cambria", "Calibri" },
+    { "Office 2023", { 0x000000, 0xFFFFFF, 0x0E2841, 0xE8E8E8, 0x156082, 0xE97132, 0x196B24, 0x0F9ED5, 0xA02B93, 0x4EA72E,
+                       0x467886, 0x96607D }, "Aptos Display", "Aptos" },
+    { "Grayscale", { 0x000000, 0xFFFFFF, 0x000000, 0xF8F8F8, 0xDDDDDD, 0xB2B2B2, 0x969696, 0x808080, 0x5F5F5F, 0x4D4D4D,
+                     0x5F5F5F, 0x919191 }, "Calibri Light", "Calibri" },
+    { "Blue", { 0x000000, 0xFFFFFF, 0x17406D, 0xDBEFF9, 0x0F6FC6, 0x009DD9, 0x0BD0D9, 0x10CF9B, 0x7CCA62, 0xA5C249,
+                0xF49100, 0x85DFD0 }, "Calibri Light", "Calibri" },
+    { "Green", { 0x000000, 0xFFFFFF, 0x455F51, 0xE3DED1, 0x549E39, 0x8AB833, 0xC0CF3A, 0x029676, 0x4AB5C4, 0x0989B1,
+                 0x6B9F25, 0xBA6906 }, "Calibri Light", "Calibri" },
+    { "Red Orange", { 0x000000, 0xFFFFFF, 0x505046, 0xEEECE1, 0xE84C22, 0xFFBD47, 0xB64926, 0xFF8427, 0xCC9900, 0xB22600,
+                      0xCC9900, 0x666699 }, "Calibri Light", "Calibri" },
+    { "Violet", { 0x000000, 0xFFFFFF, 0x373545, 0xDCD8DC, 0xAD84C6, 0x8784C7, 0x5D739A, 0x6997AF, 0x84ACB6, 0x6F8183,
+                  0x69A020, 0x8C8C8C }, "Calibri Light", "Calibri" },
+    { "Paper", { 0x000000, 0xFFFFFF, 0x444D26, 0xFEFAC9, 0xA5B592, 0xF3A447, 0xE7BC29, 0xD092A7, 0x9C85C0, 0x809EC2,
+                 0x8E58B6, 0x7F6F6F }, "Constantia", "Constantia" }
+};
+
+int32_t pd_theme_preset_count(void) {
+    return (int32_t)(sizeof(presets) / sizeof(presets[0]));
+}
+
+int32_t pd_theme_preset(int32_t i, pd_theme* t) {
+    int k;
+
+    if (!t || i < 0 || i >= pd_theme_preset_count()) {
+        return 0;
+    }
+
+    pd_theme_init(t);
+    snprintf(t->name, sizeof(t->name), "%s", presets[i].name);
+    snprintf(t->major, sizeof(t->major), "%s", presets[i].major);
+    snprintf(t->minor, sizeof(t->minor), "%s", presets[i].minor);
+
+    for (k = 0; k < PD_THEME_COLORS; k++) {
+        t->color[k] = 0xFF000000u | presets[i].c[k];
+    }
+
+    return 1;
+}
+
 /* a reference: the slot + 1 in the top four bits, then lumMod and lumOff in 1/5000, 14 bits each (lumOff signed) */
 uint32_t pd_theme_color(int32_t slot, int32_t lum_mod, int32_t lum_off) {
     long m = (lum_mod + (lum_mod < 0 ? -10 : 10)) / 20, o = (lum_off + (lum_off < 0 ? -10 : 10)) / 20;
