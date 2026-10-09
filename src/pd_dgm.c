@@ -103,6 +103,7 @@ typedef struct {
     double adjv;                /* a pyramid's level: its trapezoid's adj, -1 the layout's */
     int inv;                    /* a pyramid's level upside down (an inverted pyramid's) */
     double ccx, ccy, crad;      /* a cycle: its middle (from its corner) and its circle's radius, 0 none */
+    double hmid;                /* a hierChild hanging both ways: where the line down between them is, -1 not */
 } pnode;
 
 typedef struct {
@@ -413,6 +414,13 @@ static int data_load(dgm* D) {
     }
 
     set_depth(D, D->doc, 0);
+
+    for (k = 0; k < D->np; k++) {   /* a transition as deep as the node it is to (or after) */
+        if ((D->p[k].type == PT_PAR || D->p[k].type == PT_SIB) && D->p[k].owner >= 0) {
+            D->p[k].depth = D->p[D->p[k].owner].depth;
+        }
+    }
+
     return 1;
 }
 
@@ -1000,6 +1008,30 @@ static int value_of(const dgm* D, int r, int c, double* out) {
         return 1;
     }
 
+    if (c <= C_CY) {    /* an edge, its middle or its size from the others given (r from l and w, ...) */
+        int hz = c == C_W || c == C_L || c == C_R || c == C_CX, lo = hz ? C_L : C_T, hi = hz ? C_R : C_B;
+        int mid = hz ? C_CX : C_CY, sz = hz ? C_W : C_H;
+        double a = R->v[lo], b = R->v[hi], m = R->v[mid], w = R->v[sz], v;
+        int ha = has(R, lo), hb = has(R, hi), hm = has(R, mid), hw = has(R, sz);
+
+        if (c == lo && (hb || hm) && hw) {
+            v = hb ? b - w : m - w / 2;
+        } else if (c == hi && (ha || hm) && hw) {
+            v = ha ? a + w : m + w / 2;
+        } else if (c == mid && ((ha || hb) && hw)) {
+            v = ha ? a + w / 2 : b - w / 2;
+        } else if (c == mid && ha && hb) {
+            v = (a + b) / 2;
+        } else if (c == sz && ha && hb) {
+            v = b - a;
+        } else {
+            return 0;
+        }
+
+        *out = v / unit_of(c);
+        return 1;
+    }
+
     return 0;
 }
 
@@ -1323,6 +1355,14 @@ static void size_composite(dgm* D, int n) {
         size(D, k);
         cw = has(K, C_W) ? K->v[C_W] : has(K, C_L) && has(K, C_R) ? K->v[C_R] - K->v[C_L] : K->w;
         ch = has(K, C_H) ? K->v[C_H] : has(K, C_T) && has(K, C_B) ? K->v[C_B] - K->v[C_T] : K->h;
+
+        if (!has(K, C_W) && !has(K, C_R) && has(K, C_L) && has(N, C_W) && cw <= 0) {  /* from l to its edge */
+            cw = fmax(N->v[C_W] - K->v[C_L], 0);
+        }
+
+        if (!has(K, C_H) && !has(K, C_B) && has(K, C_T) && has(N, C_H) && ch <= 0) {
+            ch = fmax(N->v[C_H] - K->v[C_T], 0);
+        }
 
         if (fabs(cw - K->w) > 0.5 || fabs(ch - K->h) > 0.5) {
             resize(D, k, cw, ch);
@@ -1692,18 +1732,54 @@ static int solid(const dgm* D, int n, double ox, double oy, double* b, int m, in
 
 #define MAXBOX 2048
 
+/* a hierChild of the initial branch style (hierBranch="init") under a node below the top whose children have none
+   of their own: those hang, one under another, to the right of the line down from it */
+static int hang_init(const dgm* D, int n) {
+    char hb[16];
+    int p = D->n[n].pt, c, any = 0;
+
+    var_of(D, n, "hierBranch", hb, sizeof(hb));
+
+    if (strcmp(hb, "init") || p < 0 || D->p[p].depth < 2) {
+        return 0;
+    }
+
+    for (c = D->p[p].kid; c >= 0; c = D->p[c].next) {
+        if (D->p[c].kid >= 0) {
+            return 0;
+        }
+
+        any = 1;
+    }
+
+    return any;
+}
+
 /* hierChild: the subtrees of the children side by side (or one under another), as close as their shapes let
    them be */
 static void size_hchild(dgm* D, int n) {
     pnode* N = &D->n[n];
-    char dir[16], al[16];
+    char dir[16], al[16], sec[16];
     int* items, ni = 0, k, i, hor, nb = 0;
     double sib = has(N, C_SIBSP) ? N->v[C_SIBSP] : 0, cross = 0, maxx = 0, maxy = 0, minx = 0, miny = 0;
     double* placed = (double*)malloc(sizeof(double) * 4 * MAXBOX), *mine = (double*)malloc(sizeof(double) * 4 * MAXBOX);
 
     param(D, n, "linDir", dir, sizeof(dir), "fromL");
+    param(D, n, "secLinDir", sec, sizeof(sec), "");
+
+    if (hang_init(D, n)) {  /* the initial branch style, its last level: hanging to the right, one under another */
+        snprintf(dir, sizeof(dir), "fromT");
+        sec[0] = '\0';
+    }
+
     hor = !strcmp(dir, "fromL") || !strcmp(dir, "fromR");
     param(D, n, "chAlign", al, sizeof(al), hor ? "t" : "l");
+
+    if (hang_init(D, n)) {
+        snprintf(al, sizeof(al), "l");
+    }
+
+    N->hmid = -1;
 
     for (k = N->kid; k >= 0; k = D->n[k].next) {
         ni++;
@@ -1728,6 +1804,37 @@ static void size_hchild(dgm* D, int n) {
         free(mine);
         free(items);
         D->fail = 1;
+        return;
+    }
+
+    if (sec[0] && hor && ni > 0) {  /* hanging both ways: two to a row, either side of the line down, rows down */
+        double colw[2] = { 0, 0 }, y = 0, row = 0, ssib = has(N, C_SECSIBSP) ? N->v[C_SECSIBSP] : sib;
+        int fr = !strcmp(dir, "fromR");
+
+        for (i = 0; i < ni; i++) {
+            colw[(i % 2) ^ fr] = fmax(colw[(i % 2) ^ fr], D->n[items[i]].w);
+        }
+
+        for (i = 0; i < ni; i++) {
+            pnode* K = &D->n[items[i]];
+            int c = (i % 2) ^ fr;
+
+            K->x = c ? colw[0] + sib : colw[0] - K->w;  /* (each side's against the line) */
+            K->y = y;
+            row = fmax(row, K->h);
+
+            if (i % 2 || i + 1 == ni) {
+                y += row + (i + 1 < ni ? ssib : 0);
+                row = 0;
+            }
+        }
+
+        N->w = colw[0] + sib + colw[1];
+        N->h = y;
+        N->hmid = colw[0] + sib / 2;
+        free(placed);
+        free(mine);
+        free(items);
         return;
     }
 
@@ -1827,6 +1934,10 @@ static double kids_mid(const dgm* D, int c, int hor) {
     double a = 0, b = 0;
     int k, first = 1;
 
+    if (hor && D->n[c].hmid >= 0) {
+        return D->n[c].hmid;
+    }
+
     for (k = D->n[c].kid; k >= 0; k = D->n[k].next) {
         const pnode* K = &D->n[k];
         int bx;
@@ -1900,7 +2011,9 @@ static void size_hroot(dgm* D, int n) {
         pnode* C = &D->n[conts[i]], *B = &D->n[box];
         double bw = down ? B->w : B->h, cw = down ? C->w : C->h, x;
 
-        if (al[1] == 'L' || al[1] == 'T') {
+        if (down && hang_init(D, conts[i])) {  /* hanging to the right: beside the line down its left */
+            x = 0.25 * bw;
+        } else if (al[1] == 'L' || al[1] == 'T') {
             x = off * bw;
         } else if (al[1] == 'R' || al[1] == 'B') {
             x = bw - off * bw - cw;
@@ -2853,7 +2966,7 @@ static void put_fill_line(pd_buf* o, const dgm* D, const pnode* N, int geom, cre
         }
     }
 
-    if ((k = kid_of(m, osp, "noFill solidFill gradFill pattFill")) >= 0) {
+    if ((k = kid_of(m, osp, "noFill solidFill gradFill pattFill blipFill")) >= 0) {    /* (a picture's: the user's) */
         xd_raw(o, m, k);
     } else if (fi != 0 && (fc.n >= 0 || !c)) {
         pb_puts(o, "<a:solidFill>");
@@ -3604,6 +3717,7 @@ static void reset(dgm* D) {
         N->rot = N->inv = 0;
         N->adjv = -1;
         N->ccx = N->ccy = N->crad = 0;
+        N->hmid = -1;
 
         for (i = 0; i < 4; i++) {
             N->mf[i] = -1;

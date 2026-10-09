@@ -46,6 +46,7 @@ typedef struct {
     int nfonts;
     const xdoc* tstyles;        /* ppt/tableStyles.xml, NULL if none */
     int cells;                  /* tables' cell fills made shapes: their ids */
+    int docx;                   /* a .docx's SmartArt: pictures named by the package's own paths (in rels) */
 } pptx;
 
 /* a path relative to a part's folder ("../media/a.png" from "ppt/slides/slide1.xml") */
@@ -164,6 +165,8 @@ static const char* rel_like(const ppart* pt, const char* kind) {
 }
 
 /* a picture of a part in the .docx: its id there (the file copied in the first time) */
+static void put_esc(pd_buf* o, const char* s);
+
 static const char* media_id(pptx* P, const ppart* pt, const char* rid) {
     const char* path = rel_of(pt, rid), *name;
     unsigned char* data;
@@ -171,7 +174,7 @@ static const char* media_id(pptx* P, const ppart* pt, const char* rid) {
     char dst[200];
     int k;
 
-    if (!path || !P->zw) {  /* (a .docx's SmartArt: its pictures not put in) */
+    if (!path || (!P->zw && !P->docx)) {
         return NULL;
     }
 
@@ -179,6 +182,20 @@ static const char* media_id(pptx* P, const ppart* pt, const char* rid) {
         if (!strcmp(P->media[k], path)) {
             return P->media_id[k];
         }
+    }
+
+    if (P->docx) {  /* a .docx's SmartArt: the picture where it is in the package, by an id of its own */
+        if (P->nmedia >= 256) {
+            return NULL;
+        }
+
+        snprintf(P->media[P->nmedia], sizeof(P->media[0]), "%.127s", path);
+        snprintf(P->media_id[P->nmedia], sizeof(P->media_id[0]), "rIdPdS%d", P->nmedia);
+        pb_printf(&P->rels, "<Relationship Id=\"%s\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                  "relationships/image\" Target=\"/", P->media_id[P->nmedia]);
+        put_esc(&P->rels, path);
+        pb_puts(&P->rels, "\"/>");
+        return P->media_id[P->nmedia++];
     }
 
     if (P->nmedia >= 256 || (data = pd_zip_get(P->zip, P->zn, path, &len)) == NULL) {
@@ -1532,7 +1549,7 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
 
 /* SmartArt laid out from its definition, when it has no drawing saved of it (or PD_SMARTART=layout asks): the
    drawing made, 0 when it cannot be */
-static int smartart_layout(conv* C, ppart* pt, int ri, const xdoc* dm, long long cx, long long cy, ppart* out) {
+static int smartart_layout(conv* C, ppart* pt, int ri, const ppart* dmp, long long cx, long long cy, ppart* out) {
     const xdoc* d = &pt->x;
     static const char* names[3] = { "r:lo", "r:qs", "r:cs" };
     ppart parts[3];
@@ -1552,7 +1569,7 @@ static int smartart_layout(conv* C, ppart* pt, int ri, const xdoc* dm, long long
 
     if (have[0]) {
         memset(&in, 0, sizeof(in));
-        in.data = dm;
+        in.data = &dmp->x;
         in.layout = &parts[0].x;
         in.style = have[1] ? &parts[1].x : NULL;
         in.colors = have[2] ? &parts[2].x : NULL;
@@ -1580,6 +1597,9 @@ static int smartart_layout(conv* C, ppart* pt, int ri, const xdoc* dm, long long
 
             if (!ok) {
                 xd_free(&out->x);
+            } else if (dmp->nrels && (out->rels = (prel*)malloc(sizeof(prel) * (size_t)dmp->nrels)) != NULL) {
+                memcpy(out->rels, dmp->rels, sizeof(prel) * (size_t)dmp->nrels);   /* its pictures: the model's */
+                out->nrels = dmp->nrels;
             }
         }
     }
@@ -1620,14 +1640,14 @@ static int smartart_shapes(conv* C, ppart* pt, int ri, long long cx, long long c
 
     /* the saved drawing, else laid out here (or, asked, the other way round) */
     forced = mode && !strcmp(mode, "layout");
-    ok = forced && smartart_layout(C, pt, ri, &dmp.x, cx, cy, &dr);
+    ok = forced && smartart_layout(C, pt, ri, &dmp, cx, cy, &dr);
 
     if (!ok && drawpath) {
         ok = saved = part_load(C->P, &dr, drawpath);
     }
 
     if (!ok && !forced) {
-        ok = smartart_layout(C, pt, ri, &dmp.x, cx, cy, &dr);
+        ok = smartart_layout(C, pt, ri, &dmp, cx, cy, &dr);
     }
 
     if (ok) {
@@ -1736,7 +1756,14 @@ static void put_blip_shape(conv* C, ppart* pt, int sp, int lsp, int msp) {
 
     pb_puts(C->o, "<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr>");
     xd_raw(C->o, xf.d, xf.n);
-    pb_puts(C->o, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>");
+
+    if ((k = xd_kid(d, spr, "prstGeom")) >= 0) {    /* in its shape (a circle's picture round) */
+        xd_raw(C->o, d, k);
+    } else {
+        pb_puts(C->o, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+    }
+
+    pb_puts(C->o, "</pic:spPr></pic:pic>");
 }
 
 static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
@@ -2227,7 +2254,8 @@ static const char* find_in(const char* s, const char* e, const char* key) {
     return NULL;
 }
 
-char* pd_docx_smartart(const unsigned char* zip, size_t zn, const char* xml, size_t len, size_t* out_len) {
+char* pd_docx_smartart(const unsigned char* zip, size_t zn, const char* xml, size_t len, size_t* out_len,
+                       char** rels, size_t* rels_len) {
     static const char key[] = "<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/diagram\"";
     static const char end[] = "</a:graphicData>";
     const char* e = xml + len, *p = xml, *g;
@@ -2248,6 +2276,7 @@ char* pd_docx_smartart(const unsigned char* zip, size_t zn, const char* xml, siz
     P.alias[1] = 0;
     P.alias[2] = 3;
     P.alias[3] = 2;
+    P.docx = 1;
     theme_load(&P, "word/theme/theme1.xml");
     memset(&doc, 0, sizeof(doc));
     snprintf(doc.path, sizeof(doc.path), "word/document.xml");
@@ -2324,10 +2353,18 @@ char* pd_docx_smartart(const unsigned char* zip, size_t zn, const char* xml, siz
 
     pb_put(&out, p, (size_t)(e - p));
     free(doc.rels);
+    *rels = NULL;
+    *rels_len = 0;
 
-    if (!any || out.err) {
+    if (!any || out.err || P.rels.err) {
         pb_free(&out);
+        pb_free(&P.rels);
         return NULL;
+    }
+
+    if (P.rels.n) {     /* its pictures' relationships, for the document's */
+        *rels = P.rels.p;
+        *rels_len = P.rels.n;
     }
 
     pb_putc(&out, '\0');     /* (ended, as what it stands for is) */

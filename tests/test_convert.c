@@ -3564,7 +3564,7 @@ static void test_pptx_smartart(void) {
         return;
     }
 
-    for (k = 0; k < 8; k++) {
+    for (k = 0; k < 10; k++) {
         pd_block_id fl = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), k), 0);
         pd_inline o;
         char* js = NULL;
@@ -3609,6 +3609,16 @@ static void test_pptx_smartart(void) {
             CHECK(count_of(js, "prst=\\\"trapezoid\\\"") == 0 && count_of(js, "<a:custGeom>") == 2);
             CHECK(strstr(js, "<a:off x=\\\"738310\\\" y=\\\"0\\\"/><a:ext cx=\\\"4619380\\\" cy=\\\"2000250\\\"/>") != NULL);
             CHECK(strstr(js, "<a:off x=\\\"1893155\\\" y=\\\"2000250\\\"/><a:ext cx=\\\"2309690\\\" cy=\\\"2000250\\\"/>") != NULL);
+        } else if (k == 8) {    /* hanging: Init's last level to the right, one under another; Both's two to a row */
+            CHECK(count_of(js, "prst=\\\"rect\\\"") == 13 && count_of(js, "<a:custGeom>") == 12);
+            CHECK(strstr(js, "<a:off x=\\\"411307\\\" y=\\\"1697182\\\"/>") != NULL);
+            CHECK(strstr(js, "<a:off x=\\\"411307\\\" y=\\\"3394364\\\"/>") != NULL);
+            CHECK(strstr(js, "<a:off x=\\\"1866034\\\" y=\\\"1697182\\\"/>") != NULL);
+            CHECK(strstr(js, "<a:off x=\\\"3320761\\\" y=\\\"2545773\\\"/>") != NULL);
+            CHECK(strstr(js, "<a:off x=\\\"4775489\\\" y=\\\"2545773\\\"/>") != NULL);
+        } else if (k == 9) {    /* the picture in its round placeholder; the other placeholder its style's fill */
+            CHECK(count_of(js, "<pic:pic>") == 1 && count_of(js, "prst=\\\"ellipse\\\"") == 2);
+            CHECK(strstr(js, "<a:off x=\\\"1600200\\\" y=\\\"640080\\\"/><a:ext cx=\\\"4495800\\\" cy=\\\"800100\\\"/>") != NULL);
         }
 
         free(js);
@@ -3638,7 +3648,8 @@ static void test_pptx_smartart(void) {
 }
 
 /* SmartArt in a Word document: a cycle with no drawing laid out from its definition, a diagram with a drawing
-   drawn as saved (with the model's newer text); each a group of shapes inline where it was */
+   drawn as saved (with the model's newer text), a list with a picture; each a group of shapes inline where it
+   was */
 static void test_docx_smartart(void) {
     FILE* f = fopen("tests/data/smartart.docx", "rb");
     unsigned char* data = NULL;
@@ -3670,6 +3681,15 @@ static void test_docx_smartart(void) {
     }
 
     CHECK(js && count_of(js, "prst=\\\"ellipse\\\"") == 4 && count_of(js, "prst=\\\"rightArrow\\\"") == 4);
+    free(js);
+    js = NULL;
+
+    if (pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 5), 0), &o) == PD_OK &&
+            o.kind == PD_INLINE_IMAGE) {    /* the pictures' list: its picture the document's */
+        js = drawing_json(d, o.resource);
+    }
+
+    CHECK(js && count_of(js, "<pic:pic>") == 1 && count_of(js, "prst=\\\"ellipse\\\"") == 2);
     free(js);
     ns = pd_doc_story_count(d);
 

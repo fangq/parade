@@ -8,7 +8,10 @@ drawing saved of it, older than its text: the text the data model's, at the size
 colour the colour definition gives text (not the drawing's fontRef).
 
 Slides 5 to 8 are a cycle of four with arrows round it (cycle), a radial of a hub and five round it joined by lines
-(cycle, ctrShpMap="fNode"), a pyramid of three and an inverted pyramid of two (pyra). tests/data/smartart.docx has
+(cycle, ctrShpMap="fNode"), a pyramid of three and an inverted pyramid of two (pyra); slide 9 an organization
+chart whose branches hang: both ways, to the right, and (as at first) the last level under the top's children;
+slide 10 a list of two with picture placeholders, a picture (tests/data/rgba.png) in the first. The .docx has that
+list too. tests/data/smartart.docx has
 a cycle with no drawing and the diagram with the older drawing, inline in a Word document's paragraphs.
 
     python3 tools/make_test_smartart.py tests/data/smartart.pptx [tests/data/smartart.docx]
@@ -130,6 +133,89 @@ radial = ('<dgm:layoutDef %s uniqueId="test/radial"><dgm:layoutNode name="diagra
           '</dgm:forEach></dgm:forEach></dgm:forEach></dgm:layoutNode></dgm:layoutDef>') % DGM
 
 
+def branch(cases, other):
+    """a choose on the hierBranch variable: [(value, inside)], else OTHER"""
+    return '<dgm:choose name="b">' + ''.join('<dgm:if name="b%s" func="var" arg="hierBranch" op="equ" val="%s">%s'
+                                             '</dgm:if>' % (v, v, x) for v, x in cases) + \
+        '<dgm:else name="bx">%s</dgm:else></dgm:choose>' % other
+
+
+BENT = ('<dgm:param type="connRout" val="bend"/><dgm:param type="dim" val="1D"/><dgm:param type="endSty" '
+        'val="noArr"/><dgm:param type="begPts" val="bCtr"/>')
+STD_LINE = '<dgm:alg type="conn">' + BENT + '<dgm:param type="endPts" val="tCtr"/></dgm:alg>'
+HANG_LINE = '<dgm:alg type="conn">' + BENT + '<dgm:param type="endPts" val="midL midR"/>%s</dgm:alg>'
+
+# an organization chart, its branches standard, hanging both ways (hang), to the right (r), or as at first (init:
+# standard, a last level under the top's children hanging to the right)
+org = ('<dgm:layoutDef %s uniqueId="test/org"><dgm:layoutNode name="diagram"><dgm:alg type="hierChild"/>'
+       '<dgm:shape/><dgm:presOf/><dgm:constrLst>'
+       '<dgm:constr type="w" for="des" forName="comp" refType="w"/>'
+       '<dgm:constr type="h" for="des" forName="comp" refType="w" refFor="des" refForName="comp" fact="0.5"/>'
+       '<dgm:constr type="primFontSz" for="des" ptType="node" op="equ" val="65"/>'
+       '<dgm:constr type="sp" for="des" forName="root" refType="w" refFor="des" refForName="comp" fact="0.2"/>'
+       '<dgm:constr type="sibSp" refType="w" refFor="des" refForName="comp" fact="0.2"/>'
+       '<dgm:constr type="sibSp" for="des" forName="kids" refType="sibSp"/>'
+       '<dgm:constr type="secSibSp" refType="w" refFor="des" refForName="comp" fact="0.2"/>'
+       '<dgm:constr type="secSibSp" for="des" forName="kids" refType="secSibSp"/></dgm:constrLst>'
+       '<dgm:forEach name="each" axis="ch" ptType="node">'
+       '<dgm:forEach name="lines" axis="precedSib" ptType="parTrans" st="-1" cnt="1"><dgm:layoutNode name="line">' +
+       branch([('std', STD_LINE), ('init', '<dgm:choose name="d"><dgm:if name="d1" axis="self" func="depth" op="lte" '
+                'val="2">' + STD_LINE + '</dgm:if><dgm:else name="d2">' +
+                HANG_LINE % '<dgm:param type="srcNode" val="conn"/>' + '</dgm:else></dgm:choose>'),
+               ('r', HANG_LINE % '<dgm:param type="srcNode" val="conn"/>')], HANG_LINE % '') +
+       '<dgm:shape type="conn" zOrderOff="-99999"/><dgm:presOf axis="self"/></dgm:layoutNode></dgm:forEach>'
+       '<dgm:layoutNode name="root"><dgm:varLst><dgm:hierBranch val="init"/></dgm:varLst>' +
+       branch([('r', '<dgm:alg type="hierRoot"><dgm:param type="hierAlign" val="tL"/></dgm:alg>'
+                '<dgm:constrLst><dgm:constr type="alignOff" val="0.25"/></dgm:constrLst>')],
+              '<dgm:alg type="hierRoot"/>') +
+       '<dgm:shape/><dgm:presOf/><dgm:layoutNode name="comp"><dgm:alg type="composite"/><dgm:shape/>'
+       '<dgm:presOf axis="self" ptType="node" cnt="1"/>' +
+       branch([(v, '<dgm:constrLst><dgm:constr type="l" for="ch" forName="box"/><dgm:constr type="t" for="ch" '
+                'forName="box"/><dgm:constr type="w" for="ch" forName="box" refType="w"/><dgm:constr type="h" '
+                'for="ch" forName="box" refType="h"/><dgm:constr type="%s" for="ch" forName="conn"%s/>'
+                '<dgm:constr type="t" for="ch" forName="conn"/><dgm:constr type="w" for="ch" forName="conn" '
+                'refType="w" fact="0.2"/><dgm:constr type="h" for="ch" forName="conn" refType="h"/>'
+                '</dgm:constrLst>' % (('l', '') if v in ('init', 'r') else ('r', ' refType="w"')))
+               for v in ('init', 'r')], '<dgm:constrLst><dgm:constr type="l" for="ch" forName="box"/><dgm:constr '
+              'type="t" for="ch" forName="box"/><dgm:constr type="w" for="ch" forName="box" refType="w"/>'
+              '<dgm:constr type="h" for="ch" forName="box" refType="h"/><dgm:constr type="r" for="ch" '
+              'forName="conn" refType="w"/><dgm:constr type="t" for="ch" forName="conn"/><dgm:constr type="w" '
+              'for="ch" forName="conn" refType="w" fact="0.2"/><dgm:constr type="h" for="ch" forName="conn" '
+              'refType="h"/></dgm:constrLst>') +
+       '<dgm:layoutNode name="box"><dgm:alg type="tx"/><dgm:shape type="rect"/><dgm:presOf axis="self"/>'
+       '<dgm:constrLst>' + MARGINS + '</dgm:constrLst>' + SHRINK + '</dgm:layoutNode><dgm:layoutNode '
+       'name="conn"><dgm:alg type="sp"/><dgm:shape type="rect" hideGeom="1"/><dgm:presOf/></dgm:layoutNode>'
+       '</dgm:layoutNode><dgm:layoutNode name="kids">' +
+       branch([('hang', '<dgm:alg type="hierChild"><dgm:param type="chAlign" val="l"/><dgm:param type="linDir" '
+                'val="fromL"/><dgm:param type="secChAlign" val="t"/><dgm:param type="secLinDir" val="fromT"/>'
+                '</dgm:alg>'),
+               ('r', '<dgm:alg type="hierChild"><dgm:param type="chAlign" val="l"/><dgm:param type="linDir" '
+                'val="fromT"/></dgm:alg>')], '<dgm:alg type="hierChild"/>') +
+       '<dgm:shape/><dgm:presOf/><dgm:forEach name="more" ref="each"/></dgm:layoutNode></dgm:layoutNode>'
+       '</dgm:forEach></dgm:layoutNode></dgm:layoutDef>') % DGM
+
+
+# a list of pictures with text beside them: each item a picture placeholder (the user's picture in it, when there
+# is one) and its text from there to the item's edge
+pics = ('<dgm:layoutDef %s uniqueId="test/pictures"><dgm:layoutNode name="diagram"><dgm:alg type="lin">'
+        '<dgm:param type="linDir" val="fromT"/></dgm:alg><dgm:shape/><dgm:presOf/><dgm:constrLst>'
+        '<dgm:constr type="w" for="ch" forName="item" refType="w"/>'
+        '<dgm:constr type="h" for="ch" forName="item" refType="h" fact="0.4"/>'
+        '<dgm:constr type="sp" refType="h" refFor="ch" refForName="item" fact="0.2"/>'
+        '<dgm:constr type="primFontSz" for="des" forName="txt" op="equ" val="65"/></dgm:constrLst>'
+        '<dgm:forEach name="items" axis="ch" ptType="node"><dgm:layoutNode name="item"><dgm:alg type="composite"/>'
+        '<dgm:shape/><dgm:presOf/><dgm:constrLst><dgm:constr type="l" for="ch" forName="pic"/>'
+        '<dgm:constr type="t" for="ch" forName="pic"/><dgm:constr type="h" for="ch" forName="pic" refType="h"/>'
+        '<dgm:constr type="w" for="ch" forName="pic" refType="h" refFor="ch" refForName="pic"/>'
+        '<dgm:constr type="l" for="ch" forName="txt" refType="r" refFor="ch" refForName="pic"/>'
+        '<dgm:constr type="ctrY" for="ch" forName="txt" refType="ctrY" refFor="ch" refForName="pic"/>'
+        '<dgm:constr type="h" for="ch" forName="txt" refType="h" fact="0.5"/></dgm:constrLst>'
+        '<dgm:layoutNode name="pic" styleLbl="node1"><dgm:alg type="sp"/><dgm:shape type="ellipse" '
+        'blipPhldr="1"/><dgm:presOf/></dgm:layoutNode><dgm:layoutNode name="txt"><dgm:alg type="tx"/>'
+        '<dgm:shape type="rect"/><dgm:presOf axis="self"/><dgm:constrLst>' + MARGINS + '</dgm:constrLst>' + SHRINK +
+        '</dgm:layoutNode></dgm:layoutNode></dgm:forEach></dgm:layoutNode></dgm:layoutDef>') % DGM
+
+
 def pyramid(rot):
     """the nodes as a pyramid's levels, the first at its top (turned round: an inverted pyramid)"""
     return ('<dgm:layoutDef %s uniqueId="test/pyramid"><dgm:layoutNode name="diagram"><dgm:alg type="pyra">'
@@ -163,8 +249,10 @@ style = ('<dgm:styleDef %s uniqueId="test/style">'
          '</dgm:styleDef>') % DGM
 
 
-def data(tree, layout):
-    """a data model of a tree: [(text, [children])]"""
+def data(tree, layout, vars=None, pictures=None):
+    """a data model of a tree: [(text, [children])]; VARS: a node's text to its hierBranch (on its presentation
+    point of the layout node named root); PICTURES: a node's text to the relationship of the picture in its
+    placeholder (named pic)"""
     pts, cxns, n = ['<dgm:pt modelId="{doc}" type="doc"><dgm:prSet loTypeId="%s"/></dgm:pt>' % layout], [], [0]
 
     def add(parent, kids):
@@ -177,6 +265,16 @@ def data(tree, layout):
             pts.append('<dgm:pt modelId="{s%d}" type="sibTrans" cxnId="{c%d}"/>' % (k, k))
             cxns.append('<dgm:cxn modelId="{c%d}" srcId="{%s}" destId="{n%d}" srcOrd="%d" destOrd="0" '
                         'parTransId="{p%d}" sibTransId="{s%d}"/>' % (k, parent, k, i, k, k))
+
+            if pictures and text in pictures:
+                pts.append('<dgm:pt modelId="{q%d}" type="pres"><dgm:prSet presAssocID="{n%d}" presName="pic"/>'
+                           '<dgm:spPr><a:blipFill><a:blip r:embed="%s"/><a:stretch><a:fillRect/></a:stretch>'
+                           '</a:blipFill></dgm:spPr></dgm:pt>' % (k, k, pictures[text]))
+
+            if vars and text in vars:
+                pts.append('<dgm:pt modelId="{r%d}" type="pres"><dgm:prSet presAssocID="{n%d}" presName="root">'
+                           '<dgm:presLayoutVars><dgm:hierBranch val="%s"/></dgm:presLayoutVars></dgm:prSet>'
+                           '</dgm:pt>' % (k, k, vars[text]))
             add('n%d' % k, sub)
 
     add('doc', tree)
@@ -218,7 +316,12 @@ DIAGRAMS = [
     (radial, data([('Hub', [(t, []) for t in ('North', 'East', 'South', 'West', 'More')])], 'test/radial')),
     (pyramid(0), data([(t, []) for t in ('Top', 'Middle', 'Base')], 'test/pyramid')),
     (pyramid(1), data([(t, []) for t in ('Wide', 'Narrow')], 'test/pyramid')),
+    (org, data([('Head', [('Init', [('i1', []), ('i2', []), ('i3', [])]),
+                          ('Both', [('b1', []), ('b2', []), ('b3', []), ('b4', [])]),
+                          ('Right', [('r1', []), ('r2', [])])])], 'test/org', {'Both': 'hang', 'Right': 'r'})),
+    (pics, data([('Pictured', []), ('Placeholder', [])], 'test/pictures', pictures={'Pictured': 'rId1'})),
 ]
+PICTURE = open('tests/data/rgba.png', 'rb').read()
 
 
 def slide(k):
@@ -275,6 +378,10 @@ with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
                         ('rId5', 'diagramColors', '../diagrams/colors%d.xml' % k),
                         ('rId6', 'diagramDrawing', '../diagrams/drawing%d.xml' % k)))
         z.writestr('ppt/diagrams/data%d.xml' % k, dm)
+
+        if lo is pics:
+            z.writestr('ppt/diagrams/_rels/data%d.xml.rels' % k, rels(('rId1', 'image', '../media/image1.png')))
+            z.writestr('ppt/media/image1.png', PICTURE)
         z.writestr('ppt/diagrams/layout%d.xml' % k, lo)
         z.writestr('ppt/diagrams/quickStyle%d.xml' % k, style)
         z.writestr('ppt/diagrams/colors%d.xml' % k, saved_colors if dm is saved_data else colors)
@@ -298,12 +405,12 @@ if len(sys.argv) > 2:   # the Word document
                     k, k, base, base + 1, base + 2, base + 3)
 
     doc = ('<w:document %s><w:body><w:p><w:r><w:t>A cycle:</w:t></w:r></w:p>%s<w:p><w:r><w:t>A diagram with a '
-           'drawing:</w:t></w:r></w:p>%s<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" '
+           'drawing:</w:t></w:r></w:p>%s<w:p><w:r><w:t>Pictures:</w:t></w:r></w:p>%s<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" '
            'w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
-           '</w:body></w:document>') % (W, inline(1, 2), inline(2, 12))
+           '</w:body></w:document>') % (W, inline(1, 2), inline(2, 12), inline(3, 22))
     items = [('rId1', 'theme', 'theme/theme1.xml'), ('rId6', 'diagramDrawing', 'diagrams/drawing2.xml')]
 
-    for k, base in ((1, 2), (2, 12)):
+    for k, base in ((1, 2), (2, 12), (3, 22)):
         items += [('rId%d' % base, 'diagramData', 'diagrams/data%d.xml' % k),
                   ('rId%d' % (base + 1), 'diagramLayout', 'diagrams/layout%d.xml' % k),
                   ('rId%d' % (base + 2), 'diagramQuickStyle', 'diagrams/quickStyle%d.xml' % k),
@@ -318,7 +425,10 @@ if len(sys.argv) > 2:   # the Word document
         z.writestr('word/_rels/document.xml.rels', rels(*items))
         z.writestr('word/theme/theme1.xml', theme)
 
-        for k, (lo, dm) in enumerate([DIAGRAMS[4], DIAGRAMS[3]], 1):
+        z.writestr('word/diagrams/_rels/data3.xml.rels', rels(('rId1', 'image', '../media/image1.png')))
+        z.writestr('word/media/image1.png', PICTURE)
+
+        for k, (lo, dm) in enumerate([DIAGRAMS[4], DIAGRAMS[3], DIAGRAMS[9]], 1):
             z.writestr('word/diagrams/data%d.xml' % k, dm)
             z.writestr('word/diagrams/layout%d.xml' % k, lo)
             z.writestr('word/diagrams/quickStyle%d.xml' % k, style)

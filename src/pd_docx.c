@@ -10166,13 +10166,18 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
     }
 
     {   /* SmartArt: the shapes it is drawn with */
-        size_t n2 = 0;
-        char* x2 = pd_docx_smartart(s, n, xml, len, &n2);
+        size_t n2 = 0, nr = 0;
+        char* rels = NULL, *x2 = pd_docx_smartart(s, n, xml, len, &n2, &rels, &nr);
 
         if (x2) {
             free(xml);
             xml = x2;
             len = n2;
+        }
+
+        if (rels) {     /* its pictures' */
+            read_rels(&X, rels, nr);
+            free(rels);
         }
     }
 
