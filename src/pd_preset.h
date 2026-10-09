@@ -2,6 +2,8 @@
 #ifndef PD_PRESET_H
 #define PD_PRESET_H
 
+#include <stddef.h>
+
 #define PD_PRESET_MAXPATH 16
 #define PD_PRESET_MAXPT 4096
 
@@ -23,6 +25,9 @@ int pd_preset_known(const char* name);
 /* the preset at a size with its adjustments ("adj1=5000 adj2=200"; those not given at their defaults); 0 for
    none */
 int pd_preset_flatten(const char* name, double w, double h, const char* adj, pd_preset_flat* out);
+
+/* the name of a preset's IDX-th adjustment (from 1: "adj", "adj1", ...); 0 for none */
+int pd_preset_adj_name(const char* name, int idx, char* buf, size_t cap);
 
 /* where the preset's text goes in its box (Office's text rectangle); 0 for none */
 int pd_preset_text_rect(const char* name, double w, double h, const char* adj, double* l, double* t, double* r,

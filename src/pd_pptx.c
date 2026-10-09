@@ -12,191 +12,8 @@
 #include <string.h>
 
 #include "pd_conv.h"
-
-/* ---- a small DOM over the markup tokenizer ---- */
-
-typedef struct {
-    char name[48];              /* local name */
-    size_t a, b;                /* the element: its '<' to after its end */
-    size_t ia, ib;              /* its inside */
-    const char* attrs;
-    size_t alen;
-    int parent, kid, next;
-} xnode;
-
-typedef struct {
-    char* s;                    /* owned */
-    size_t n;
-    xnode* v;
-    int nv, cap;
-} xdoc;
-
-static void xd_free(xdoc* d) {
-    free(d->s);
-    free(d->v);
-    memset(d, 0, sizeof(*d));
-}
-
-/* parsed from owned text (taken); 0 when it cannot be */
-static int xd_parse(xdoc* d, char* s, size_t n) {
-    pd_markup m;
-    int stack[256], depth = 0, last[256];
-    size_t at;
-
-    memset(d, 0, sizeof(*d));
-    d->s = s;
-    d->n = n;
-
-    if (!s) {
-        return 0;
-    }
-
-    mu_init(&m, s, n, 0);
-
-    for (;;) {
-        at = m.pos;
-
-        if (mu_next(&m) == MT_END) {
-            break;
-        }
-
-        if (m.type == MT_OPEN || m.type == MT_EMPTY) {
-            xnode* x;
-            int k;
-
-            if (d->nv >= d->cap) {
-                int nc = d->cap ? d->cap * 2 : 256;
-                xnode* t = (xnode*)realloc(d->v, sizeof(xnode) * (size_t)nc);
-
-                if (!t) {
-                    return 0;
-                }
-
-                d->v = t;
-                d->cap = nc;
-            }
-
-            k = d->nv++;
-            x = &d->v[k];
-            memset(x, 0, sizeof(*x));
-            snprintf(x->name, sizeof(x->name), "%s", mu_local(m.name));
-            x->a = at;
-            x->ia = x->ib = x->b = m.pos;
-            x->attrs = m.attrs;
-            x->alen = m.alen;
-            x->parent = depth ? stack[depth - 1] : -1;
-            x->kid = x->next = -1;
-
-            if (depth) {    /* the last child of its parent: this one after it */
-                int p = stack[depth - 1];
-
-                if (last[depth - 1] < 0) {
-                    d->v[p].kid = k;
-                } else {
-                    d->v[last[depth - 1]].next = k;
-                }
-
-                last[depth - 1] = k;
-            }
-
-            if (m.type == MT_OPEN && depth < 255) {
-                stack[depth] = k;
-                last[depth] = -1;
-                depth++;
-            }
-        } else if (m.type == MT_CLOSE && depth) {
-            xnode* x = &d->v[stack[--depth]];
-
-            x->ib = at;
-            x->b = m.pos;
-        }
-    }
-
-    return d->nv > 0;
-}
-
-static int xd_kid(const xdoc* d, int n, const char* name) {
-    int k;
-
-    if (n < 0) {
-        return -1;
-    }
-
-    for (k = d->v[n].kid; k >= 0; k = d->v[k].next) {
-        if (!strcmp(d->v[k].name, name)) {
-            return k;
-        }
-    }
-
-    return -1;
-}
-
-/* a descendant by a path of local names ("spPr/xfrm") */
-static int xd_path(const xdoc* d, int n, const char* path) {
-    char part[48];
-    const char* p = path;
-
-    while (n >= 0 && *p) {
-        size_t k = 0;
-
-        while (*p && *p != '/' && k < sizeof(part) - 1) {
-            part[k++] = *p++;
-        }
-
-        part[k] = '\0';
-
-        if (*p == '/') {
-            p++;
-        }
-
-        n = xd_kid(d, n, part);
-    }
-
-    return n;
-}
-
-/* the first element of a name anywhere in the document */
-static int xd_find(const xdoc* d, const char* name) {
-    int k;
-
-    for (k = 0; k < d->nv; k++) {
-        if (!strcmp(d->v[k].name, name)) {
-            return k;
-        }
-    }
-
-    return -1;
-}
-
-static int xd_attr(const xdoc* d, int n, const char* name, char* buf, size_t cap) {
-    pd_markup m;
-
-    buf[0] = '\0';
-
-    if (n < 0) {
-        return 0;
-    }
-
-    memset(&m, 0, sizeof(m));
-    m.attrs = d->v[n].attrs;
-    m.alen = d->v[n].alen;
-    return mu_attr(&m, name, buf, cap);
-}
-
-static long long xd_int(const xdoc* d, int n, const char* name, long long def) {
-    char v[40];
-
-    return xd_attr(d, n, name, v, sizeof(v)) && v[0] ? atoll(v) : def;
-}
-
-/* an element's whole text, or its inside */
-static void xd_raw(pd_buf* o, const xdoc* d, int n) {
-    pb_put(o, d->s + d->v[n].a, d->v[n].b - d->v[n].a);
-}
-
-static void xd_inner(pd_buf* o, const xdoc* d, int n) {
-    pb_put(o, d->s + d->v[n].ia, d->v[n].ib - d->v[n].ia);
-}
+#include "pd_dgm.h"
+#include "pd_xdoc.h"
 
 /* ---- the package ---- */
 
@@ -221,6 +38,7 @@ typedef struct {
     char media_id[256][16];     /* and their ids in the .docx */
     uint32_t theme[12];         /* dk1 lt1 dk2 lt2 accent1-6 hlink folHlink */
     char major[64], minor[64];  /* the theme's fonts: headings, body */
+    double line_w[3];           /* the theme's line widths (EMU) */
     int docpr;
     long long sw, sh;           /* the slide size (EMU) */
     int alias[4];               /* bg1, tx1, bg2, tx2: the theme's colours they are (the master's clrMap) */
@@ -275,10 +93,7 @@ static int part_load(pptx* P, ppart* pt, const char* path) {
     s = (char*)pd_zip_get(P->zip, P->zn, path, &len);
 
     if (!s || !xd_parse(&pt->x, s, len)) {
-        if (!s) {
-            free(s);
-        }
-
+        xd_free(&pt->x);
         return 0;
     }
 
@@ -500,6 +315,9 @@ static void theme_load(pptx* P, const char* path) {
     int k, s, f;
 
     memcpy(P->theme, defaults, sizeof(defaults));
+    P->line_w[0] = 6350;
+    P->line_w[1] = 12700;
+    P->line_w[2] = 19050;
     snprintf(P->major, sizeof(P->major), "Calibri Light");
     snprintf(P->minor, sizeof(P->minor), "Calibri");
 
@@ -515,6 +333,15 @@ static void theme_load(pptx* P, const char* path) {
 
         if (c >= 0) {
             P->theme[k] = (uint32_t)c;
+        }
+    }
+
+    s = xd_find(&t.x, "lnStyleLst");
+
+    for (k = 0, f = s >= 0 ? t.x.v[s].kid : -1; f >= 0 && k < 3; f = t.x.v[f].next) {
+        if (!strcmp(t.x.v[f].name, "ln")) {
+            P->line_w[k] = (double)xd_int(&t.x, f, "w", (long long)P->line_w[k]);
+            k++;
         }
     }
 
@@ -680,6 +507,7 @@ typedef struct {
     int bullet;                 /* while its bullet is put: */
     long bu_colour;             /* the bullet's colour (buClr), -1 the text's */
     double bu_scale;            /* and its size (buSzPct), 0 the text's */
+    long def_sz;                /* the size of runs that give none (hundredths of a point), 0: 18 points */
 } tctx;
 
 /* the levels' properties for level L: the paragraph's own, the text body's list styles, the placeholders', the
@@ -886,6 +714,8 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
 
     if (rpr_attr(T, d, rpr, "sz", v, sizeof(v))) {
         sz = atol(v);
+    } else if (T->def_sz > 0) {
+        sz = T->def_sz;
     }
 
     sz = (long)(sz * T->scale * (T->bullet && T->bu_scale > 0 ? T->bu_scale : 1) + 0.5);
@@ -983,7 +813,8 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
     }
 
     /* a line of its text, in twips: PowerPoint's 1.2 times its size */
-    line = (rpr_attr(T, d, first_rpr, "sz", v, sizeof(v)) ? atof(v) : 1800) * T->scale * 1.2 / 5;
+    line = (rpr_attr(T, d, first_rpr, "sz", v, sizeof(v)) ? atof(v) : T->def_sz > 0 ? T->def_sz : 1800) * T->scale *
+           1.2 / 5;
     pb_puts(o, "<w:p><w:pPr>");
     /* line spacing and the space around (a percentage: of a line); autofit's line spacing reduction takes from
        the space around too */
@@ -1040,7 +871,7 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
 
             xd_attr(c.d, c.n, "char", v, sizeof(v));
             xd_attr(f.d, f.n, "typeface", face, sizeof(face));
-            snprintf(bu, sizeof(bu), "%s", symbol_bullet(v, face));
+            snprintf(bu, sizeof(bu), "%.12s", symbol_bullet(v, face));
         }
 
         if (bu[0]) {
@@ -1107,7 +938,8 @@ typedef struct {
     const xdoc* pres;           /* presentation.xml: its default text style */
     int pres_style;
     int id_base;                /* the part's shape ids made apart from the other parts' */
-    const xdoc* dm;             /* a SmartArt's data model, while its drawing is put */
+    const xdoc* dm;             /* a SmartArt's data model, while its drawing is put, */
+    const xdoc* dmc;            /* and its colours */
     pd_buf* o;
 } conv;
 
@@ -1131,6 +963,62 @@ static int dm_text(const xdoc* m, const char* model) {
     }
 
     return -1;
+}
+
+/* the text colour a SmartArt drawing's shape takes from its colours: its presentation point's style label's
+   txFillClrLst, -1 none */
+static long dm_text_colour(const pptx* P, const xdoc* m, const xdoc* cs, const xdoc* d, int sp) {
+    char id[64], v[64], lbl[64] = "";
+    int k, l;
+
+    if (!xd_attr(d, sp, "modelId", id, sizeof(id))) {
+        return -1;
+    }
+
+    for (k = 0; k < m->nv && !lbl[0]; k++) {
+        if (!strcmp(m->v[k].name, "pt") && xd_attr(m, k, "modelId", v, sizeof(v)) && !strcmp(v, id)) {
+            xd_attr(m, xd_kid(m, k, "prSet"), "presStyleLbl", lbl, sizeof(lbl));
+        }
+    }
+
+    for (k = 0; lbl[0] && k < cs->nv; k++) {
+        if (!strcmp(cs->v[k].name, "styleLbl") && xd_attr(cs, k, "name", v, sizeof(v)) && !strcmp(v, lbl)) {
+            l = xd_kid(cs, k, "txFillClrLst");
+            return l >= 0 && cs->v[l].kid >= 0 ? colour_of(P, cs, cs->v[l].kid) : -1;
+        }
+    }
+
+    return -1;
+}
+
+/* whether two text bodies have the same text */
+static int same_text(const xdoc* a, int ta, const xdoc* b, int tb) {
+    pd_buf x, y;
+    int k, same;
+
+    memset(&x, 0, sizeof(x));
+    memset(&y, 0, sizeof(y));
+
+    for (k = ta; k < a->nv && a->v[k].a < a->v[ta].b; k++) {
+        if (!strcmp(a->v[k].name, "t") && k != ta) {
+            xd_inner(&x, a, k);
+        } else if (!strcmp(a->v[k].name, "p")) {
+            pb_putc(&x, '\n');
+        }
+    }
+
+    for (k = tb; k < b->nv && b->v[k].a < b->v[tb].b; k++) {
+        if (!strcmp(b->v[k].name, "t") && k != tb) {
+            xd_inner(&y, b, k);
+        } else if (!strcmp(b->v[k].name, "p")) {
+            pb_putc(&y, '\n');
+        }
+    }
+
+    same = x.n == y.n && (!x.n || !memcmp(x.p, y.p, x.n));
+    pb_free(&x);
+    pb_free(&y);
+    return same;
 }
 
 /* an element under another name: its attributes and inside kept, its colours the slide's */
@@ -1236,11 +1124,29 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
         ns[nn++] = C->pres_style;
     }
 
+    if (C->dm && C->dmc) {  /* its text the colour its colours give its style label (PowerPoint's, over fontRef) */
+        long c = dm_text_colour(C->P, C->dm, C->dmc, d, sp);
+
+        if (c >= 0) {
+            T.font_colour = c;
+        }
+    }
+
     if (C->dm) {
         char id[64];
         int t;
 
-        if (xd_attr(d, sp, "modelId", id, sizeof(id)) && (t = dm_text(C->dm, id)) >= 0) {
+        if (xd_attr(d, sp, "modelId", id, sizeof(id)) && (t = dm_text(C->dm, id)) >= 0 &&
+                !same_text(d, tx, C->dm, t)) {
+            int k;
+
+            for (k = tx; k < d->nv && d->v[k].a < d->v[tx].b; k++) {   /* its runs' size, the drawing's */
+                if (!strcmp(d->v[k].name, "rPr") && xd_int(d, k, "sz", 0) > 0) {
+                    T.def_sz = (long)xd_int(d, k, "sz", 0);
+                    break;
+                }
+            }
+
             d = C->dm;      /* the text it has now */
             tx = t;
         }
@@ -1618,12 +1524,78 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
     pb_free(&tb);
 }
 
-/* SmartArt: the drawing PowerPoint keeps of it (its shapes, as it last laid them out), in a group at the frame */
+/* SmartArt laid out from its definition, when it has no drawing saved of it (or PD_SMARTART=layout asks): the
+   drawing made, 0 when it cannot be */
+static int smartart_layout(conv* C, ppart* pt, int ri, const xdoc* dm, long long cx, long long cy, ppart* out) {
+    const xdoc* d = &pt->x;
+    static const char* names[3] = { "r:lo", "r:qs", "r:cs" };
+    ppart parts[3];
+    int have[3], k, ok = 0;
+    pd_dgm_in in;
+    pd_buf b;
+
+    memset(&b, 0, sizeof(b));
+
+    for (k = 0; k < 3; k++) {
+        char id[64];
+        const char* path;
+
+        have[k] = xd_attr(d, ri, names[k], id, sizeof(id)) && (path = rel_of(pt, id)) != NULL &&
+                  part_load(C->P, &parts[k], path);
+    }
+
+    if (have[0]) {
+        memset(&in, 0, sizeof(in));
+        in.data = dm;
+        in.layout = &parts[0].x;
+        in.style = have[1] ? &parts[1].x : NULL;
+        in.colors = have[2] ? &parts[2].x : NULL;
+        in.cx = (double)cx;
+        in.cy = (double)cy;
+        memcpy(in.line_w, C->P->line_w, sizeof(in.line_w));
+        in.font = C->P->minor;
+
+        if (pd_dgm_layout(&in, &b) && !b.err) {
+            memset(out, 0, sizeof(*out));
+            snprintf(out->path, sizeof(out->path), "%s", pt->path);
+
+            if (getenv("PD_SMARTART_DUMP")) {   /* for a look at what it was laid out as */
+                FILE* f = fopen(getenv("PD_SMARTART_DUMP"), "ab");
+
+                if (f) {
+                    fwrite(b.p, 1, b.n, f);
+                    fputc('\n', f);
+                    fclose(f);
+                }
+            }
+
+            ok = xd_parse(&out->x, b.p, b.n);   /* (the text taken) */
+            b.p = NULL;
+
+            if (!ok) {
+                xd_free(&out->x);
+            }
+        }
+    }
+
+    pb_free(&b);
+
+    for (k = 0; k < 3; k++) {
+        if (have[k]) {
+            part_free(&parts[k]);
+        }
+    }
+
+    return ok;
+}
+
+/* SmartArt: the drawing PowerPoint keeps of it (its shapes, as it last laid them out), else it laid out here; in
+   a group at the frame */
 static void put_smartart(conv* C, ppart* pt, int gf) {
     const xdoc* d = &pt->x;
-    int ri = xd_path(d, gf, "graphic/graphicData/relIds"), xf = xd_kid(d, gf, "xfrm"), off, ext, k;   /* (its own) */
+    int ri = xd_path(d, gf, "graphic/graphicData/relIds"), xf = xd_kid(d, gf, "xfrm"), off, ext, k, saved = 0, ok = 0;
     char dm[64];
-    const char* dmpath, *drawpath = NULL;
+    const char* dmpath, *drawpath = NULL, *mode = getenv("PD_SMARTART");
     ppart dmp, dr;
 
     if (ri < 0 || xf < 0 || !xd_attr(d, ri, "r:dm", dm, sizeof(dm)) || !(dmpath = rel_of(pt, dm)) ||
@@ -1631,6 +1603,8 @@ static void put_smartart(conv* C, ppart* pt, int gf) {
         return;
     }
 
+    off = xd_kid(d, xf, "off");
+    ext = xd_kid(d, xf, "ext");
     k = xd_find(&dmp.x, "dataModelExt");
 
     if (k >= 0) {
@@ -1641,20 +1615,43 @@ static void put_smartart(conv* C, ppart* pt, int gf) {
         }
     }
 
-    if (drawpath && part_load(C->P, &dr, drawpath)) {
-        int tree = xd_find(&dr.x, "spTree");
+    if (off >= 0 && ext >= 0) {     /* the saved drawing, else laid out here (or, asked, the other way round) */
+        long long cx = xd_int(d, ext, "cx", 0), cy = xd_int(d, ext, "cy", 0);
+        int forced = mode && !strcmp(mode, "layout");
 
-        off = xd_kid(d, xf, "off");
-        ext = xd_kid(d, xf, "ext");
+        ok = forced && smartart_layout(C, pt, ri, &dmp.x, cx, cy, &dr);
 
-        if (tree >= 0 && off >= 0 && ext >= 0) {
+        if (!ok && drawpath) {
+            ok = saved = part_load(C->P, &dr, drawpath);
+        }
+
+        if (!ok && !forced) {
+            ok = smartart_layout(C, pt, ri, &dmp.x, cx, cy, &dr);
+        }
+    }
+
+    if (ok) {
+        int tree = xd_find(&dr.x, "spTree"), have_cs;
+        ppart cs;
+        char cid[64];
+        const char* cpath;
+
+        if (tree >= 0) {
             pb_printf(C->o, "<wpg:grpSp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext "
                       "cx=\"%lld\" cy=\"%lld\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
                       "</wpg:grpSpPr>", xd_int(d, off, "x", 0), xd_int(d, off, "y", 0), xd_int(d, ext, "cx", 0),
                       xd_int(d, ext, "cy", 0), xd_int(d, ext, "cx", 0), xd_int(d, ext, "cy", 0));
-            C->dm = &dmp.x;
+            have_cs = saved && xd_attr(d, ri, "r:cs", cid, sizeof(cid)) && (cpath = rel_of(pt, cid)) != NULL &&
+                      part_load(C->P, &cs, cpath);
+            C->dm = saved ? &dmp.x : NULL;  /* the text the saved drawing has may be older than the model's */
+            C->dmc = have_cs ? &cs.x : NULL;
             put_tree(C, &dr, tree, 0);
-            C->dm = NULL;
+            C->dm = C->dmc = NULL;
+
+            if (have_cs) {
+                part_free(&cs);
+            }
+
             pb_puts(C->o, "</wpg:grpSp>");
         }
 

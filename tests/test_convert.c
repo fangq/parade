@@ -3538,6 +3538,87 @@ static void test_pptx(void) {
     pd_doc_free(d);
 }
 
+/* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
+   makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
+   box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
+static void test_pptx_smartart(void) {
+    FILE* f = fopen("tests/data/smartart.pptx", "rb");
+    unsigned char* data = NULL;
+    long sz = 0;
+    pd_doc* d = NULL;
+    int k;
+
+    if (f && fseek(f, 0, SEEK_END) == 0 && (sz = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+            (data = (unsigned char*)malloc((size_t)sz)) != NULL && fread(data, 1, (size_t)sz, f) != (size_t)sz) {
+        sz = 0;
+    }
+
+    if (f) {
+        fclose(f);
+    }
+
+    CHECK(data && sz > 0 && pd_doc_import(data, (size_t)sz, PD_CONV_PPTX, &d) == PD_OK && d);
+    free(data);
+
+    if (!d) {
+        return;
+    }
+
+    for (k = 0; k < 3; k++) {
+        pd_block_id fl = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), k), 0);
+        pd_inline o;
+        char* js = NULL;
+
+        if (pd_doc_inline_at(d, at(pd_doc_child(d, fl, 0), 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE) {
+            js = drawing_json(d, o.resource);
+        }
+
+        CHECK(js != NULL);
+
+        if (!js) {
+            continue;
+        }
+
+        if (k == 0) {   /* five blocks, two to a row (the biggest they can be in the frame), the fifth centred */
+            CHECK(count_of(js, "\"fill\":4282675908") == 5);
+            CHECK(strstr(js, "<a:off x=\\\"947738\\\" y=\\\"0\\\"/><a:ext cx=\\\"2000250\\\" cy=\\\"1200150\\\"/>") != NULL);
+            CHECK(strstr(js, "<a:off x=\\\"2047875\\\" y=\\\"2800350\\\"/>") != NULL);
+        } else if (k == 1) {    /* three steps across the frame, two arrows between them, centred down it */
+            CHECK(count_of(js, "prst=\\\"roundRect\\\"") == 3 && count_of(js, "prst=\\\"rightArrow\\\"") == 2);
+            CHECK(strstr(js, "<a:off x=\\\"0\\\" y=\\\"1518987\\\"/><a:ext cx=\\\"1604211\\\" cy=\\\"962526\\\"/>") != NULL);
+        } else {    /* six boxes, five lines; the root over its three children, Middle over its two */
+            CHECK(count_of(js, "\"fill\":4282675908") == 6 && count_of(js, "<a:custGeom>") == 5);
+            CHECK(strstr(js, "<a:off x=\\\"2151529\\\" y=\\\"207309\\\"/>") != NULL);
+            CHECK(strstr(js, "<a:off x=\\\"2151529\\\" y=\\\"1552015\\\"/>") != NULL);
+            CHECK(strstr(js, "<a:off x=\\\"1075765\\\" y=\\\"2896721\\\"/>") != NULL);
+        }
+
+        free(js);
+    }
+
+    {   /* slide 4, drawn as saved: the model's text, at the drawing's size, in the colour the colours give text */
+        int32_t ns = pd_doc_story_count(d), i, fresh = 0, stale = 0;
+
+        for (i = 0; i < ns; i++) {
+            pd_block_id p = pd_doc_child(d, pd_doc_story_at(d, i), 0);
+            pd_run r;
+            int32_t nr = 0;
+            pd_char_props cp;
+
+            stale |= text_is(d, p, "Stale");
+
+            if (text_is(d, p, "Fresh") && pd_doc_para_runs(d, p, &r, 1, &nr) == PD_OK && nr >= 1 &&
+                    pd_doc_format_resolve(d, p, r.format, &cp) == PD_OK) {
+                fresh = cp.size == PD_PT(10) && (cp.color & 0xFFFFFFu) == 0xFFC000u;
+            }
+        }
+
+        CHECK(fresh && !stale);
+    }
+
+    pd_doc_free(d);
+}
+
 /* A Word drawing canvas with pictures, a group inside it (whose own
    coordinates scale its picture), a filled box and a text box: one picture
    of the whole, every part where the canvas has it. And a floating text box
@@ -4822,6 +4903,7 @@ int main(void) {
     test_docx_float_offset_y();
     test_docx_float_from_page();
     test_pptx();
+    test_pptx_smartart();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();
     printf("EMF pictures\n");

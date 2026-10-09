@@ -378,6 +378,11 @@ pd_para_break(p, &prm, NULL);
     src/pd_pptx.c        PowerPoint read: each slide a page that is a canvas (placeholders from the layout
                          and master, theme colours and fonts, pictures, tables, SmartArt drawings), made a
                          .docx in memory and read as one
+    src/pd_dgm.c         SmartArt laid out from its definition when it has no drawing saved of it (data
+                         model, layout nodes, constraints and rules; composite, lin, snake, hierRoot,
+                         hierChild); PD_SMARTART=layout lays out even those that have one, and
+                         tools/dgm_compare.py sets that against PowerPoint's drawing
+    src/pd_xdoc.c        a small DOM over the markup tokenizer, for the Office readers
     src/pd_preset.c      Office's preset shapes worked out (guides, arcs, handles); pd_presets.inc is
                          generated from ECMA-376 presetShapeDefinitions.xml by tools/presets.py
     tests/               unit tests, Unicode conformance

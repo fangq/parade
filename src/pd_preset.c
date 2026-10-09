@@ -179,6 +179,27 @@ static int pv_given(const char* adj, const char* name, double* v) {
     return 0;
 }
 
+/* the name of a preset's IDX-th adjustment (from 1: "adj", "adj1", ...); 0 for none */
+int pd_preset_adj_name(const char* name, int idx, char* buf, size_t cap) {
+    const char* d = name ? pv_def(name) : NULL;
+    char s[256], nm[40];
+
+    while (d && *d) {
+        d = pv_next(d, s, sizeof(s));
+
+        if (s[0] != 'a' || s[1] != ' ') {
+            break;
+        }
+
+        if (sscanf(s + 2, "%39s", nm) == 1 && --idx == 0) {
+            snprintf(buf, cap, "%s", nm);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* the guides for a size and adjustments (and a handle's adjustment overridden: OVN = OVV) */
 static const char* pv_env_make(pv_env* E, const char* def, double w, double h, const char* adj, const char* ovn,
                                double ovv) {
