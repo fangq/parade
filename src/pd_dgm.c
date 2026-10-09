@@ -2,8 +2,8 @@
  * SmartArt laid out from its definition, as PowerPoint lays one out before it saves the drawing of it: the
  * data model's points (its nodes, and the transitions between them) made the layout definition's tree of
  * layout nodes (its forEach and choose worked through), their constraints worked out from the frame down, the
- * algorithms placing each node's children (composite, lin, snake, hierRoot and hierChild; tx, sp and conn
- * the leaves), the text fitted to its shapes by the rules (fonts made smaller, shapes taller), and the shapes
+ * algorithms placing each node's children (composite, lin, snake, hierRoot, hierChild, cycle and pyra; tx,
+ * sp and conn the leaves), the text fitted to its shapes by the rules (fonts made smaller, shapes taller), and the shapes
  * written with the quick style's and the colour definition's fills and lines. ECMA-376 Part 1, 21.4.
  *
  * Its text is measured with a sans face's widths, scaled for the face named: the fonts are the host's, and
@@ -23,6 +23,10 @@
 #define MAXPN 4096
 #define MAXSEQ 4096
 #define BIT(c) (1ULL << (c))
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* ---- the data model ---- */
 
@@ -47,18 +51,19 @@ typedef struct {
 
 enum {
     C_W, C_H, C_L, C_T, C_R, C_B, C_CX, C_CY, C_FONT, C_SFONT, C_SP, C_SIBSP, C_SECSIBSP, C_TM, C_BM, C_LM, C_RM,
-    C_BEGPAD, C_ENDPAD, C_CONNDIST, C_ALIGNOFF, C_BENDDIST, C_WARH, C_HARH, C_STEM, C_DIAM, C_BEGM, C_ENDM, C_USER,
+    C_BEGPAD, C_ENDPAD, C_CONNDIST, C_ALIGNOFF, C_BENDDIST, C_WARH, C_HARH, C_STEM, C_DIAM, C_BEGM, C_ENDM, C_PYRA,
+    C_USER,
     C_N = C_USER + 26          /* userA to userZ */
 };
 
 static const char* const ct_name[C_USER] = {
     "w", "h", "l", "t", "r", "b", "ctrX", "ctrY", "primFontSz", "secFontSz", "sp", "sibSp", "secSibSp", "tMarg",
     "bMarg", "lMarg", "rMarg", "begPad", "endPad", "connDist", "alignOff", "bendDist", "wArH", "hArH", "stemThick",
-    "diam", "begMarg", "endMarg"
+    "diam", "begMarg", "endMarg", "pyraAcctRatio"
 };
 
 /* what each is in: L lengths (mm, kept in EMU), F font sizes (points), M margins (points, kept in EMU), R ratios */
-static const char ct_unit[C_N + 1] = "LLLLLLLLFFLLLMMMMLLLRLRRLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL";
+static const char ct_unit[C_N + 1] = "LLLLLLLLFFLLLMMMMLLLRLLLLLLLRLLLLLLLLLLLLLLLLLLLLLLLLLL";
 
 /* ---- the layout nodes made ---- */
 
@@ -94,6 +99,10 @@ typedef struct {
     int tried;                  /* the time round its size was last tried */
     unsigned long long keep;    /* its w, h given (BIT(C_W), BIT(C_H)): its own constraints not to change them */
     int custt;                  /* its text's sizes the user's */
+    double rot;                 /* how far it is turned (degrees), along a cycle's path */
+    double adjv;                /* a pyramid's level: its trapezoid's adj, -1 the layout's */
+    int inv;                    /* a pyramid's level upside down (an inverted pyramid's) */
+    double ccx, ccy, crad;      /* a cycle: its middle (from its corner) and its circle's radius, 0 none */
 } pnode;
 
 typedef struct {
@@ -963,12 +972,31 @@ static int targets(const dgm* D, int n, int deep, const char* fname, const char*
     return m;
 }
 
+/* whether all a node's text is of points under its own (a node's children's): its size secFontSz */
+static int sec_text(const dgm* D, int n) {
+    const pnode* N = &D->n[n];
+    int i;
+
+    for (i = 0; i < N->nof; i++) {
+        if (D->p[D->ofs[N->of + i]].depth <= D->p[N->pt].depth) {
+            return 0;
+        }
+    }
+
+    return N->nof > 0;
+}
+
 /* a node's value of a constraint as the number constraints give it (mm, points, a ratio) */
 static int value_of(const dgm* D, int r, int c, double* out) {
     const pnode* R = &D->n[r];
 
     if (has(R, c)) {
         *out = R->v[c] / unit_of(c);
+        return 1;
+    }
+
+    if (c == C_SFONT && has(R, C_FONT) && sec_text(D, r)) {    /* (kept as its text's size) */
+        *out = R->v[C_FONT];
         return 1;
     }
 
@@ -980,7 +1008,7 @@ static int constr_apply(dgm* D, int n, int k) {
     const xdoc* L = D->lo;
     char type[32], fr[16], fname[64], ptt[32], rtype[32], rfor[16], rname[64], rpt[32], op[16], sv[40];
     double fact = atf(L, k, "fact", 1), num = NAN;
-    int c, rc = -1, r = -1, i, nt, tg[MAXPN > 512 ? 512 : MAXPN];
+    int c, c0, rc = -1, r = -1, i, nt, tg[MAXPN > 512 ? 512 : MAXPN];
     int dep = 0;
 
     at(L, k, "type", type, sizeof(type));
@@ -1035,8 +1063,12 @@ static int constr_apply(dgm* D, int n, int k) {
         num = strtod(sv, NULL);
     }
 
+    c0 = c;
+
     for (i = 0; i < nt; i++) {
         pnode* T = &D->n[tg[i]];
+
+        c = c0 == C_SFONT && sec_text(D, tg[i]) ? C_FONT : c0;     /* secondary text: its size its text's */
 
         if (!strcmp(op, "gte") || !strcmp(op, "lte")) {
             if (isfinite(num)) {
@@ -1119,9 +1151,22 @@ static int constr_apply(dgm* D, int n, int k) {
     return 0;
 }
 
+static int is_alg(const dgm* D, int n, const char* type);
+
 static void constrain(dgm* D, int n) {
     pnode* N = &D->n[n];
     int pass, i, k;
+
+    if (N->parent >= 0 && (is_alg(D, n, "cycle") || is_alg(D, n, "pyra"))) {   /* not given a size: its parent's */
+        const pnode* P = &D->n[N->parent];
+
+        for (i = C_W; i <= C_H; i++) {
+            if (!has(N, i) && has(P, i)) {
+                N->v[i] = P->v[i];
+                N->set |= BIT(i);
+            }
+        }
+    }
 
     for (pass = 0; pass < 4; pass++) {
         int pending = 0;
@@ -1171,6 +1216,9 @@ static void scale_tree(dgm* D, int n, double s) {
     N->w *= s;
     N->h *= s;
     N->scl *= s;
+    N->ccx *= s;
+    N->ccy *= s;
+    N->crad *= s;
 
     for (k = N->kid; k >= 0; k = D->n[k].next) {
         D->n[k].x *= s;
@@ -1225,7 +1273,7 @@ static int rules_of(const dgm* D, int n, int c, double* val, double* fact, int c
                 char type[32], fr[16], fname[64], ptt[32];
 
                 if (strcmp(D->lo->v[k].name, "rule") || !at(D->lo, k, "type", type, sizeof(type)) ||
-                        ct_index(type) != c) {
+                        (ct_index(type) != c && !(c == C_FONT && ct_index(type) == C_SFONT && sec_text(D, n)))) {
                     continue;
                 }
 
@@ -1901,6 +1949,315 @@ static void size_hroot(dgm* D, int n) {
     N->h = maxy - miny;
 }
 
+static void shape_type(const dgm* D, int n, char* type, size_t cap);
+
+/* how far from a node's middle the edge of its shape is, going along (ux, uy): an ellipse's, else its box's */
+static double shape_edge(const dgm* D, int n, double ux, double uy) {
+    const pnode* N = &D->n[n];
+    char type[48];
+    double a = N->w / 2, b = N->h / 2;
+
+    shape_type(D, n, type, sizeof(type));
+
+    if (a <= 0 || b <= 0) {
+        return 0;
+    }
+
+    if (!strcmp(type, "ellipse") || !strcmp(type, "donut") || !strcmp(type, "flowChartConnector")) {
+        return 1 / sqrt((ux / a) * (ux / a) + (uy / b) * (uy / b));
+    }
+
+    return fmin(fabs(ux) > 1e-9 ? a / fabs(ux) : HUGE_VAL, fabs(uy) > 1e-9 ? b / fabs(uy) : HUGE_VAL);
+}
+
+/* a node's width and height when it has none of its own: its parent's (a cycle's, a pyramid's room) */
+static void room_of(const dgm* D, int n, double* W, double* H) {
+    const pnode* N = &D->n[n], *P = N->parent >= 0 ? &D->n[N->parent] : NULL;
+
+    *W = has(N, C_W) ? N->v[C_W] : P && has(P, C_W) ? P->v[C_W] : -1;
+    *H = has(N, C_H) ? N->v[C_H] : P && has(P, C_H) ? P->v[C_H] : -1;
+}
+
+/* cycle: the children round a circle (or an arc of one, stAng to stAng + spanAng, degrees clockwise from the top),
+   the first in its middle when it is to be (ctrShpMap="fNode"); the circle as big as it is asked to be (diam), or
+   bigger: the children sibSp apart, those round it sp from the one in the middle, going straight out; the whole
+   made smaller to fit it */
+static void size_cycle(dgm* D, int n) {
+    pnode* N = &D->n[n];
+    char v[16];
+    int* ring, nr = 0, nk = 0, k, i, ctr = -1, full, along;
+    double W, H, st, span, step, R = 0, s, ox, oy, *ang;
+    double sib = has(N, C_SIBSP) ? N->v[C_SIBSP] : 0, sp = has(N, C_SP) ? N->v[C_SP] : 0;
+    double minx = HUGE_VAL, miny = HUGE_VAL, maxx = -HUGE_VAL, maxy = -HUGE_VAL, bw, bh;
+
+    for (k = N->kid; k >= 0; k = D->n[k].next) {
+        nk++;
+    }
+
+    ring = (int*)malloc(sizeof(int) * (size_t)(nk + 1));
+    ang = (double*)malloc(sizeof(double) * (size_t)(nk + 1));
+
+    if (!ring || !ang) {
+        free(ring);
+        free(ang);
+        D->fail = 1;
+        return;
+    }
+
+    room_of(D, n, &W, &H);
+    param(D, n, "stAng", v, sizeof(v), "0");
+    st = atof(v);
+    param(D, n, "spanAng", v, sizeof(v), "360");
+    span = atof(v);
+    param(D, n, "rotPath", v, sizeof(v), "none");
+    along = !strcmp(v, "alongPath");
+    param(D, n, "ctrShpMap", v, sizeof(v), "none");
+
+    for (k = N->kid; k >= 0; k = D->n[k].next) {
+        size(D, k);
+
+        if (is_alg(D, k, "conn")) {
+            continue;   /* connectors go where the shapes they join are */
+        }
+
+        if (!strcmp(v, "fNode") && ctr < 0) {
+            ctr = k;
+        } else {
+            ring[nr++] = k;
+        }
+    }
+
+    full = fabs(span) >= 359.999;
+    step = nr <= 1 ? 0 : full ? span / nr : span / (nr - 1);
+
+    for (i = 0; i < nr; i++) {
+        ang[i] = (st + step * i) * M_PI / 180;
+    }
+
+    if (has(N, C_DIAM)) {
+        R = fabs(N->v[C_DIAM]) / 2;
+    }
+
+    for (i = 0; i < nr; i++) {
+        double ux = sin(ang[i]), uy = -cos(ang[i]);
+
+        if (ctr >= 0) {
+            R = fmax(R, shape_edge(D, ctr, ux, uy) + sp + shape_edge(D, ring[i], -ux, -uy));
+        }
+
+        if (i + 1 < nr || (full && nr > 2)) {   /* from the next round: along the line between their middles */
+            int j = (i + 1) % nr;
+            double ax = sin(ang[j]) - ux, ay = -cos(ang[j]) + cos(ang[i]), chord = sqrt(ax * ax + ay * ay);
+
+            if (chord > 1e-9) {
+                ax /= chord;
+                ay /= chord;
+                R = fmax(R, (sib + shape_edge(D, ring[i], ax, ay) + shape_edge(D, ring[j], -ax, -ay)) / chord);
+            }
+        }
+    }
+
+    if (ctr >= 0) {
+        pnode* C = &D->n[ctr];
+
+        C->x = -C->w / 2;
+        C->y = -C->h / 2;
+        minx = fmin(minx, C->x);
+        miny = fmin(miny, C->y);
+        maxx = fmax(maxx, C->x + C->w);
+        maxy = fmax(maxy, C->y + C->h);
+    }
+
+    for (i = 0; i < nr; i++) {
+        pnode* K = &D->n[ring[i]];
+        double ux = sin(ang[i]), uy = -cos(ang[i]), r = R;
+
+        if (K->pres >= 0) {     /* the user's scaling of it: bigger (or smaller) where it was, its inside edge kept */
+            double sx = atf(D->dm, D->p[K->pres].pr, "custScaleX", 100000) / 100000;
+            double sy = atf(D->dm, D->p[K->pres].pr, "custScaleY", 100000) / 100000;
+
+            if (sx > 0 && sy > 0 && (fabs(sx - 1) > 1e-6 || fabs(sy - 1) > 1e-6)) {
+                double e0 = shape_edge(D, ring[i], -ux, -uy);
+
+                K->csx = sx;
+                K->csy = sy;
+                resize(D, ring[i], K->w * sx, K->h * sy);
+                r += shape_edge(D, ring[i], -ux, -uy) - e0;
+            }
+        }
+
+        K->x = r * ux - K->w / 2;
+        K->y = r * uy - K->h / 2;
+
+        if (along) {
+            K->rot = st + step * i;
+        }
+
+        minx = fmin(minx, K->x);
+        miny = fmin(miny, K->y);
+        maxx = fmax(maxx, K->x + K->w);
+        maxy = fmax(maxy, K->y + K->h);
+    }
+
+    if (minx > maxx) {
+        minx = miny = maxx = maxy = 0;
+    }
+
+    bw = maxx - minx;
+    bh = maxy - miny;
+    s = W > 0 && H > 0 && bw > 0 && bh > 0 ? fmin(1, fmin(W / bw, H / bh)) : 1;
+    ox = W > 0 ? (W - bw * s) / 2 : 0;
+    oy = H > 0 ? (H - bh * s) / 2 : 0;
+
+    for (k = N->kid; k >= 0; k = D->n[k].next) {
+        pnode* K = &D->n[k];
+
+        if (!is_alg(D, k, "conn")) {
+            K->x = (K->x - minx) * s + ox;
+            K->y = (K->y - miny) * s + oy;
+        }
+
+        if (s < 1) {
+            scale_tree(D, k, s);
+        }
+    }
+
+    N->ccx = ox + bw * s / 2;   /* (PowerPoint's arcs round it: about the middle of what is round it) */
+    N->ccy = oy + bh * s / 2;
+    N->crad = fmax(R * s, 1);
+    N->w = W > 0 ? W : bw;
+    N->h = H > 0 ? H : bh;
+    N->bw = bw * s;
+    N->bh = bh * s;
+    free(ring);
+    free(ang);
+}
+
+/* the first of a node's descendants with a name, -1 none */
+static int named_des(const dgm* D, int n, const char* name) {
+    int k, f;
+
+    for (k = D->n[n].kid; k >= 0; k = D->n[k].next) {
+        if (!strcmp(D->n[k].name, name)) {
+            return k;
+        }
+
+        if ((f = named_des(D, k, name)) >= 0) {
+            return f;
+        }
+    }
+
+    return -1;
+}
+
+/* pyra: the children one under another (linDir), as the levels of a pyramid -- trapezoids, the top one a
+   triangle; upside down when their shape is turned round -- and their accents (pyraAcctBkgdNode, pyraAcctTxNode)
+   beside it, a part of the width (pyraAcctRatio) before or after it */
+static void size_pyra(dgm* D, int n) {
+    pnode* N = &D->n[n];
+    char dir[16], pos[16], mar[16], lvn[64], bgn[64], txn[64], rot[32];
+    int* kids, nk = 0, k, i, inv = 0, accent = 0;
+    double W, H, Wp, B, hl, x0, cxp, ratio;
+
+    for (k = N->kid; k >= 0; k = D->n[k].next) {
+        nk++;
+    }
+
+    kids = (int*)malloc(sizeof(int) * (size_t)(nk + 1));
+
+    if (!kids) {
+        D->fail = 1;
+        return;
+    }
+
+    room_of(D, n, &W, &H);
+    param(D, n, "linDir", dir, sizeof(dir), "fromT");
+    param(D, n, "pyraAcctPos", pos, sizeof(pos), "aft");
+    param(D, n, "pyraAcctTxMar", mar, sizeof(mar), "step");
+    param(D, n, "pyraLvlNode", lvn, sizeof(lvn), "");
+    param(D, n, "pyraAcctBkgdNode", bgn, sizeof(bgn), "");
+    param(D, n, "pyraAcctTxNode", txn, sizeof(txn), "");
+    nk = 0;
+
+    for (k = N->kid; k >= 0; k = D->n[k].next) {
+        size(D, k);
+
+        if (!is_alg(D, k, "conn")) {
+            int lv = lvn[0] ? named_des(D, k, lvn) : -1;
+
+            kids[nk++] = k;
+            accent |= (bgn[0] && named_des(D, k, bgn) >= 0) || (txn[0] && named_des(D, k, txn) >= 0);
+
+            if (nk == 1) {  /* its levels turned round: an inverted pyramid */
+                lv = lv >= 0 ? lv : k;
+                inv = D->n[lv].shape >= 0 && at(D->lo, D->n[lv].shape, "rot", rot, sizeof(rot)) &&
+                      fabs(fabs(strtod(rot, NULL)) - 180) < 1;
+            }
+        }
+    }
+
+    if (W <= 0 || H <= 0 || nk == 0) {
+        N->w = fmax(W, 0);
+        N->h = fmax(H, 0);
+        free(kids);
+        return;
+    }
+
+    ratio = has(N, C_PYRA) ? N->v[C_PYRA] : 0.33;
+    Wp = accent ? W * (1 - fmin(fmax(ratio, 0), 0.9)) : W;
+    B = fmin(Wp, H * 2 / sqrt(3));     /* no wider than an equilateral triangle as tall */
+    hl = H / nk;
+    x0 = accent && !strcmp(pos, "bef") ? W - Wp : 0;
+    cxp = x0 + Wp / 2;
+
+    for (i = 0; i < nk; i++) {
+        int r = !strcmp(dir, "fromB") ? nk - 1 - i : i, c = kids[i];
+        int lv = lvn[0] ? named_des(D, c, lvn) : -1, bg = bgn[0] ? named_des(D, c, bgn) : -1;
+        int tx = txn[0] ? named_des(D, c, txn) : -1;
+        double lw = B * (inv ? nk - r : r + 1) / nk, in = B / (2.0 * nk), mid = lw - in;
+        pnode* L;
+
+        if (lv < 0 && bg < 0 && tx < 0) {   /* the child the level */
+            lv = c;
+        } else {
+            pnode* C = &D->n[c];
+
+            C->x = 0;
+            C->y = r * hl;
+            C->w = W;
+            C->h = hl;
+        }
+
+        resize(D, lv, lw, hl);
+        L = &D->n[lv];
+        L->x = cxp - lw / 2;
+        L->y = lv == c ? r * hl : 0;
+        L->adjv = in / fmax(fmin(lw, hl), 1) * 100000;
+        L->inv = inv;
+
+        if (bg >= 0) {  /* the accent's background: from the middle of the level to the edge */
+            double bx = !strcmp(pos, "bef") ? 0 : cxp, bwid = !strcmp(pos, "bef") ? cxp : W - cxp;
+
+            resize(D, bg, bwid, hl);
+            D->n[bg].x = bx;
+            D->n[bg].y = 0;
+        }
+
+        if (tx >= 0) {  /* its text: from the level's side halfway down (step), or the pyramid's (stack) */
+            double edge = !strcmp(mar, "stack") ? (B / 2) : mid / 2, tw;
+
+            tw = !strcmp(pos, "bef") ? cxp - edge : W - cxp - edge;
+            resize(D, tx, fmax(tw, 1), hl);
+            D->n[tx].x = !strcmp(pos, "bef") ? 0 : cxp + edge;
+            D->n[tx].y = 0;
+        }
+    }
+
+    N->w = W;
+    N->h = H;
+    free(kids);
+}
+
 static void size(dgm* D, int n) {
     char a[32];
 
@@ -1917,10 +2274,11 @@ static void size(dgm* D, int n) {
         size_hroot(D, n);
     } else if (!strcmp(a, "hierChild")) {
         size_hchild(D, n);
-    } else if (!*a || !strcmp(a, "tx") || !strcmp(a, "sp") || !strcmp(a, "conn")) {
-        size_leaf(D, n);
-    } else {
-        D->fail = 1;    /* cycle, pyra: not laid out here */
+    } else if (!strcmp(a, "cycle")) {
+        size_cycle(D, n);
+    } else if (!strcmp(a, "pyra")) {
+        size_pyra(D, n);
+    } else {    /* tx, sp, conn: as big as they are asked to be */
         size_leaf(D, n);
     }
 }
@@ -2021,6 +2379,11 @@ static void adj_of(const dgm* D, int n, const char* prst, char* out, size_t cap)
 
     out[0] = '\0';
 
+    if (D->n[n].adjv >= 0 && !strcmp(prst, "trapezoid")) {    /* a pyramid's level: as its slope has it */
+        snprintf(out, cap, "adj=%.0f", D->n[n].adjv);
+        return;
+    }
+
     for (a = D->n[n].shape >= 0 ? xd_kid(D->lo, D->n[n].shape, "adjLst") : -1, a = a >= 0 ? D->lo->v[a].kid : -1;
             a >= 0; a = D->lo->v[a].next) {
         char nm[40];
@@ -2090,6 +2453,13 @@ static void text_room(const dgm* D, int n, double f, double ww, double hh, doubl
             l = t = 0;
             r = ww;
             b = hh;
+        }
+
+        if (N->inv) {   /* upside down */
+            double t0 = t;
+
+            t = hh - b;
+            b = hh - t0;
         }
     }
 
@@ -2171,6 +2541,7 @@ static void fit_node(dgm* D, int n, double fixed, double* fout, double* hout) {
                     }
 
                     c = ct_index(type);
+                    c = c == C_SFONT && sec_text(D, n) ? C_FONT : c;
                     rv = atf(L, e, "val", NAN);
                     rf = atf(L, e, "fact", NAN);
 
@@ -2597,6 +2968,20 @@ static void put_text(pd_buf* o, dgm* D, int n, const char* anchor) {
         mg[i] = N->mf[i] >= 0 ? N->mf[i] * f * EMU_PT : has(N, C_TM + i) ? N->v[C_TM + i] : 0;
     }
 
+    if (N->inv) {   /* an upside-down level (a custom shape): its text where a trapezoid's goes, turned round */
+        char adj[64];
+        double l, t, r, b;
+
+        adj_of(D, n, "trapezoid", adj, sizeof(adj));
+
+        if (pd_preset_text_rect("trapezoid", N->w, N->h, adj, &l, &t, &r, &b)) {
+            mg[2] += l;
+            mg[3] += N->w - r;
+            mg[0] += N->h - b;
+            mg[1] += t;
+        }
+    }
+
     pb_printf(o, "<dsp:txBody><a:bodyPr spcFirstLastPara=\"0\" vert=\"horz\" wrap=\"square\" lIns=\"%.0f\" "
               "tIns=\"%.0f\" rIns=\"%.0f\" bIns=\"%.0f\" numCol=\"1\" spcCol=\"1270\" anchor=\"%s\" anchorCtr=\"0\">"
               "<a:noAutofit/></a:bodyPr><a:lstStyle/>", mg[2], mg[0], mg[3], mg[1], anchor);
@@ -2766,11 +3151,78 @@ static void near_pt(const pnode* B, const char* list, double tx, double ty, doub
     }
 }
 
-/* how far from a box's middle its edge is, going along (ux, uy) */
-static double edge_dist(const pnode* B, double ux, double uy) {
-    double tx = fabs(ux) > 1e-9 ? B->w / 2 / fabs(ux) : HUGE_VAL, ty = fabs(uy) > 1e-9 ? B->h / 2 / fabs(uy) : HUGE_VAL;
+/* how far round a circle a node's shape goes, from its middle (degrees, a quarter at a time) */
+static double arc_half(const dgm* D, int n, double cx, double cy, double rc) {
+    const pnode* B = &D->n[n];
+    double a0 = atan2(B->y + B->h / 2 - cy, B->x + B->w / 2 - cx);
+    int k;
 
-    return fmin(tx, ty);
+    for (k = 1; k < 720; k++) {
+        double px = cx + rc * cos(a0 + k * M_PI / 720), py = cy + rc * sin(a0 + k * M_PI / 720);
+
+        if (px < B->x || px > B->x + B->w || py < B->y || py > B->y + B->h) {
+            break;
+        }
+    }
+
+    return (k - 1) * 0.25;
+}
+
+static double norm_deg(double a) {
+    a = fmod(a, 360);
+    return a < 0 ? a + 360 : a;
+}
+
+/* a connector round a cycle's circle (connRout="longCurve"): a circular arrow from the one shape round to the other
+   (to itself, all the way round), clockwise when its diam is less than 0; its sizes the cycle's diam's parts */
+static void put_arc(pd_buf* o, dgm* D, int n, int s, int d, int cyc) {
+    pnode* N = &D->n[n];
+    const pnode* C = &D->n[cyc], *S = &D->n[s], *E = &D->n[d];
+    double cx = C->x + C->ccx, cy = C->y + C->ccy, k, rc, th, hw, ah, as, ae, hs, hd, span, pb, pe, thh, side, aa;
+    int cw = N->v[C_DIAM] < 0;
+    cref tx;
+
+    k = has(C, C_DIAM) && fabs(C->v[C_DIAM]) > 1 ? 2 * C->crad / fabs(C->v[C_DIAM]) : N->scl;
+    rc = fabs(N->v[C_DIAM]) * k / 2;
+    th = has(N, C_STEM) ? N->v[C_STEM] * k : rc * 0.12;
+    hw = has(N, C_HARH) ? N->v[C_HARH] * k : th * 1.5;     /* the arrowhead: half as wide, */
+    ah = has(N, C_WARH) ? N->v[C_WARH] * k : th;           /* as long */
+
+    if (rc < 1 || th < 1) {
+        return;
+    }
+
+    as = atan2(S->y + S->h / 2 - cy, S->x + S->w / 2 - cx) * 180 / M_PI;
+    ae = atan2(E->y + E->h / 2 - cy, E->x + E->w / 2 - cx) * 180 / M_PI;
+
+    if (!cw) {      /* worked out clockwise, mirrored (flipH) */
+        as = 180 - as;
+        ae = 180 - ae;
+    }
+
+    hs = arc_half(D, s, cx, cy, rc);
+    hd = arc_half(D, d, cx, cy, rc);
+    as += hs;
+    ae -= hd;
+    span = s == d ? 360 - hs - hd : norm_deg(ae - as);
+    pb = (N->padm & 1) ? N->padf[0] * span : has(N, C_BEGPAD) ? N->v[C_BEGPAD] * N->scl / rc * 180 / M_PI : 0;
+    pe = (N->padm & 2) ? N->padf[1] * span : has(N, C_ENDPAD) ? N->v[C_ENDPAD] * N->scl / rc * 180 / M_PI : 0;
+    as += fmax(pb, -0.4 * hs);  /* (into the shape it is from, no further than it hides it) */
+    ae -= pe;
+    aa = ah / rc * 180 / M_PI;
+    thh = fmax(hw - th / 2, 0);
+    side = 2 * (rc + thh);
+    put_id(o, D, n);
+    pb_printf(o, "<a:xfrm%s><a:off x=\"%.0f\" y=\"%.0f\"/><a:ext cx=\"%.0f\" cy=\"%.0f\"/></a:xfrm><a:prstGeom "
+              "prst=\"circularArrow\"><a:avLst><a:gd name=\"adj1\" fmla=\"val %.0f\"/><a:gd name=\"adj2\" fmla=\"val "
+              "%.0f\"/><a:gd name=\"adj3\" fmla=\"val %.0f\"/><a:gd name=\"adj4\" fmla=\"val %.0f\"/><a:gd name=\"adj5\" "
+              "fmla=\"val %.0f\"/></a:avLst></a:prstGeom>", cw ? "" : " flipH=\"1\"", cx - side / 2, cy - side / 2, side,
+              side, th / side * 100000, aa * 60000, norm_deg(ae - aa) * 60000, norm_deg(as) * 60000,
+              thh / side * 100000);
+    put_fill_line(o, D, N, 1, &tx);
+    pb_puts(o, "</dsp:spPr>");
+    put_style(o, tx);
+    pb_puts(o, "</dsp:sp>");
 }
 
 /* a connector: an arrow between the shapes of the points it is between, or a line (bent, as its routing says) */
@@ -2788,12 +3240,25 @@ static void put_conn(pd_buf* o, dgm* D, int n) {
     if (T->type == PT_SIB && T->owner >= 0) {
         src = T->owner;
         dst = D->p[T->owner].next;
+
+        if (dst < 0 && D->p[T->owner].parent >= 0) {    /* the last's (its layout keeping it): back to the first */
+            dst = D->p[D->p[T->owner].parent].kid;
+        }
     } else if (T->type == PT_PAR && T->owner >= 0) {
         src = D->p[T->owner].parent;
         dst = T->owner;
     }
 
-    if (src < 0 || dst < 0 || (s = shape_of(D, src, sn)) < 0 || (d = shape_of(D, dst, dn)) < 0) {
+    if (src < 0 || dst < 0 || (s = shape_of(D, src, sn)) < 0) {
+        return;
+    }
+
+    if ((d = shape_of(D, dst, dn)) < 0 && dn[0]) {  /* the node named, of another point (back to the first) */
+        for (d = 0; d < D->nn && strcmp(D->n[d].name, dn); d++) {
+        }
+    }
+
+    if (d < 0 || d >= D->nn) {
         return;
     }
 
@@ -2808,8 +3273,28 @@ static void put_conn(pd_buf* o, dgm* D, int n) {
         param(D, n, "begSty", bs, sizeof(bs), "noArr");
         param(D, n, "endSty", es, sizeof(es), "arr");
         param(D, n, "bendPt", bend, sizeof(bend), "beg");
-        near_pt(S, bp, E->x + E->w / 2, E->y + E->h / 2, &x0, &y0);
-        near_pt(E, ep, x0, y0, &x1, &y1);
+        if (!strcmp(rout, "stra") && (!strcmp(bp, "auto") || !strcmp(bp, "radial")) &&
+                (!strcmp(ep, "auto") || !strcmp(ep, "radial"))) {   /* along the line between their middles */
+            double sx = S->x + S->w / 2, sy = S->y + S->h / 2, ex = E->x + E->w / 2, ey = E->y + E->h / 2;
+            double len = sqrt((ex - sx) * (ex - sx) + (ey - sy) * (ey - sy)), ux, uy, a, z;
+
+            if (len < 1) {
+                return;
+            }
+
+            ux = (ex - sx) / len;
+            uy = (ey - sy) / len;
+            a = shape_edge(D, s, ux, uy);
+            z = shape_edge(D, d, -ux, -uy);
+            x0 = sx + ux * a;
+            y0 = sy + uy * a;
+            x1 = ex - ux * z;
+            y1 = ey - uy * z;
+        } else {
+            near_pt(S, bp, E->x + E->w / 2, E->y + E->h / 2, &x0, &y0);
+            near_pt(E, ep, x0, y0, &x1, &y1);
+        }
+
         vb = fabs(y0 - S->y) < 1 || fabs(y0 - S->y - S->h) < 1;
         ve = fabs(y1 - E->y) < 1 || fabs(y1 - E->y - E->h) < 1;
         pts[np++] = x0;
@@ -2891,6 +3376,22 @@ static void put_conn(pd_buf* o, dgm* D, int n) {
         const pnode* S = &D->n[s], *E = &D->n[d];
         double sx = S->x + S->w / 2, sy = S->y + S->h / 2, ex = E->x + E->w / 2, ey = E->y + E->h / 2;
         double dx = ex - sx, dy = ey - sy, len = sqrt(dx * dx + dy * dy), ux, uy, gap, bp0, ep0, alen, thick, cx, cy;
+        double es0, ee0;
+        int cyc;
+
+        param(D, n, "begPts", bp, sizeof(bp), "auto");
+        param(D, n, "endPts", ep, sizeof(ep), "auto");
+        param(D, n, "connRout", rout, sizeof(rout), "stra");
+        param(D, n, "begSty", bs, sizeof(bs), "noArr");
+        param(D, n, "endSty", es, sizeof(es), "arr");
+
+        for (cyc = N->parent; cyc >= 0 && D->n[cyc].crad <= 0; cyc = D->n[cyc].parent) {
+        }
+
+        if (!strcmp(rout, "longCurve") && has(N, C_DIAM) && cyc >= 0) {
+            put_arc(o, D, n, s, d, cyc);
+            return;
+        }
 
         if (len < 1) {
             return;
@@ -2898,22 +3399,39 @@ static void put_conn(pd_buf* o, dgm* D, int n) {
 
         ux = dx / len;
         uy = dy / len;
-        gap = len - edge_dist(S, ux, uy) - edge_dist(E, ux, uy);
+        es0 = !strcmp(bp, "ctr") ? 0 : shape_edge(D, s, ux, uy);     /* from their edges, or their middles */
+        ee0 = !strcmp(ep, "ctr") ? 0 : shape_edge(D, d, -ux, -uy);
+        gap = len - es0 - ee0;
         bp0 = (N->padm & 1) ? N->padf[0] * gap : has(N, C_BEGPAD) ? N->v[C_BEGPAD] * N->scl : 0;
         ep0 = (N->padm & 2) ? N->padf[1] * gap : has(N, C_ENDPAD) ? N->v[C_ENDPAD] * N->scl : 0;
         alen = gap - bp0 - ep0;
         thick = fabs(ux) >= fabs(uy) ? N->h : N->w;
 
+        if (thick <= 1) {
+            thick = fabs(ux) >= fabs(uy) ? N->w : N->h;
+        }
+
         if (alen <= 1 || thick <= 1) {
             return;
         }
 
-        cx = sx + ux * (edge_dist(S, ux, uy) + bp0 + alen / 2);
-        cy = sy + uy * (edge_dist(S, ux, uy) + bp0 + alen / 2);
+        if (es0 == 0 || ee0 == 0) {     /* to a middle: in the middle of the way there, as long as its pads leave */
+            bp0 = ep0 = (bp0 + ep0) / 2;
+        }
+
+        cx = sx + ux * (es0 + bp0 + alen / 2);
+        cy = sy + uy * (es0 + bp0 + alen / 2);
         put_id(o, D, n);
-        put_xfrm(o, cx - alen / 2, cy - thick / 2, alen, thick, atan2(uy, ux) * 180 / 3.14159265358979323846);
-        pb_puts(o, "<a:prstGeom prst=\"rightArrow\"><a:avLst><a:gd name=\"adj1\" fmla=\"val 60000\"/><a:gd "
-                "name=\"adj2\" fmla=\"val 50000\"/></a:avLst></a:prstGeom>");
+        put_xfrm(o, cx - alen / 2, cy - thick / 2, alen, thick, atan2(uy, ux) * 180 / M_PI);
+
+        if (strcmp(bs, "noArr") || strcmp(es, "noArr")) {
+            pb_printf(o, "<a:prstGeom prst=\"%s\"><a:avLst><a:gd name=\"adj1\" fmla=\"val 60000\"/><a:gd "
+                      "name=\"adj2\" fmla=\"val 50000\"/></a:avLst></a:prstGeom>", !strcmp(bs, "noArr") ? "rightArrow" :
+                      !strcmp(es, "noArr") ? "leftArrow" : "leftRightArrow");
+        } else {
+            pb_puts(o, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+        }
+
         put_fill_line(o, D, N, 1, &tx);
         pb_puts(o, "</dsp:spPr>");
         put_style(o, tx);
@@ -2946,10 +3464,23 @@ static void put_node(pd_buf* o, dgm* D, int n) {
     }
 
     put_id(o, D, n);
-    put_xfrm(o, N->x, N->y, N->w, N->h, N->shape >= 0 && at(D->lo, N->shape, "rot", rot, sizeof(rot)) ?
-             strtod(rot, NULL) : 0);
-    pb_printf(o, "<a:prstGeom prst=\"%s\"><a:avLst>", type);
-    adj_of(D, n, type, adj, sizeof(adj));
+
+    if (N->inv) {   /* a level of an upside-down pyramid: a trapezoid wide at the top, its text the right way up */
+        double in = fmin(N->adjv / 100000 * fmin(N->w, N->h), N->w / 2);
+
+        put_xfrm(o, N->x, N->y, N->w, N->h, N->rot);
+        pb_printf(o, "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"0\" t=\"0\" r=\"r\" b=\"b\"/>"
+                  "<a:pathLst><a:path w=\"%.0f\" h=\"%.0f\"><a:moveTo><a:pt x=\"0\" y=\"0\"/></a:moveTo><a:lnTo><a:pt "
+                  "x=\"%.0f\" y=\"0\"/></a:lnTo><a:lnTo><a:pt x=\"%.0f\" y=\"%.0f\"/></a:lnTo><a:lnTo><a:pt x=\"%.0f\" "
+                  "y=\"%.0f\"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom>", N->w, N->h, N->w, N->w - in,
+                  N->h, in, N->h);
+        adj[0] = '\0';
+    } else {
+        put_xfrm(o, N->x, N->y, N->w, N->h, N->rot + (N->shape >= 0 && at(D->lo, N->shape, "rot", rot, sizeof(rot)) ?
+                 strtod(rot, NULL) : 0));
+        pb_printf(o, "<a:prstGeom prst=\"%s\"><a:avLst>", type);
+        adj_of(D, n, type, adj, sizeof(adj));
+    }
 
     for (i = 0; adj[i];) {   /* "adj1=5000 adj2=200" as guides */
         char nm[40];
@@ -2968,7 +3499,10 @@ static void put_node(pd_buf* o, dgm* D, int n) {
         }
     }
 
-    pb_puts(o, "</a:avLst></a:prstGeom>");
+    if (!N->inv) {
+        pb_puts(o, "</a:avLst></a:prstGeom>");
+    }
+
     shape_type(D, n, adj, sizeof(adj));
     put_fill_line(o, D, N, adj[0] != '\0', &tx);
     pb_puts(o, "</dsp:spPr>");
@@ -3067,6 +3601,9 @@ static void reset(dgm* D) {
         N->fmax = N->hb = 0;
         N->scl = N->csx = N->csy = 1;
         N->x = N->y = N->w = N->h = 0;
+        N->rot = N->inv = 0;
+        N->adjv = -1;
+        N->ccx = N->ccy = N->crad = 0;
 
         for (i = 0; i < 4; i++) {
             N->mf[i] = -1;

@@ -10165,6 +10165,17 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
         return PD_ERR_FORMAT;
     }
 
+    {   /* SmartArt: the shapes it is drawn with */
+        size_t n2 = 0;
+        char* x2 = pd_docx_smartart(s, n, xml, len, &n2);
+
+        if (x2) {
+            free(xml);
+            xml = x2;
+            len = n2;
+        }
+    }
+
     bld_init(&b, d);
     X.b = &b;
     read_fonts(&X);

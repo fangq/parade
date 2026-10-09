@@ -7,7 +7,11 @@ written for these, in the schema PowerPoint's are in, with a colour definition a
 drawing saved of it, older than its text: the text the data model's, at the size the drawing's runs are, in the
 colour the colour definition gives text (not the drawing's fontRef).
 
-    python3 tools/make_test_smartart.py tests/data/smartart.pptx
+Slides 5 to 8 are a cycle of four with arrows round it (cycle), a radial of a hub and five round it joined by lines
+(cycle, ctrShpMap="fNode"), a pyramid of three and an inverted pyramid of two (pyra). tests/data/smartart.docx has
+a cycle with no drawing and the diagram with the older drawing, inline in a Word document's paragraphs.
+
+    python3 tools/make_test_smartart.py tests/data/smartart.pptx [tests/data/smartart.docx]
 """
 import sys
 import zipfile
@@ -86,6 +90,57 @@ hier = ('<dgm:layoutDef %s uniqueId="test/hierarchy"><dgm:layoutNode name="diagr
         '<dgm:forEach name="more" ref="each"/></dgm:layoutNode></dgm:layoutNode></dgm:forEach></dgm:layoutNode>'
         '</dgm:layoutDef>') % DGM
 
+# a cycle: the nodes round a circle, as far apart as their spacing asks, arrows round it between them (the last's
+# back to the first)
+cycle = ('<dgm:layoutDef %s uniqueId="test/cycle"><dgm:layoutNode name="diagram"><dgm:alg type="cycle">'
+         '<dgm:param type="stAng" val="0"/><dgm:param type="spanAng" val="360"/></dgm:alg><dgm:shape/><dgm:presOf/>'
+         '<dgm:constrLst><dgm:constr type="w" for="ch" ptType="node" refType="w"/>'
+         '<dgm:constr type="h" for="ch" ptType="node" refType="w" refFor="ch" refPtType="node"/>'
+         '<dgm:constr type="sibSp" refType="w" refFor="ch" refPtType="node" fact="0.4"/>'
+         '<dgm:constr type="h" for="ch" ptType="sibTrans" refType="w" refFor="ch" refPtType="node" fact="0.15"/>'
+         '<dgm:constr type="primFontSz" for="ch" ptType="node" op="equ" val="65"/></dgm:constrLst>'
+         '<dgm:forEach name="nodes" axis="ch" ptType="node"><dgm:layoutNode name="node"><dgm:alg type="tx"/>'
+         '<dgm:shape type="ellipse"/><dgm:presOf axis="desOrSelf" ptType="node"/><dgm:constrLst>' + MARGINS +
+         '</dgm:constrLst>' + SHRINK + '</dgm:layoutNode><dgm:forEach name="arrows" axis="followSib" '
+         'ptType="sibTrans" hideLastTrans="0" cnt="1"><dgm:layoutNode name="arrow"><dgm:alg type="conn"/>'
+         '<dgm:shape type="conn"/><dgm:presOf axis="self"/><dgm:constrLst><dgm:constr type="connDist"/>'
+         '<dgm:constr type="begPad" refType="connDist" fact="0.1"/><dgm:constr type="endPad" refType="connDist" '
+         'fact="0.1"/></dgm:constrLst></dgm:layoutNode></dgm:forEach></dgm:forEach></dgm:layoutNode>'
+         '</dgm:layoutDef>') % DGM
+
+# a radial: the first node in the middle, the others round it, sp from it, lines out to them
+radial = ('<dgm:layoutDef %s uniqueId="test/radial"><dgm:layoutNode name="diagram"><dgm:alg type="cycle">'
+          '<dgm:param type="stAng" val="0"/><dgm:param type="spanAng" val="360"/>'
+          '<dgm:param type="ctrShpMap" val="fNode"/></dgm:alg><dgm:shape/><dgm:presOf/><dgm:constrLst>'
+          '<dgm:constr type="w" for="ch" forName="centre" refType="w"/>'
+          '<dgm:constr type="w" for="ch" forName="node" refType="w" refFor="ch" refForName="centre" fact="0.6"/>'
+          '<dgm:constr type="sp" refType="w" refFor="ch" refForName="centre" fact="0.25"/>'
+          '<dgm:constr type="sibSp" refType="w" refFor="ch" refForName="node" fact="0.1"/>'
+          '<dgm:constr type="primFontSz" for="ch" forName="node" op="equ" val="65"/></dgm:constrLst>'
+          '<dgm:forEach name="first" axis="ch" ptType="node" cnt="1"><dgm:layoutNode name="centre">'
+          '<dgm:alg type="tx"/><dgm:shape type="ellipse"/><dgm:presOf axis="self"/><dgm:constrLst>'
+          '<dgm:constr type="h" refType="w"/><dgm:constr type="primFontSz" val="65"/>' + MARGINS +
+          '</dgm:constrLst>' + SHRINK + '</dgm:layoutNode><dgm:forEach name="kids" axis="ch">'
+          '<dgm:forEach name="lines" axis="self" ptType="parTrans"><dgm:layoutNode name="line">'
+          '<dgm:alg type="conn"><dgm:param type="dim" val="1D"/><dgm:param type="endSty" val="noArr"/></dgm:alg>'
+          '<dgm:shape type="conn" zOrderOff="-99"/><dgm:presOf axis="self"/></dgm:layoutNode></dgm:forEach>'
+          '<dgm:forEach name="each" axis="self" ptType="node"><dgm:layoutNode name="node"><dgm:alg type="tx"/>'
+          '<dgm:shape type="ellipse"/><dgm:presOf axis="desOrSelf" ptType="node"/><dgm:constrLst>'
+          '<dgm:constr type="h" refType="w"/>' + MARGINS + '</dgm:constrLst>' + SHRINK + '</dgm:layoutNode>'
+          '</dgm:forEach></dgm:forEach></dgm:forEach></dgm:layoutNode></dgm:layoutDef>') % DGM
+
+
+def pyramid(rot):
+    """the nodes as a pyramid's levels, the first at its top (turned round: an inverted pyramid)"""
+    return ('<dgm:layoutDef %s uniqueId="test/pyramid"><dgm:layoutNode name="diagram"><dgm:alg type="pyra">'
+            '<dgm:param type="linDir" val="fromT"/></dgm:alg><dgm:shape/><dgm:presOf/><dgm:constrLst>'
+            '<dgm:constr type="primFontSz" for="ch" ptType="node" op="equ" val="65"/></dgm:constrLst>'
+            '<dgm:forEach name="levels" axis="ch" ptType="node"><dgm:layoutNode name="level"><dgm:alg type="tx"/>'
+            '<dgm:shape type="trapezoid"%s/><dgm:presOf axis="desOrSelf" ptType="node"/><dgm:constrLst>' +
+            MARGINS + '</dgm:constrLst>' + SHRINK + '</dgm:layoutNode></dgm:forEach></dgm:layoutNode>'
+            '</dgm:layoutDef>') % (DGM, ' rot="180"' if rot else '')
+
+
 colors = ('<dgm:colorsDef %s uniqueId="test/colors">'
           '<dgm:styleLbl name="node1"><dgm:fillClrLst meth="repeat"><a:schemeClr val="accent1"/></dgm:fillClrLst>'
           '<dgm:linClrLst meth="repeat"><a:schemeClr val="lt1"/></dgm:linClrLst><dgm:txFillClrLst meth="repeat">'
@@ -159,6 +214,10 @@ DIAGRAMS = [
     (process, data([(t, []) for t in ('Plan', 'Build', 'Ship')], 'test/process')),
     (hier, data([('Root', [('Left', []), ('Middle', [('One', []), ('Two', [])]), ('Right', [])])], 'test/hierarchy')),
     (process, saved_data),
+    (cycle, data([(t, []) for t in ('Plan', 'Do', 'Check', 'Act')], 'test/cycle')),
+    (radial, data([('Hub', [(t, []) for t in ('North', 'East', 'South', 'West', 'More')])], 'test/radial')),
+    (pyramid(0), data([(t, []) for t in ('Top', 'Middle', 'Base')], 'test/pyramid')),
+    (pyramid(1), data([(t, []) for t in ('Wide', 'Narrow')], 'test/pyramid')),
 ]
 
 
@@ -222,3 +281,47 @@ with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
 
         if dm is saved_data:
             z.writestr('ppt/diagrams/drawing%d.xml' % k, saved_drawing)
+
+if len(sys.argv) > 2:   # the Word document
+    W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' \
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' \
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' \
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+
+    def inline(k, base):
+        return ('<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="5486400" '
+                'cy="3200400"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="%d" name="Diagram %d"/>'
+                '<wp:cNvGraphicFramePr/><a:graphic><a:graphicData '
+                'uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds '
+                'xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rId%d" r:lo="rId%d" '
+                'r:qs="rId%d" r:cs="rId%d"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>') % (
+                    k, k, base, base + 1, base + 2, base + 3)
+
+    doc = ('<w:document %s><w:body><w:p><w:r><w:t>A cycle:</w:t></w:r></w:p>%s<w:p><w:r><w:t>A diagram with a '
+           'drawing:</w:t></w:r></w:p>%s<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" '
+           'w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+           '</w:body></w:document>') % (W, inline(1, 2), inline(2, 12))
+    items = [('rId1', 'theme', 'theme/theme1.xml'), ('rId6', 'diagramDrawing', 'diagrams/drawing2.xml')]
+
+    for k, base in ((1, 2), (2, 12)):
+        items += [('rId%d' % base, 'diagramData', 'diagrams/data%d.xml' % k),
+                  ('rId%d' % (base + 1), 'diagramLayout', 'diagrams/layout%d.xml' % k),
+                  ('rId%d' % (base + 2), 'diagramQuickStyle', 'diagrams/quickStyle%d.xml' % k),
+                  ('rId%d' % (base + 3), 'diagramColors', 'diagrams/colors%d.xml' % k)]
+
+    with zipfile.ZipFile(sys.argv[2], 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-'
+                   'officedocument.wordprocessingml.document.main+xml"/></Types>')
+        z.writestr('_rels/.rels', rels(('rId1', 'officeDocument', 'word/document.xml')))
+        z.writestr('word/document.xml', doc)
+        z.writestr('word/_rels/document.xml.rels', rels(*items))
+        z.writestr('word/theme/theme1.xml', theme)
+
+        for k, (lo, dm) in enumerate([DIAGRAMS[4], DIAGRAMS[3]], 1):
+            z.writestr('word/diagrams/data%d.xml' % k, dm)
+            z.writestr('word/diagrams/layout%d.xml' % k, lo)
+            z.writestr('word/diagrams/quickStyle%d.xml' % k, style)
+            z.writestr('word/diagrams/colors%d.xml' % k, saved_colors if dm is saved_data else colors)
+
+        z.writestr('word/diagrams/drawing2.xml', saved_drawing)

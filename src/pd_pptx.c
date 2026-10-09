@@ -80,26 +80,17 @@ static void resolve(const char* base, const char* target, char* out, size_t cap)
     }
 }
 
-static int part_load(pptx* P, ppart* pt, const char* path) {
+/* a part's relationships, their targets as paths in the package */
+static void part_rels(pptx* P, ppart* pt) {
     size_t len = 0;
     char* s;
     char rpath[300];
-    const char* slash;
+    const char* slash = strrchr(pt->path, '/');
     xdoc r;
     int k;
 
-    memset(pt, 0, sizeof(*pt));
-    snprintf(pt->path, sizeof(pt->path), "%s", path);
-    s = (char*)pd_zip_get(P->zip, P->zn, path, &len);
-
-    if (!s || !xd_parse(&pt->x, s, len)) {
-        xd_free(&pt->x);
-        return 0;
-    }
-
-    slash = strrchr(path, '/');
-    snprintf(rpath, sizeof(rpath), "%.*s_rels/%s.rels", slash ? (int)(slash - path + 1) : 0, path,
-             slash ? slash + 1 : path);
+    snprintf(rpath, sizeof(rpath), "%.*s_rels/%s.rels", slash ? (int)(slash - pt->path + 1) : 0, pt->path,
+             slash ? slash + 1 : pt->path);
     s = (char*)pd_zip_get(P->zip, P->zn, rpath, &len);
 
     if (s && xd_parse(&r, s, len)) {
@@ -114,7 +105,7 @@ static int part_load(pptx* P, ppart* pt, const char* path) {
 
             xd_attr(&r, k, "Id", pt->rels[pt->nrels].id, sizeof(pt->rels[0].id));
             xd_attr(&r, k, "Target", tgt, sizeof(tgt));
-            resolve(path, tgt, pt->rels[pt->nrels].target, sizeof(pt->rels[0].target));
+            resolve(pt->path, tgt, pt->rels[pt->nrels].target, sizeof(pt->rels[0].target));
             pt->nrels++;
         }
 
@@ -122,7 +113,22 @@ static int part_load(pptx* P, ppart* pt, const char* path) {
     } else if (s) {
         free(s);
     }
+}
 
+static int part_load(pptx* P, ppart* pt, const char* path) {
+    size_t len = 0;
+    char* s;
+
+    memset(pt, 0, sizeof(*pt));
+    snprintf(pt->path, sizeof(pt->path), "%s", path);
+    s = (char*)pd_zip_get(P->zip, P->zn, path, &len);
+
+    if (!s || !xd_parse(&pt->x, s, len)) {
+        xd_free(&pt->x);
+        return 0;
+    }
+
+    part_rels(P, pt);
     return 1;
 }
 
@@ -165,7 +171,7 @@ static const char* media_id(pptx* P, const ppart* pt, const char* rid) {
     char dst[200];
     int k;
 
-    if (!path) {
+    if (!path || !P->zw) {  /* (a .docx's SmartArt: its pictures not put in) */
         return NULL;
     }
 
@@ -1589,22 +1595,19 @@ static int smartart_layout(conv* C, ppart* pt, int ri, const xdoc* dm, long long
     return ok;
 }
 
-/* SmartArt: the drawing PowerPoint keeps of it (its shapes, as it last laid them out), else it laid out here; in
-   a group at the frame */
-static void put_smartart(conv* C, ppart* pt, int gf) {
+/* SmartArt's shapes (RI its relIds): the drawing Office keeps of it (as it last laid it out), else it laid out here,
+   in a frame CX by CY; 0 none */
+static int smartart_shapes(conv* C, ppart* pt, int ri, long long cx, long long cy) {
     const xdoc* d = &pt->x;
-    int ri = xd_path(d, gf, "graphic/graphicData/relIds"), xf = xd_kid(d, gf, "xfrm"), off, ext, k, saved = 0, ok = 0;
+    int k, saved = 0, ok = 0, forced;
     char dm[64];
     const char* dmpath, *drawpath = NULL, *mode = getenv("PD_SMARTART");
     ppart dmp, dr;
 
-    if (ri < 0 || xf < 0 || !xd_attr(d, ri, "r:dm", dm, sizeof(dm)) || !(dmpath = rel_of(pt, dm)) ||
-            !part_load(C->P, &dmp, dmpath)) {
-        return;
+    if (!xd_attr(d, ri, "r:dm", dm, sizeof(dm)) || !(dmpath = rel_of(pt, dm)) || !part_load(C->P, &dmp, dmpath)) {
+        return 0;
     }
 
-    off = xd_kid(d, xf, "off");
-    ext = xd_kid(d, xf, "ext");
     k = xd_find(&dmp.x, "dataModelExt");
 
     if (k >= 0) {
@@ -1615,19 +1618,16 @@ static void put_smartart(conv* C, ppart* pt, int gf) {
         }
     }
 
-    if (off >= 0 && ext >= 0) {     /* the saved drawing, else laid out here (or, asked, the other way round) */
-        long long cx = xd_int(d, ext, "cx", 0), cy = xd_int(d, ext, "cy", 0);
-        int forced = mode && !strcmp(mode, "layout");
+    /* the saved drawing, else laid out here (or, asked, the other way round) */
+    forced = mode && !strcmp(mode, "layout");
+    ok = forced && smartart_layout(C, pt, ri, &dmp.x, cx, cy, &dr);
 
-        ok = forced && smartart_layout(C, pt, ri, &dmp.x, cx, cy, &dr);
+    if (!ok && drawpath) {
+        ok = saved = part_load(C->P, &dr, drawpath);
+    }
 
-        if (!ok && drawpath) {
-            ok = saved = part_load(C->P, &dr, drawpath);
-        }
-
-        if (!ok && !forced) {
-            ok = smartart_layout(C, pt, ri, &dmp.x, cx, cy, &dr);
-        }
+    if (!ok && !forced) {
+        ok = smartart_layout(C, pt, ri, &dmp.x, cx, cy, &dr);
     }
 
     if (ok) {
@@ -1636,11 +1636,7 @@ static void put_smartart(conv* C, ppart* pt, int gf) {
         char cid[64];
         const char* cpath;
 
-        if (tree >= 0) {
-            pb_printf(C->o, "<wpg:grpSp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext "
-                      "cx=\"%lld\" cy=\"%lld\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
-                      "</wpg:grpSpPr>", xd_int(d, off, "x", 0), xd_int(d, off, "y", 0), xd_int(d, ext, "cx", 0),
-                      xd_int(d, ext, "cy", 0), xd_int(d, ext, "cx", 0), xd_int(d, ext, "cy", 0));
+        if ((ok = tree >= 0) != 0) {
             have_cs = saved && xd_attr(d, ri, "r:cs", cid, sizeof(cid)) && (cpath = rel_of(pt, cid)) != NULL &&
                       part_load(C->P, &cs, cpath);
             C->dm = saved ? &dmp.x : NULL;  /* the text the saved drawing has may be older than the model's */
@@ -1651,14 +1647,41 @@ static void put_smartart(conv* C, ppart* pt, int gf) {
             if (have_cs) {
                 part_free(&cs);
             }
-
-            pb_puts(C->o, "</wpg:grpSp>");
         }
 
         part_free(&dr);
     }
 
     part_free(&dmp);
+    return ok;
+}
+
+/* SmartArt: its shapes in a group at the frame */
+static void put_smartart(conv* C, ppart* pt, int gf) {
+    const xdoc* d = &pt->x;
+    int ri = xd_path(d, gf, "graphic/graphicData/relIds"), xf = xd_kid(d, gf, "xfrm"), off, ext;
+    pd_buf shapes, *o = C->o;
+    long long cx, cy;
+
+    if (ri < 0 || xf < 0 || (off = xd_kid(d, xf, "off")) < 0 || (ext = xd_kid(d, xf, "ext")) < 0) {
+        return;
+    }
+
+    cx = xd_int(d, ext, "cx", 0);
+    cy = xd_int(d, ext, "cy", 0);
+    memset(&shapes, 0, sizeof(shapes));
+    C->o = &shapes;
+
+    if (smartart_shapes(C, pt, ri, cx, cy)) {
+        pb_printf(o, "<wpg:grpSp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" "
+                  "cy=\"%lld\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm></wpg:grpSpPr>",
+                  xd_int(d, off, "x", 0), xd_int(d, off, "y", 0), cx, cy, cx, cy);
+        pb_put(o, shapes.p, shapes.n);
+        pb_puts(o, "</wpg:grpSp>");
+    }
+
+    C->o = o;
+    pb_free(&shapes);
 }
 
 /* a shape filled with a picture as that picture: its fill's stretch (insets past its box: the picture cropped
@@ -2188,4 +2211,126 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     st = pd_docx_import(d, (const unsigned char*)zip.p, zip.n);
     pb_free(&zip);
     return st;
+}
+
+/* ---- Word's SmartArt ---- */
+
+static const char* find_in(const char* s, const char* e, const char* key) {
+    size_t n = strlen(key);
+
+    for (; s + n <= e; s++) {
+        if (*s == *key && !memcmp(s, key, n)) {
+            return s;
+        }
+    }
+
+    return NULL;
+}
+
+char* pd_docx_smartart(const unsigned char* zip, size_t zn, const char* xml, size_t len, size_t* out_len) {
+    static const char key[] = "<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/diagram\"";
+    static const char end[] = "</a:graphicData>";
+    const char* e = xml + len, *p = xml, *g;
+    pptx P;
+    ppart doc;
+    conv C;
+    pd_buf out;
+    int any = 0;
+
+    if (!find_in(xml, e, key)) {
+        return NULL;
+    }
+
+    memset(&P, 0, sizeof(P));
+    P.zip = zip;
+    P.zn = zn;
+    P.alias[0] = 1;     /* Word's colour map: bg1 lt1, tx1 dk1 */
+    P.alias[1] = 0;
+    P.alias[2] = 3;
+    P.alias[3] = 2;
+    theme_load(&P, "word/theme/theme1.xml");
+    memset(&doc, 0, sizeof(doc));
+    snprintf(doc.path, sizeof(doc.path), "word/document.xml");
+    part_rels(&P, &doc);
+    memset(&C, 0, sizeof(C));
+    C.P = &P;
+    memset(&out, 0, sizeof(out));
+
+    while ((g = find_in(p, e, key)) != NULL) {
+        const char* q = find_in(g, e, end), *x, *ex = NULL;
+        long long cx = 0, cy = 0;
+        char* seg;
+        ppart pt;
+        pd_buf shapes;
+        int ri, ok = 0;
+
+        if (!q) {
+            break;
+        }
+
+        q += sizeof(end) - 1;
+
+        for (x = p; (x = find_in(x, g, "<wp:extent ")) != NULL; x++) {     /* the frame: its drawing's extent */
+            ex = x;
+        }
+
+        if (ex) {
+            const char* a = find_in(ex, g, "cx=\""), *b = find_in(ex, g, "cy=\"");
+
+            cx = a ? atoll(a + 4) : 0;
+            cy = b ? atoll(b + 4) : 0;
+        }
+
+        memset(&pt, 0, sizeof(pt));
+        memset(&shapes, 0, sizeof(shapes));
+        seg = (char*)malloc((size_t)(q - g) + 1);
+
+        if (seg && cx > 0 && cy > 0) {
+            memcpy(seg, g, (size_t)(q - g));
+            seg[q - g] = '\0';
+
+            if (xd_parse(&pt.x, seg, (size_t)(q - g))) {    /* (the text taken) */
+                pt.rels = doc.rels;
+                pt.nrels = doc.nrels;
+                snprintf(pt.path, sizeof(pt.path), "%s", doc.path);
+                ri = xd_find(&pt.x, "relIds");
+                C.o = &shapes;
+                ok = ri >= 0 && smartart_shapes(&C, &pt, ri, cx, cy);
+            }
+
+            xd_free(&pt.x);
+            seg = NULL;
+        }
+
+        free(seg);
+        pb_put(&out, p, (size_t)(g - p));
+
+        if (ok) {   /* a group of its shapes, as big as the frame */
+            pb_printf(&out, "<a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\">"
+                      "<wpg:wgp xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" "
+                      "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\"><wpg:cNvGrpSpPr/>"
+                      "<wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/><a:chOff x=\"0\" "
+                      "y=\"0\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm></wpg:grpSpPr>", cx, cy, cx, cy);
+            pb_put(&out, shapes.p, shapes.n);
+            pb_puts(&out, "</wpg:wgp></a:graphicData>");
+            any = 1;
+        } else {
+            pb_put(&out, g, (size_t)(q - g));
+        }
+
+        pb_free(&shapes);
+        p = q;
+    }
+
+    pb_put(&out, p, (size_t)(e - p));
+    free(doc.rels);
+
+    if (!any || out.err) {
+        pb_free(&out);
+        return NULL;
+    }
+
+    pb_putc(&out, '\0');     /* (ended, as what it stands for is) */
+    *out_len = out.n - 1;
+    return out.p;
 }

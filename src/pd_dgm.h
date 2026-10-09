@@ -1,5 +1,5 @@
-/* SmartArt laid out from its definition (pd_dgm.c): for the PowerPoint reader, when a diagram has no drawing
-   saved of it */
+/* SmartArt laid out from its definition (pd_dgm.c): for the PowerPoint and Word readers, when a diagram has no
+   drawing saved of it */
 #ifndef PD_DGM_H
 #define PD_DGM_H
 
@@ -16,7 +16,7 @@ typedef struct {
 } pd_dgm_in;
 
 /* the diagram laid out as the drawing PowerPoint saves of one: a dsp:drawing, its shapes in the frame's
-   coordinates; 0 when its layout has what this does not lay out (cycles, pyramids) */
+   coordinates; 0 when it cannot be (a definition or data model not as the schema has them) */
 int pd_dgm_layout(const pd_dgm_in* in, pd_buf* out);
 
 #endif
