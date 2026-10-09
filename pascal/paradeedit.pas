@@ -319,6 +319,7 @@ type
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
     function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
     procedure PushShapeStep(const Lbl: string; const At: pd_pos);
+    function PutPageCanvas(Sec: pd_block_id; Res: pd_res_id): Boolean;
     { a drawing's object selected as text (delete, cut and copy take it) -- the canvas page's only as the caret }
     procedure SelectObject(const P: pd_pos);
     { the canvas page's canvas: its object's place }
@@ -557,6 +558,15 @@ type
 
     { the canvas page (and its canvas) made W by H (sp); one step of undo }
     function ResizeCanvasPage(W, H: pd_sp): Boolean;
+    { slides (a presentation: every page a canvas page): how many; the one being edited (-1 none); one shown and
+      ready to draw in; a new one after another (-1: first), blank or (Copy) a copy of that one; one deleted (not
+      the last left); one moved to another place. Each one step of undo }
+    function SlideCount: Integer;
+    function CurrentSlide: Integer;
+    function GoToSlide(Index: Integer): Boolean;
+    function NewSlide(After: Integer; Copy: Boolean = False): Boolean;
+    function DeleteSlide(Index: Integer): Boolean;
+    function MoveSlide(Index, ToIndex: Integer): Boolean;
     { the selected drawing is a canvas (made here, or read from Word) shapes can go into }
     function CanvasSelected: Boolean;
     { the selected object, in the text, moved to P (as text is dragged); one step of undo }
@@ -966,10 +976,15 @@ type
 
 { a polygon filled with a colour, non-zero winding, edges smoothed: four rows
   of samples to a pixel, and each crossing counted to its fraction of a pixel }
-procedure FillRingsImg(Img: TLazIntfImage; const Rings: TRings; Col: UInt32);
+{ rings filled (non-zero winding), antialiased; a gradient (GKind 1 linear at GAng degrees clockwise from right, 2
+  radial out from the middle) from Col to Col2 across their box }
+procedure FillRingsImg(Img: TLazIntfImage; const Rings: TRings; Col: UInt32; Col2: UInt32 = 0; GKind: Integer = 0;
+  GAng: Double = 0);
 const
   SUB = 4;
 var
+  GCX, GCY, GUX, GUY, GLo, GHi, GR, GT, BX0, BY0, BX1, BY1: Double;
+  CR, CG, CB: Integer;
   Op: Integer;
   N, I, J, K, PY, S, X0, X1, Cnt, Wind, PX, RI, Total: Integer;
   P: TPtDArray;
@@ -995,6 +1010,15 @@ begin
     end;
   if Total < 3 then
     Exit;
+  BX0 := MinX; BY0 := MinY; BX1 := MaxX; BY1 := MaxY;     { the gradient's box: the rings', not the part in view }
+  GCX := (BX0 + BX1) / 2;
+  GCY := (BY0 + BY1) / 2;
+  GUX := Cos(GAng * Pi / 180);
+  GUY := Sin(GAng * Pi / 180);
+  GLo := Min(Min((BX0 - GCX) * GUX + (BY0 - GCY) * GUY, (BX1 - GCX) * GUX + (BY0 - GCY) * GUY),
+    Min((BX0 - GCX) * GUX + (BY1 - GCY) * GUY, (BX1 - GCX) * GUX + (BY1 - GCY) * GUY));
+  GHi := -GLo;
+  GR := Max(1, Sqrt(Sqr(BX1 - BX0) + Sqr(BY1 - BY0)) / 2);
   if MinY < 0 then MinY := 0;
   if MaxY > Img.Height then MaxY := Img.Height;
   if MinX < 0 then MinX := 0;
@@ -1086,12 +1110,102 @@ begin
       if A > Op then A := Op;
       if A > 0 then
       begin
-        Pix^.R := (Pix^.R * (255 - A) + R * A) div 255;
-        Pix^.G := (Pix^.G * (255 - A) + G * A) div 255;
-        Pix^.B := (Pix^.B * (255 - A) + B * A) div 255;
+        CR := R; CG := G; CB := B;
+        if GKind > 0 then
+        begin   { how far along the gradient this pixel is }
+          if GKind = 2 then
+            GT := 1 - Sqrt(Sqr(X0 + PX + 0.5 - GCX) + Sqr(PY + 0.5 - GCY)) / GR
+          else if GHi > GLo then
+            GT := ((X0 + PX + 0.5 - GCX) * GUX + (PY + 0.5 - GCY) * GUY - GLo) / (GHi - GLo)
+          else
+            GT := 0;
+          if GT < 0 then GT := 0;
+          if GT > 1 then GT := 1;
+          if GKind = 2 then
+            GT := 1 - GT;     { the middle the first colour, the outside the second }
+          CR := Round(R + (Integer((Col2 shr 16) and $FF) - R) * GT);
+          CG := Round(G + (Integer((Col2 shr 8) and $FF) - G) * GT);
+          CB := Round(B + (Integer(Col2 and $FF) - B) * GT);
+        end;
+        Pix^.R := (Pix^.R * (255 - A) + CR * A) div 255;
+        Pix^.G := (Pix^.G * (255 - A) + CG * A) div 255;
+        Pix^.B := (Pix^.B * (255 - A) + CB * A) div 255;
         Pix^.A := 255;
       end;
       Inc(Pix);
+    end;
+  end;
+end;
+
+{ whether a point is inside a polygon (even-odd) }
+function InPolygon(const P: TPtDArray; X, Y: Double): Boolean;
+var
+  I, J: Integer;
+begin
+  Result := False;
+  J := High(P);
+  for I := 0 to High(P) do
+  begin
+    if ((P[I].Y > Y) <> (P[J].Y > Y)) and (X < (P[J].X - P[I].X) * (Y - P[I].Y) / (P[J].Y - P[I].Y) + P[I].X) then
+      Result := not Result;
+    J := I;
+  end;
+end;
+
+{ a picture (Pic, its own size W by H in pixels) over the page turned Rot degrees clockwise about (CX, CY), flipped;
+  only within Crop (the rectangle as it is before it is turned, when CropOn) and inside Poly (when it has points) }
+procedure BlendPictureEx(Img, Pic: TLazIntfImage; CX, CY, Rot: Double; FH, FV, CropOn: Boolean;
+  const Crop: TRect; const Poly: TPtDArray);
+var
+  C, S, HX, HY, UX, UY, SXf, SYf: Double;
+  X0, Y0, X1, Y1, X, Y, SX, SY, A: Integer;
+  Src, Dst: PPixel;
+begin
+  C := Cos(Rot * Pi / 180);
+  S := Sin(Rot * Pi / 180);
+  HX := Pic.Width / 2;
+  HY := Pic.Height / 2;
+  X0 := Floor(CX - Abs(HX * C) - Abs(HY * S)) - 1;
+  X1 := Ceil(CX + Abs(HX * C) + Abs(HY * S)) + 1;
+  Y0 := Floor(CY - Abs(HX * S) - Abs(HY * C)) - 1;
+  Y1 := Ceil(CY + Abs(HX * S) + Abs(HY * C)) + 1;
+  if X0 < 0 then X0 := 0;
+  if Y0 < 0 then Y0 := 0;
+  if X1 > Img.Width then X1 := Img.Width;
+  if Y1 > Img.Height then Y1 := Img.Height;
+  for Y := Y0 to Y1 - 1 do
+  begin
+    Dst := PPixel(Img.GetDataLineStart(Y));
+    Inc(Dst, X0);
+    for X := X0 to X1 - 1 do
+    begin
+      { back to where it was before it was turned }
+      UX := (X + 0.5 - CX) * C + (Y + 0.5 - CY) * S;
+      UY := -(X + 0.5 - CX) * S + (Y + 0.5 - CY) * C;
+      SXf := UX + HX;
+      SYf := UY + HY;
+      if FH then SXf := Pic.Width - SXf;
+      if FV then SYf := Pic.Height - SYf;
+      SX := Floor(SXf);
+      SY := Floor(SYf);
+      if (SX >= 0) and (SY >= 0) and (SX < Pic.Width) and (SY < Pic.Height) and
+         (not CropOn or ((CX + UX >= Crop.Left) and (CX + UX < Crop.Right) and (CY + UY >= Crop.Top) and
+         (CY + UY < Crop.Bottom))) and ((Length(Poly) < 3) or InPolygon(Poly, X + 0.5, Y + 0.5)) then
+      begin
+        Src := PPixel(Pic.GetDataLineStart(SY));
+        Inc(Src, SX);
+        A := Src^.A;
+        if A = 255 then
+          Dst^ := Src^
+        else if A > 0 then
+        begin
+          Dst^.R := (Dst^.R * (255 - A) + Src^.R * A) div 255;
+          Dst^.G := (Dst^.G * (255 - A) + Src^.G * A) div 255;
+          Dst^.B := (Dst^.B * (255 - A) + Src^.B * A) div 255;
+          Dst^.A := 255;
+        end;
+      end;
+      Inc(Dst);
     end;
   end;
 end;
@@ -7705,36 +7819,37 @@ begin
   EnsureCanvas;
 end;
 
-function TParadeEdit.StartCanvasPage: Boolean;
+{ a section made a page to draw on: a canvas (Res, or a new empty one) in front of the text from the page's corner,
+  as big as the page, at its start }
+function TParadeEdit.PutPageCanvas(Sec: pd_block_id; Res: pd_res_id): Boolean;
 var
   P: pd_section_props;
   Fp: pd_float_props;
-  Sec, Fl: pd_block_id;
+  Fl: pd_block_id;
   J: TJSONObject;
   S, Xml: string;
-  R0, R: pd_res_id;
+  R0: pd_res_id;
   O: pd_inline;
 begin
   Result := False;
-  if FReadOnly then
+  if pd_doc_section_props(FDoc, Sec, P) <> PD_OK then
     Exit;
-  SetOrientation(True);
-  SetMargins(0, 0, 0, 0);
-  P := CurrentSectionProps;
-  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), 0);
-  Xml := '<wpc:wpc><wpc:bg/><wpc:whole/></wpc:wpc>';
-  J := TJSONObject.Create(['w', Integer(P.page_width), 'h', Integer(P.page_height), 'items', TJSONArray.Create,
-    'kind', 'wpc', 'rels', TJSONObject.Create, 'xml', Xml]);
-  try
-    S := J.AsJSON;
-  finally
-    J.Free;
+  if Res = 0 then
+  begin
+    Xml := '<wpc:wpc><wpc:bg/><wpc:whole/></wpc:wpc>';
+    J := TJSONObject.Create(['w', Integer(P.page_width), 'h', Integer(P.page_height), 'items', TJSONArray.Create,
+      'kind', 'wpc', 'rels', TJSONObject.Create, 'xml', Xml]);
+    try
+      S := J.AsJSON;
+    finally
+      J.Free;
+    end;
+    if (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(S), Length(S), R0) <> PD_OK) or
+       (pd_docx_drawing_rebuild(FDoc, R0, PAnsiChar(Xml), Length(Xml), Res) <> PD_OK) then
+      Exit;
   end;
-  if (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(S), Length(S), R0) <> PD_OK) or
-     (pd_docx_drawing_rebuild(FDoc, R0, PAnsiChar(Xml), Length(Xml), R) <> PD_OK) or
-     (pd_doc_insert_block(FDoc, Sec, 0, PD_BLOCK_FLOAT, Fl) <> PD_OK) then
+  if pd_doc_insert_block(FDoc, Sec, 0, PD_BLOCK_FLOAT, Fl) <> PD_OK then
     Exit;
-  { the canvas in front of the text, from the page's corner, as big as the page }
   pd_doc_float_props(FDoc, Fl, Fp);
   Fp.placement := PD_PLACE_HERE or PD_PLACE_FORCE or PD_PLACE_OFFSET;
   Fp.wrap := PD_WRAP_FRONT;
@@ -7746,10 +7861,20 @@ begin
   pd_doc_set_float_props(FDoc, Fl, Fp);
   FillChar(O, SizeOf(O), 0);
   O.kind := PD_INLINE_IMAGE;
-  O.resource := R;
+  O.resource := Res;
   O.width := P.page_width;
   O.height := P.page_height;
   Result := pd_doc_insert_inline(FDoc, PdPos(pd_doc_child(FDoc, Fl, 0), 0), O, nil) = PD_OK;
+end;
+
+function TParadeEdit.StartCanvasPage: Boolean;
+begin
+  Result := False;
+  if FReadOnly then
+    Exit;
+  SetOrientation(True);
+  SetMargins(0, 0, 0, 0);
+  Result := PutPageCanvas(pd_doc_child(FDoc, pd_doc_root(FDoc), 0), 0);
   pd_doc_clear_undo(FDoc);
   SetLength(FSelUndo, 0);
   SetLength(FSelRedo, 0);
@@ -7758,6 +7883,157 @@ begin
   FCanvasPage := Result;
   FShapeOn := False;
   EnsureCanvas;
+end;
+
+{ ---------------- slides: the canvas pages of a presentation ---------------- }
+
+function TParadeEdit.SlideCount: Integer;
+begin
+  if FCanvasPage then
+    Result := ChildCount(pd_doc_root(FDoc))
+  else
+    Result := 0;
+end;
+
+function TParadeEdit.CurrentSlide: Integer;
+var
+  Sec: pd_block_id;
+  Info: pd_block_info;
+begin
+  Result := -1;
+  if not FCanvasPage then
+    Exit;
+  if FShapeOn then
+    Sec := SectionOf(FDoc, FShapeAt.block)
+  else
+    Sec := SectionOf(FDoc, CaretPos.block);
+  if (Sec <> 0) and (pd_doc_block_info(FDoc, Sec, Info) = PD_OK) then
+    Result := Info.index;
+end;
+
+function TParadeEdit.GoToSlide(Index: Integer): Boolean;
+var
+  P: pd_pos;
+  Pg: Int32;
+  X0, Y0, X1, Y1: Double;
+begin
+  Result := False;
+  if (Index < 0) or (Index >= SlideCount) or
+     not SectionCanvas(FDoc, pd_doc_child(FDoc, pd_doc_root(FDoc), Index), P) then
+    Exit;
+  ClearShapeSelection;
+  SetCaret(P, False);
+  EnsureCanvas;
+  if ShapePageBox(P, -1, Pg, X0, Y0, X1, Y1) then
+  begin   { its page at the top of the view }
+    FScrollY := Max(0, PageTop(Pg) + FScrollY - FPageGap div 2);
+    UpdateScrollBar;
+  end;
+  Invalidate;
+  Result := True;
+end;
+
+function TParadeEdit.NewSlide(After: Integer; Copy: Boolean): Boolean;
+var
+  Src, Sec: pd_block_id;
+  Sp: pd_section_props;
+  P, C: pd_pos;
+  O: pd_inline;
+  J: TJSONObject;
+  Xml: string;
+  R: pd_res_id;
+  Old, New_: TParadeBlockArray;
+  I: Integer;
+begin
+  Result := False;
+  if FReadOnly or not FCanvasPage or (After < -1) or (After >= SlideCount) then
+    Exit;
+  Src := pd_doc_child(FDoc, pd_doc_root(FDoc), Max(0, After));
+  if pd_doc_section_props(FDoc, Src, Sp) <> PD_OK then
+    Exit;
+  R := 0;
+  Old := nil;
+  if Copy and SectionCanvas(FDoc, Src, C) and (pd_doc_inline_at(FDoc, C, O) = PD_OK) then
+  begin   { its canvas made again from its XML: the same shapes, text boxes of their own (their text copied below) }
+    J := DrawingJson(FDoc, C);
+    if J <> nil then
+      try
+        Xml := J.Get('xml', '');
+      finally
+        J.Free;
+      end;
+    { every text box marked new (story -1): stories of their own, not the slide's }
+    Xml := StringReplace(MarkTextBoxes(Xml), '<!--pd-story:', '<!--pd-story:-1', [rfReplaceAll]);
+    if (Xml = '') or (pd_docx_drawing_rebuild(FDoc, O.resource, PAnsiChar(Xml), Length(Xml), R) <> PD_OK) then
+      R := 0;
+    Old := ResStories(FDoc, O.resource);
+  end;
+  PushShapeStep(IfThen(Copy, 'Duplicate slide', 'New slide'), FShapeAt);
+  pd_doc_begin_group(FDoc, PAnsiChar(IfThen(Copy, 'Duplicate slide', 'New slide')));
+  try
+    if pd_doc_insert_block(FDoc, pd_doc_root(FDoc), After + 1, PD_BLOCK_SECTION, Sec) <> PD_OK then
+      Exit;
+    pd_doc_set_section_props(FDoc, Sec, Sp);
+    Result := PutPageCanvas(Sec, R);
+    if Result and (R <> 0) then
+    begin   { the copies' text boxes: the text the slide's have now }
+      New_ := ResStories(FDoc, R);
+      for I := 0 to Min(High(Old), High(New_)) do
+        FillStory(New_[I], StoryData(Old[I]));
+    end;
+  finally
+    pd_doc_end_group(FDoc);
+  end;
+  Changed;
+  if Result then
+    GoToSlide(After + 1);
+  if SectionCanvas(FDoc, Sec, P) then
+    FShapeAt := P;
+end;
+
+function TParadeEdit.DeleteSlide(Index: Integer): Boolean;
+var
+  Sec: pd_block_id;
+  P: pd_pos;
+begin
+  Result := False;
+  if FReadOnly or (SlideCount < 2) or (Index < 0) or (Index >= SlideCount) then
+    Exit;
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
+  ClearShapeSelection;
+  if SectionCanvas(FDoc, Sec, P) then
+    PushShapeStep('Delete slide', P);
+  SetCaret(PdPos(FirstPara, 0), False);
+  pd_doc_begin_group(FDoc, 'Delete slide');
+  try
+    if SectionCanvas(FDoc, Sec, P) then
+      DropStories(StoriesInRange(P, PdPos(P.block, P.offset + 3)), nil);
+    Result := pd_doc_remove_block(FDoc, Sec) = PD_OK;
+  finally
+    pd_doc_end_group(FDoc);
+  end;
+  Changed;
+  GoToSlide(Min(Index, SlideCount - 1));
+end;
+
+function TParadeEdit.MoveSlide(Index, ToIndex: Integer): Boolean;
+var
+  Sec: pd_block_id;
+begin
+  Result := False;
+  if FReadOnly or (Index < 0) or (Index >= SlideCount) or (ToIndex < 0) or (ToIndex >= SlideCount) or
+     (Index = ToIndex) then
+    Exit;
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
+  PushShapeStep('Move slide', FShapeAt);
+  pd_doc_begin_group(FDoc, 'Move slide');
+  try
+    Result := pd_doc_move_block(FDoc, Sec, pd_doc_root(FDoc), ToIndex) = PD_OK;
+  finally
+    pd_doc_end_group(FDoc);
+  end;
+  Changed;
+  GoToSlide(ToIndex);
 end;
 
 function TParadeEdit.ResizeObject(W, H: pd_sp): Boolean;
@@ -12121,6 +12397,7 @@ var
   Bands: array of TSelBand;
   NB, K: Integer;
   Rings: TRings;
+  Poly: TPtDArray;
   Info: pd_page_info;
   Items: array of pd_draw;
   N, I, PW, PH, IX, IY, Sub: Integer;
@@ -12283,7 +12560,24 @@ begin
             IX := OX + Round(x * PxScale);
             IY := OY + Round(y * PxScale);
             Pic := GetPicture(resource, OX + Round((x + w) * PxScale) - IX, OY + Round((y + h) * PxScale) - IY);
-            if (Pic <> nil) and (clip_w > 0) then   { cropped: only its frame }
+            if (Pic <> nil) and ((rotation <> 0) or (flip <> 0) or (clip_npoints >= 3)) then
+            begin   { turned, flipped, cut to its shape: a pixel at a time }
+              SetLength(Poly, Max(0, clip_npoints));
+              for K := 0 to clip_npoints - 1 do
+              begin
+                Poly[K].X := OX + clip_points[2 * K] * PxScale;
+                Poly[K].Y := OY + clip_points[2 * K + 1] * PxScale;
+              end;
+              if clip_w > 0 then
+                BlendPictureEx(Img, Pic, OX + (clip_x + clip_w / 2) * PxScale, OY + (clip_y + clip_h / 2) * PxScale,
+                  rotation / 60000, (flip and PD_FLIP_H) <> 0, (flip and PD_FLIP_V) <> 0, True,
+                  Rect(OX + Round(clip_x * PxScale), OY + Round(clip_y * PxScale), OX + Round((clip_x + clip_w) * PxScale),
+                  OY + Round((clip_y + clip_h) * PxScale)), Poly)
+              else
+                BlendPictureEx(Img, Pic, OX + (x + w / 2) * PxScale, OY + (y + h / 2) * PxScale, rotation / 60000,
+                  (flip and PD_FLIP_H) <> 0, (flip and PD_FLIP_V) <> 0, False, Rect(0, 0, 0, 0), Poly);
+            end
+            else if (Pic <> nil) and (clip_w > 0) then   { cropped: only its frame }
               BlendPicture(Img, Pic, IX, IY, OX + Round(clip_x * PxScale), OY + Round(clip_y * PxScale),
                 OX + Round((clip_x + clip_w) * PxScale), OY + Round((clip_y + clip_h) * PxScale))
             else if Pic <> nil then
@@ -12316,7 +12610,9 @@ begin
                 Rings[High(Rings)][High(Rings[High(Rings)])].X := OX + points[2 * K] * PxScale;
                 Rings[High(Rings)][High(Rings[High(Rings)])].Y := OY + points[2 * K + 1] * PxScale;
               end;
-            if fill <> 0 then
+            if (fill <> 0) and (grad > 0) and (fill2 <> 0) then
+              FillRingsImg(Img, Rings, fill, fill2, grad, grad_angle / 60000)
+            else if fill <> 0 then
               FillRingsImg(Img, Rings, fill);
             if (line_width > 0) and (color <> 0) then
               for K := 0 to High(Rings) do

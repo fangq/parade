@@ -1025,7 +1025,7 @@ var
   Info: pd_page_info;
   A, B: TPoint;
   Sp: pd_section_props;
-  Dir: string;
+  Dir, Xml: string;
 begin
   Dir := ExtractFilePath(ParamStr(0));
   E.LoadFromFile(Dir + '../../tests/data/slides.pptx');
@@ -1047,6 +1047,22 @@ begin
   pd_layout_page_info(E.Layout, 0, Info);
   Check((Abs(Info.width - 648 * K) < 2 * K) and E.CanvasPage, Format('a slide''s corner dragged: every slide ' +
     'narrower (%.1f)', [Info.width / K]));
+  { slides added, copied, moved, deleted }
+  Check((E.SlideCount = 2) and E.GoToSlide(1) and (E.CurrentSlide = 1), 'the second slide gone to');
+  Check(E.NewSlide(0) and (E.SlideCount = 3) and (E.CurrentSlide = 1) and E.SelectedShape(D, Sid) and
+    (Length(E.DrawingShapes(D)) = 0), 'a new slide after the first: blank, the one being edited');
+  E.Undo;
+  Check(E.SlideCount = 2, 'undone');
+  N0 := pd_doc_story_count(E.Doc);
+  Check(E.NewSlide(0, True) and (E.SlideCount = 3) and E.CanvasPagePos(C) and
+    (Length(E.DrawingShapes(C)) = N0 * 0 + Length(E.DrawingShapes(C))) and
+    (pd_doc_story_count(E.Doc) > N0), 'the first slide copied: its text boxes of their own');
+  Xml := '';
+  for Sid := 0 to pd_doc_story_count(E.Doc) - 1 do
+    Xml := Xml + '|' + E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, Sid), 0));
+  Check(Pos('Hello Slides', Copy(Xml, Pos('Hello Slides', Xml) + 1, MaxInt)) > 0, 'with their text');
+  Check(E.MoveSlide(1, 2) and (E.CurrentSlide = 2), 'the copy moved last');
+  Check(E.DeleteSlide(2) and (E.SlideCount = 2) and (pd_doc_story_count(E.Doc) = N0), 'deleted: its stories too');
   E.SaveToFile(Dir + 'edit_slides.pdoc');
   E.LoadFromFile(Dir + 'edit_slides.pdoc');
   Check(E.CanvasPage and (E.PageCount = 2), 'saved as a Parade document: still its slides');
