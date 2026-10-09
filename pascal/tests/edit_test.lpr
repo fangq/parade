@@ -1015,6 +1015,43 @@ begin
   Check(not E.CanvasPage, 'a new document: no canvas page');
 end;
 
+{ a PowerPoint file opened: each slide a canvas page, its shapes there to edit; the slides sized together }
+procedure TestSlides(E: TParadeEdit);
+const
+  K = PD_SP_PER_PT;
+var
+  D, C: pd_pos;
+  Sid, N0: Integer;
+  Info: pd_page_info;
+  A, B: TPoint;
+  Sp: pd_section_props;
+  Dir: string;
+begin
+  Dir := ExtractFilePath(ParamStr(0));
+  E.LoadFromFile(Dir + '../../tests/data/slides.pptx');
+  Check(E.CanvasPage and (E.PageCount = 2), 'a presentation opened: its slides canvas pages');
+  Check(E.SelectedShape(D, Sid) and (Sid = -1) and E.CanvasPagePos(C) and (C.block = D.block),
+    'the first slide''s canvas, ready to draw in');
+  N0 := Length(E.DrawingShapes(D));
+  Check(N0 >= 6, Format('its shapes, the master''s too (%d)', [N0]));
+  Check(E.AddShape('star5', 100 * K, 250 * K, 160 * K, 300 * K) and (Length(E.DrawingShapes(D)) = N0 + 1),
+    'a shape drawn on it');
+  E.ProcessKey(VK_ESCAPE, []);
+  pd_layout_page_info(E.Layout, 1, Info);
+  A := E.PageToClient(1, Info.width / K, Info.height / K);    { the second slide's corner }
+  B := Point(A.X - Round(72 * E.Zoom * 96 / 72), A.Y);
+  TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+  TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y);
+  Sp := E.CurrentSectionProps;
+  pd_layout_page_info(E.Layout, 0, Info);
+  Check((Abs(Info.width - 648 * K) < 2 * K) and E.CanvasPage, Format('a slide''s corner dragged: every slide ' +
+    'narrower (%.1f)', [Info.width / K]));
+  E.SaveToFile(Dir + 'edit_slides.pdoc');
+  E.LoadFromFile(Dir + 'edit_slides.pdoc');
+  Check(E.CanvasPage and (E.PageCount = 2), 'saved as a Parade document: still its slides');
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -2304,6 +2341,7 @@ begin
   TestSnap(E);
   TestWrap(E);
   TestCanvasPage(E);
+  TestSlides(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

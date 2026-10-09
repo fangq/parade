@@ -155,6 +155,7 @@ type
     FGuideX, FGuideY: array of Double;   { a drag snapped to these: lines shown across the canvas (its units) }
     FSnapShapes: Boolean;          { a drag snaps to the other shapes' edges and middles, and the canvas's }
     FCanvasPage: Boolean;          { the document is a page to draw on: its page a canvas, not an object to select }
+    FCornerPage: Integer;          { the page whose corner is dragged }
     FSnapGrid: Double;             { and to a grid this many points apart (0: none) }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
     FFrameKey: string;             { the text box the caret is in, as last looked up: story and revision }
@@ -549,8 +550,10 @@ type
     { the document is such a page: its page a canvas, the canvas not selected as an object, the page's corner
       dragged to size both }
     property CanvasPage: Boolean read FCanvasPage;
-    { the canvas page's canvas: its object's place }
+    { the canvas page's canvas: its object's place (the page the caret is on, of several) }
     function CanvasPagePos(out P: pd_pos): Boolean;
+    { the object at P is a canvas page's canvas }
+    function IsPageCanvas(const P: pd_pos): Boolean;
 
     { the canvas page (and its canvas) made W by H (sp); one step of undo }
     function ResizeCanvasPage(W, H: pd_sp): Boolean;
@@ -835,20 +838,24 @@ type
 
 { a picture onto the page at X, Y, over what is there by its alpha }
 { a picture in the page's pixel layout onto the page: opaque runs copied, the rest blended }
-procedure BlendPicture(Img, Pic: TLazIntfImage; X, Y: Integer);
+{ a picture over the page's pixels at X, Y; only within the clip (a cropped picture's frame) when it has one }
+procedure BlendPicture(Img, Pic: TLazIntfImage; X, Y: Integer; CL: Integer = Low(Integer); CT: Integer = Low(Integer);
+  CR: Integer = High(Integer); CB: Integer = High(Integer));
 var
   PX, PY, A, X0, X1: Integer;
   Src, Dst: PPixel;
 begin
   X0 := 0;
   if X < 0 then X0 := -X;
+  if X + X0 < CL then X0 := CL - X;
   X1 := Pic.Width;
   if X + X1 > Img.Width then X1 := Img.Width - X;
+  if X + X1 > CR then X1 := CR - X;
   if X1 <= X0 then
     Exit;
   for PY := 0 to Pic.Height - 1 do
   begin
-    if (Y + PY < 0) or (Y + PY >= Img.Height) then
+    if (Y + PY < 0) or (Y + PY >= Img.Height) or (Y + PY < CT) or (Y + PY >= CB) then
       Continue;
     Src := PPixel(Pic.GetDataLineStart(PY));
     Inc(Src, X0);
@@ -1262,6 +1269,7 @@ begin
   if E = '.tex' then Exit(PD_CONV_LATEX);
   if E = '.rtf' then Exit(PD_CONV_RTF);
   if E = '.docx' then Exit(PD_CONV_DOCX);
+  if E = '.pptx' then Exit(PD_CONV_PPTX);
   if E = '.txt' then Exit(PD_CONV_TEXT);
   if (E = '.pdoc') or (E = '.jdoc') then Exit(PD_CONV_JDATA);
   Result := -1;
@@ -7473,67 +7481,93 @@ begin
 end;
 
 procedure TParadeEdit.SelectObject(const P: pd_pos);
-var
-  C: pd_pos;
 begin
-  if CanvasPagePos(C) and (C.block = P.block) and (C.offset = P.offset) then
+  if IsPageCanvas(P) then
     SetCaret(P, False)    { the page's canvas: never taken as text }
   else
     SelectRange(PdRange(P, PdPos(P.block, P.offset + 3)));
 end;
 
+{ a section that is a page to draw on: no margins, its first block a canvas in front of the text from the page's
+  corner; its canvas's place }
+function SectionCanvas(Doc: Ppd_doc; Sec: pd_block_id; out P: pd_pos): Boolean;
+var
+  Fl, Para: pd_block_id;
+  Info: pd_block_info;
+  Sp: pd_section_props;
+  Fp: pd_float_props;
+  O: pd_inline;
+  J: TJSONObject;
+begin
+  Result := False;
+  P := PdPos(0, 0);
+  Fl := pd_doc_child(Doc, Sec, 0);
+  if (pd_doc_section_props(Doc, Sec, Sp) <> PD_OK) or (Sp.margin_left <> 0) or (Sp.margin_top <> 0) or
+     (pd_doc_block_info(Doc, Fl, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_FLOAT) or
+     (pd_doc_float_props(Doc, Fl, Fp) <> PD_OK) or (Fp.wrap <> PD_WRAP_FRONT) or
+     (Fp.offset_from <> PD_FROM_PAGE) then
+    Exit;
+  Para := pd_doc_child(Doc, Fl, 0);
+  if (pd_doc_inline_at(Doc, PdPos(Para, 0), O) <> PD_OK) or (O.kind <> PD_INLINE_IMAGE) then
+    Exit;
+  J := DrawingJson(Doc, PdPos(Para, 0));
+  if J = nil then
+    Exit;
+  try
+    Result := (J.Find('xml') <> nil) and (Pos('<wpc:wpc', J.Get('xml', '')) > 0);
+  finally
+    J.Free;
+  end;
+  if Result then
+    P := PdPos(Para, 0);
+end;
+
+{ the section a block is in }
+function SectionOf(Doc: Ppd_doc; B: pd_block_id): pd_block_id;
+var
+  Info: pd_block_info;
+begin
+  Result := 0;
+  while (B <> 0) and (pd_doc_block_info(Doc, B, Info) = PD_OK) do
+  begin
+    if Info.kind = PD_BLOCK_SECTION then
+      Exit(B);
+    B := Info.parent;
+  end;
+end;
+
 function TParadeEdit.CanvasPagePos(out P: pd_pos): Boolean;
 var
-  Sec, Fl, Para: pd_block_id;
-  Info: pd_block_info;
-  O: pd_inline;
+  Sec: pd_block_id;
 begin
   Result := False;
   P := PdPos(0, 0);
   if not FCanvasPage then
     Exit;
-  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), 0);
-  Fl := pd_doc_child(FDoc, Sec, 0);
-  if (pd_doc_block_info(FDoc, Fl, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_FLOAT) then
-    Exit;
-  Para := pd_doc_child(FDoc, Fl, 0);
-  Result := (pd_doc_inline_at(FDoc, PdPos(Para, 0), O) = PD_OK) and (O.kind = PD_INLINE_IMAGE);
-  if Result then
-    P := PdPos(Para, 0);
+  Sec := SectionOf(FDoc, CaretPos.block);     { the page the caret is on; else the first }
+  if (Sec = 0) or not SectionCanvas(FDoc, Sec, P) then
+    Result := SectionCanvas(FDoc, pd_doc_child(FDoc, pd_doc_root(FDoc), 0), P)
+  else
+    Result := True;
+end;
+
+function TParadeEdit.IsPageCanvas(const P: pd_pos): Boolean;
+var
+  C: pd_pos;
+begin
+  Result := FCanvasPage and SectionCanvas(FDoc, SectionOf(FDoc, P.block), C) and (C.block = P.block) and
+    (C.offset = P.offset);
 end;
 
 function TParadeEdit.DetectCanvasPage: Boolean;
 var
-  Sec, Fl: pd_block_id;
-  Info: pd_block_info;
-  Sp: pd_section_props;
-  Fp: pd_float_props;
+  I, N: Integer;
   P: pd_pos;
-  J: TJSONObject;
 begin
-  Result := False;
-  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), 0);
-  Fl := pd_doc_child(FDoc, Sec, 0);
-  if (pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK) or (Sp.margin_left <> 0) or (Sp.margin_top <> 0) or
-     (pd_doc_block_info(FDoc, Fl, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_FLOAT) or
-     (pd_doc_float_props(FDoc, Fl, Fp) <> PD_OK) or (Fp.wrap <> PD_WRAP_FRONT) or
-     (Fp.offset_from <> PD_FROM_PAGE) then
-    Exit;
-  FCanvasPage := True;     { for CanvasPagePos }
-  try
-    if not CanvasPagePos(P) then
-      Exit;
-    J := DrawingJson(FDoc, P);
-    if J = nil then
-      Exit;
-    try
-      Result := (J.Find('xml') <> nil) and (Pos('<wpc:wpc', J.Get('xml', '')) > 0);
-    finally
-      J.Free;
-    end;
-  finally
-    FCanvasPage := Result;
-  end;
+  N := ChildCount(pd_doc_root(FDoc));
+  Result := N > 0;
+  for I := 0 to N - 1 do    { every page one to draw on (a slide each) }
+    Result := Result and SectionCanvas(FDoc, pd_doc_child(FDoc, pd_doc_root(FDoc), I), P);
 end;
 
 procedure TParadeEdit.EnsureCanvas;
@@ -7558,40 +7592,53 @@ end;
 function TParadeEdit.OnPageCorner(X, Y: Integer): Boolean;
 var
   Info: pd_page_info;
-  CX, CY: Integer;
+  CX, CY, Pg: Integer;
 begin
   Result := False;
-  if not FCanvasPage or FReadOnly or (PageCount = 0) then
+  if not FCanvasPage or FReadOnly then
     Exit;
-  pd_layout_page_info(FLayout, 0, Info);
-  CX := PageLeft(0) + Round(Info.width * PxPerSp);
-  CY := PageTop(0) + Round(Info.height * PxPerSp);
-  Result := (Abs(X - CX) <= 7) and (Abs(Y - CY) <= 7);
+  for Pg := 0 to PageCount - 1 do
+  begin
+    pd_layout_page_info(FLayout, Pg, Info);
+    CX := PageLeft(Pg) + Round(Info.width * PxPerSp);
+    CY := PageTop(Pg) + Round(Info.height * PxPerSp);
+    if (Abs(X - CX) <= 7) and (Abs(Y - CY) <= 7) then
+    begin
+      FCornerPage := Pg;
+      Exit(True);
+    end;
+  end;
 end;
 
 { the canvas page's corner: a handle to size it by; as dragged, the page it would make }
 procedure TParadeEdit.PaintPageCorner;
 var
   Info: pd_page_info;
-  CX, CY: Integer;
+  CX, CY, Pg: Integer;
 begin
-  if not FCanvasPage or FReadOnly or (PageCount = 0) then
+  if not FCanvasPage or FReadOnly then
     Exit;
-  pd_layout_page_info(FLayout, 0, Info);
-  CX := PageLeft(0) + Round(Info.width * PxPerSp);
-  CY := PageTop(0) + Round(Info.height * PxPerSp);
-  Canvas.Pen.Color := $00D77800;
-  Canvas.Pen.Style := psSolid;
-  Canvas.Pen.Width := 1;
-  Canvas.Brush.Style := bsSolid;
-  Canvas.Brush.Color := clWhite;
-  Canvas.Rectangle(CX - 5, CY - 5, CX + 1, CY + 1);
-  Canvas.Line(CX - 3, CY - 1, CX - 1, CY - 3);
+  for Pg := 0 to PageCount - 1 do
+  begin
+    pd_layout_page_info(FLayout, Pg, Info);
+    CX := PageLeft(Pg) + Round(Info.width * PxPerSp);
+    CY := PageTop(Pg) + Round(Info.height * PxPerSp);
+    if (CY < -10) or (CY - Round(Info.height * PxPerSp) > ClientHeight + 10) then
+      Continue;   { not in view }
+    Canvas.Pen.Color := $00D77800;
+    Canvas.Pen.Style := psSolid;
+    Canvas.Pen.Width := 1;
+    Canvas.Brush.Style := bsSolid;
+    Canvas.Brush.Color := clWhite;
+    Canvas.Rectangle(CX - 5, CY - 5, CX + 1, CY + 1);
+    Canvas.Line(CX - 3, CY - 1, CX - 1, CY - 3);
+  end;
   if FShapeDrag = 16 then
   begin
     Canvas.Brush.Style := bsClear;
     Canvas.Pen.Style := psDash;
-    Canvas.Rectangle(PageLeft(0), PageTop(0), Max(PageLeft(0) + 20, FBandTo.X) + 1, Max(PageTop(0) + 20, FBandTo.Y) + 1);
+    Canvas.Rectangle(PageLeft(FCornerPage), PageTop(FCornerPage), Max(PageLeft(FCornerPage) + 20, FBandTo.X) + 1,
+      Max(PageTop(FCornerPage) + 20, FBandTo.Y) + 1);
     Canvas.Pen.Style := psSolid;
   end;
 end;
@@ -7608,42 +7655,48 @@ var
   J: TJSONObject;
   R: pd_res_id;
   S: string;
+  I: Integer;
+  Lbl: TParadeShapeStep;
 begin
   Result := False;
   W := Max(W, Round(144 * PD_SP_PER_PT));     { two inches at least }
   H := Max(H, Round(144 * PD_SP_PER_PT));
-  if FReadOnly or not CanvasPagePos(P) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or (O.width <= 0) or
-     (O.height <= 0) or (pd_doc_block_info(FDoc, P.block, Info) <> PD_OK) then
+  if FReadOnly or not CanvasPagePos(P) then
     Exit;
-  KeepInlineText(O, Keep);
-  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), 0);
-  if (pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK) or (pd_doc_float_props(FDoc, Info.parent, Fp) <> PD_OK) then
-    Exit;
-  J := DrawingJson(FDoc, P);
-  if J = nil then
-    Exit;
-  try
-    J.Integers['w'] := Max(1, Round(J.Get('w', 0.0) * W / O.width));    { its room, its shapes as they are }
-    J.Integers['h'] := Max(1, Round(J.Get('h', 0.0) * H / O.height));
-    S := J.AsJSON;
-  finally
-    J.Free;
-  end;
-  if pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(S), Length(S), R) <> PD_OK then
-    Exit;
-  O.resource := R;
-  O.width := W;
-  O.height := H;
   PushShapeStep('Page size', P);
   pd_doc_begin_group(FDoc, 'Page size');
   try
-    Sp.page_width := W;
-    Sp.page_height := H;
-    pd_doc_set_section_props(FDoc, Sec, Sp);
-    Fp.width := W;
-    pd_doc_set_float_props(FDoc, Info.parent, Fp);
-    pd_doc_delete(FDoc, PdRange(P, PdPos(P.block, P.offset + 3)), nil);
-    Result := pd_doc_insert_inline(FDoc, P, O, nil) = PD_OK;
+    for I := 0 to ChildCount(pd_doc_root(FDoc)) - 1 do
+    begin   { every page (each slide) as big, its canvas with it, its shapes as they are }
+      Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), I);
+      if not SectionCanvas(FDoc, Sec, P) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or (O.width <= 0) or
+         (O.height <= 0) or (pd_doc_block_info(FDoc, P.block, Info) <> PD_OK) or
+         (pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK) or (pd_doc_float_props(FDoc, Info.parent, Fp) <> PD_OK) then
+        Continue;
+      KeepInlineText(O, Keep);
+      J := DrawingJson(FDoc, P);
+      if J = nil then
+        Continue;
+      try
+        J.Integers['w'] := Max(1, Round(J.Get('w', 0.0) * W / O.width));
+        J.Integers['h'] := Max(1, Round(J.Get('h', 0.0) * H / O.height));
+        S := J.AsJSON;
+      finally
+        J.Free;
+      end;
+      if pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(S), Length(S), R) <> PD_OK then
+        Continue;
+      O.resource := R;
+      O.width := W;
+      O.height := H;
+      Sp.page_width := W;
+      Sp.page_height := H;
+      pd_doc_set_section_props(FDoc, Sec, Sp);
+      Fp.width := W;
+      pd_doc_set_float_props(FDoc, Info.parent, Fp);
+      pd_doc_delete(FDoc, PdRange(P, PdPos(P.block, P.offset + 3)), nil);
+      Result := (pd_doc_insert_inline(FDoc, P, O, nil) = PD_OK) or Result;
+    end;
   finally
     pd_doc_end_group(FDoc);
   end;
@@ -11844,7 +11897,7 @@ begin
     if D = 16 then
     begin   { the canvas page's corner dropped: the page and its canvas that big }
       if Moved then
-        ResizeCanvasPage(Round((X - PageLeft(0)) / PxPerSp), Round((Y - PageTop(0)) / PxPerSp));
+        ResizeCanvasPage(Round((X - PageLeft(FCornerPage)) / PxPerSp), Round((Y - PageTop(FCornerPage)) / PxPerSp));
     end
     else if D = 15 then
     begin   { a connector's end: on the site it is dropped by, or just there }
@@ -12230,7 +12283,10 @@ begin
             IX := OX + Round(x * PxScale);
             IY := OY + Round(y * PxScale);
             Pic := GetPicture(resource, OX + Round((x + w) * PxScale) - IX, OY + Round((y + h) * PxScale) - IY);
-            if Pic <> nil then
+            if (Pic <> nil) and (clip_w > 0) then   { cropped: only its frame }
+              BlendPicture(Img, Pic, IX, IY, OX + Round(clip_x * PxScale), OY + Round(clip_y * PxScale),
+                OX + Round((clip_x + clip_w) * PxScale), OY + Round((clip_y + clip_h) * PxScale))
+            else if Pic <> nil then
               BlendPicture(Img, Pic, IX, IY)
             else
             begin   { not loaded, or not a picture: a frame in its place }
