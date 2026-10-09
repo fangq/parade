@@ -133,6 +133,9 @@ int main(void) {
     printf("pd_char_props.size_cs %zu\n", offsetof(pd_char_props, size_cs));
     printf("pd_char_props.weight_cs %zu\n", offsetof(pd_char_props, weight_cs));
     printf("pd_char_props.italic_cs %zu\n", offsetof(pd_char_props, italic_cs));
+    printf("pd_char_props.color_theme %zu\n", offsetof(pd_char_props, color_theme));
+    printf("pd_char_props.background_theme %zu\n", offsetof(pd_char_props, background_theme));
+    printf("pd_char_props.font_theme %zu\n", offsetof(pd_char_props, font_theme));
     printf("pd_revision %zu\n", sizeof(pd_revision));
     printf("pd_revision.kind %zu\n", offsetof(pd_revision, kind));
     printf("pd_revision.author %zu\n", offsetof(pd_revision, author));
@@ -173,6 +176,8 @@ int main(void) {
     printf("pd_para_props.border_sides %zu\n", offsetof(pd_para_props, border_sides));
     printf("pd_para_props.border_space %zu\n", offsetof(pd_para_props, border_space));
     printf("pd_para_props.snap_grid %zu\n", offsetof(pd_para_props, snap_grid));
+    printf("pd_para_props.border_theme %zu\n", offsetof(pd_para_props, border_theme));
+    printf("pd_para_props.shading_theme %zu\n", offsetof(pd_para_props, shading_theme));
     printf("pd_tab_stop %zu\n", sizeof(pd_tab_stop));
     printf("pd_tab_stop.position %zu\n", offsetof(pd_tab_stop, position));
     printf("pd_tab_stop.align %zu\n", offsetof(pd_tab_stop, align));
@@ -282,6 +287,7 @@ int main(void) {
     printf("pd_table_props.border_sides %zu\n", offsetof(pd_table_props, border_sides));
     printf("pd_table_props.cell_padding_v %zu\n", offsetof(pd_table_props, cell_padding_v));
     printf("pd_table_props.direction %zu\n", offsetof(pd_table_props, direction));
+    printf("pd_table_props.border_theme %zu\n", offsetof(pd_table_props, border_theme));
     printf("pd_cell_props %zu\n", sizeof(pd_cell_props));
     printf("pd_cell_props.col_span %zu\n", offsetof(pd_cell_props, col_span));
     printf("pd_cell_props.valign %zu\n", offsetof(pd_cell_props, valign));
@@ -293,6 +299,17 @@ int main(void) {
     printf("pd_cell_props.border_width %zu\n", offsetof(pd_cell_props, border_width));
     printf("pd_cell_props.border_color %zu\n", offsetof(pd_cell_props, border_color));
     printf("pd_cell_props.edge_width %zu\n", offsetof(pd_cell_props, edge_width));
+    printf("pd_cell_props.background_theme %zu\n", offsetof(pd_cell_props, background_theme));
+    printf("pd_cell_props.border_theme %zu\n", offsetof(pd_cell_props, border_theme));
+    printf("pd_theme %zu\n", sizeof(pd_theme));
+    printf("pd_theme.name %zu\n", offsetof(pd_theme, name));
+    printf("pd_theme.color %zu\n", offsetof(pd_theme, color));
+    printf("pd_theme.major %zu\n", offsetof(pd_theme, major));
+    printf("pd_theme.minor %zu\n", offsetof(pd_theme, minor));
+    printf("pd_theme.major_ea %zu\n", offsetof(pd_theme, major_ea));
+    printf("pd_theme.minor_ea %zu\n", offsetof(pd_theme, minor_ea));
+    printf("pd_theme.major_cs %zu\n", offsetof(pd_theme, major_cs));
+    printf("pd_theme.minor_cs %zu\n", offsetof(pd_theme, minor_cs));
     printf("pd_change %zu\n", sizeof(pd_change));
     printf("pd_change.kind %zu\n", offsetof(pd_change, kind));
     printf("pd_change.block %zu\n", offsetof(pd_change, block));

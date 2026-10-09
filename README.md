@@ -34,6 +34,14 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   caption, quote, code, equation, …) and a style; lists are separate.
 - **Styles**: named paragraph and character styles with inheritance;
   direct formatting is interned as style + overrides, so runs are ids.
+- **Theme**: a document has an Office theme (`pd_theme`: twelve colours,
+  heading and body fonts per script; `pd_doc_set_theme`, undoable). Colours
+  of text, shading, borders and cells, and font families, can be linked to
+  it (`color_theme`, `font_theme`, ...: `pd_theme_color(slot, lumMod,
+  lumOff)`), and resolved properties follow the theme when it changes. Links
+  come from .docx (`w:themeColor`/tint/shade, `w:asciiTheme`) and .pptx
+  (`schemeClr`, `+mj-lt`), are kept in Parade's format and collaboration, and
+  go back to .docx with a theme part patched to the theme as it is now.
 - **Inline objects** (images, equations, fields, footnote marks, links,
   bookmarks, tabs) occupy U+FFFC, so document and layout offsets agree.
 - **Editing**: every change is an operation recording its inverse —

@@ -419,6 +419,69 @@ static const char* dx_u_name(int32_t u) {
     return u >= 0 && u <= PD_UNDERLINE_WORDS ? names[u] : "single";
 }
 
+/* a theme colour reference as Word's attributes: w:themeColor (w:themeFill with fill), its tint or shade */
+void pd_conv_theme_attr(pd_buf* o, uint32_t ref, int fill) {
+    static const char* const names[PD_THEME_COLORS] = { "text1", "background1", "text2", "background2", "accent1",
+                                                        "accent2", "accent3", "accent4", "accent5", "accent6",
+                                                        "hyperlink", "followedHyperlink"
+                                                      };
+    int32_t slot, lm, lo;
+    double mul, add;
+
+    if (!pd_theme_color_parts(ref, &slot, &lm, &lo)) {
+        return;
+    }
+
+    mul = lm / 100000.0;
+    add = lo / 100000.0;
+    pb_printf(o, fill ? " w:themeFill=\"%s\"" : " w:themeColor=\"%s\"", names[slot]);
+
+    if (add > 0.0005) {     /* a tint (toward white), shaded after when the two do not add up to one */
+        double sh = mul + add > 0.9995 ? 1 : mul + add, t = mul / (sh > 0 ? sh : 1);
+
+        pb_printf(o, fill ? " w:themeFillTint=\"%02X\"" : " w:themeTint=\"%02X\"", (unsigned)(t * 255 + 0.5));
+
+        if (sh < 1) {
+            pb_printf(o, fill ? " w:themeFillShade=\"%02X\"" : " w:themeShade=\"%02X\"", (unsigned)(sh * 255 + 0.5));
+        }
+    } else if (mul < 0.9995) {
+        pb_printf(o, fill ? " w:themeFillShade=\"%02X\"" : " w:themeShade=\"%02X\"",
+                  (unsigned)((mul < 0 ? 0 : mul > 1 ? 1 : mul) * 255 + 0.5));
+    }
+}
+
+#define dx_theme_attr pd_conv_theme_attr
+
+static void dx_color(pd_buf* o, uint32_t rgb, uint32_t ref) {
+    pb_printf(o, "<w:color w:val=\"%06X\"", (unsigned)(rgb & 0xFFFFFF));
+    dx_theme_attr(o, ref, 0);
+    pb_puts(o, "/>");
+}
+
+static void dx_shd(pd_buf* o, uint32_t rgb, uint32_t ref) {
+    pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"", (unsigned)(rgb & 0xFFFFFF));
+    dx_theme_attr(o, ref, 1);
+    pb_puts(o, "/>");
+}
+
+/* the theme's fonts a family is linked to, as w:rFonts attributes */
+static void dx_font_theme_attr(pd_buf* o, int32_t ft) {
+    int t = PD_FONT_THEME_TEXT(ft), e = PD_FONT_THEME_EA(ft), c = PD_FONT_THEME_CS(ft);
+
+    if (t) {
+        pb_printf(o, " w:asciiTheme=\"%sHAnsi\" w:hAnsiTheme=\"%sHAnsi\"", t == 1 ? "major" : "minor",
+                  t == 1 ? "major" : "minor");
+    }
+
+    if (e) {
+        pb_printf(o, " w:eastAsiaTheme=\"%sEastAsia\"", e == 1 ? "major" : "minor");
+    }
+
+    if (c) {
+        pb_printf(o, " w:cstheme=\"%sBidi\"", c == 1 ? "major" : "minor");
+    }
+}
+
 static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const char* rstyle) {
     pd_buf* o = x->o;
     size_t mark;
@@ -434,8 +497,9 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
     if (mono) {
         pb_puts(o, "<w:rFonts w:ascii=\"Courier New\" w:hAnsi=\"Courier New\" w:cs=\"Courier New\"/>");
     } else if ((strcmp(c->family, b->family) && c->family[0]) || strcmp(c->family_ea, b->family_ea) ||
-               strcmp(c->family_cs, b->family_cs)) {
-        int lat = strcmp(c->family, b->family) && c->family[0];
+               strcmp(c->family_cs, b->family_cs) || c->font_theme != b->font_theme) {
+        int lat = (strcmp(c->family, b->family) || PD_FONT_THEME_TEXT(c->font_theme) !=
+                   PD_FONT_THEME_TEXT(b->font_theme)) && c->family[0];
 
         pb_puts(o, "<w:rFonts");
 
@@ -459,6 +523,9 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
             pb_putc(o, '"');
         }
 
+        dx_font_theme_attr(o, PD_FONT_THEME(lat ? PD_FONT_THEME_TEXT(c->font_theme) : 0,
+                                            c->family_ea[0] ? PD_FONT_THEME_EA(c->font_theme) : 0,
+                                            c->family_cs[0] ? PD_FONT_THEME_CS(c->font_theme) : 0));
         pb_puts(o, "/>");
     }
 
@@ -496,8 +563,8 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_puts(o, c->hidden ? "<w:vanish/>" : "<w:vanish w:val=\"0\"/>");
     }
 
-    if (c->color != b->color) {
-        pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(c->color & 0xFFFFFF));
+    if (c->color != b->color || c->color_theme != b->color_theme) {
+        dx_color(o, c->color, c->color_theme);
     }
 
     if (c->letter_space != b->letter_space) {
@@ -525,8 +592,8 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name(c->underline));
     }
 
-    if (c->background && c->background != b->background) {
-        pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(c->background & 0xFFFFFF));
+    if (c->background && (c->background != b->background || c->background_theme != b->background_theme)) {
+        dx_shd(o, c->background, c->background_theme);
     }
 
     if (c->shift == PD_SHIFT_SUPER) {
@@ -2552,8 +2619,10 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
         for (k = 0; k < 6; k++) {
             if (sides & bit[k]) {
-                pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"/>", edge[k], sz,
+                pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"", edge[k], sz,
                           (unsigned)(tp.border_color & 0xFFFFFF));
+                dx_theme_attr(o, tp.border_theme, 0);
+                pb_puts(o, "/>");
             } else {
                 pb_printf(o, "<w:%s w:val=\"nil\"/>", edge[k]);
             }
@@ -2648,8 +2717,10 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                     sz = sz < 2 ? 2 : sz;
 
                     if (cp.border_on & bit[e]) {
-                        pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"/>", edge[e], sz,
+                        pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"", edge[e], sz,
                                   (unsigned)(cp.border_color & 0xFFFFFF));
+                        dx_theme_attr(o, cp.border_theme, 0);
+                        pb_puts(o, "/>");
                     } else if (cp.border_set & bit[e]) {
                         pb_printf(o, "<w:%s w:val=\"nil\"/>", edge[e]);
                     }
@@ -2659,7 +2730,7 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
             }
 
             if (cp.background) {
-                pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(cp.background & 0xFFFFFF));
+                dx_shd(o, cp.background, cp.background_theme);
             }
 
             if (cp.valign) {
@@ -2928,7 +2999,7 @@ static void dx_style_name(pd_buf* o, const char* n) {
 /* a family for Word: the generic monospace one as a face it has */
 /* w:rFonts: the text's family (NULL: not said) in the Latin slots, East Asian and complex-script ones (NULL or
    "": the text's, when it is said) */
-static void dx_fonts3(pd_buf* o, const char* family, const char* ea, const char* cs) {
+static void dx_fonts3(pd_buf* o, const char* family, const char* ea, const char* cs, int32_t ft) {
     const char* f = family && !strcmp(family, "monospace") ? "Courier New" : family;
 
     cs = cs && cs[0] ? cs : f;
@@ -2955,11 +3026,13 @@ static void dx_fonts3(pd_buf* o, const char* family, const char* ea, const char*
         pb_putc(o, '"');
     }
 
+    dx_font_theme_attr(o, PD_FONT_THEME(f ? PD_FONT_THEME_TEXT(ft) : 0, ea ? PD_FONT_THEME_EA(ft) : 0,
+                                        cs ? PD_FONT_THEME_CS(ft) : 0));
     pb_puts(o, "/>");
 }
 
 static void dx_fonts(pd_buf* o, const char* family) {
-    dx_fonts3(o, family, NULL, NULL);
+    dx_fonts3(o, family, NULL, NULL, 0);
 }
 
 /* the paragraph properties before w:numPr in a w:pPr, of those mask sets */
@@ -2994,8 +3067,10 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
 
         for (side = 0; side < 5; side++) {
             if (has & bits[side]) {
-                pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"%d\" w:color=\"%06X\"/>", names[side], sz,
+                pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"%d\" w:color=\"%06X\"", names[side], sz,
                           side == 4 ? 0 : (int)SCALE(pp->border_space, 1, 65536), (unsigned)(pp->border_color & 0xFFFFFF));
+                dx_theme_attr(o, pp->border_theme, 0);
+                pb_puts(o, "/>");
             } else if (base && base->border_color && base->border_width > 0) {
                 pb_printf(o, "<w:%s w:val=\"nil\"/>", names[side]);   /* the style's edge taken away */
             }
@@ -3008,7 +3083,7 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
     }
 
     if ((m & PD_PP_SHADING) && pp->shading) {
-        pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(pp->shading & 0xFFFFFF));
+        dx_shd(o, pp->shading, pp->shading_theme);
     } else if ((m & PD_PP_SHADING) && base && base->shading) {
         pb_puts(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>");
     }
@@ -3106,7 +3181,7 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
     if (((m & PD_CP_FAMILY) && c->family[0]) || ((m & PD_CP_FAMILY_EA) && c->family_ea[0]) ||
             ((m & PD_CP_FAMILY_CS) && c->family_cs[0])) {
         dx_fonts3(o, (m & PD_CP_FAMILY) && c->family[0] ? c->family : NULL, m & PD_CP_FAMILY_EA ? c->family_ea : NULL,
-                  m & PD_CP_FAMILY_CS ? c->family_cs : NULL);
+                  m & PD_CP_FAMILY_CS ? c->family_cs : NULL, c->font_theme);
     }
 
     if (m & PD_CP_WEIGHT) {
@@ -3142,7 +3217,7 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
     }
 
     if (m & PD_CP_COLOR) {
-        pb_printf(o, "<w:color w:val=\"%06X\"/>", (unsigned)(c->color & 0xFFFFFF));
+        dx_color(o, c->color, c->color_theme);
     }
 
     if (m & PD_CP_LETTERSPACE) {
@@ -3172,7 +3247,7 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
     }
 
     if ((m & PD_CP_BACKGROUND) && c->background) {
-        pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06X\"/>", (unsigned)(c->background & 0xFFFFFF));
+        dx_shd(o, c->background, c->background_theme);
     }
 
     if (m & PD_CP_SHIFT) {
@@ -3185,6 +3260,222 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
         xesc(o, c->lang, strlen(c->lang));
         pb_puts(o, "\"/>");
     }
+}
+
+/* a style's own properties with what their links to the theme come to now */
+static void dx_theme_props(const pd_doc* d, pd_para_props* pp, pd_char_props* cp) {
+    pd_theme t;
+    int k;
+
+    pd_doc_theme(d, &t);
+    pp->border_color = pd_theme_color_resolve(&t, pp->border_theme, pp->border_color);
+    pp->shading = pd_theme_color_resolve(&t, pp->shading_theme, pp->shading);
+    cp->color = pd_theme_color_resolve(&t, cp->color_theme, cp->color);
+    cp->background = pd_theme_color_resolve(&t, cp->background_theme, cp->background);
+
+    for (k = 0; k < 3; k++) {
+        int w = (cp->font_theme >> (2 * k)) & 3;
+        const char* f = !w ? NULL : k == 0 ? (w == 1 ? t.major : t.minor) : k == 1 ? (w == 1 ? t.major_ea : t.minor_ea) :
+                        (w == 1 ? t.major_cs : t.minor_cs);
+
+        if (f && f[0]) {
+            snprintf(k == 0 ? cp->family : k == 1 ? cp->family_ea : cp->family_cs, 64, "%s", f);
+        }
+    }
+}
+
+static int dx_theme_of_xml(const char* xml, size_t n, pd_theme* out);
+
+/* DrawingML's names of the theme's colours, in PD_THEME_* order */
+static const char* const dx_clr_names[PD_THEME_COLORS] = { "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3",
+                                                           "accent4", "accent5", "accent6", "hlink", "folHlink"
+                                                         };
+
+static void dx_clr_scheme(pd_buf* o, const char* pre, const pd_theme* t) {
+    int i;
+
+    pb_printf(o, "<%sclrScheme name=\"", pre);
+    xesc(o, t->name, strlen(t->name));
+    pb_puts(o, "\">");
+
+    for (i = 0; i < PD_THEME_COLORS; i++) {
+        pb_printf(o, "<%s%s><%ssrgbClr val=\"%06X\"/></%s%s>", pre, dx_clr_names[i], pre,
+                  (unsigned)(t->color[i] & 0xFFFFFF), pre, dx_clr_names[i]);
+    }
+
+    pb_printf(o, "</%sclrScheme>", pre);
+}
+
+static void dx_font_set(pd_buf* o, const char* tag, const char* lat, const char* ea, const char* cs) {
+    pb_printf(o, "<a:%s><a:latin typeface=\"", tag);
+    xesc(o, lat, strlen(lat));
+    pb_puts(o, "\"/><a:ea typeface=\"");
+    xesc(o, ea, strlen(ea));
+    pb_puts(o, "\"/><a:cs typeface=\"");
+    xesc(o, cs, strlen(cs));
+    pb_printf(o, "\"/></a:%s>", tag);
+}
+
+/* a theme part of the document's theme, Office's formatting scheme with it */
+static void dx_theme_new(pd_buf* o, const pd_theme* t) {
+    pb_puts(o, XML_DECL);
+    pb_puts(o, "<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" name=\"");
+    xesc(o, t->name, strlen(t->name));
+    pb_puts(o, "\"><a:themeElements>");
+    dx_clr_scheme(o, "a:", t);
+    pb_puts(o, "<a:fontScheme name=\"");
+    xesc(o, t->name, strlen(t->name));
+    pb_puts(o, "\">");
+    dx_font_set(o, "majorFont", t->major, t->major_ea, t->major_cs);
+    dx_font_set(o, "minorFont", t->minor, t->minor_ea, t->minor_cs);
+    pb_puts(o, "</a:fontScheme><a:fmtScheme name=\"Office\"><a:fillStyleLst>"
+            "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+            "<a:gradFill rotWithShape=\"1\"><a:gsLst>"
+            "<a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"110000\"/><a:satMod val=\"105000\"/>"
+            "<a:tint val=\"67000\"/></a:schemeClr></a:gs>"
+            "<a:gs pos=\"50000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"105000\"/><a:satMod val=\"103000\"/>"
+            "<a:tint val=\"73000\"/></a:schemeClr></a:gs>"
+            "<a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"105000\"/><a:satMod val=\"109000\"/>"
+            "<a:tint val=\"81000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+            "<a:gradFill rotWithShape=\"1\"><a:gsLst>"
+            "<a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:satMod val=\"103000\"/><a:lumMod val=\"102000\"/>"
+            "<a:tint val=\"94000\"/></a:schemeClr></a:gs>"
+            "<a:gs pos=\"50000\"><a:schemeClr val=\"phClr\"><a:satMod val=\"110000\"/><a:lumMod val=\"100000\"/>"
+            "<a:shade val=\"100000\"/></a:schemeClr></a:gs>"
+            "<a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:lumMod val=\"99000\"/><a:satMod val=\"120000\"/>"
+            "<a:shade val=\"78000\"/></a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+            "</a:fillStyleLst><a:lnStyleLst>"
+            "<a:ln w=\"6350\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+            "<a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+            "<a:ln w=\"12700\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+            "<a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+            "<a:ln w=\"19050\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+            "<a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>"
+            "</a:lnStyleLst><a:effectStyleLst>"
+            "<a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle>"
+            "<a:effectStyle><a:effectLst><a:outerShdw blurRad=\"57150\" dist=\"19050\" dir=\"5400000\" algn=\"ctr\" "
+            "rotWithShape=\"0\"><a:srgbClr val=\"000000\"><a:alpha val=\"63000\"/></a:srgbClr></a:outerShdw>"
+            "</a:effectLst></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst>"
+            "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>"
+            "<a:solidFill><a:schemeClr val=\"phClr\"><a:tint val=\"95000\"/><a:satMod val=\"170000\"/></a:schemeClr>"
+            "</a:solidFill>"
+            "<a:gradFill rotWithShape=\"1\"><a:gsLst>"
+            "<a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:tint val=\"93000\"/><a:satMod val=\"150000\"/>"
+            "<a:shade val=\"98000\"/><a:lumMod val=\"102000\"/></a:schemeClr></a:gs>"
+            "<a:gs pos=\"50000\"><a:schemeClr val=\"phClr\"><a:tint val=\"98000\"/><a:satMod val=\"130000\"/>"
+            "<a:shade val=\"90000\"/><a:lumMod val=\"103000\"/></a:schemeClr></a:gs>"
+            "<a:gs pos=\"100000\"><a:schemeClr val=\"phClr\"><a:shade val=\"63000\"/><a:satMod val=\"120000\"/>"
+            "</a:schemeClr></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>"
+            "</a:bgFillStyleLst></a:fmtScheme></a:themeElements><a:objectDefaults/><a:extraClrSchemeLst/></a:theme>");
+}
+
+/* where a tag (prefixed or not) starts in s[from, to), or to */
+static size_t dx_tag_at(const char* s, size_t from, size_t to, const char* local, int closing) {
+    size_t i, n = strlen(local);
+
+    for (i = from; i + n + 2 < to; i++) {
+        size_t j = i + 1;
+
+        if (s[i] != '<' || (closing ? s[j++] != '/' : s[j] == '/')) {
+            continue;
+        }
+
+        while (j < to && s[j] != ':' && s[j] != '>' && s[j] != ' ' && s[j] != '/' && j - i < 24) {
+            j++;
+        }
+
+        j = j < to && s[j] == ':' ? j + 1 : i + 1 + (closing ? 1 : 0);
+
+        if (j + n < to && !strncmp(s + j, local, n) && (s[j + n] == '>' || s[j + n] == ' ' || s[j + n] == '/')) {
+            return i;
+        }
+    }
+
+    return to;
+}
+
+/* the kept theme part with the document's colours and fonts in it, where they changed; else the part as it was */
+static void dx_theme_patch(pd_buf* o, const char* s, size_t n, const pd_theme* t) {
+    pd_theme was;
+    size_t a, b, at = 0, k;
+    char pre[24] = "";
+
+    if (!dx_theme_of_xml(s, n, &was) || (!memcmp(was.color, t->color, sizeof(t->color)) && !strcmp(was.major, t->major) &&
+                                        !strcmp(was.minor, t->minor) && !strcmp(was.major_ea, t->major_ea) &&
+                                        !strcmp(was.minor_ea, t->minor_ea) && !strcmp(was.major_cs, t->major_cs) &&
+                                        !strcmp(was.minor_cs, t->minor_cs))) {
+        pb_put(o, s, n);
+        return;
+    }
+
+    /* the colour scheme made again, in the part's own prefix */
+    a = dx_tag_at(s, 0, n, "clrScheme", 0);
+    b = a < n ? dx_tag_at(s, a, n, "clrScheme", 1) : n;
+
+    if (a < n && b < n) {
+        for (k = a + 1; k < n && s[k] != ':' && s[k] != ' ' && s[k] != '>' && k - a < sizeof(pre); k++) {
+        }
+
+        if (s[k] == ':') {
+            snprintf(pre, sizeof(pre), "%.*s", (int)(k - a), s + a + 1);
+        }
+
+        pb_put(o, s, a);
+        dx_clr_scheme(o, pre, t);
+        at = b;
+
+        while (at < n && s[at] != '>') {
+            at++;
+        }
+
+        at = at < n ? at + 1 : n;
+    }
+
+    /* each font set's latin, ea and cs typefaces */
+    for (k = 0; k < 2; k++) {
+        size_t fa = dx_tag_at(s, at, n, k ? "minorFont" : "majorFont", 0), fb;
+        static const char* const slot[3] = { "latin", "ea", "cs" };
+        int q;
+
+        if (fa >= n) {
+            continue;
+        }
+
+        fb = dx_tag_at(s, fa, n, k ? "minorFont" : "majorFont", 1);
+
+        for (q = 0; q < 3; q++) {
+            const char* v = q == 0 ? (k ? t->minor : t->major) : q == 1 ? (k ? t->minor_ea : t->major_ea) :
+                            (k ? t->minor_cs : t->major_cs);
+            size_t e = dx_tag_at(s, fa, fb, slot[q], 0), tf, te;
+
+            if (e >= fb) {
+                continue;
+            }
+
+            for (tf = e; tf + 10 < fb && strncmp(s + tf, "typeface=\"", 10) && s[tf] != '>'; tf++) {
+            }
+
+            if (tf + 10 >= fb || s[tf] == '>') {
+                continue;
+            }
+
+            tf += 10;
+
+            for (te = tf; te < fb && s[te] != '"'; te++) {
+            }
+
+            if (tf < at) {
+                continue;
+            }
+
+            pb_put(o, s + at, tf - at);
+            xesc(o, v, strlen(v));
+            at = te;
+        }
+
+    }
+
+    pb_put(o, s + at, n - at);
 }
 
 /* the document's own styles. docDefaults are Parade's defaults, so each style says only what it sets,
@@ -3221,6 +3512,7 @@ static void dx_styles(dxo* x, pd_buf* o) {
             continue;
         }
 
+        dx_theme_props(d, &pp, &cp);
         dx_sid(d, sid, id, sizeof(id));
         pb_printf(o, "<w:style w:type=\"%s\"%s w:styleId=\"%s\"><w:name w:val=\"", kind == PD_STYLE_CHARACTER ?
                   "character" : "paragraph", sid == normal ? " w:default=\"1\"" : "", id);
@@ -3541,6 +3833,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     dxo* x = (dxo*)calloc(1, sizeof(dxo));
     pd_buf doc, part, cxml, cext, fonts;
     int has_fonts, has_theme;
+    pd_buf themeb = { 0 };
     const void* theme = NULL;
     size_t theme_len = 0;
     zipw z;
@@ -3649,6 +3942,24 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     ncomments = dx_comments(d, &cxml, &cext);
     has_fonts = dx_font_table(d, &fonts);
     has_theme = dx_kept(d, THEME_MIME, &theme, &theme_len);
+
+    {   /* the theme as the document has it now: the part it came with, its colours and fonts changed where they
+           were; a document of Parade's own with a theme other than Office's gets a part made */
+        pd_theme th, office;
+
+        pd_doc_theme(d, &th);
+        pd_theme_init(&office);
+
+        if (has_theme) {
+            dx_theme_patch(&themeb, (const char*)theme, theme_len, &th);
+        } else if (memcmp(&th, &office, sizeof(th)) != 0) {
+            dx_theme_new(&themeb, &th);
+            has_theme = 1;
+        }
+
+        theme = themeb.p;
+        theme_len = themeb.n;
+    }
 
     /* the package */
     z.o = out;
@@ -3924,6 +4235,7 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     i = doc.err || part.err || x->rels.err || x->notes.err || x->endnotes.err || cxml.err || cext.err;
     pb_free(&cxml);
     pb_free(&fonts);
+    pb_free(&themeb);
     pb_free(&cext);
     pb_free(&part);
     pb_free(&doc);
@@ -3989,6 +4301,7 @@ typedef struct {
     pd_sp w;                    /* the widest */
     pd_sp ew[6];                /* each edge's, by bit */
     uint32_t c;
+    uint32_t ref;               /* c's theme colour, 0 none */
 } dedges;
 
 /* one part of a table style: the whole table, or a condition of it */
@@ -3996,6 +4309,7 @@ typedef struct {
     int given;
     dprops pr;                  /* its w:pPr and w:rPr, for the text of the cells */
     uint32_t shd;               /* cell shading, with has_shd */
+    uint32_t shd_ref;           /* its theme colour, 0 none */
     int has_shd;
     dedges cb;                  /* w:tcBorders */
 } dtpart;
@@ -4047,6 +4361,7 @@ typedef struct {
     char def_pstyle[64];        /* the paragraph style of a paragraph that names none */
     char theme_major[64], theme_minor[64];  /* the theme's heading and body fonts */
     char theme_major_ea[64], theme_minor_ea[64], theme_major_cs[64], theme_minor_cs[64];  /* other scripts' */
+    char theme_name[64];
     uint32_t theme_clr[12];     /* the theme's colours: dk1 lt1 dk2 lt2 accent1..6 hlink folHlink */
     pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
     struct {                    /* bookmarks read: where they are */
@@ -4167,26 +4482,38 @@ static uint32_t lum_adjust(uint32_t c, double mul, double add) {
 
 /* a w: colour: the theme colour named by themeattr when there is one (tinted toward white, or shaded toward
    black, by the hex 00-FF in tintattr and shadeattr), else the hex in valattr; 0 when neither, or auto */
-static int wcolor(const dxi* X, const pd_markup* m, const char* valattr, const char* themeattr, const char* tintattr,
-                  const char* shadeattr, uint32_t* out) {
+static int wcolor_ref(const dxi* X, const pd_markup* m, const char* valattr, const char* themeattr,
+                      const char* tintattr, const char* shadeattr, uint32_t* out, uint32_t* ref) {
     char v[64];
     int slot = -1;
+
+    if (ref) {
+        *ref = 0;
+    }
 
     if (themeattr && mu_attr(m, themeattr, v, sizeof(v))) {
         slot = pd_conv_theme_slot(v);
     }
 
     if (slot >= 0) {
-        *out = X->theme_clr[slot];
+        double mul = 1, add = 0;
 
         if (tintattr && mu_attr(m, tintattr, v, sizeof(v))) {
-            double t = (double)strtoul(v, NULL, 16) / 255.0;
-
-            *out = lum_adjust(*out, t, 1 - t);
+            mul = (double)strtoul(v, NULL, 16) / 255.0;
+            add = 1 - mul;
         }
 
         if (shadeattr && mu_attr(m, shadeattr, v, sizeof(v))) {
-            *out = lum_adjust(*out, (double)strtoul(v, NULL, 16) / 255.0, 0);
+            double sh = (double)strtoul(v, NULL, 16) / 255.0;
+
+            mul *= sh;
+            add *= sh;
+        }
+
+        *out = mul == 1 && add == 0 ? X->theme_clr[slot] : lum_adjust(X->theme_clr[slot], mul, add);
+
+        if (ref) {  /* linked to the theme: what it comes to follows the document's */
+            *ref = pd_theme_color(slot, (int32_t)(mul * 100000 + 0.5), (int32_t)(add * 100000 + 0.5));
         }
 
         return 1;
@@ -4200,12 +4527,17 @@ static int wcolor(const dxi* X, const pd_markup* m, const char* valattr, const c
     return 0;
 }
 
+static int wcolor(const dxi* X, const pd_markup* m, const char* valattr, const char* themeattr, const char* tintattr,
+                  const char* shadeattr, uint32_t* out) {
+    return wcolor_ref(X, m, valattr, themeattr, tintattr, shadeattr, out, NULL);
+}
+
 /* a w:shd as the colour it shows: the pattern (w:val: clear, solid, pctN, stripes...) of its foreground
    (w:color; auto is black) over its fill (w:fill; auto is none, white under a pattern); 0 when it shows nothing */
-static int shd_color(const dxi* X, const pd_markup* m, uint32_t* out) {
+static int shd_color_ref(const dxi* X, const pd_markup* m, uint32_t* out, uint32_t* ref) {
     char v[32] = "clear";
-    uint32_t fill = 0, fg = 0xFF000000u, base;
-    int has_fill = wcolor(X, m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", &fill);
+    uint32_t fill = 0, fg = 0xFF000000u, base, fref = 0;
+    int has_fill = wcolor_ref(X, m, "w:fill", "w:themeFill", "w:themeFillTint", "w:themeFillShade", &fill, &fref);
     double f = 0;
     uint32_t r, g, b;
 
@@ -4222,6 +4554,10 @@ static int shd_color(const dxi* X, const pd_markup* m, uint32_t* out) {
 
     f = f < 0 ? 0 : f > 1 ? 1 : f;
 
+    if (ref) {  /* a plain fill keeps its link to the theme; a pattern is a colour of its own */
+        *ref = f == 0 && has_fill ? fref : 0;
+    }
+
     if (f == 0) {
         *out = has_fill ? fill : 0;
         return has_fill;
@@ -4233,6 +4569,10 @@ static int shd_color(const dxi* X, const pd_markup* m, uint32_t* out) {
     b = (uint32_t)((base & 255) * (1 - f) + (fg & 255) * f + 0.5);
     *out = 0xFF000000u | r << 16 | g << 8 | b;
     return 1;
+}
+
+static int shd_color(const dxi* X, const pd_markup* m, uint32_t* out) {
+    return shd_color_ref(X, m, out, NULL);
 }
 
 /* a DrawingML colour modifier (a child of srgbClr, schemeClr, sysClr, prstClr) applied to c */
@@ -4334,7 +4674,7 @@ static pd_sp twips(int v) {
 static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_props* cp, char* rstyle,
                      size_t rcap) {
     char v[300];
-    uint32_t c;
+    uint32_t c, ref;
 
     if (strcmp(t, "b") == 0) {
         cp->mask |= PD_CP_WEIGHT;
@@ -4375,41 +4715,65 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "vertAlign") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
         cp->mask |= PD_CP_SHIFT;
         cp->shift = strcmp(v, "superscript") == 0 ? PD_SHIFT_SUPER : strcmp(v, "subscript") == 0 ? PD_SHIFT_SUB : 0;
-    } else if (strcmp(t, "color") == 0 && wcolor(X, m, "w:val", "w:themeColor", "w:themeTint", "w:themeShade", &c)) {
+    } else if (strcmp(t, "color") == 0 && wcolor_ref(X, m, "w:val", "w:themeColor", "w:themeTint", "w:themeShade", &c,
+               &ref)) {
         cp->mask |= PD_CP_COLOR;
         cp->color = c;
-    } else if (strcmp(t, "shd") == 0 && shd_color(X, m, &c)) {
+        cp->color_theme = ref;
+    } else if (strcmp(t, "shd") == 0 && shd_color_ref(X, m, &c, &ref)) {
         cp->mask |= PD_CP_BACKGROUND;
         cp->background = c;
+        cp->background_theme = ref;
     } else if (strcmp(t, "highlight") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
         cp->mask |= PD_CP_BACKGROUND;
+        cp->background_theme = 0;
         cp->background = strcmp(v, "none") == 0 ? 0 : strcmp(v, "yellow") == 0 ? 0xFFFFFF00u : strcmp(v, "green") == 0 ?
                          0xFF00FF00u : strcmp(v, "cyan") == 0 ? 0xFF00FFFFu : 0xFFFFFF00u;
     } else if (strcmp(t, "rFonts") == 0) {
         /* a named font, else the theme's: minorHAnsi is the body font, majorHAnsi the headings' */
-        if (mu_attr(m, "w:ascii", v, sizeof(v)) || mu_attr(m, "w:hAnsi", v, sizeof(v))) {
-            cp->mask |= PD_CP_FAMILY;
-            snprintf(cp->family, sizeof(cp->family), "%.63s", v);
-        } else if ((mu_attr(m, "w:asciiTheme", v, sizeof(v)) || mu_attr(m, "w:hAnsiTheme", v, sizeof(v))) &&
-                   (strncmp(v, "major", 5) == 0 ? X->theme_major : X->theme_minor)[0]) {
+        /* Word takes the theme's font over a name given beside it (the name is what it was when saved) */
+        if ((mu_attr(m, "w:asciiTheme", v, sizeof(v)) || mu_attr(m, "w:hAnsiTheme", v, sizeof(v))) &&
+                (strncmp(v, "major", 5) == 0 ? X->theme_major : X->theme_minor)[0]) {
             cp->mask |= PD_CP_FAMILY;
             snprintf(cp->family, sizeof(cp->family), "%s", strncmp(v, "major", 5) == 0 ? X->theme_major :
                      X->theme_minor);
+            cp->font_theme = (cp->font_theme & ~3) | (strncmp(v, "major", 5) == 0 ? PD_FONT_THEME_MAJOR :
+                             PD_FONT_THEME_MINOR);
+        } else if (mu_attr(m, "w:ascii", v, sizeof(v)) || mu_attr(m, "w:hAnsi", v, sizeof(v))) {
+            cp->mask |= PD_CP_FAMILY;
+            snprintf(cp->family, sizeof(cp->family), "%.63s", v);
+            cp->font_theme &= ~3;
         }
 
-        /* the East Asian and complex-script slots: named, else the theme's for those scripts */
-        if ((mu_attr(m, "w:eastAsia", v, sizeof(v)) || (mu_attr(m, "w:eastAsiaTheme", v, sizeof(v)) &&
-                snprintf(v, sizeof(v), "%s", strncmp(v, "major", 5) == 0 ? X->theme_major_ea : X->theme_minor_ea) >= 0 &&
-                v[0])) && !((cp->mask & PD_CP_FAMILY) && !strcmp(v, cp->family))) {
-            cp->mask |= PD_CP_FAMILY_EA;
-            snprintf(cp->family_ea, sizeof(cp->family_ea), "%.63s", v);
-        }
+        /* the East Asian and complex-script slots: the theme's for those scripts, else named */
+        {
+            static const char* const named[2] = { "w:eastAsia", "w:cs" }, *const themed[2] = { "w:eastAsiaTheme",
+                                                                                             "w:cstheme"
+                                                                                           };
+            int k;
 
-        if ((mu_attr(m, "w:cs", v, sizeof(v)) || (mu_attr(m, "w:cstheme", v, sizeof(v)) &&
-                snprintf(v, sizeof(v), "%s", strncmp(v, "major", 5) == 0 ? X->theme_major_cs : X->theme_minor_cs) >= 0 &&
-                v[0])) && !((cp->mask & PD_CP_FAMILY) && !strcmp(v, cp->family))) {   /* the same face: nothing apart */
-            cp->mask |= PD_CP_FAMILY_CS;
-            snprintf(cp->family_cs, sizeof(cp->family_cs), "%.63s", v);
+            for (k = 0; k < 2; k++) {
+                int th = 0, sh = k ? 4 : 2;
+
+                v[0] = '\0';
+
+                if (mu_attr(m, themed[k], v, sizeof(v))) {
+                    th = strncmp(v, "major", 5) == 0 ? PD_FONT_THEME_MAJOR : PD_FONT_THEME_MINOR;
+                    snprintf(v, sizeof(v), "%s", k ? (th == PD_FONT_THEME_MAJOR ? X->theme_major_cs : X->theme_minor_cs) :
+                             (th == PD_FONT_THEME_MAJOR ? X->theme_major_ea : X->theme_minor_ea));
+                    th = v[0] ? th : 0;
+                }
+
+                if (!v[0] && !mu_attr(m, named[k], v, sizeof(v))) {
+                    v[0] = '\0';
+                }
+
+                if (v[0] && !((cp->mask & PD_CP_FAMILY) && !strcmp(v, cp->family))) {   /* the same face: nothing apart */
+                    cp->mask |= k ? PD_CP_FAMILY_CS : PD_CP_FAMILY_EA;
+                    snprintf(k ? cp->family_cs : cp->family_ea, 64, "%.63s", v);
+                    cp->font_theme = (cp->font_theme & ~(3 << sh)) | th << sh;
+                }
+            }
         }
     } else if (strcmp(t, "sz") == 0) {
         int hp = attr_int(m, "w:val", 0);       /* half-points */
@@ -4535,7 +4899,8 @@ static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr
             pp->border_width = pp->border_width > 0 ? pp->border_width : PD_PT(0.25);
 
             if (!pp->border_color || side != PD_BORDER_BETWEEN) {
-                if (!wcolor(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &pp->border_color)) {
+                if (!wcolor_ref(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &pp->border_color,
+                                &pp->border_theme)) {
                     pp->border_color = 0xFF000000u;
                 }
             }
@@ -4548,7 +4913,7 @@ static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr
         }
     } else if (strcmp(t, "shd") == 0) {
         pp->mask |= PD_PP_SHADING;
-        if (!shd_color(X, m, &pp->shading)) {
+        if (!shd_color_ref(X, m, &pp->shading, &pp->shading_theme)) {
             pp->shading = 0;
         }
     } else if (strcmp(t, "suppressAutoHyphens") == 0) {
@@ -4596,8 +4961,10 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sp->mask & PD_PP_SNAP_GRID) dp->snap_grid = sp->snap_grid;
     if (sp->mask & PD_PP_DIRECTION) dp->direction = sp->direction;
     if (sp->mask & PD_PP_SHADING) dp->shading = sp->shading;
+    if (sp->mask & PD_PP_SHADING) dp->shading_theme = sp->shading_theme;
 
     if (sp->mask & PD_PP_BORDER) {
+        dp->border_theme = sp->border_theme;
         dp->border_color = sp->border_color;
         dp->border_width = sp->border_width;
         dp->border_sides = sp->border_sides;
@@ -4646,6 +5013,11 @@ static void pr_over(dprops* d, const dprops* s) {
     dp->mask |= sp->mask;
 
     if (sc->mask & PD_CP_FAMILY) memcpy(dc->family, sc->family, sizeof(dc->family));
+    if (sc->mask & PD_CP_FAMILY) dc->font_theme = (dc->font_theme & ~3) | (sc->font_theme & 3);
+    if (sc->mask & PD_CP_FAMILY_EA) dc->font_theme = (dc->font_theme & ~(3 << 2)) | (sc->font_theme & (3 << 2));
+    if (sc->mask & PD_CP_FAMILY_CS) dc->font_theme = (dc->font_theme & ~(3 << 4)) | (sc->font_theme & (3 << 4));
+    if (sc->mask & PD_CP_COLOR) dc->color_theme = sc->color_theme;
+    if (sc->mask & PD_CP_BACKGROUND) dc->background_theme = sc->background_theme;
     if (sc->mask & PD_CP_SIZE) dc->size = sc->size;
     if (sc->mask & PD_CP_WEIGHT) dc->weight = sc->weight;
     if (sc->mask & PD_CP_ITALIC) dc->italic = sc->italic;
@@ -4796,7 +5168,7 @@ static void edge_elem(const dxi* X, const pd_markup* m, const char* t, dedges* e
             e->ew[k] = bw > 0 ? bw : PD_PT(0.25);
         }
 
-        wcolor(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &e->c);
+        wcolor_ref(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &e->c, &e->ref);
     } else {
         e->on &= ~bit;
     }
@@ -4817,6 +5189,7 @@ static void edges_over(dedges* a, const dedges* b) {
 
     if (b->on) {
         a->w = b->w;
+        a->ref = b->c ? b->ref : a->ref;
         a->c = b->c ? b->c : a->c;
     }
 }
@@ -4832,6 +5205,7 @@ static void part_over(dtpart* a, const dtpart* b) {
     if (b->has_shd) {
         a->has_shd = 1;
         a->shd = b->shd;
+        a->shd_ref = b->shd_ref;
     }
 
     edges_over(&a->cb, &b->cb);
@@ -4937,7 +5311,7 @@ static void read_table_styles(dxi* X, const char* xml, size_t n) {
             ts->col_band = attr_int(&m, "w:val", 1);
         } else if (in_tcpr && strcmp(t, "shd") == 0) {
             tp->has_shd = 1;
-            if (!shd_color(X, &m, &tp->shd)) {
+            if (!shd_color_ref(X, &m, &tp->shd, &tp->shd_ref)) {
                 tp->shd = 0;
             }
         } else if (strcmp(t, "basedOn") == 0) {
@@ -4997,7 +5371,9 @@ static void read_theme(dxi* X, const char* xml, size_t n) {
     while (mu_next(&m) != MT_END) {
         const char* t = mu_local(m.name);
 
-        if (strcmp(t, "clrScheme") == 0) {
+        if (strcmp(t, "theme") == 0 && m.type == MT_OPEN) {
+            mu_attr(&m, "name", X->theme_name, sizeof(X->theme_name));
+        } else if (strcmp(t, "clrScheme") == 0) {
             in_scheme = m.type == MT_OPEN;
         } else if (in_scheme && m.type == MT_OPEN && pd_conv_theme_slot(t) >= 0 && (t[0] == 'd' || t[0] == 'l' ||
                    t[0] == 'a' || t[0] == 'h' || t[0] == 'f')) {
@@ -5023,6 +5399,54 @@ static void read_theme(dxi* X, const char* xml, size_t n) {
                     (major ? X->theme_major_cs : X->theme_minor_cs), 64);
         }
     }
+}
+
+static void dx_theme_from(const dxi* X, pd_theme* th);
+
+/* a theme part's colours and fonts */
+static int dx_theme_of_xml(const char* xml, size_t n, pd_theme* out) {
+    dxi* X = (dxi*)calloc(1, sizeof(dxi));
+
+    if (!X) {
+        return 0;
+    }
+
+    theme_defaults(X->theme_clr);
+    read_theme(X, xml, n);
+    dx_theme_from(X, out);
+    free(X);
+    return 1;
+}
+
+/* the theme read made the document's, for what is linked to it */
+static void dx_theme_set(const dxi* X, pd_doc* d) {
+    pd_theme th;
+
+    dx_theme_from(X, &th);
+    pd_doc_set_theme(d, &th);
+}
+
+static void dx_theme_from(const dxi* X, pd_theme* out) {
+    pd_theme th;
+    int i;
+
+    pd_theme_init(&th);
+
+    if (X->theme_name[0]) {
+        snprintf(th.name, sizeof(th.name), "%s", X->theme_name);
+    }
+
+    for (i = 0; i < PD_THEME_COLORS; i++) {
+        th.color[i] = X->theme_clr[i];
+    }
+
+    snprintf(th.major, sizeof(th.major), "%s", X->theme_major);
+    snprintf(th.minor, sizeof(th.minor), "%s", X->theme_minor);
+    snprintf(th.major_ea, sizeof(th.major_ea), "%s", X->theme_major_ea);
+    snprintf(th.minor_ea, sizeof(th.minor_ea), "%s", X->theme_minor_ea);
+    snprintf(th.major_cs, sizeof(th.major_cs), "%s", X->theme_major_cs);
+    snprintf(th.minor_cs, sizeof(th.minor_cs), "%s", X->theme_minor_cs);
+    *out = th;
 }
 
 /* document-wide settings that are paragraph properties in Parade */
@@ -5368,7 +5792,7 @@ typedef struct {
     int ntab;
     dedges cell_edges;          /* the cell's own w:tcBorders */
     int pend_row, row_header, pend_cell, span, cell_merge, cell_valign;
-    uint32_t cell_bg;
+    uint32_t cell_bg, cell_bg_ref;
     int in_tblpr, in_grid, in_borders, in_mar, in_cb;
     pd_sp t_width, grid[PD_TABLE_MAX_COLS];
     int t_jc, ngrid, t_autofit;
@@ -5437,6 +5861,24 @@ static void dw_apply_run(dw* w) {
     DW_DIFF(PD_CP_ITALIC_CS, italic_cs)
 #undef DW_DIFF
 
+    /* a colour's link to the theme goes with it, and makes it different from the style's when the link is */
+    if ((f->mask & PD_CP_COLOR) && (cp.mask & PD_CP_COLOR || f->color_theme != t->color_theme)) {
+        cp.mask |= PD_CP_COLOR;
+        cp.color = f->color;
+        cp.color_theme = f->color_theme;
+    }
+
+    if ((f->mask & PD_CP_BACKGROUND) && (cp.mask & PD_CP_BACKGROUND || f->background_theme != t->background_theme)) {
+        cp.mask |= PD_CP_BACKGROUND;
+        cp.background = f->background;
+        cp.background_theme = f->background_theme;
+    }
+
+    if ((f->mask & PD_CP_FAMILY) && PD_FONT_THEME_TEXT(f->font_theme) != PD_FONT_THEME_TEXT(t->font_theme)) {
+        cp.mask |= PD_CP_FAMILY;
+        memcpy(cp.family, f->family, sizeof(cp.family));
+    }
+
     if ((f->mask & PD_CP_FAMILY_EA) && !same_ci(f->family_ea, t->family_ea)) {
         cp.mask |= PD_CP_FAMILY_EA;
         memcpy(cp.family_ea, f->family_ea, sizeof(cp.family_ea));
@@ -5446,6 +5888,8 @@ static void dw_apply_run(dw* w) {
         cp.mask |= PD_CP_FAMILY_CS;
         memcpy(cp.family_cs, f->family_cs, sizeof(cp.family_cs));
     }
+
+    cp.font_theme = f->font_theme;      /* kept for the families given (pd_doc_format masks it) */
 
     if (w->rev || w->X->float_rev) {
         cp.mask |= PD_CP_REVISION;
@@ -5496,7 +5940,7 @@ static void dw_begin_cell(dw* w) {
     }
 
     if (w->pend_cell) {
-        uint32_t bg = w->cell_bg;
+        uint32_t bg = w->cell_bg, bg_ref = w->cell_bg_ref;
         dedges e;
 
         memset(&e, 0, sizeof(e));
@@ -5508,6 +5952,7 @@ static void dw_begin_cell(dw* w) {
 
             if (!bg && c->has_shd) {
                 bg = c->shd;
+                bg_ref = c->shd_ref;
             }
 
             e = c->cb;
@@ -5517,7 +5962,7 @@ static void dw_begin_cell(dw* w) {
         bld_cell_begin(b, w->span, bg);
         w->pend_cell = 0;
 
-        if ((e.set & 15) || (w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].row_h > 0)) {
+        if ((e.set & 15) || bg_ref || (w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].row_h > 0)) {
             pd_cell_props cp;
 
             if (pd_doc_cell_props(b->d, bld_container(b), &cp) == PD_OK) {
@@ -5525,6 +5970,8 @@ static void dw_begin_cell(dw* w) {
                 cp.border_on = e.on & e.set & 15;
                 cp.border_width = e.w;
                 cp.border_color = e.c ? e.c : 0xFF000000u;
+                cp.border_theme = e.c ? e.ref : 0;
+                cp.background_theme = bg ? bg_ref : 0;
 
                 {   /* each edge's own, where it is not the widest (PD_TBORDER_ bits 0-3 are PD_BORDER_'s) */
                     int k2;
@@ -5623,6 +6070,7 @@ static void dw_table_props(dw* w) {
             tp.border = e.on ? e.w : 0;
             tp.border_sides = e.on == 63 ? 0 : e.on ? e.on : 0;
             tp.border_color = e.c ? e.c : 0xFF000000u;
+            tp.border_theme = e.c ? e.ref : 0;
         }
 
         /* cell margins: Word's 5.4pt at the sides and none above and below unless said */
@@ -5676,6 +6124,7 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid) {
         /* only what differs from Normal: the same style read again says the same */
 #define SAME_P(bit, f) if ((sty.pp.mask & (bit)) && sty.pp.f == rp.f) { sty.pp.mask &= ~(bit); }
 #define SAME_C(bit, f) if ((sty.cp.mask & (bit)) && sty.cp.f == rc.f) { sty.cp.mask &= ~(bit); }
+
         SAME_P(PD_PP_ALIGN, align)
         SAME_P(PD_PP_INDENT_LEFT, indent_left)
         SAME_P(PD_PP_INDENT_RIGHT, indent_right)
@@ -5689,12 +6138,19 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid) {
         SAME_P(PD_PP_HYPHENATE, hyphenate)
         SAME_P(PD_PP_CONTEXTUAL, contextual)
         SAME_P(PD_PP_SNAP_GRID, snap_grid)
-        SAME_P(PD_PP_SHADING, shading)
+        if (sty.pp.shading_theme == rp.shading_theme) {
+            SAME_P(PD_PP_SHADING, shading)
+        }
         SAME_C(PD_CP_SIZE, size)
         SAME_C(PD_CP_WEIGHT, weight)
         SAME_C(PD_CP_ITALIC, italic)
-        SAME_C(PD_CP_COLOR, color)
-        SAME_C(PD_CP_BACKGROUND, background)
+        if (sty.cp.color_theme == rc.color_theme) {     /* a different link to the theme is another colour */
+            SAME_C(PD_CP_COLOR, color)
+        }
+
+        if (sty.cp.background_theme == rc.background_theme) {
+            SAME_C(PD_CP_BACKGROUND, background)
+        }
         SAME_C(PD_CP_UNDERLINE, underline)
         SAME_C(PD_CP_STRIKE, strike)
         SAME_C(PD_CP_SHIFT, shift)
@@ -5718,7 +6174,8 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid) {
             sty.cp.mask &= ~PD_CP_FAMILY_CS;
         }
 
-        if ((sty.cp.mask & PD_CP_FAMILY) && same_ci(sty.cp.family, rc.family)) {
+        if ((sty.cp.mask & PD_CP_FAMILY) && same_ci(sty.cp.family, rc.family) &&
+                PD_FONT_THEME_TEXT(sty.cp.font_theme) == PD_FONT_THEME_TEXT(rc.font_theme)) {
             sty.cp.mask &= ~PD_CP_FAMILY;
         }
 
@@ -5731,7 +6188,7 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid) {
             sty.pp.mask &= ~PD_PP_TABS;
         }
 
-        if ((sty.pp.mask & PD_PP_BORDER) && sty.pp.border_color == rp.border_color &&
+        if ((sty.pp.mask & PD_PP_BORDER) && sty.pp.border_color == rp.border_color && sty.pp.border_theme == rp.border_theme &&
                 sty.pp.border_width == rp.border_width && sty.pp.border_sides == rp.border_sides &&
                 sty.pp.border_space == rp.border_space) {
             sty.pp.mask &= ~PD_PP_BORDER;
@@ -5883,9 +6340,17 @@ static void dw_begin_para(dw* w) {
         DW_DIFF(PD_PP_SHADING, shading)
 #undef DW_DIFF
 
+        if ((f->mask & PD_PP_SHADING) && (b->pp.mask & PD_PP_SHADING || f->shading_theme != rp.shading_theme)) {
+            b->pp.mask |= PD_PP_SHADING;    /* its link to the theme with it */
+            b->pp.shading = f->shading;
+            b->pp.shading_theme = f->shading_theme;
+        }
+
         if ((f->mask & PD_PP_BORDER) && (f->border_color != rp.border_color || f->border_width != rp.border_width ||
-                                         f->border_sides != rp.border_sides || f->border_space != rp.border_space)) {
+                                         f->border_sides != rp.border_sides || f->border_space != rp.border_space ||
+                                         f->border_theme != rp.border_theme)) {
             b->pp.mask |= PD_PP_BORDER;
+            b->pp.border_theme = f->border_theme;
             b->pp.border_color = f->border_color;
             b->pp.border_width = f->border_width;
             b->pp.border_sides = f->border_sides;
@@ -9744,7 +10209,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
                 w->pend_cell = 1;
                 w->span = 1;
-                w->cell_bg = 0;
+                w->cell_bg = w->cell_bg_ref = 0;
                 w->cell_merge = 0;
                 w->cell_valign = 0;
                 memset(&w->cell_edges, 0, sizeof(w->cell_edges));
@@ -9757,7 +10222,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->cell_merge = !(mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "restart") == 0);
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->cell_valign = strcmp(v, "center") == 0 ? 1 : strcmp(v, "bottom") == 0 ? 2 : 0;
-                } else if (strcmp(t, "shd") == 0 && shd_color(w->X, &m, &w->cell_bg)) {
+                } else if (strcmp(t, "shd") == 0 && shd_color_ref(w->X, &m, &w->cell_bg, &w->cell_bg_ref)) {
                 } else if (strcmp(t, "tcBorders") == 0) {
                     w->in_cb = m.type == MT_OPEN;
                 } else if (w->in_cb) {
@@ -10238,6 +10703,7 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
         pd_doc_add_resource(d, THEME_MIME, theme_xml, theme_len, &tr);
         free(theme_xml);
         theme_xml = NULL;
+        dx_theme_set(&X, d);
     }
     dw_parse(&X, xml, len, 0);
 

@@ -112,7 +112,8 @@ enum {
     UR_STATE = 0,               /* swap a block's state */
     UR_ATTACH = 1,              /* attach <-> detach a subtree */
     UR_STYLE = 2,               /* swap a style definition */
-    UR_COMMENT = 3              /* swap a comment */
+    UR_COMMENT = 3,             /* swap a comment */
+    UR_THEME = 4                /* swap the theme */
 };
 
 typedef struct {
@@ -126,6 +127,7 @@ typedef struct {
     dstyle sdef;
     pd_comment_id comment;      /* UR_COMMENT */
     dcomment csave;
+    pd_theme* tsave;            /* UR_THEME */
 } urec;
 
 typedef struct {
@@ -199,13 +201,15 @@ struct pd_doc {
     int32_t ncomments, capcomments;
     uint64_t comment_rev;       /* bumped by every comment change */
     uint64_t meta_rev;          /* bumped by every metadata change */
+    pd_theme theme;             /* pd_doc_set_theme; Office's by default */
+    uint64_t theme_rev;         /* bumped by every theme change */
     /* deltas: what each finished operation changed, for a journal or a replica */
     pd_delta_fn delta_fn;
     void* delta_user;
     pd_block_id* dnew;          /* subtrees attached during the operation */
     int32_t ndnew, capdnew;
     int32_t sent_formats, sent_revs, sent_lists, sent_res;     /* table entries a replica has */
-    uint64_t sent_comment_rev, sent_meta_rev;
+    uint64_t sent_comment_rev, sent_meta_rev, sent_theme_rev;
     uint64_t delta_serial;
     int applying;               /* pd_doc_apply_delta under way: nothing to report */
     /* the replication binding (pd_sync.c): told of every finished operation, while the touched list is there */
@@ -228,6 +232,14 @@ void      pd_doc_install_builtin_styles(pd_doc* d);
 int       pd_doc_intern_raw(pd_doc* d, const dformat* f, pd_format_id* out);
 void      pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap);
 /* a paragraph's effective properties: style chain, direct properties, list indent */
+/* the theme's colours and fonts in properties linked to it */
+void      pd_doc_theme_cp(const pd_doc* d, pd_char_props* cp);
+void      pd_doc_theme_pp(const pd_doc* d, pd_para_props* pp);
+void      pd_doc_theme_cell(const pd_doc* d, pd_cell_props* c);
+void      pd_doc_theme_table(const pd_doc* d, pd_table_props* t);
+void      pd_doc_theme_raw(pd_doc* d, const pd_theme* theme);
+/* a colour's HSL luminance scaled by mul and moved by add (DrawingML's lumMod and lumOff) */
+uint32_t  pd_lum_adjust(uint32_t c, double mul, double add);
 void      pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp* label_x);
 /* the text of a field or footnote mark if known yet (returns 1), for sizing it */
 typedef int (*pd_field_fn)(void* user, const blk* b, const dinline* q, char* buf, size_t cap);
@@ -262,6 +274,8 @@ void pd_jd_put_pp(void* pj_writer, const pd_para_props* p);
 void pd_jd_put_cp(void* pj_writer, const pd_char_props* c);
 int  pd_jd_get_pp(pd_doc* d, const void* pj_node, pd_para_props* p);
 int  pd_jd_get_cp(pd_doc* d, const void* pj_node, pd_char_props* c);
+void pd_jd_put_theme(void* pj_writer, const pd_theme* t);
+int  pd_jd_get_theme(pd_doc* d, const void* pj_node, pd_theme* t);
 /* a non-paragraph block's properties (the object pd_jd_put_block writes) into a state */
 int  pd_jd_get_block(pd_doc* d, const void* pj_node, int32_t kind, bstate* st);
 /* pd_doc_comment_add outside the undo history (loading) */

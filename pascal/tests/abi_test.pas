@@ -27,6 +27,7 @@ var
   v_pd_section_props: pd_section_props;
   v_pd_table_props: pd_table_props;
   v_pd_cell_props: pd_cell_props;
+  v_pd_theme: pd_theme;
   v_pd_change: pd_change;
   v_pd_layout_info: pd_layout_info;
   v_pd_page_info: pd_page_info;
@@ -165,6 +166,9 @@ begin
   WriteLn('pd_char_props.size_cs ', PtrUInt(@v_pd_char_props.size_cs) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_char_props.weight_cs ', PtrUInt(@v_pd_char_props.weight_cs) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_char_props.italic_cs ', PtrUInt(@v_pd_char_props.italic_cs) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.color_theme ', PtrUInt(@v_pd_char_props.color_theme) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.background_theme ', PtrUInt(@v_pd_char_props.background_theme) - PtrUInt(@v_pd_char_props));
+  WriteLn('pd_char_props.font_theme ', PtrUInt(@v_pd_char_props.font_theme) - PtrUInt(@v_pd_char_props));
   WriteLn('pd_revision ', SizeOf(pd_revision));
   WriteLn('pd_revision.kind ', PtrUInt(@v_pd_revision.kind) - PtrUInt(@v_pd_revision));
   WriteLn('pd_revision.author ', PtrUInt(@v_pd_revision.author) - PtrUInt(@v_pd_revision));
@@ -205,6 +209,8 @@ begin
   WriteLn('pd_para_props.border_sides ', PtrUInt(@v_pd_para_props.border_sides) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.border_space ', PtrUInt(@v_pd_para_props.border_space) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.snap_grid ', PtrUInt(@v_pd_para_props.snap_grid) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.border_theme ', PtrUInt(@v_pd_para_props.border_theme) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.shading_theme ', PtrUInt(@v_pd_para_props.shading_theme) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_tab_stop ', SizeOf(pd_tab_stop));
   WriteLn('pd_tab_stop.position ', PtrUInt(@v_pd_tab_stop.position) - PtrUInt(@v_pd_tab_stop));
   WriteLn('pd_tab_stop.align ', PtrUInt(@v_pd_tab_stop.align) - PtrUInt(@v_pd_tab_stop));
@@ -314,6 +320,7 @@ begin
   WriteLn('pd_table_props.border_sides ', PtrUInt(@v_pd_table_props.border_sides) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.cell_padding_v ', PtrUInt(@v_pd_table_props.cell_padding_v) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.direction ', PtrUInt(@v_pd_table_props.direction) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.border_theme ', PtrUInt(@v_pd_table_props.border_theme) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_cell_props ', SizeOf(pd_cell_props));
   WriteLn('pd_cell_props.col_span ', PtrUInt(@v_pd_cell_props.col_span) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.valign ', PtrUInt(@v_pd_cell_props.valign) - PtrUInt(@v_pd_cell_props));
@@ -325,6 +332,17 @@ begin
   WriteLn('pd_cell_props.border_width ', PtrUInt(@v_pd_cell_props.border_width) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.border_color ', PtrUInt(@v_pd_cell_props.border_color) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.edge_width ', PtrUInt(@v_pd_cell_props.edge_width) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.background_theme ', PtrUInt(@v_pd_cell_props.background_theme) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.border_theme ', PtrUInt(@v_pd_cell_props.border_theme) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_theme ', SizeOf(pd_theme));
+  WriteLn('pd_theme.name ', PtrUInt(@v_pd_theme.name) - PtrUInt(@v_pd_theme));
+  WriteLn('pd_theme.color ', PtrUInt(@v_pd_theme.color) - PtrUInt(@v_pd_theme));
+  WriteLn('pd_theme.major ', PtrUInt(@v_pd_theme.major) - PtrUInt(@v_pd_theme));
+  WriteLn('pd_theme.minor ', PtrUInt(@v_pd_theme.minor) - PtrUInt(@v_pd_theme));
+  WriteLn('pd_theme.major_ea ', PtrUInt(@v_pd_theme.major_ea) - PtrUInt(@v_pd_theme));
+  WriteLn('pd_theme.minor_ea ', PtrUInt(@v_pd_theme.minor_ea) - PtrUInt(@v_pd_theme));
+  WriteLn('pd_theme.major_cs ', PtrUInt(@v_pd_theme.major_cs) - PtrUInt(@v_pd_theme));
+  WriteLn('pd_theme.minor_cs ', PtrUInt(@v_pd_theme.minor_cs) - PtrUInt(@v_pd_theme));
   WriteLn('pd_change ', SizeOf(pd_change));
   WriteLn('pd_change.kind ', PtrUInt(@v_pd_change.kind) - PtrUInt(@v_pd_change));
   WriteLn('pd_change.block ', PtrUInt(@v_pd_change.block) - PtrUInt(@v_pd_change));

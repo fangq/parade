@@ -157,8 +157,10 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
     OVER(PD_PP_CONTEXTUAL, contextual);
     OVER(PD_PP_SNAP_GRID, snap_grid);
     OVER(PD_PP_SHADING, shading);
+    OVER(PD_PP_SHADING, shading_theme);
 
     if (s->pp.mask & PD_PP_BORDER) {
+        pp->border_theme = s->pp.border_theme;
         pp->border_color = s->pp.border_color;
         pp->border_width = s->pp.border_width;
         pp->border_sides = s->pp.border_sides;
@@ -171,6 +173,8 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
         pp->tab_interval = s->pp.tab_interval;
     }
 #undef OVER
+
+    pd_doc_theme_pp(d, pp);
 
     if (label_x) {
         *label_x = 0;

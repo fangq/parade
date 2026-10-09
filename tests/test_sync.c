@@ -842,6 +842,50 @@ static void test_merge(void) {
     free(n);
 }
 
+/* the theme: one replica changes it, the others follow, with what is linked to it; undone the same way */
+static void test_theme(void) {
+    pd_theme t;
+    pd_char_props cp;
+    pd_block_id p;
+    int k;
+
+    p = pd_doc_next_paragraph(R[0].d, 0);
+    memset(&cp, 0, sizeof(cp));
+    cp.mask = PD_CP_COLOR;
+    cp.color = 0xFF4472C4u;
+    cp.color_theme = pd_theme_color(PD_THEME_ACCENT1, 100000, 0);
+    pd_doc_set_char_props(R[0].d, (pd_range) { at(p, 0), at(p, 3) }, &cp);
+    deliver_all();
+    pd_doc_theme(R[1].d, &t);
+    t.color[PD_THEME_ACCENT1] = 0xFF00AA00u;
+    snprintf(t.name, sizeof(t.name), "%s", "Green");
+    CHECK(pd_doc_set_theme(R[1].d, &t) == PD_OK);
+    deliver_all();
+    CHECK(same_everywhere("theme", 1));
+
+    for (k = 0; k < NREP; k++) {
+        pd_theme o;
+        pd_char_props r;
+        pd_run run[64];
+        int32_t nr = 0;
+
+        p = pd_doc_next_paragraph(R[k].d, 0);
+        CHECK(pd_doc_theme(R[k].d, &o) == PD_OK && o.color[PD_THEME_ACCENT1] == 0xFF00AA00u && !strcmp(o.name, "Green"));
+        CHECK(pd_doc_para_runs(R[k].d, p, run, 64, &nr) == PD_OK && nr >= 1);
+        CHECK(pd_doc_format_resolve(R[k].d, p, run[0].format, &r) == PD_OK && r.color == 0xFF00AA00u);
+    }
+
+    CHECK(pd_sync_undo(R[1].s) == PD_OK);
+    deliver_all();
+    CHECK(same_everywhere("theme undone", 1));
+
+    for (k = 0; k < NREP; k++) {
+        pd_theme o;
+
+        CHECK(pd_doc_theme(R[k].d, &o) == PD_OK && o.color[PD_THEME_ACCENT1] == 0xFF4472C4u);
+    }
+}
+
 int main(void) {
     int k;
 
@@ -857,6 +901,8 @@ int main(void) {
     test_catch_up();
     printf("merging the log\n");
     test_merge();
+    printf("the theme\n");
+    test_theme();
 
     for (k = 0; k < NREP; k++) {
         pd_sync_free(R[k].s);

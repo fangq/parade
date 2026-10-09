@@ -4,7 +4,7 @@
  * The shared state (a yrs document):
  *   "blocks": map  key -> block map {"k": kind, "p": properties (JSON text),
  *                                    "t": text (paragraphs) | "kids": array of keys (containers)}
- *   "styles": map  style name -> definition (JSON text)
+ *   "styles": map  style name -> definition (JSON text); THEME_KEY -> the document's theme (JSON text)
  *   "lists":  map  key -> list levels (JSON text)
  *   "res":    map  hash -> picture bytes, "m:" hash -> its media type
  *   "comments": map key -> {"j": description (JSON text), "s"/"e": sticky anchors of the range's ends
@@ -124,6 +124,7 @@ struct pd_sync {
     uint32_t nckey, ncjson;
     uint64_t comment_rev_seen;
     int comments_changed;
+    uint64_t theme_rev_seen;    /* the document's theme as last shared or pulled */
     /* undo of this replica's own edits */
     YUndoManager* um;
     int prev_typing;
@@ -599,6 +600,18 @@ static void fmt_attrs(pd_sync* s, pd_format_id f, attrs* a, int* has_link) {
     AI(PD_CP_ITALIC_CS, "ics", italic_cs)
 #undef AI
 
+    if (cp.color_theme) {   /* links to the theme */
+        at_int(a, "ct", (int64_t)cp.color_theme);
+    }
+
+    if (cp.background_theme) {
+        at_int(a, "bgt", (int64_t)cp.background_theme);
+    }
+
+    if (cp.font_theme) {
+        at_int(a, "ft", (int64_t)cp.font_theme);
+    }
+
     if (m & PD_CP_FAMILY_EA) {
         at_str(a, "fea", cp.family_ea, slen(cp.family_ea, sizeof(cp.family_ea)));
     }
@@ -706,6 +719,18 @@ static pd_format_id sig_fmt(pd_sync* s, int32_t sig) {
     AG(PD_CP_WEIGHT_CS, "wcs", weight_cs, int32_t)
     AG(PD_CP_ITALIC_CS, "ics", italic_cs, int32_t)
 #undef AG
+
+    if ((x = at_get(&a, "ct")) != NULL) {
+        cp.color_theme = (uint32_t)x->i;
+    }
+
+    if ((x = at_get(&a, "bgt")) != NULL) {
+        cp.background_theme = (uint32_t)x->i;
+    }
+
+    if ((x = at_get(&a, "ft")) != NULL) {
+        cp.font_theme = (int32_t)x->i;
+    }
 
     if ((x = at_get(&a, "fea")) != NULL) {
         cp.mask |= PD_CP_FAMILY_EA;
@@ -1550,6 +1575,58 @@ static void props_apply(pd_sync* s, const YTransaction* t, blk* b, const char* j
 /* styles                                                             */
 /* ------------------------------------------------------------------ */
 
+/* the theme's entry among the styles: no style is named with a control character */
+#define THEME_KEY "\001theme"
+
+static char* theme_json(pd_sync* s) {
+    pd_theme th;
+    pd_buf b;
+    pj_writer w;
+
+    pd_doc_theme(s->d, &th);
+    memset(&b, 0, sizeof(b));
+    pj_init(&w, 0, to_pb, &b);
+    w.compact = 1;
+    pd_jd_put_theme(&w, &th);
+    pj_finish(&w);
+    return pb_take(&b);
+}
+
+static void theme_share(pd_sync* s, YTransaction* t) {
+    char* js = theme_json(s), *old = js ? map_str(s->styles, t, THEME_KEY) : NULL;
+
+    if (js && (!old || strcmp(old, js) != 0)) {
+        YInput v = yinput_string(js);
+
+        ymap_insert(s->styles, t, THEME_KEY, &v);
+    }
+
+    free(old);
+    free(js);
+    s->theme_rev_seen = s->d->theme_rev;
+}
+
+/* the shared theme into the document, when it is another */
+static void theme_pull(pd_sync* s, const YTransaction* t) {
+    char* v = map_str(s->styles, t, THEME_KEY), *cur = v ? theme_json(s) : NULL;
+
+    if (v && cur && strcmp(v, cur) != 0) {
+        pj_doc* j = pj_parse(v, strlen(v), 0, NULL);
+        const pj_node* r = j ? pj_root(j) : NULL;
+        pd_theme th;
+
+        if (r && r->type == PJ_OBJ && pd_jd_get_theme(s->d, r, &th)) {
+            pd_doc_set_theme(s->d, &th);
+        }
+
+        pj_free(j);
+    }
+
+    free(v);
+    free(cur);
+    s->theme_rev_seen = s->d->theme_rev;
+}
+
 static char* style_json(pd_sync* s, pd_style_id id) {
     pd_doc* d = s->d;
     int32_t kind = 0;
@@ -1616,8 +1693,8 @@ static void styles_pull(pd_sync* s, const YTransaction* t) {
     /* twice: a style's parent may come after it */
     for (pass = 0; pass < 2 && it; pass++) {
         while ((e = ymap_iter_next(it)) != NULL) {
-            char* v = e->value ? youtput_read_string(e->value) : NULL;
-            pd_style_id id = pd_doc_style_find(s->d, e->key);
+            char* v = e->value && strcmp(e->key, THEME_KEY) != 0 ? youtput_read_string(e->value) : NULL;
+            pd_style_id id = v ? pd_doc_style_find(s->d, e->key) : 0;
             char* cur = id ? style_json(s, id) : NULL;
 
             if (v && (!cur || strcmp(cur, v) != 0)) {
@@ -2124,6 +2201,10 @@ static void share_as(pd_sync* s, const char* origin) {
         comments_share(s, t);
     }
 
+    if (s->d->theme_rev != s->theme_rev_seen) {
+        theme_share(s, t);
+    }
+
     if (s->d->ncomments) {  /* the ranges as the shared anchors have them, everywhere the same */
         comments_anchor(s, t, 1);
     }
@@ -2162,7 +2243,8 @@ static void on_doc_change(void* user) {
         }
     }
 
-    if (s->ndk || s->ndp || s->nds || s->d->comment_rev != s->comment_rev_seen) {
+    if (s->ndk || s->ndp || s->nds || s->d->comment_rev != s->comment_rev_seen ||
+            s->d->theme_rev != s->theme_rev_seen) {
         share(s);
     }
 
@@ -2499,6 +2581,7 @@ static void reconcile(pd_sync* s) {
     pd_doc_begin_group(d, "Remote edits");
 
     if (s->styles_changed) {
+        theme_pull(s, t);
         styles_pull(s, t);
         s->styles_changed = 0;
     }
@@ -3496,6 +3579,7 @@ pd_status pd_sync_publish(pd_sync* s) {
     push(&s->dk, &s->ndk, &s->capdk, PD_STORYROOT_ID);
     push(&s->dk, &s->ndk, &s->capdk, PD_ROOT_ID);
     s->comment_rev_seen = s->d->comment_rev - 1;    /* the comments already there are shared too */
+    s->theme_rev_seen = s->d->theme_rev - 1;        /* and the theme */
     share(s);
     yundo_manager_clear(s->um);     /* publishing is not an edit to undo */
     return PD_OK;

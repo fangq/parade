@@ -244,6 +244,24 @@ const
   PD_PP_TABS = 1 shl 18;
   PD_PP_CONTEXTUAL = 1 shl 19;
   PD_PP_SNAP_GRID = 1 shl 20;
+
+  { the colours of a theme (pd_theme.color) }
+  PD_THEME_DK1 = 0;
+  PD_THEME_LT1 = 1;
+  PD_THEME_DK2 = 2;
+  PD_THEME_LT2 = 3;
+  PD_THEME_ACCENT1 = 4;
+  PD_THEME_ACCENT2 = 5;
+  PD_THEME_ACCENT3 = 6;
+  PD_THEME_ACCENT4 = 7;
+  PD_THEME_ACCENT5 = 8;
+  PD_THEME_ACCENT6 = 9;
+  PD_THEME_HLINK = 10;
+  PD_THEME_FOLHLINK = 11;
+  PD_THEME_COLORS = 12;
+  PD_FONT_THEME_NONE = 0;
+  PD_FONT_THEME_MAJOR = 1;
+  PD_FONT_THEME_MINOR = 2;
   PD_BORDER_TOP = 1;
   PD_BORDER_RIGHT = 2;
   PD_BORDER_BOTTOM = 4;
@@ -405,8 +423,20 @@ type
     size_cs: pd_sp;           { 0 = size }
     weight_cs: Int32;         { 0 = weight }
     italic_cs: Int32;         { -1 = italic }
+    color_theme: UInt32;      { pd_theme_color reference (with PD_CP_COLOR), 0 = none }
+    background_theme: UInt32; { pd_theme_color reference (with PD_CP_BACKGROUND), 0 = none }
+    font_theme: Int32;        { PD_FONT_THEME_* of the text's, East Asian, complex scripts' family (2 bits each) }
   end;
   Ppd_char_props = ^pd_char_props;
+
+  pd_theme = record
+    name: array[0..63] of AnsiChar;
+    color: array[0..PD_THEME_COLORS - 1] of UInt32;   { 0xAARRGGBB, PD_THEME_* order }
+    major, minor: array[0..63] of AnsiChar;           { headings' and body's Latin families }
+    major_ea, minor_ea: array[0..63] of AnsiChar;
+    major_cs, minor_cs: array[0..63] of AnsiChar;
+  end;
+  Ppd_theme = ^pd_theme;
 
   pd_revision = record
     kind: Int32;
@@ -449,6 +479,8 @@ type
     border_sides: Int32;
     border_space: pd_sp;
     snap_grid: Int32;         { lines on the section's grid (1) }
+    border_theme: UInt32;     { pd_theme_color reference of the border, 0 = none }
+    shading_theme: UInt32;    { pd_theme_color reference of the shading, 0 = none }
   end;
   Ppd_para_props = ^pd_para_props;
 
@@ -550,6 +582,7 @@ type
     width_pct, border_sides: Int32;
     cell_padding_v: pd_sp;
     direction: Int32;        { pd_direction: PD_DIR_RTL lays its columns out from the right }
+    border_theme: UInt32;    { pd_theme_color reference of border_color, 0 = none }
   end;
   Ppd_table_props = ^pd_table_props;
 
@@ -562,6 +595,7 @@ type
     border_width: pd_sp;
     border_color: UInt32;
     edge_width: array[0..3] of pd_sp;   { each edge's width (top, right, bottom, left); 0: border_width }
+    background_theme, border_theme: UInt32;     { pd_theme_color references, 0 = none }
   end;
   Ppd_cell_props = ^pd_cell_props;
 
@@ -710,6 +744,12 @@ function pd_doc_prev_paragraph(doc: Ppd_doc; block: pd_block_id): pd_block_id; c
 function pd_doc_style_define(doc: Ppd_doc; name: PAnsiChar; kind: Int32; parent: pd_style_id; para: Ppd_para_props;
   chr: Ppd_char_props; out_style: PUInt32): pd_status; cdecl; PDEXT;
 function pd_doc_style_find(doc: Ppd_doc; name: PAnsiChar): pd_style_id; cdecl; PDEXT;
+procedure pd_theme_init(theme: Ppd_theme); cdecl; PDEXT;
+function pd_doc_theme(doc: Ppd_doc; out_: Ppd_theme): pd_status; cdecl; PDEXT;
+function pd_doc_set_theme(doc: Ppd_doc; theme: Ppd_theme): pd_status; cdecl; PDEXT;
+function pd_theme_color(slot, lum_mod, lum_off: Int32): UInt32; cdecl; PDEXT;
+function pd_theme_color_parts(ref: UInt32; slot, lum_mod, lum_off: PInt32): Int32; cdecl; PDEXT;
+function pd_theme_color_resolve(theme: Ppd_theme; ref, fallback: UInt32): UInt32; cdecl; PDEXT;
 function pd_doc_style_resolve(doc: Ppd_doc; style: pd_style_id; para: Ppd_para_props; chr: Ppd_char_props): pd_status; cdecl; PDEXT;
 function pd_doc_style_count(doc: Ppd_doc): Int32; cdecl; PDEXT;
 function pd_doc_style_at(doc: Ppd_doc; index: Int32): pd_style_id; cdecl; PDEXT;

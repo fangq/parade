@@ -21,13 +21,13 @@ STRUCTS = {
                      "revision",
     "pd_char_props": "mask family size weight italic color background underline strike shift letter_space kerning "
                      "lang small_caps link_target caps hidden position revision family_ea family_cs size_cs weight_cs "
-                     "italic_cs",
+                     "italic_cs color_theme background_theme font_theme",
     "pd_revision": "kind author date",
     "pd_comment": "author date text text_len parent resolved range",
     "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
                      "border_color border_width shading direction ntabs tabs tab_interval contextual border_sides border_space "
-                     "snap_grid",
+                     "snap_grid border_theme shading_theme",
     "pd_tab_stop": "position align leader",
     "pd_list_level": "format start text indent hanging restart_after label_family label_size label_weight "
                      "label_italic label_color",
@@ -43,9 +43,10 @@ STRUCTS = {
                         "footnote_skip add_spacing line_numbers line_number_start line_number_distance "
                         "line_number_restart mirror_margins gutter page_valign line_pitch direction",
     "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width indent width_pct "
-                      "border_sides cell_padding_v direction",
+                      "border_sides cell_padding_v direction border_theme",
     "pd_cell_props": "col_span valign background merge_up min_height border_set border_on border_width border_color "
-                     "edge_width",
+                     "edge_width background_theme border_theme",
+    "pd_theme": "name color major minor major_ea minor_ea major_cs minor_cs",
     "pd_change": "kind block style revision",
     "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull variants",
     "pd_page_info": "width height section number label float_page first last",

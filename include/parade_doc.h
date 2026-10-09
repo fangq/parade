@@ -264,7 +264,23 @@ typedef struct {
     pd_sp size_cs;              /**< complex scripts' size; 0 = size */
     int32_t weight_cs;          /**< complex scripts' weight; 0 = weight */
     int32_t italic_cs;          /**< complex scripts' italic; -1 = italic */
+    /* links to the document's theme (pd_doc_set_theme): resolved properties take the theme's colour or font, and
+       the colour and family above are what the link came to when it was made (shown when there is no theme) */
+    uint32_t color_theme;       /**< pd_theme_color reference (with PD_CP_COLOR), 0 = none */
+    uint32_t background_theme;  /**< pd_theme_color reference (with PD_CP_BACKGROUND), 0 = none */
+    int32_t font_theme;         /**< PD_FONT_THEME_* of each script's family: PD_FONT_THEME(text, ea, cs) */
 } pd_char_props;
+
+/* a family taken from the theme: its heading (major) or body (minor) font */
+#define PD_FONT_THEME_NONE  0
+#define PD_FONT_THEME_MAJOR 1
+#define PD_FONT_THEME_MINOR 2
+/* font_theme packed: the text's family (with PD_CP_FAMILY), the East Asian (PD_CP_FAMILY_EA), the complex
+   scripts' (PD_CP_FAMILY_CS) */
+#define PD_FONT_THEME(text, ea, cs) ((text) | (ea) << 2 | (cs) << 4)
+#define PD_FONT_THEME_TEXT(ft) ((ft) & 3)
+#define PD_FONT_THEME_EA(ft)   (((ft) >> 2) & 3)
+#define PD_FONT_THEME_CS(ft)   (((ft) >> 4) & 3)
 
 /* paragraph property mask bits */
 #define PD_PP_ALIGN        (1u << 0)
@@ -317,6 +333,8 @@ typedef struct {
     int32_t border_sides;       /**< PD_BORDER_* edges the border has (with PD_PP_BORDER); 0 = all four */
     pd_sp border_space;         /**< between the text and the border */
     int32_t snap_grid;          /**< its lines on the section's grid, when it has one (1, the default) */
+    uint32_t border_theme;      /**< pd_theme_color reference of the border (with PD_PP_BORDER), 0 = none */
+    uint32_t shading_theme;     /**< pd_theme_color reference of the shading (with PD_PP_SHADING), 0 = none */
 } pd_para_props;
 
 /* the edges of a paragraph border; paragraphs one after another with the
@@ -326,6 +344,58 @@ typedef struct {
 #define PD_BORDER_BOTTOM  (1 << 2)
 #define PD_BORDER_LEFT    (1 << 3)
 #define PD_BORDER_BETWEEN (1 << 4)
+
+/* ------------------------------------------------------------------ */
+/* Theme                                                              */
+/* ------------------------------------------------------------------ */
+
+/* the colours of a theme, in DrawingML's order */
+#define PD_THEME_DK1      0     /**< dark 1: text */
+#define PD_THEME_LT1      1     /**< light 1: background */
+#define PD_THEME_DK2      2
+#define PD_THEME_LT2      3
+#define PD_THEME_ACCENT1  4     /**< accents 1-6 */
+#define PD_THEME_ACCENT2  5
+#define PD_THEME_ACCENT3  6
+#define PD_THEME_ACCENT4  7
+#define PD_THEME_ACCENT5  8
+#define PD_THEME_ACCENT6  9
+#define PD_THEME_HLINK    10
+#define PD_THEME_FOLHLINK 11
+#define PD_THEME_COLORS   12
+
+/**
+ * A document's theme (Office's): a colour scheme and the heading (major) and
+ * body (minor) fonts of each script. Properties linked to it (color_theme,
+ * font_theme, ...) follow it when it changes.
+ */
+typedef struct {
+    char name[64];              /**< the theme's name, UTF-8 ("Office Theme") */
+    uint32_t color[PD_THEME_COLORS];    /**< 0xAARRGGBB */
+    char major[64];             /**< the headings' Latin family */
+    char minor[64];             /**< the body's Latin family */
+    char major_ea[64], minor_ea[64];    /**< East Asian, "" = none of its own */
+    char major_cs[64], minor_cs[64];    /**< complex scripts */
+} pd_theme;
+
+/** Office's default theme (2013-2022: Calibri Light and Calibri, "Office" colours) */
+PD_API void      pd_theme_init(pd_theme* theme);
+/** the document's theme (Office's default unless one was set) */
+PD_API pd_status pd_doc_theme(const pd_doc* doc, pd_theme* out);
+/** set the document's theme: one undoable step; every linked colour and font changes with it */
+PD_API pd_status pd_doc_set_theme(pd_doc* doc, const pd_theme* theme);
+
+/**
+ * A theme colour reference: a slot (PD_THEME_*) with its luminance scaled
+ * and moved as DrawingML's lumMod and lumOff do (in 1/100000; 100000 and 0
+ * leave it as it is). Word's tint t is lumMod t, lumOff 1 - t; its shade s
+ * is lumMod s. 0 is no reference.
+ */
+PD_API uint32_t  pd_theme_color(int32_t slot, int32_t lum_mod, int32_t lum_off);
+/** the slot, lumMod and lumOff of a reference; 0 if it is none */
+PD_API int32_t   pd_theme_color_parts(uint32_t ref, int32_t* slot, int32_t* lum_mod, int32_t* lum_off);
+/** the colour a reference comes to in a theme (0xAARRGGBB), or fallback if ref is 0 */
+PD_API uint32_t  pd_theme_color_resolve(const pd_theme* theme, uint32_t ref, uint32_t fallback);
 
 /**
  * Define a named style. parent is inherited for every unmasked field
@@ -594,6 +664,7 @@ typedef struct {
     pd_sp cell_padding_v;       /**< top and bottom padding of the cells, < 0 = cell_padding */
     int32_t direction;          /**< pd_direction: PD_DIR_RTL lays its columns out from the right (the first at the
                                      right edge), its indent and LEFT alignment measured from the right */
+    uint32_t border_theme;      /**< pd_theme_color reference of border_color, 0 = none */
 } pd_table_props;
 
 /* when line numbers start again */
@@ -624,6 +695,8 @@ typedef struct {
     uint32_t border_color;
     pd_sp edge_width[4];        /**< each edge's own width, top, right, bottom, left (the PD_BORDER_* bits' order);
                                      0: border_width */
+    uint32_t background_theme;  /**< pd_theme_color reference of background, 0 = none */
+    uint32_t border_theme;      /**< pd_theme_color reference of border_color, 0 = none */
 } pd_cell_props;
 
 PD_API pd_status pd_doc_float_props(const pd_doc* doc, pd_block_id flt, pd_float_props* out);

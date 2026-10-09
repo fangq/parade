@@ -873,6 +873,7 @@ static pd_para_props para_resolved(const pd_doc* d, pd_block_id p) {
     if (o.mask & PD_PP_SPACE_AFTER) r.space_after = o.space_after;
     if (o.mask & PD_PP_LINE_SPACING) r.line_spacing = o.line_spacing;
     if (o.mask & PD_PP_SHADING) r.shading = o.shading;
+    if (o.mask & PD_PP_SHADING) r.shading_theme = o.shading_theme;
     if (o.mask & PD_PP_BORDER) {
         r.border_color = o.border_color;
         r.border_width = o.border_width;
@@ -2101,6 +2102,162 @@ static void test_docx_charts(void) {
         CHECK(z.p && has_mem(z.p, z.n, "word/charts/_rels/chart1.xml.rels") && !has_mem(z.p, z.n, "word/drawings/"));
         free(z.p);
         pd_doc_free(d);
+    }
+}
+
+/* colours and fonts linked to the theme: read as links, changed with the theme (and back on undo), kept through
+   Parade's format and .docx, the theme part made again with the new colours and fonts */
+static void test_theme_links(void) {
+    pd_doc* d = docx_doc(
+        "word/theme/theme1.xml",
+        "<a:theme xmlns:a=\"a\" name=\"Mine\"><a:themeElements><a:clrScheme name=\"Mine\"><a:dk1><a:sysClr val=\"windowText\" "
+        "lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr "
+        "val=\"222222\"/></a:dk2><a:lt2><a:srgbClr val=\"EEEEEE\"/></a:lt2><a:accent1><a:srgbClr val=\"112233\"/></a:accent1>"
+        "<a:accent2><a:srgbClr val=\"808080\"/></a:accent2><a:accent3><a:srgbClr val=\"00FF00\"/></a:accent3><a:accent4>"
+        "<a:srgbClr val=\"444444\"/></a:accent4><a:accent5><a:srgbClr val=\"555555\"/></a:accent5><a:accent6><a:srgbClr "
+        "val=\"666666\"/></a:accent6><a:hlink><a:srgbClr val=\"0000FF\"/></a:hlink><a:folHlink><a:srgbClr val=\"800080\"/>"
+        "</a:folHlink></a:clrScheme><a:fontScheme name=\"Mine\"><a:majorFont><a:latin typeface=\"Georgia\"/><a:ea "
+        "typeface=\"\"/><a:cs typeface=\"\"/></a:majorFont><a:minorFont><a:latin typeface=\"Verdana\"/><a:ea "
+        "typeface=\"\"/><a:cs typeface=\"\"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>",
+        "word/styles.xml",
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:styleId=\"Accent\"><w:name w:val=\"Accent\"/><w:rPr>"
+        "<w:color w:val=\"112233\" w:themeColor=\"accent1\"/></w:rPr></w:style></w:styles>",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\"><w:body>"
+        "<w:p><w:r><w:rPr><w:color w:val=\"000000\" w:themeColor=\"accent1\"/></w:rPr><w:t>a</w:t></w:r>"
+        "<w:r><w:rPr><w:color w:val=\"000000\" w:themeColor=\"accent2\" w:themeShade=\"80\"/></w:rPr><w:t>b</w:t></w:r>"
+        "<w:r><w:rPr><w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\" w:asciiTheme=\"majorHAnsi\" w:hAnsiTheme=\"majorHAnsi\"/>"
+        "</w:rPr><w:t>c</w:t></w:r><w:r><w:rPr><w:color w:val=\"FF0000\"/></w:rPr><w:t>d</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:pStyle w:val=\"Accent\"/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFFFFF\" "
+        "w:themeFill=\"accent2\" w:themeFillTint=\"80\"/></w:pPr><w:r><w:t>e</w:t></w:r></w:p>"
+        "<w:tbl><w:tblPr><w:tblW w:w=\"2000\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid>"
+        "<w:tr><w:tc><w:tcPr><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"00FF00\" w:themeFill=\"accent3\"/></w:tcPr>"
+        "<w:p><w:r><w:t>f</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+        "<w:p/></w:body></w:document>",
+        NULL);
+    pd_block_id body, p0, p1, cell;
+    pd_char_props cp;
+    pd_para_props pp;
+    pd_cell_props ce;
+    pd_theme th, th2;
+    int pass;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    /* the references: a slot and its luminance change, as Word's tints and shades come to */
+    CHECK(pd_theme_color(PD_THEME_ACCENT1, 100000, 0) != 0 && pd_theme_color(-1, 100000, 0) == 0);
+    {
+        int32_t sl, lm, lo;
+
+        CHECK(pd_theme_color_parts(pd_theme_color(PD_THEME_ACCENT2, 75000, 25000), &sl, &lm, &lo) && sl == 5 &&
+              lm == 75000 && lo == 25000);
+        CHECK(pd_theme_color_parts(0, &sl, &lm, &lo) == 0);
+    }
+
+    CHECK(pd_doc_theme(d, &th) == PD_OK && !strcmp(th.name, "Mine") && !strcmp(th.major, "Georgia") &&
+          !strcmp(th.minor, "Verdana") && th.color[PD_THEME_ACCENT1] == 0xFF112233u);
+
+    for (pass = 0; pass < 3; pass++) {  /* as read, through Parade's format, through .docx */
+        body = pd_doc_child(d, pd_doc_root(d), 0);
+        p0 = pd_doc_child(d, body, 0);
+        p1 = pd_doc_child(d, body, 1);
+        cell = pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, body, 2), 0), 0);
+        cp = chars_at(d, p0, 0);
+        CHECK(cp.color == 0xFF112233u && cp.color_theme == pd_theme_color(PD_THEME_ACCENT1, 100000, 0));
+        cp = chars_at(d, p0, 1);
+        CHECK(cp.color == 0xFF404040u && cp.color_theme != 0);    /* 50% grey shaded to half its lightness */
+        cp = chars_at(d, p0, 2);
+        CHECK(!strcmp(cp.family, "Georgia") && PD_FONT_THEME_TEXT(cp.font_theme) == PD_FONT_THEME_MAJOR);
+        cp = chars_at(d, p0, 3);
+        CHECK(cp.color == 0xFFFF0000u && cp.color_theme == 0);
+        cp = chars_at(d, p1, 0);
+        CHECK(cp.color == 0xFF112233u && cp.color_theme != 0);    /* from its style */
+        pp = para_resolved(d, p1);
+        CHECK(pp.shading == 0xFFBFBFBFu && pp.shading_theme != 0);    /* 50% grey tinted halfway to white */
+        CHECK(pd_doc_cell_props(d, cell, &ce) == PD_OK && ce.background == 0xFF00FF00u && ce.background_theme != 0);
+
+        if (pass < 2) {
+            buf_t b = { NULL, 0 };
+            pd_doc* back = NULL;
+
+            CHECK((pass ? pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) : pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b)) ==
+                  PD_OK);
+            CHECK((pass ? pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) : pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &back)) ==
+                  PD_OK);
+            free(b.p);
+
+            if (!back) {
+                break;
+            }
+
+            pd_doc_free(d);
+            d = back;
+            CHECK(pd_doc_theme(d, &th2) == PD_OK && !memcmp(&th, &th2, sizeof(th)));
+        }
+    }
+
+    /* another theme: what is linked follows, what is not stays; undone, back */
+    th2 = th;
+    th2.color[PD_THEME_ACCENT1] = 0xFFAA0000u;
+    th2.color[PD_THEME_ACCENT3] = 0xFF0000AAu;
+    snprintf(th2.major, sizeof(th2.major), "%s", "Cambria");
+    CHECK(pd_doc_set_theme(d, &th2) == PD_OK);
+    body = pd_doc_child(d, pd_doc_root(d), 0);
+    p0 = pd_doc_child(d, body, 0);
+    p1 = pd_doc_child(d, body, 1);
+    cell = pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, body, 2), 0), 0);
+    CHECK(chars_at(d, p0, 0).color == 0xFFAA0000u && chars_at(d, p1, 0).color == 0xFFAA0000u);
+    CHECK(!strcmp(chars_at(d, p0, 2).family, "Cambria") && chars_at(d, p0, 3).color == 0xFFFF0000u);
+    CHECK(pd_doc_cell_props(d, cell, &ce) == PD_OK && ce.background == 0xFF0000AAu);
+    CHECK(pd_doc_undo(d) == PD_OK && chars_at(d, p0, 0).color == 0xFF112233u &&
+          !strcmp(chars_at(d, p0, 2).family, "Georgia"));
+    CHECK(pd_doc_redo(d) == PD_OK && chars_at(d, p0, 0).color == 0xFFAA0000u);
+
+    {   /* written: the theme part has the new colours and fonts, and Word's attributes keep the links */
+        buf_t b = { NULL, 0 };
+        pd_doc* back = NULL;
+        pd_theme th3;
+
+        CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+
+        if (back) {
+            CHECK(pd_doc_theme(back, &th3) == PD_OK && th3.color[PD_THEME_ACCENT1] == 0xFFAA0000u &&
+                  !strcmp(th3.major, "Cambria") && !strcmp(th3.minor, "Verdana"));
+            body = pd_doc_child(back, pd_doc_root(back), 0);
+            CHECK(chars_at(back, pd_doc_child(back, body, 0), 0).color_theme != 0);
+            pd_doc_free(back);
+        }
+    }
+
+    pd_doc_free(d);
+
+    {   /* a document of Parade's own given a theme: written with a theme part made for it */
+        pd_doc* n = NULL;
+        buf_t b = { NULL, 0 };
+        pd_doc* back = NULL;
+        pd_theme t;
+
+        CHECK(pd_doc_new(&n) == PD_OK);
+        pd_theme_init(&t);
+        t.color[PD_THEME_ACCENT1] = 0xFF123456u;
+        snprintf(t.minor, sizeof(t.minor), "%s", "Gill Sans");
+        CHECK(pd_doc_set_theme(n, &t) == PD_OK);
+        CHECK(pd_doc_export(n, PD_CONV_DOCX, to_buf, &b) == PD_OK && pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+
+        if (back) {
+            CHECK(pd_doc_theme(back, &t) == PD_OK && t.color[PD_THEME_ACCENT1] == 0xFF123456u &&
+                  !strcmp(t.minor, "Gill Sans"));
+            pd_doc_free(back);
+        }
+
+        pd_doc_free(n);
     }
 }
 
@@ -5259,6 +5416,7 @@ int main(void) {
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();
+    test_theme_links();
     test_rtl_html_rtf();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();

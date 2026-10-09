@@ -161,6 +161,7 @@ typedef struct {                /* a table: column grid and header rows */
     int32_t nrows;
     pd_sp header_h;
     pd_table_props tp;
+    const pd_theme* theme;      /* the document's, for the cells' colours linked to it */
 } ptable;
 
 /* where a cell (column c, span columns) starts across its table: from the left, or (right to left) the right */
@@ -1439,6 +1440,8 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
     memset(T, 0, sizeof(*T));
     T->block = t->id;
     T->tp = *tp;
+    T->theme = &d->theme;
+    pd_doc_theme_table(d, &T->tp);
     T->ncols = tp->ncols;
 
     for (r = 0; r < t->nkids; r++) {    /* grid width: the widest row */
@@ -2152,6 +2155,11 @@ static pd_sp cell_edge_width(const pd_cell_props* cp, int edge) {
     return cp->edge_width[k] > 0 ? cp->edge_width[k] : cp->border_width;
 }
 
+/* a cell's shading, its theme colour when it is linked to one */
+static uint32_t cell_fill(const pd_doc* d, const blk* cell) {
+    return pd_theme_color_resolve(&d->theme, cell->st.cell.background_theme, cell->st.cell.background);
+}
+
 /* The rule on one edge of a cell: what the cell says of it, else what the
    cell across the edge says of its own side there, else the table's rule
    for an outer edge or one between cells. Returns its width, 0 for none. */
@@ -2160,12 +2168,12 @@ static pd_sp edge_rule(const ptable* T, const blk* cell, int edge, const blk* ac
     int sides = T->tp.border_sides ? T->tp.border_sides : 63;
 
     if (cell && (cell->st.cell.border_set & edge)) {
-        *color = cell->st.cell.border_color;
+        *color = pd_theme_color_resolve(T->theme, cell->st.cell.border_theme, cell->st.cell.border_color);
         return (cell->st.cell.border_on & edge) ? cell_edge_width(&cell->st.cell, edge) : 0;
     }
 
     if (across && (across->st.cell.border_set & across_edge)) {
-        *color = across->st.cell.border_color;
+        *color = pd_theme_color_resolve(T->theme, across->st.cell.border_theme, across->st.cell.border_color);
         return (across->st.cell.border_on & across_edge) ? cell_edge_width(&across->st.cell, across_edge) : 0;
     }
 
@@ -2240,7 +2248,7 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
             inner = inner < PD_PT(1) ? PD_PT(1) : inner;
 
             if (cell->st.cell.background) {
-                add_rule(L, page, cx, ry, cw, rowh[r], cell->st.cell.background, region, cell->id);
+                add_rule(L, page, cx, ry, cw, rowh[r], cell_fill(L->doc, cell), region, cell->id);
             }
 
             if (!cell->st.cell.merge_up) {
@@ -2322,14 +2330,14 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
         if (v->part && !cell->st.cell.merge_up) {     /* a slice: the lines that start in it, from the top */
             if (cell->st.cell.background) {
-                add_rule(F->L, F->page, cx, y, cw, v->h, cell->st.cell.background, 0, cell->id);
+                add_rule(F->L, F->page, cx, y, cw, v->h, cell_fill(F->L->doc, cell), 0, cell->id);
             }
 
             place_stack_clip(F->L, cell->id, inner, F->page, cx + pad, y - v->from + padv, v->from - padv,
                              v->from - padv + v->h);
         } else if (!cell->st.cell.merge_up) {
             if (cell->st.cell.background) {
-                add_rule(F->L, F->page, cx, y, cw, ch, cell->st.cell.background, 0, cell->id);
+                add_rule(F->L, F->page, cx, y, cw, ch, cell_fill(F->L->doc, cell), 0, cell->id);
             }
 
             h = stack_height(F->L, cell->id, inner, &st);

@@ -8,6 +8,7 @@
  *   UR_ATTACH attaches or detaches a whole subtree (insert, remove, move)
  *   UR_STYLE  swaps a style definition
  *   UR_COMMENT swaps a comment
+ *   UR_THEME  swaps the theme
  * Before an operation first changes a block in a step, the block's state
  * is saved once; later changes in the same step (typing) need nothing.
  */
@@ -112,11 +113,17 @@ void pd_doc_cp_normalize(pd_char_props* cp) {
 
     if (m & PD_CP_COLOR) {
         z.color = cp->color;
+        z.color_theme = pd_theme_color_parts(cp->color_theme, NULL, NULL, NULL) ? cp->color_theme : 0;
     }
 
     if (m & PD_CP_BACKGROUND) {
         z.background = cp->background;
+        z.background_theme = pd_theme_color_parts(cp->background_theme, NULL, NULL, NULL) ? cp->background_theme : 0;
     }
+
+    z.font_theme = PD_FONT_THEME(m & PD_CP_FAMILY ? PD_FONT_THEME_TEXT(cp->font_theme) % 3 : 0,
+                                 m & PD_CP_FAMILY_EA ? PD_FONT_THEME_EA(cp->font_theme) % 3 : 0,
+                                 m & PD_CP_FAMILY_CS ? PD_FONT_THEME_CS(cp->font_theme) % 3 : 0);
 
     if (m & PD_CP_UNDERLINE) {
         z.underline = cp->underline;
@@ -220,9 +227,15 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
         z.border_width = pp->border_width;
         z.border_sides = pp->border_sides & 31;
         z.border_space = pp->border_space;
+        z.border_theme = pd_theme_color_parts(pp->border_theme, NULL, NULL, NULL) ? pp->border_theme : 0;
     }
 
     KEEP(PD_PP_SHADING, shading);
+
+    if (m & PD_PP_SHADING) {
+        z.shading_theme = pd_theme_color_parts(pp->shading_theme, NULL, NULL, NULL) ? pp->shading_theme : 0;
+    }
+
     KEEP(PD_PP_DIRECTION, direction);
     KEEP(PD_PP_CONTEXTUAL, contextual);
     KEEP(PD_PP_SNAP_GRID, snap_grid);
@@ -246,6 +259,7 @@ static void cp_apply(pd_char_props* dst, const pd_char_props* src) {
 
     if (m & PD_CP_FAMILY) {
         memcpy(dst->family, src->family, sizeof(dst->family));
+        dst->font_theme = (dst->font_theme & ~3) | PD_FONT_THEME_TEXT(src->font_theme);
     }
 
     if (m & PD_CP_SIZE) {
@@ -262,10 +276,12 @@ static void cp_apply(pd_char_props* dst, const pd_char_props* src) {
 
     if (m & PD_CP_COLOR) {
         dst->color = src->color;
+        dst->color_theme = src->color_theme;
     }
 
     if (m & PD_CP_BACKGROUND) {
         dst->background = src->background;
+        dst->background_theme = src->background_theme;
     }
 
     if (m & PD_CP_UNDERLINE) {
@@ -318,10 +334,12 @@ static void cp_apply(pd_char_props* dst, const pd_char_props* src) {
 
     if (m & PD_CP_FAMILY_EA) {
         memcpy(dst->family_ea, src->family_ea, sizeof(dst->family_ea));
+        dst->font_theme = (dst->font_theme & ~(3 << 2)) | (src->font_theme & (3 << 2));
     }
 
     if (m & PD_CP_FAMILY_CS) {
         memcpy(dst->family_cs, src->family_cs, sizeof(dst->family_cs));
+        dst->font_theme = (dst->font_theme & ~(3 << 4)) | (src->font_theme & (3 << 4));
     }
 
     if (m & PD_CP_SIZE_CS) {
@@ -363,9 +381,11 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
         dst->border_width = src->border_width;
         dst->border_sides = src->border_sides;
         dst->border_space = src->border_space;
+        dst->border_theme = src->border_theme;
     }
 
     SET(PD_PP_SHADING, shading);
+    SET(PD_PP_SHADING, shading_theme);
     SET(PD_PP_DIRECTION, direction);
     SET(PD_PP_CONTEXTUAL, contextual);
     SET(PD_PP_SNAP_GRID, snap_grid);
@@ -656,6 +676,7 @@ pd_doc* pd_doc_alloc(void) {
         d->next_id = 1;
         d->undo_limit = 1000;
         d->stable_breaks = 1;
+        pd_theme_init(&d->theme);
     }
 
     return d;
@@ -671,6 +692,8 @@ static void step_free(pd_doc* d, ustep* s, int dropping) {
             bstate_free(&r->saved);
         } else if (r->type == UR_COMMENT) {
             free(r->csave.text);
+        } else if (r->type == UR_THEME) {
+            free(r->tsave);
         } else if (r->type == UR_ATTACH && !r->attached && dropping) {
             /* the only owner of a detached subtree is the record that detached it */
             blk* b = r->id < d->captab ? d->tab[r->id] : NULL;
@@ -1241,6 +1264,15 @@ pd_status pd_doc_style_resolve(const pd_doc* d, pd_style_id id, pd_para_props* p
 
     default_props(pp, cp);
     apply_chain(d, id, pp, cp, 0);
+
+    if (pp) {
+        pd_doc_theme_pp(d, pp);
+    }
+
+    if (cp) {
+        pd_doc_theme_cp(d, cp);
+    }
+
     return PD_OK;
 }
 
@@ -1357,6 +1389,7 @@ pd_status pd_doc_para_props(const pd_doc* d, pd_block_id para, pd_para_props* ou
     }
 
     *out = b->st.pp;
+    pd_doc_theme_pp(d, out);
     return PD_OK;
 }
 
@@ -1414,6 +1447,7 @@ pd_status pd_doc_format_resolve(const pd_doc* d, pd_block_id para, pd_format_id 
     apply_chain(d, b->st.style, NULL, out, 0);
     apply_chain(d, f->style, NULL, out, 0);
     cp_apply(out, &f->cp);
+    pd_doc_theme_cp(d, out);
     out->mask = PD_CP_ALL;
     return PD_OK;
 }
@@ -1782,6 +1816,7 @@ pd_status pd_doc_table_props(const pd_doc* d, pd_block_id id, pd_table_props* ou
     }
 
     *out = b->st.tp;
+    pd_doc_theme_table(d, out);
     return PD_OK;
 }
 
@@ -1793,7 +1828,203 @@ pd_status pd_doc_cell_props(const pd_doc* d, pd_block_id id, pd_cell_props* out)
     }
 
     *out = b->st.cell;
+    pd_doc_theme_cell(d, out);
     return PD_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* theme                                                              */
+/* ------------------------------------------------------------------ */
+
+void pd_theme_init(pd_theme* t) {
+    static const uint32_t c[PD_THEME_COLORS] = { 0x000000, 0xFFFFFF, 0x44546A, 0xE7E6E6, 0x4472C4, 0xED7D31,
+                                                 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47, 0x0563C1, 0x954F72
+                                               };
+    int i;
+
+    if (!t) {
+        return;
+    }
+
+    memset(t, 0, sizeof(*t));
+    strcpy(t->name, "Office Theme");
+
+    for (i = 0; i < PD_THEME_COLORS; i++) {
+        t->color[i] = 0xFF000000u | c[i];
+    }
+
+    strcpy(t->major, "Calibri Light");
+    strcpy(t->minor, "Calibri");
+}
+
+/* a reference: the slot + 1 in the top four bits, then lumMod and lumOff in 1/5000, 14 bits each (lumOff signed) */
+uint32_t pd_theme_color(int32_t slot, int32_t lum_mod, int32_t lum_off) {
+    long m = (lum_mod + (lum_mod < 0 ? -10 : 10)) / 20, o = (lum_off + (lum_off < 0 ? -10 : 10)) / 20;
+
+    if (slot < 0 || slot >= PD_THEME_COLORS) {
+        return 0;
+    }
+
+    m = m < 0 ? 0 : m > 0x3FFF ? 0x3FFF : m;
+    o = o < -0x2000 ? -0x2000 : o > 0x1FFF ? 0x1FFF : o;
+    return (uint32_t)(slot + 1) << 28 | (uint32_t)m << 14 | ((uint32_t)o & 0x3FFF);
+}
+
+int32_t pd_theme_color_parts(uint32_t ref, int32_t* slot, int32_t* lum_mod, int32_t* lum_off) {
+    int32_t s = (int32_t)(ref >> 28) - 1, o = (int32_t)(ref & 0x3FFF);
+
+    if (s < 0 || s >= PD_THEME_COLORS) {
+        return 0;
+    }
+
+    o = o >= 0x2000 ? o - 0x4000 : o;
+
+    if (slot) {
+        *slot = s;
+    }
+
+    if (lum_mod) {
+        *lum_mod = (int32_t)((ref >> 14) & 0x3FFF) * 20;
+    }
+
+    if (lum_off) {
+        *lum_off = o * 20;
+    }
+
+    return 1;
+}
+
+static void rgb_hsl(uint32_t c, double* h, double* s, double* l) {
+    double r = ((c >> 16) & 255) / 255.0, g = ((c >> 8) & 255) / 255.0, b = (c & 255) / 255.0;
+    double mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    double dd = mx - mn;
+
+    *l = (mx + mn) / 2;
+    *h = *s = 0;
+
+    if (dd > 1e-9) {
+        *s = *l > 0.5 ? dd / (2 - mx - mn) : dd / (mx + mn);
+        *h = mx == r ? (g - b) / dd + (g < b ? 6 : 0) : mx == g ? (b - r) / dd + 2 : (r - g) / dd + 4;
+        *h /= 6;
+    }
+}
+
+static double hue_part(double p, double q, double t) {
+    t = t < 0 ? t + 1 : t > 1 ? t - 1 : t;
+    return t < 1.0 / 6 ? p + (q - p) * 6 * t : t < 0.5 ? q : t < 2.0 / 3 ? p + (q - p) * (2.0 / 3 - t) * 6 : p;
+}
+
+uint32_t pd_lum_adjust(uint32_t c, double mul, double add) {
+    double h, s, l, r, g, b, q, p;
+
+    rgb_hsl(c, &h, &s, &l);
+    l = l * mul + add;
+    l = l < 0 ? 0 : l > 1 ? 1 : l;
+    r = g = b = l;
+
+    if (s > 1e-9) {
+        q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        p = 2 * l - q;
+        r = hue_part(p, q, h + 1.0 / 3);
+        g = hue_part(p, q, h);
+        b = hue_part(p, q, h - 1.0 / 3);
+    }
+
+    return (c & 0xFF000000u) | (uint32_t)(r * 255 + 0.5) << 16 | (uint32_t)(g * 255 + 0.5) << 8 |
+           (uint32_t)(b * 255 + 0.5);
+}
+
+uint32_t pd_theme_color_resolve(const pd_theme* t, uint32_t ref, uint32_t fallback) {
+    int32_t slot, m, o;
+    uint32_t c;
+
+    if (!t || !pd_theme_color_parts(ref, &slot, &m, &o)) {
+        return fallback;
+    }
+
+    c = t->color[slot] | 0xFF000000u;
+    return m == 100000 && o == 0 ? c : pd_lum_adjust(c, m / 100000.0, o / 100000.0);
+}
+
+static void theme_family(char* dst, size_t cap, const pd_theme* t, int which, const char* major, const char* minor) {
+    const char* f = which == PD_FONT_THEME_MAJOR ? major : which == PD_FONT_THEME_MINOR ? minor : NULL;
+
+    (void)t;
+
+    if (f && f[0]) {
+        snprintf(dst, cap, "%s", f);
+    }
+}
+
+void pd_doc_theme_cp(const pd_doc* d, pd_char_props* cp) {
+    const pd_theme* t = &d->theme;
+
+    cp->color = pd_theme_color_resolve(t, cp->color_theme, cp->color);
+    cp->background = pd_theme_color_resolve(t, cp->background_theme, cp->background);
+
+    if (cp->font_theme) {
+        theme_family(cp->family, sizeof(cp->family), t, PD_FONT_THEME_TEXT(cp->font_theme), t->major, t->minor);
+        theme_family(cp->family_ea, sizeof(cp->family_ea), t, PD_FONT_THEME_EA(cp->font_theme), t->major_ea,
+                     t->minor_ea);
+        theme_family(cp->family_cs, sizeof(cp->family_cs), t, PD_FONT_THEME_CS(cp->font_theme), t->major_cs,
+                     t->minor_cs);
+    }
+}
+
+void pd_doc_theme_pp(const pd_doc* d, pd_para_props* pp) {
+    pp->border_color = pd_theme_color_resolve(&d->theme, pp->border_theme, pp->border_color);
+    pp->shading = pd_theme_color_resolve(&d->theme, pp->shading_theme, pp->shading);
+}
+
+void pd_doc_theme_cell(const pd_doc* d, pd_cell_props* c) {
+    c->background = pd_theme_color_resolve(&d->theme, c->background_theme, c->background);
+    c->border_color = pd_theme_color_resolve(&d->theme, c->border_theme, c->border_color);
+}
+
+void pd_doc_theme_table(const pd_doc* d, pd_table_props* tp) {
+    tp->border_color = pd_theme_color_resolve(&d->theme, tp->border_theme, tp->border_color);
+}
+
+pd_status pd_doc_theme(const pd_doc* d, pd_theme* out) {
+    if (!d || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = d->theme;
+    return PD_OK;
+}
+
+static void theme_clean(pd_theme* t) {
+    char* f[7];
+    int i;
+
+    f[0] = t->name;
+    f[1] = t->major;
+    f[2] = t->minor;
+    f[3] = t->major_ea;
+    f[4] = t->minor_ea;
+    f[5] = t->major_cs;
+    f[6] = t->minor_cs;
+
+    for (i = 0; i < 7; i++) {   /* each name ended, and nothing after it: themes compare byte for byte */
+        size_t n;
+
+        f[i][63] = '\0';
+        n = strlen(f[i]);
+        memset(f[i] + n, 0, 64 - n);
+    }
+
+    for (i = 0; i < PD_THEME_COLORS; i++) {
+        t->color[i] |= 0xFF000000u;
+    }
+}
+
+/* the theme a document read or replicated comes with: set as it is, no undo step */
+void pd_doc_theme_raw(pd_doc* d, const pd_theme* theme) {
+    d->theme = *theme;
+    theme_clean(&d->theme);
+    d->theme_rev++;
+    d->style_rev++;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2067,6 +2298,14 @@ static void toggle(pd_doc* d, urec* r) {
         r->sdef = t;
         d->style_rev++;
         touch(d, PD_CHANGE_STYLE, 0, r->style);
+    } else if (r->type == UR_THEME) {
+        pd_theme t = d->theme;
+
+        d->theme = *r->tsave;
+        *r->tsave = t;
+        d->theme_rev++;
+        d->style_rev++;
+        touch(d, PD_CHANGE_STYLE, 0, 0);
     } else if (r->type == UR_COMMENT) {
         dcomment t = d->comments[r->comment - 1];
 
@@ -4541,4 +4780,60 @@ void pd_doc_delta_commit(pd_doc* d) {
     notify(d);
     d->applying = 0;
     pd_doc_clear_undo(d);
+}
+
+pd_status pd_doc_set_theme(pd_doc* d, const pd_theme* theme) {
+    pd_theme nt;
+    urec* r;
+    const char* names[7];
+    int i;
+
+    if (!d || !theme) {
+        return PD_ERR_ARG;
+    }
+
+    nt = *theme;
+    theme_clean(&nt);
+    names[0] = nt.name;
+    names[1] = nt.major;
+    names[2] = nt.minor;
+    names[3] = nt.major_ea;
+    names[4] = nt.minor_ea;
+    names[5] = nt.major_cs;
+    names[6] = nt.minor_cs;
+
+    for (i = 0; i < 7; i++) {
+        if (!pd_doc_utf8_valid(names[i], strlen(names[i]), 0)) {
+            return PD_ERR_ARG;
+        }
+    }
+
+    if (memcmp(&nt, &d->theme, sizeof(nt)) == 0) {
+        return PD_OK;
+    }
+
+    if (op_begin(d, "Theme", 0, 0, 0)) {
+        op_end(d, 0, 0, 0);
+        return PD_ERR_NOMEM;
+    }
+
+    r = add_rec(d, UR_THEME);
+
+    if (!r || (r->tsave = (pd_theme*)malloc(sizeof(pd_theme))) == NULL) {
+        if (r) {
+            r->type = UR_STYLE;     /* nothing to swap: a no-op record of style 0 */
+            r->style = 0;
+        }
+
+        op_end(d, 0, 0, 0);
+        return PD_ERR_NOMEM;
+    }
+
+    *r->tsave = d->theme;
+    d->theme = nt;
+    d->theme_rev++;
+    d->style_rev++;
+    touch(d, PD_CHANGE_STYLE, 0, 0);
+    op_end(d, 0, 0, 0);
+    return PD_OK;
 }

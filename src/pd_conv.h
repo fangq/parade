@@ -227,6 +227,8 @@ const char* mu_local(const char* name);
 /* a theme colour's slot (0 dk1, 1 lt1, 2 dk2, 3 lt2, 4-9 accent1-6, 10 hlink, 11 folHlink) by its DrawingML or
    WordprocessingML name, text1/background1 and the like as Word maps them; -1 if none */
 int pd_conv_theme_slot(const char* name);
+/* a pd_theme_color reference as WordprocessingML attributes (w:themeColor, w:themeTint...; fill: w:themeFill...) */
+void pd_conv_theme_attr(pd_buf* o, uint32_t ref, int fill);
 /* a DrawingML colour modifier (lumMod, lumOff, tint, shade: the element m is at, local name t) applied to c */
 uint32_t pd_conv_clr_modify(uint32_t c, const char* t, const pd_markup* m);
 /* A DrawingML chart part (c:chartSpace) as the items of a Parade drawing (application/vnd.parade.drawing+json)

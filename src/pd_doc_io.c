@@ -168,10 +168,18 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
         if (p->border_space) {
             put_int(w, "BorderSpace", p->border_space);
         }
+
+        if (p->border_theme) {
+            put_int(w, "BorderTheme", p->border_theme);
+        }
     }
 
     if (m & PD_PP_SHADING) {
         put_int(w, "Shading", p->shading);
+
+        if (p->shading_theme) {
+            put_int(w, "ShadingTheme", p->shading_theme);
+        }
     }
 
     if (m & PD_PP_DIRECTION) {
@@ -216,6 +224,10 @@ static void save_cp(pj_writer* w, const pd_char_props* c) {
         put_str(w, "Family", c->family);
     }
 
+    if (c->font_theme) {
+        put_int(w, "FontTheme", c->font_theme);
+    }
+
     if (m & PD_CP_SIZE) {
         put_int(w, "Size", c->size);
     }
@@ -230,10 +242,18 @@ static void save_cp(pj_writer* w, const pd_char_props* c) {
 
     if (m & PD_CP_COLOR) {
         put_int(w, "Color", c->color);
+
+        if (c->color_theme) {
+            put_int(w, "ColorTheme", c->color_theme);
+        }
     }
 
     if (m & PD_CP_BACKGROUND) {
         put_int(w, "Background", c->background);
+
+        if (c->background_theme) {
+            put_int(w, "BackgroundTheme", c->background_theme);
+        }
     }
 
     if (m & PD_CP_UNDERLINE) {
@@ -305,6 +325,37 @@ static void save_cp(pj_writer* w, const pd_char_props* c) {
     }
 
     pj_obj_end(w);
+}
+
+/* the document's theme: {"Name", "Colors": [12], "Major", "Minor", "MajorEastAsian", ...} */
+static void save_theme(pj_writer* w, const pd_theme* t) {
+    int i;
+
+    pj_obj_begin(w);
+    put_str(w, "Name", t->name);
+    pj_key(w, "Colors");
+    pj_arr_begin(w);
+
+    for (i = 0; i < PD_THEME_COLORS; i++) {
+        pj_int(w, (int64_t)t->color[i]);
+    }
+
+    pj_arr_end(w);
+    put_str(w, "Major", t->major);
+    put_str(w, "Minor", t->minor);
+    put_str(w, "MajorEastAsian", t->major_ea);
+    put_str(w, "MinorEastAsian", t->minor_ea);
+    put_str(w, "MajorComplex", t->major_cs);
+    put_str(w, "MinorComplex", t->minor_cs);
+    pj_obj_end(w);
+}
+
+/* the theme a document has saved, when it is not Office's */
+static int theme_saved(const pd_doc* d) {
+    pd_theme o;
+
+    pd_theme_init(&o);
+    return memcmp(&o, &d->theme, sizeof(o)) != 0;
 }
 
 /* saving: formats are written compacted, numbered by first use */
@@ -579,6 +630,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
             put_int(w, "Border", p->border);
             put_int(w, "BorderColor", (int64_t)p->border_color);
 
+            if (p->border_theme) {
+                put_int(w, "BorderTheme", (int64_t)p->border_theme);
+            }
+
             if (p->indent) {
                 put_int(w, "Indent", p->indent);
             }
@@ -623,6 +678,14 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "ColumnSpan", p->col_span);
                 put_int(w, "VerticalAlign", p->valign);
                 put_int(w, "Background", (int64_t)p->background);
+
+                if (p->background_theme) {
+                    put_int(w, "BackgroundTheme", (int64_t)p->background_theme);
+                }
+
+                if (p->border_theme) {
+                    put_int(w, "BorderTheme", (int64_t)p->border_theme);
+                }
 
                 if (p->merge_up) {
                     put_int(w, "MergeUp", p->merge_up);
@@ -1012,6 +1075,11 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
         pj_str(&w, d->meta, d->meta_len);
     }
 
+    if (theme_saved(d)) {
+        pj_key(&w, "Theme");
+        save_theme(&w, &d->theme);
+    }
+
     pj_key(&w, "Document");
     save_block(&w, &sv, d->tab[PD_ROOT_ID]);
 
@@ -1150,11 +1218,13 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
         p->border_width = (pd_sp)int_or(pj_get(o, "BorderWidth"), 0, 0, SP_MAX, L);
         p->border_sides = (int32_t)int_or(pj_get(o, "BorderSides"), 0, 0, 31, L);
         p->border_space = (pd_sp)int_or(pj_get(o, "BorderSpace"), 0, 0, SP_MAX, L);
+        p->border_theme = (uint32_t)int_or(pj_get(o, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
     }
 
     if ((x = pj_get(o, "Shading"))) {
         p->mask |= PD_PP_SHADING;
         p->shading = (uint32_t)int_or(x, 0, 0, 0xFFFFFFFFLL, L);
+        p->shading_theme = (uint32_t)int_or(pj_get(o, "ShadingTheme"), 0, 0, 0xFFFFFFFFLL, L);
     }
 
     if ((x = pj_get(o, "Direction"))) {
@@ -1216,6 +1286,9 @@ static void load_cp(const pj_node* o, pd_char_props* c, loader* L) {
     F("Italic", PD_CP_ITALIC, italic, 0, 1);
     F("Color", PD_CP_COLOR, color, 0, 0xFFFFFFFFLL);
     F("Background", PD_CP_BACKGROUND, background, 0, 0xFFFFFFFFLL);
+    c->color_theme = (uint32_t)int_or(pj_get(o, "ColorTheme"), 0, 0, 0xFFFFFFFFLL, L);
+    c->background_theme = (uint32_t)int_or(pj_get(o, "BackgroundTheme"), 0, 0, 0xFFFFFFFFLL, L);
+    c->font_theme = (int32_t)int_or(pj_get(o, "FontTheme"), 0, 0, 63, L);
     F("Underline", PD_CP_UNDERLINE, underline, 0, PD_UNDERLINE_WORDS);
     F("Strike", PD_CP_STRIKE, strike, 0, 2);
 
@@ -1255,6 +1328,32 @@ static void load_cp(const pj_node* o, pd_char_props* c, loader* L) {
     F("ItalicComplex", PD_CP_ITALIC_CS, italic_cs, -1, 1);
 #undef F
     pd_doc_cp_normalize(c);
+}
+
+static void load_theme(loader* L, const pj_node* x, pd_theme* t) {
+    const pj_node* c, *y;
+    int i;
+
+    pd_theme_init(t);
+    REQUIRE(x->type == PJ_OBJ);
+
+    if ((c = pj_get(x, "Colors")) != NULL) {
+        REQUIRE(c->type == PJ_ARR && c->n == PD_THEME_COLORS);
+
+        for (i = 0, y = c->child; y; y = y->next, i++) {
+            t->color[i] = (uint32_t)int_or(y, 0, 0, 0xFFFFFFFFLL, L);
+        }
+    }
+
+#define N(key, f) if ((y = pj_get(x, key)) != NULL) { copy_name(y, t->f, sizeof(t->f), L); }
+    N("Name", name);
+    N("Major", major);
+    N("Minor", minor);
+    N("MajorEastAsian", major_ea);
+    N("MinorEastAsian", minor_ea);
+    N("MajorComplex", major_cs);
+    N("MinorComplex", minor_cs);
+#undef N
 }
 
 /* a list definition */
@@ -1532,6 +1631,7 @@ static void load_table(loader* L, const pj_node* o, pd_table_props* p) {
     p->cell_padding = (pd_sp)int_or(pj_get(x, "CellPadding"), p->cell_padding, 0, SP_MAX, L);
     p->border = (pd_sp)int_or(pj_get(x, "Border"), p->border, 0, SP_MAX, L);
     p->border_color = (uint32_t)int_or(pj_get(x, "BorderColor"), p->border_color, 0, 0xFFFFFFFFLL, L);
+    p->border_theme = (uint32_t)int_or(pj_get(x, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
     p->indent = (pd_sp)int_or(pj_get(x, "Indent"), 0, -PD_PT(10000), PD_PT(10000), L);
     p->width_pct = (int32_t)int_or(pj_get(x, "WidthPerMille"), 0, 0, 1000, L);
     p->border_sides = (int32_t)int_or(pj_get(x, "BorderSides"), 0, 0, 63, L);
@@ -1568,6 +1668,8 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     p->border_on = (int32_t)int_or(pj_get(x, "BorderOn"), 0, 0, 15, L) & p->border_set;
     p->border_width = (pd_sp)int_or(pj_get(x, "BorderWidth"), 0, 0, SP_MAX, L);
     p->border_color = (uint32_t)int_or(pj_get(x, "BorderColor"), 0, 0, 0xFFFFFFFFLL, L);
+    p->background_theme = (uint32_t)int_or(pj_get(x, "BackgroundTheme"), 0, 0, 0xFFFFFFFFLL, L);
+    p->border_theme = (uint32_t)int_or(pj_get(x, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
 
     {
         const pj_node* ew = pj_get(x, "EdgeWidths");
@@ -1852,6 +1954,13 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
         }
     }
 
+    if ((x = pj_get(r, "Theme")) != NULL) {
+        pd_theme t;
+
+        load_theme(L, x, &t);
+        pd_doc_theme_raw(d, &t);
+    }
+
     /* blocks: the main tree, then the hidden story container */
     if (!L->bad && load_tree(L, pj_get(r, "Document"), 0, 0, 0) != PD_ROOT_ID) {
         L->bad = 1;
@@ -2073,7 +2182,8 @@ void pd_doc_delta_emit(pd_doc* d) {
     int comments = d->comment_rev != d->sent_comment_rev;
 
     if (nt == 0 && d->ndnew == 0 && d->nformats == d->sent_formats && d->nrevs == d->sent_revs &&
-            d->nlists == d->sent_lists && d->nres == d->sent_res && !comments && d->meta_rev == d->sent_meta_rev) {
+            d->nlists == d->sent_lists && d->nres == d->sent_res && !comments && d->meta_rev == d->sent_meta_rev &&
+            d->theme_rev == d->sent_theme_rev) {
         return;
     }
 
@@ -2311,6 +2421,11 @@ void pd_doc_delta_emit(pd_doc* d) {
         pj_str(&w, d->meta ? d->meta : "", d->meta_len);
     }
 
+    if (d->theme_rev != d->sent_theme_rev) {
+        pj_key(&w, "Theme");
+        save_theme(&w, &d->theme);
+    }
+
     pj_obj_end(&w);
 
     if (pj_finish(&w) == 0 && !out.err) {
@@ -2320,6 +2435,7 @@ void pd_doc_delta_emit(pd_doc* d) {
         d->sent_res = d->nres;
         d->sent_comment_rev = d->comment_rev;
         d->sent_meta_rev = d->meta_rev;
+        d->sent_theme_rev = d->theme_rev;
         d->delta_fn(d->delta_user, out.p, out.n);
     }
 
@@ -2351,6 +2467,7 @@ pd_status pd_doc_snapshot(pd_doc* d, pd_jdata_format format, pd_writer fn, void*
     d->sent_res = d->nres;
     d->sent_comment_rev = d->comment_rev;
     d->sent_meta_rev = d->meta_rev;
+    d->sent_theme_rev = d->theme_rev;
     d->delta_serial = 0;
     d->ndnew = 0;
     return PD_OK;
@@ -2849,6 +2966,20 @@ pd_status pd_doc_apply_delta(pd_doc* d, const char* json, size_t len) {
         }
     }
 
+    if ((x = pj_get(r, "Theme")) != NULL) {
+        pd_theme t;
+
+        load_theme(&L, x, &t);
+
+        if (L.bad) {
+            FAIL(PD_ERR_FORMAT);
+        }
+
+        pd_doc_theme_raw(d, &t);
+        d->sent_theme_rev = d->theme_rev;   /* what came from the replica is not sent back to it */
+        pd_doc_delta_touch(d, PD_CHANGE_STYLE, 0, 0);
+    }
+
 #undef FAIL
 end:
     if (st == PD_OK && L.bad) {
@@ -2880,6 +3011,19 @@ void pd_jd_put_pp(void* w, const pd_para_props* p) {
 
 void pd_jd_put_cp(void* w, const pd_char_props* c) {
     save_cp((pj_writer*)w, c);
+}
+
+void pd_jd_put_theme(void* w, const pd_theme* t) {
+    save_theme((pj_writer*)w, t);
+}
+
+int pd_jd_get_theme(pd_doc* d, const void* o, pd_theme* t) {
+    loader L;
+
+    memset(&L, 0, sizeof(L));
+    L.d = d;
+    load_theme(&L, (const pj_node*)o, t);
+    return !L.bad;
 }
 
 int pd_jd_get_pp(pd_doc* d, const void* o, pd_para_props* p) {

@@ -41,6 +41,9 @@ typedef struct {
     char major_cs[64], minor_cs[64];    /* and for complex scripts (cs, else its Arabic or Hebrew font), "" none */
     double line_w[3];           /* the theme's line widths (EMU) */
     char theme_path[256];       /* the theme's part, "" none */
+    char doc_theme[256];        /* the theme the .docx made carries (the first master's): colours of the slides with
+                                   it are linked to it */
+    uint32_t last_ref;          /* the theme colour the last colour_of came to, 0 none (pd_theme_color) */
     int docpr;
     long long sw, sh;           /* the slide size (EMU) */
     int alias[4];               /* bg1, tx1, bg2, tx2: the theme's colours they are (the master's clrMap) */
@@ -283,6 +286,8 @@ static long colour_of(const pptx* P, const xdoc* d, int c) {
     int k;
     double h, s, l;
 
+    ((pptx*)P)->last_ref = 0;
+
     if (c < 0) {
         return -1;
     }
@@ -304,17 +309,34 @@ static long colour_of(const pptx* P, const xdoc* d, int c) {
 
     rgb_hsl(rgb, &h, &s, &l);
 
-    for (k = d->v[c].kid; k >= 0; k = d->v[k].next) {
-        double val = xd_int(d, k, "val", 100000) / 100000.0;
+    {
+        double mul = 1, add = 0;    /* what the changes do to the lightness: l * mul + add */
+        int plain = 1;
 
-        if (!strcmp(d->v[k].name, "lumMod")) {
-            l *= val;
-        } else if (!strcmp(d->v[k].name, "lumOff")) {
-            l += val;
-        } else if (!strcmp(d->v[k].name, "tint")) {
-            l = l + (1 - l) * (1 - val);
-        } else if (!strcmp(d->v[k].name, "shade")) {
-            l *= val;
+        for (k = d->v[c].kid; k >= 0; k = d->v[k].next) {
+            double val = xd_int(d, k, "val", 100000) / 100000.0;
+
+            if (!strcmp(d->v[k].name, "lumMod") || !strcmp(d->v[k].name, "shade")) {
+                l *= val;
+                mul *= val;
+                add *= val;
+            } else if (!strcmp(d->v[k].name, "lumOff")) {
+                l += val;
+                add += val;
+            } else if (!strcmp(d->v[k].name, "tint")) {
+                l = l + (1 - l) * (1 - val);
+                mul *= val;
+                add = add * val + (1 - val);
+            } else {
+                plain = 0;  /* alpha, satMod...: a colour of its own */
+            }
+        }
+
+        /* a theme colour of the document's own theme: linked to it */
+        if (plain && !strcmp(d->v[c].name, "schemeClr") && P->theme_path[0] && !strcmp(P->theme_path, P->doc_theme)) {
+            xd_attr(d, c, "val", v, sizeof(v));
+            ((pptx*)P)->last_ref = pd_theme_color(theme_slot_of(P, v), (int32_t)(mul * 100000 + 0.5),
+                                                  (int32_t)(add * 100000 + (add < 0 ? -0.5 : 0.5)));
         }
     }
 
@@ -653,7 +675,8 @@ static long rpr_colour(const tctx* T, const xdoc* d, int rpr) {
     return c >= 0 ? c : T->font_colour >= 0 ? T->font_colour : (long)T->P->theme[0];
 }
 
-static void rpr_font(const tctx* T, const xdoc* d, int rpr, char* face, size_t cap) {
+/* a run's face; *th the theme's font it is (PD_FONT_THEME_MAJOR, _MINOR), 0 a face of its own */
+static void rpr_font(const tctx* T, const xdoc* d, int rpr, char* face, size_t cap, int* th) {
     int k, l = rpr >= 0 ? xd_kid(d, rpr, "latin") : -1;
 
     face[0] = '\0';
@@ -666,10 +689,18 @@ static void rpr_font(const tctx* T, const xdoc* d, int rpr, char* face, size_t c
         xd_attr(T->lvl[k].d, xd_path(T->lvl[k].d, T->lvl[k].n, "defRPr/latin"), "typeface", face, cap);
     }
 
+    *th = 0;
+
     if (!face[0] || !strcmp(face, "+mn-lt")) {
-        snprintf(face, cap, "%s", T->title ? T->P->major : T->P->minor);
+        *th = T->title && !face[0] ? PD_FONT_THEME_MAJOR : PD_FONT_THEME_MINOR;
+        snprintf(face, cap, "%s", *th == PD_FONT_THEME_MAJOR ? T->P->major : T->P->minor);
     } else if (!strcmp(face, "+mj-lt")) {
+        *th = PD_FONT_THEME_MAJOR;
         snprintf(face, cap, "%s", T->P->major);
+    }
+
+    if (!T->P->theme_path[0] || strcmp(T->P->theme_path, T->P->doc_theme)) {
+        *th = 0;    /* another master's theme: not the document's */
     }
 }
 
@@ -733,10 +764,11 @@ static int font_weight(char* face) {
 static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
     char v[80];
     long sz = 1800, c;
-    int heavy, link;
+    int heavy, link, th;
+    uint32_t ref;
 
     pb_puts(o, "<w:rPr>");
-    rpr_font(T, d, rpr, v, sizeof(v));
+    rpr_font(T, d, rpr, v, sizeof(v), &th);
     heavy = font_weight(v);
     {   /* the face, for the font table */
         int q;
@@ -759,7 +791,14 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
         rpr_cs_font(T, d, rpr, cs, sizeof(cs));
         put_esc(o, cs[0] ? cs : v);
     }
-    pb_puts(o, "\"/>");
+    pb_putc(o, '"');
+
+    if (th && !heavy) {
+        pb_printf(o, " w:asciiTheme=\"%sHAnsi\" w:hAnsiTheme=\"%sHAnsi\"", th == PD_FONT_THEME_MAJOR ? "major" : "minor",
+                  th == PD_FONT_THEME_MAJOR ? "major" : "minor");
+    }
+
+    pb_puts(o, "/>");
 
     if (heavy || T->force_bold || (rpr_attr(T, d, rpr, "b", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true")))) {
         pb_puts(o, "<w:b/>");
@@ -784,8 +823,13 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
     }
 
     /* a link in the theme's link colour */
+    T->P->last_ref = 0;
     c = T->bullet && T->bu_colour >= 0 ? T->bu_colour : link ? (long)T->P->theme[10] : rpr_colour(T, d, rpr);
-    pb_printf(o, "<w:color w:val=\"%06lX\"/>", (unsigned long)c & 0xFFFFFFul);
+    ref = T->bullet && T->bu_colour >= 0 ? 0 : link ? (T->P->theme_path[0] && !strcmp(T->P->theme_path, T->P->doc_theme) ?
+            pd_theme_color(PD_THEME_HLINK, 100000, 0) : 0) : T->P->last_ref;
+    pb_printf(o, "<w:color w:val=\"%06lX\"", (unsigned long)c & 0xFFFFFFul);
+    pd_conv_theme_attr(o, ref, 0);
+    pb_puts(o, "/>");
 
     if (rpr_attr(T, d, rpr, "sz", v, sizeof(v))) {
         sz = atol(v);
@@ -2164,6 +2208,8 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
         } else {
             theme_load(&P, NULL);
         }
+
+        snprintf(P.doc_theme, sizeof(P.doc_theme), "%s", P.theme_path);
     }
 
     if (part_load(&P, &ts, "ppt/tableStyles.xml")) {   /* the table styles the tables name */
