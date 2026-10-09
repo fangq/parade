@@ -538,6 +538,13 @@ type
     function MoveFloatBy(DX, DY: pd_sp): Boolean;
     { the float the selected object is in (0: it is in the text) }
     function SelectedFloat: pd_block_id;
+    { how the text goes round the selected object (a picture or a drawing): -1 in line with the text, else PD_WRAP_*
+      (NONE: above and below it; LEFT, RIGHT: beside it, it on that side; FRONT, BEHIND: over or under the text,
+      which takes no notice); -2 when none is selected }
+    function ObjectWrap: Integer;
+    { the selected object put in line with the text (-1) or floating with the text round it so; where it is kept;
+      one step of undo }
+    function SetObjectWrap(Wrap: Integer): Boolean;
     { the shapes selected: the one, and those added (Shift+click), as sids }
     function SelectedShapes: TIntegerArray;
     { a shape of the selected drawing added to the selection, or taken out if it is in it (Shift+click) }
@@ -6766,7 +6773,7 @@ end;
 { the selection a shape edit was made from (undone) or left (redone), as far as the drawing still has it }
 procedure TParadeEdit.RestoreShapeStep(const S: TParadeShapeStep);
 var
-  J: TJSONObject;
+  O: pd_inline;
   Boxes: TParadeShapeBoxes;
   I, K: Integer;
   Found: Boolean;
@@ -6776,13 +6783,11 @@ begin
     ClearShapeSelection;
     Exit;
   end;
-  J := DrawingJson(FDoc, S.At);
-  if J = nil then
-  begin
+  if (pd_doc_inline_at(FDoc, S.At, O) <> PD_OK) or (O.kind <> PD_INLINE_IMAGE) then
+  begin   { a picture or a drawing no longer there }
     ClearShapeSelection;
     Exit;
   end;
-  J.Free;
   FShapeOn := True;
   FShapeAt := S.At;
   FShapeSid := -1;
@@ -10906,6 +10911,110 @@ begin
     Result := Info.id;
 end;
 
+function TParadeEdit.ObjectWrap: Integer;
+var
+  Fl: pd_block_id;
+  Fp: pd_float_props;
+begin
+  Result := -2;
+  if not FShapeOn then
+    Exit;
+  Fl := SelectedFloat;
+  if Fl = 0 then
+    Exit(-1);
+  if pd_doc_float_props(FDoc, Fl, Fp) = PD_OK then
+    Result := Fp.wrap;
+end;
+
+function TParadeEdit.SetObjectWrap(Wrap: Integer): Boolean;
+var
+  Fl, Sec, Anchor, B: pd_block_id;
+  FI, BI, Info: pd_block_info;
+  Fp: pd_float_props;
+  Sp: pd_section_props;
+  O: pd_inline;
+  Keep: array[0..2] of string;
+  At: pd_pos;
+  Pg: Int32;
+  X, Y, W, H, JW, JH, ColLeft: Double;
+  Sid: Integer;
+begin
+  Result := False;
+  if FReadOnly or not FShapeOn or (Wrap < -1) or (Wrap > PD_WRAP_BEHIND) or
+     (pd_doc_inline_at(FDoc, FShapeAt, O) <> PD_OK) or (Wrap = ObjectWrap) then
+    Exit;
+  At := FShapeAt;
+  Sid := FShapeSid;
+  Fl := SelectedFloat;
+  KeepInlineText(O, Keep);
+  if not DrawingPlace(At, Pg, X, Y, W, H, JW, JH) then
+    X := 0;
+  PushShapeStep('Wrap text', At);
+  pd_doc_begin_group(FDoc, 'Wrap text');
+  try
+    if (Fl <> 0) and (Wrap = -1) then
+    begin   { into the text: at the start of the paragraph it was anchored in, the float gone }
+      if pd_doc_block_info(FDoc, Fl, FI) <> PD_OK then
+        Exit;
+      Anchor := pd_doc_child(FDoc, FI.parent, FI.index + 1);
+      if (Anchor = 0) or (pd_doc_block_info(FDoc, Anchor, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_PARAGRAPH) then
+        if pd_doc_insert_block(FDoc, FI.parent, FI.index + 1, PD_BLOCK_PARAGRAPH, Anchor) <> PD_OK then
+          Exit;
+      if pd_doc_insert_inline(FDoc, PdPos(Anchor, 0), O, nil) <> PD_OK then
+        Exit;
+      Result := pd_doc_remove_block(FDoc, Fl) = PD_OK;
+      At := PdPos(Anchor, 0);
+    end
+    else if Fl = 0 then
+    begin   { out of the line: a float before its paragraph, anchored there, across the column where it was }
+      if (pd_doc_block_info(FDoc, At.block, BI) <> PD_OK) or
+         (pd_doc_insert_block(FDoc, BI.parent, BI.index, PD_BLOCK_FLOAT, Fl) <> PD_OK) then
+        Exit;
+      pd_doc_delete(FDoc, PdRange(At, PdPos(At.block, At.offset + 3)), nil);
+      B := pd_doc_child(FDoc, Fl, 0);
+      if pd_doc_insert_inline(FDoc, PdPos(B, 0), O, nil) <> PD_OK then
+        Exit;
+      pd_doc_float_props(FDoc, Fl, Fp);
+      Fp.placement := PD_PLACE_HERE or PD_PLACE_FORCE;
+      Fp.width := O.width;
+      Fp.gap := Round(9 * PD_SP_PER_PT);
+      Fp.wrap := Wrap;
+      ColLeft := 0;
+      Sec := BI.parent;
+      while (Sec <> 0) and (pd_doc_block_info(FDoc, Sec, Info) = PD_OK) and (Info.kind <> PD_BLOCK_SECTION) do
+        Sec := Info.parent;
+      if (Sec <> 0) and (pd_doc_section_props(FDoc, Sec, Sp) = PD_OK) then
+        ColLeft := Sp.margin_left;
+      if (Wrap <> PD_WRAP_NONE) and (X > 0) then
+      begin
+        Fp.placement := Fp.placement or PD_PLACE_OFFSET;
+        Fp.offset_x := Round(X - ColLeft);
+      end;
+      Result := pd_doc_set_float_props(FDoc, Fl, Fp) = PD_OK;
+      At := PdPos(B, 0);
+    end
+    else
+    begin   { another way round the float }
+      pd_doc_float_props(FDoc, Fl, Fp);
+      Fp.wrap := Wrap;
+      if Wrap in [PD_WRAP_LEFT, PD_WRAP_RIGHT] then
+        Fp.placement := Fp.placement and not PD_PLACE_OFFSET;     { against that side }
+      Result := pd_doc_set_float_props(FDoc, Fl, Fp) = PD_OK;
+    end;
+  finally
+    pd_doc_end_group(FDoc);
+  end;
+  Changed;
+  FShapeOn := True;
+  FShapeAt := At;
+  FShapeSid := Sid;
+  if Sid < 0 then
+    SelectRange(PdRange(At, PdPos(At.block, At.offset + 3)))
+  else
+    SetCaret(At, False);
+  Invalidate;
+end;
+
 function TParadeEdit.OnDrawingBody(X, Y: Integer): Boolean;
 var
   Pg: Int32;
@@ -10996,6 +11105,22 @@ begin
     Exit;
   NX := X + DX;
   NY := Y + DY;
+  if Fp.offset_from <> PD_FROM_PARAGRAPH then
+  begin   { placed from the page: as far again down it, anchored where it is }
+    PushShapeStep('Move', FShapeAt);
+    Fp.offset_y := Fp.offset_y + DY;
+    if Fp.wrap <> PD_WRAP_NONE then
+    begin
+      Fp.placement := Fp.placement or PD_PLACE_OFFSET;
+      Fp.offset_x := Round(NX - Sp.margin_left);
+    end;
+    pd_doc_begin_group(FDoc, 'Move');
+    Result := pd_doc_set_float_props(FDoc, Fl, Fp) = PD_OK;
+    pd_doc_end_group(FDoc);
+    Changed;
+    Invalidate;
+    Exit;
+  end;
   { how far above its anchor's first line the drawing is placed from (the gap between them) }
   A0 := pd_doc_child(FDoc, Sec, FI.index + 1);
   D0 := 0;

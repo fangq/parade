@@ -900,6 +900,56 @@ begin
   E.SnapToShapes := True;
 end;
 
+{ a picture's wrapping: in the line, beside the text, over it, and back; so saved }
+procedure TestWrap(E: TParadeEdit);
+const
+  Long = 'In olden times when wishing still helped one, there lived a king whose daughters were all beautiful, ' +
+    'but the youngest was so beautiful that the sun itself, which has seen so much, was astonished whenever ' +
+    'it shone in her face. Close by the king''s castle lay a great dark forest.';
+var
+  D, P: pd_pos;
+  Sid, I: Integer;
+  Dir: string;
+  Sec, Fl: pd_block_id;
+  Info: pd_block_info;
+  Fp: pd_float_props;
+  Pg: Int32;
+  X0, Y0, X1, Y1: Double;
+  A: TPoint;
+begin
+  Dir := ExtractFilePath(ParamStr(0));
+  E.NewDocument;
+  E.InsertText(Long);
+  E.ProcessKey(VK_RETURN, []);
+  P := E.CaretPos;
+  Check(E.InsertPicture(Dir + '../../tests/data/rgba.png'), 'a picture in the line');
+  E.InsertText(Long);
+  { select it: a click on it }
+  if E.ShapePageBox(PdPos(P.block, 0), -1, Pg, X0, Y0, X1, Y1) then
+  begin
+    A := E.PageToClient(Pg, (X0 + X1) / 2 / PD_SP_PER_PT, (Y0 + Y1) / 2 / PD_SP_PER_PT);
+    TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], A.X, A.Y);
+  end;
+  Check(E.SelectedShape(D, Sid) and (E.ObjectWrap = -1), 'selected: in line with the text');
+  Check(E.SetObjectWrap(PD_WRAP_LEFT) and (E.SelectedFloat <> 0) and (E.ObjectWrap = PD_WRAP_LEFT) and
+    (Pos(#$EF#$BF#$BC, E.ParaText(P.block)) = 0), 'square: a float, the text beside it');
+  Check(E.SetObjectWrap(PD_WRAP_FRONT) and (E.ObjectWrap = PD_WRAP_FRONT), 'in front of the text');
+  E.SaveToFile(Dir + 'edit_wrap.docx');
+  Check(E.SetObjectWrap(-1) and (E.SelectedFloat = 0) and E.SelectedShape(D, Sid) and
+    (Pos(#$EF#$BF#$BC, E.ParaText(D.block)) = 1), 'back in the line, at its paragraph''s start');
+  E.Undo;
+  Check(E.ObjectWrap = PD_WRAP_FRONT, 'undone: in front again, selected');
+  E.LoadFromFile(Dir + 'edit_wrap.docx');
+  Sec := pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0);
+  Fl := 0;
+  for I := 0 to ChildCountOf(E.Doc, Sec) - 1 do
+    if (pd_doc_block_info(E.Doc, pd_doc_child(E.Doc, Sec, I), Info) = PD_OK) and (Info.kind = PD_BLOCK_FLOAT) then
+      Fl := Info.id;
+  Check((Fl <> 0) and (pd_doc_float_props(E.Doc, Fl, Fp) = PD_OK) and (Fp.wrap = PD_WRAP_FRONT),
+    'saved and read back: in front of the text');
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -2187,6 +2237,7 @@ begin
   TestDrawingMove(E);
   TestConnectors(E);
   TestSnap(E);
+  TestWrap(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;
