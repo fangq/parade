@@ -152,6 +152,9 @@ type
                                      14 the whole drawing moved, 15 a connector's end }
     FShapeFrom: TPoint;            { where it began (client pixels) }
     FBandTo: TPoint;               { a rubber band: its other corner }
+    FGuideX, FGuideY: array of Double;   { a drag snapped to these: lines shown across the canvas (its units) }
+    FSnapShapes: Boolean;          { a drag snaps to the other shapes' edges and middles, and the canvas's }
+    FSnapGrid: Double;             { and to a grid this many points apart (0: none) }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
     FFrameKey: string;             { the text box the caret is in, as last looked up: story and revision }
     FFrameAt: pd_pos;              { its drawing (block 0: the caret is in none) }
@@ -334,6 +337,7 @@ type
     function ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
     function ShapeDragStart(X, Y: Integer): Boolean;
     procedure ShapeDragMove(X, Y: Integer; Shift: TShiftState);
+    procedure SnapDrag(JW, JH, Thr: Double);
     function NudgeShape(DX, DY: Double): Boolean;
     { over the selected drawing where a press moves it: a picture anywhere, a canvas on its edge }
     function OnDrawingBody(X, Y: Integer): Boolean;
@@ -506,6 +510,10 @@ type
     { a handle of the selected shape in the control's pixels: Kind 's' a sizing one (0..7), 'r' the turning one,
       'a' an adjustment's, 'n' a point's (Edit Points) }
     function ShapeHandlePoint(Kind: Char; Index: Integer; out P: TPoint): Boolean;
+    { a shape dragged (moved, sized, drawn) snaps to the other shapes' edges and middles and the canvas's, a guide
+      shown (Alt held: not); and to a grid SnapGrid points apart (0: none) }
+    property SnapToShapes: Boolean read FSnapShapes write FSnapShapes;
+    property SnapGrid: Double read FSnapGrid write FSnapGrid;
     { what a new shape is filled and outlined with }
     property ShapeFillColor: TColor read FShapeFillDef write FShapeFillDef;
     property ShapeLineColor: TColor read FShapeLineDef write FShapeLineDef;
@@ -1325,6 +1333,7 @@ end;
 
 constructor TParadeEdit.Create(AOwner: TComponent);
 begin
+  FSnapShapes := True;
   inherited Create(AOwner);
   FHybridDefault := True;
   FShapeDrag := -1;
@@ -6289,6 +6298,18 @@ begin
             Canvas.Rectangle(Rc.Left, Rc.Top, Rc.Right + 1, Rc.Bottom + 1);
     Canvas.Pen.Style := psSolid;
   end;
+  if (FShapeDrag in [0..9]) and (DrawingPlace(FShapeAt, Pg, X, Y, W, H, JW, JH)) and (JW > 0) and (JH > 0) then
+  begin   { the lines a drag has snapped to, across the canvas }
+    Canvas.Pen.Color := $004080FF;
+    Canvas.Pen.Style := psDot;
+    for I := 0 to High(FGuideX) do
+      if ShapeClientRect([FGuideX[I], 0, FGuideX[I], JH], Rc) then
+        Canvas.Line(Rc.Left, Rc.Top, Rc.Left, Rc.Bottom);
+    for I := 0 to High(FGuideY) do
+      if ShapeClientRect([0, FGuideY[I], JW, FGuideY[I]], Rc) then
+        Canvas.Line(Rc.Left, Rc.Top, Rc.Right, Rc.Top);
+    Canvas.Pen.Style := psSolid;
+  end;
   if FShapeDrag = 15 then
   begin   { a connector's end dragged: from its other end to the mouse }
     if DrawMap(M) and ConnectorInfo(CX1, CY1, CX2, CY2, I, K) then
@@ -10530,7 +10551,130 @@ begin
       end;
     end;
   end;
+  SetLength(FGuideX, 0);
+  SetLength(FGuideY, 0);
+  if not (ssAlt in Shift) and ((FShapeSid >= 0) or (FShapeDrag = 9)) and
+     not ((ssShift in Shift) and (FShapeDrag in [0, 2, 4, 6])) then
+    SnapDrag(JW, JH, 6 / PxPerSp * JW / W);    { six pixels }
   Invalidate;
+end;
+
+{ the drag's box (FShapeNew) snapped: its moving edges (a move: its edges and middle) to the nearest of the other
+  shapes' edges and middles, the canvas's, or the grid, within Thr (the drawing's units); the lines snapped to kept
+  to show }
+procedure TParadeEdit.SnapDrag(JW, JH, Thr: Double);
+var
+  Boxes: TParadeShapeBoxes;
+  CX, CY: array of Double;
+  Sids: TIntegerArray;
+  I, K: Integer;
+  Skip: Boolean;
+  G: Double;
+
+  procedure Add(var A: array of Double; var N: Integer; V: Double);
+  begin
+    A[N] := V;
+    Inc(N);
+  end;
+
+  { the shift putting one of the edges Es on a line, the nearest within Thr; the line }
+  function Best(const Es: array of Double; const Cs: array of Double; NC: Integer; out Line: Double): Double;
+  var
+    A, B: Integer;
+    D, BD, V: Double;
+  begin
+    Result := 0;
+    Line := NaN;
+    BD := Thr;
+    for A := 0 to High(Es) do
+    begin
+      for B := 0 to NC - 1 do
+      begin
+        D := Cs[B] - Es[A];
+        if Abs(D) < BD then
+        begin
+          BD := Abs(D);
+          Result := D;
+          Line := Cs[B];
+        end;
+      end;
+      if IsNan(Line) and (G > 0) and (A = 0) then
+      begin   { the grid, when no shape is near: its first edge (a move: its top left corner) }
+        V := Round(Es[A] / G) * G;    { the nearest grid line, however far }
+        Result := V - Es[A];
+      end;
+    end;
+  end;
+
+var
+  NX, NY: Integer;
+  D, L: Double;
+begin
+  SetLength(FGuideX, 0);
+  SetLength(FGuideY, 0);
+  G := FSnapGrid * PD_SP_PER_PT;
+  if not FSnapShapes and (G <= 0) then
+    Exit;
+  Boxes := DrawingShapes(FShapeAt);
+  Sids := SelectedShapes;
+  SetLength(CX, 3 * Length(Boxes) + 3);
+  SetLength(CY, 3 * Length(Boxes) + 3);
+  NX := 0;
+  NY := 0;
+  if FSnapShapes then
+  begin
+    Add(CX, NX, 0); Add(CX, NX, JW / 2); Add(CX, NX, JW);
+    Add(CY, NY, 0); Add(CY, NY, JH / 2); Add(CY, NY, JH);
+    for I := 0 to High(Boxes) do
+    begin
+      Skip := FShapeDrag = 9;
+      for K := 0 to High(Sids) do
+        Skip := Skip or (Boxes[I].Sid = Sids[K]);
+      if Skip and (FShapeDrag <> 9) then
+        Continue;
+      Add(CX, NX, Boxes[I].X0); Add(CX, NX, (Boxes[I].X0 + Boxes[I].X1) / 2); Add(CX, NX, Boxes[I].X1);
+      Add(CY, NY, Boxes[I].Y0); Add(CY, NY, (Boxes[I].Y0 + Boxes[I].Y1) / 2); Add(CY, NY, Boxes[I].Y1);
+    end;
+  end;
+  case FShapeDrag of
+    8:
+      begin   { moved: whichever of its edges or its middle is nearest a line }
+        D := Best([FShapeNew[0], (FShapeNew[0] + FShapeNew[2]) / 2, FShapeNew[2]], CX, NX, L);
+        FShapeNew[0] := FShapeNew[0] + D;
+        FShapeNew[2] := FShapeNew[2] + D;
+        if not IsNan(L) then FGuideX := [L];
+        D := Best([FShapeNew[1], (FShapeNew[1] + FShapeNew[3]) / 2, FShapeNew[3]], CY, NY, L);
+        FShapeNew[1] := FShapeNew[1] + D;
+        FShapeNew[3] := FShapeNew[3] + D;
+        if not IsNan(L) then FGuideY := [L];
+      end;
+    9:
+      begin   { drawn: where it ends }
+        D := Best([FShapeNew[2]], CX, NX, L);
+        FShapeNew[2] := FShapeNew[2] + D;
+        if not IsNan(L) then FGuideX := [L];
+        D := Best([FShapeNew[3]], CY, NY, L);
+        FShapeNew[3] := FShapeNew[3] + D;
+        if not IsNan(L) then FGuideY := [L];
+      end;
+  else
+    begin   { sized: the edges its handle moves }
+      if FShapeDrag in [0, 6, 7] then K := 0 else if FShapeDrag in [2, 3, 4] then K := 2 else K := -1;
+      if K >= 0 then
+      begin
+        D := Best([FShapeNew[K]], CX, NX, L);
+        FShapeNew[K] := FShapeNew[K] + D;
+        if not IsNan(L) then FGuideX := [L];
+      end;
+      if FShapeDrag in [0, 1, 2] then K := 1 else if FShapeDrag in [4, 5, 6] then K := 3 else K := -1;
+      if K >= 0 then
+      begin
+        D := Best([FShapeNew[K]], CY, NY, L);
+        FShapeNew[K] := FShapeNew[K] + D;
+        if not IsNan(L) then FGuideY := [L];
+      end;
+    end;
+  end;
 end;
 
 { the selected shape moved by DX, DY points on the page }
@@ -11047,6 +11191,8 @@ begin
   begin
     D := FShapeDrag;
     FShapeDrag := -1;
+    SetLength(FGuideX, 0);
+    SetLength(FGuideY, 0);
     Moved := (Abs(X - FShapeFrom.X) > 2) or (Abs(Y - FShapeFrom.Y) > 2);
     if D = 15 then
     begin   { a connector's end: on the site it is dropped by, or just there }

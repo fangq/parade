@@ -806,6 +806,59 @@ begin
   Check((Pos('stCxn', Xml) > 0) and (Pos('endCxn', Xml) > 0), 'saved and read back: still joined');
 end;
 
+{ a shape dragged near another's edge: on it; with Alt, where it is dropped; on a grid }
+procedure TestSnap(E: TParadeEdit);
+const
+  K = PD_SP_PER_PT;
+var
+  CP, D: pd_pos;
+  Sid: Integer;
+  Pg: Int32;
+  PX0, PY0, PX1, PY1: Double;
+  B: TParadeShapeBoxes;
+
+  function Pt(U, V: Double): TPoint;
+  begin
+    Result := E.PageToClient(Pg, PX0 / K + U, PY0 / K + V);
+  end;
+
+  procedure Drag(A, B: TPoint; Shift: TShiftState);
+  begin
+    TParadeWheel(E).MouseDown(mbLeft, Shift, A.X, A.Y);
+    TParadeWheel(E).MouseMove([ssLeft] + Shift, (A.X + B.X) div 2, (A.Y + B.Y) div 2);
+    TParadeWheel(E).MouseMove([ssLeft] + Shift, B.X, B.Y);
+    TParadeWheel(E).MouseUp(mbLeft, Shift, B.X, B.Y);
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertText('Snapped');
+  E.ProcessKey(VK_RETURN, []);
+  CP := E.CaretPos;
+  E.InsertCanvas(400, 200);
+  CP := PdPos(CP.block, 0);
+  E.ShapePageBox(CP, -1, Pg, PX0, PY0, PX1, PY1);
+  E.AddShape('rect', 20 * K, 20 * K, 100 * K, 80 * K);
+  E.AddShape('rect', 250 * K, 100 * K, 350 * K, 160 * K);
+  Drag(Pt(300, 130), Pt(300, 52), []);    { its top 2 points below the other's }
+  B := E.DrawingShapes(CP);
+  Check(E.SelectedShape(D, Sid) and (Sid = 1) and (Abs(B[1].Y0 - 20 * K) < 0.5 * K),
+    Format('dragged near the other''s top: on it (%.1f)', [B[1].Y0 / K]));
+  E.Undo;
+  Drag(Pt(300, 130), Pt(300, 52), [ssAlt]);
+  B := E.DrawingShapes(CP);
+  Check(Abs(B[1].Y0 - 22 * K) < 0.8 * K, Format('with Alt: where it was dropped (%.1f)', [B[1].Y0 / K]));
+  E.Undo;
+  E.SnapToShapes := False;
+  E.SnapGrid := 18;
+  Drag(Pt(300, 130), Pt(312, 137), []);
+  B := E.DrawingShapes(CP);
+  Check((Abs(B[1].X0 - 270 * K) < 0.5 * K) and (Abs(B[1].Y0 - 108 * K) < 0.5 * K),
+    Format('on a grid of a quarter inch (%.1f, %.1f)', [B[1].X0 / K, B[1].Y0 / K]));
+  E.SnapGrid := 0;
+  E.SnapToShapes := True;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -2092,6 +2145,7 @@ begin
   TestShapeEditing(E);
   TestDrawingMove(E);
   TestConnectors(E);
+  TestSnap(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;
