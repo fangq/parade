@@ -3706,6 +3706,7 @@ pd_status pd_sync_merge(const void* const* updates, const size_t* lens, size_t n
     YDoc* y;
     YTransaction* t;
     YPendingUpdate* pu;
+    YIdSet* ds;
     pd_status st = PD_OK;
     uint32_t m = 0;
     char* p;
@@ -3738,9 +3739,18 @@ pd_status pd_sync_merge(const void* const* updates, const size_t* lens, size_t n
     if (st == PD_OK) {
         t = ydoc_read_transaction(y);
         pu = ytransaction_pending_update(t);
+        ds = ytransaction_pending_ds(t);
 
-        if (pu) {   /* waiting for an update it depends on: the input has a hole */
-            ypending_update_destroy(pu);
+        if (pu || ds) {     /* waiting for an update it depends on -- items to insert, or to delete (an update that
+                               only deletes is held as a delete set, not a pending update): the input has a hole */
+            if (pu) {
+                ypending_update_destroy(pu);
+            }
+
+            if (ds) {
+                ydelete_set_destroy(ds);
+            }
+
             st = PD_ERR_FORMAT;
         } else {
             p = ytransaction_state_diff_v1(t, NULL, 0, &m);

@@ -825,10 +825,42 @@ static void test_merge(void) {
     printf("  %d updates (%zu bytes) merged into one of %zu bytes\n", nlog_, total, n2);
     pd_sync_free_data(a);
     pd_sync_free_data(b);
-    /* the last update without what it builds on, or garbage: refused */
-    u[0] = LOG[nlog_ - 1].p;
-    n[0] = LOG[nlog_ - 1].n;
-    CHECK(pd_sync_merge(u, n, 1, &bad, &nb) == PD_ERR_FORMAT && !bad);
+    /* an update without what it builds on, or garbage: refused. The log's last update may build on nothing (a new
+       key in a shared map), so the ones made here do: text typed into text typed just before, and a deletion of
+       it (an update that only deletes) */
+    {
+        pd_block_id p = pd_doc_next_paragraph(R[0].d, 0);
+        int k0 = nlog_, k1, k2, k3, i;
+
+        pd_doc_insert_text(R[0].d, at(p, 0), "xy", 2, PD_FORMAT_INHERIT, NULL);
+        pd_doc_seal_undo(R[0].d);
+        k1 = nlog_;
+        pd_doc_insert_text(R[0].d, at(p, 1), "z", 1, PD_FORMAT_INHERIT, NULL);
+        pd_doc_seal_undo(R[0].d);
+        k2 = nlog_;
+        pd_doc_delete(R[0].d, (pd_range) { at(p, 0), at(p, 3) }, NULL);
+        k3 = nlog_;
+        CHECK(k1 > k0 && k2 > k1 && k3 > k2);
+        u = (const void**)realloc((void*)u, (size_t)(nlog_ + 1) * sizeof(void*));
+        n = (size_t*)realloc(n, (size_t)(nlog_ + 1) * sizeof(size_t));
+
+        for (i = k1; i < k2; i++) {
+            u[i - k1] = LOG[i].p;
+            n[i - k1] = LOG[i].n;
+        }
+
+        CHECK(pd_sync_merge(u, n, (size_t)(k2 - k1), &bad, &nb) == PD_ERR_FORMAT && !bad);
+
+        for (i = k2; i < k3; i++) {
+            u[i - k2] = LOG[i].p;
+            n[i - k2] = LOG[i].n;
+        }
+
+        CHECK(pd_sync_merge(u, n, (size_t)(k3 - k2), &bad, &nb) == PD_ERR_FORMAT && !bad);
+        deliver_all();
+        CHECK(same_everywhere("after the merge's own edits", 1));
+    }
+
     u[0] = "\xff\xfe junk";
     n[0] = 7;
     CHECK(pd_sync_merge(u, n, 1, &bad, &nb) == PD_ERR_FORMAT && !bad);
@@ -892,12 +924,15 @@ static void test_theme(void) {
     pd_block_id p;
     int k;
 
-    p = pd_doc_next_paragraph(R[0].d, 0);
+    /* a paragraph of its own at the start, whatever the random edits left: all of its text in the first accent */
+    CHECK(pd_doc_insert_block(R[0].d, pd_doc_child(R[0].d, pd_doc_root(R[0].d), 0), 0, PD_BLOCK_PARAGRAPH, &p) ==
+          PD_OK);
+    pd_doc_insert_text(R[0].d, at(p, 0), "Themed", 6, PD_FORMAT_INHERIT, NULL);
     memset(&cp, 0, sizeof(cp));
     cp.mask = PD_CP_COLOR;
     cp.color = 0xFF4472C4u;
     cp.color_theme = pd_theme_color(PD_THEME_ACCENT1, 100000, 0);
-    pd_doc_set_char_props(R[0].d, (pd_range) { at(p, 0), at(p, 3) }, &cp);
+    pd_doc_set_char_props(R[0].d, (pd_range) { at(p, 0), at(p, 6) }, &cp);
     deliver_all();
     pd_doc_theme(R[1].d, &t);
     t.color[PD_THEME_ACCENT1] = 0xFF00AA00u;
