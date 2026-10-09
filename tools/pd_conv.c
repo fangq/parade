@@ -236,11 +236,16 @@ static int fmt_of(const char* ext, int* jdata_binary) {
         return PD_CONV_RTF;
     }
 
-    if (!strcmp(ext, "docx")) {
+    if (!strcmp(ext, "docx") || !strcmp(ext, "docm") || !strcmp(ext, "dotm")) {
         return PD_CONV_DOCX;
     }
 
-    if (!strcmp(ext, "pptx")) {
+    if (!strcmp(ext, "dotx")) {
+        return PD_CONV_DOTX;
+    }
+
+    if (!strcmp(ext, "pptx") || !strcmp(ext, "pptm") || !strcmp(ext, "potx") || !strcmp(ext, "potm") ||
+            !strcmp(ext, "ppsx")) {
         return PD_CONV_PPTX;
     }
 

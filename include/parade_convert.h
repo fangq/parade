@@ -56,7 +56,8 @@ typedef enum {
     PD_CONV_RTF = 4,
     PD_CONV_DOCX = 5,
     PD_CONV_JDATA = 6,          /**< the native format (JData text), for clipboards */
-    PD_CONV_PPTX = 7            /**< PowerPoint, import only: each slide a page that is a canvas */
+    PD_CONV_PPTX = 7,           /**< PowerPoint, import only: each slide a page that is a canvas (also .potx) */
+    PD_CONV_DOTX = 8            /**< a Word template (.dotx): read as DOCX (a new document from it), written as one */
 } pd_conv_format;
 
 /** the whole document */

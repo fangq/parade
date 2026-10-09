@@ -1576,7 +1576,8 @@ pd_status pd_doc_export(const pd_doc* d, pd_conv_format fmt, pd_writer fn, void*
             break;
 
         case PD_CONV_DOCX:
-            st = pd_docx_export(d, &out);
+        case PD_CONV_DOTX:
+            st = pd_docx_export_as(d, &out, fmt == PD_CONV_DOTX);
             break;
 
         case PD_CONV_JDATA:
@@ -1597,6 +1598,7 @@ pd_status pd_doc_export(const pd_doc* d, pd_conv_format fmt, pd_writer fn, void*
 pd_status pd_doc_import(const void* data, size_t len, pd_conv_format fmt, pd_doc** out) {
     pd_doc* d;
     pd_status st;
+    int tmpl = 0;
     const char* s = (const char*)data;
     char* conv = NULL;
 
@@ -1608,6 +1610,11 @@ pd_status pd_doc_import(const void* data, size_t len, pd_conv_format fmt, pd_doc
 
     if (fmt == PD_CONV_JDATA) {
         return pd_doc_load(data, len, PD_JDATA_AUTO, out);
+    }
+
+    if (fmt == PD_CONV_DOTX) {  /* a template: a document of what it has, with every style it has */
+        tmpl = 1;
+        fmt = PD_CONV_DOCX;
     }
 
     if (fmt == PD_CONV_LATEX || (int)fmt < 0 || fmt > PD_CONV_PPTX) {
@@ -1646,7 +1653,7 @@ pd_status pd_doc_import(const void* data, size_t len, pd_conv_format fmt, pd_doc
             break;
 
         case PD_CONV_DOCX:
-            st = pd_docx_import(d, (const unsigned char*)s, len);
+            st = pd_docx_import_ex(d, (const unsigned char*)s, len, tmpl);
             break;
 
         case PD_CONV_PPTX:

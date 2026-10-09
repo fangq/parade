@@ -1491,8 +1491,9 @@ begin
   if (E = '.md') or (E = '.markdown') then Exit(PD_CONV_MARKDOWN);
   if E = '.tex' then Exit(PD_CONV_LATEX);
   if E = '.rtf' then Exit(PD_CONV_RTF);
-  if E = '.docx' then Exit(PD_CONV_DOCX);
-  if E = '.pptx' then Exit(PD_CONV_PPTX);
+  if (E = '.docx') or (E = '.docm') or (E = '.dotm') then Exit(PD_CONV_DOCX);
+  if E = '.dotx' then Exit(PD_CONV_DOTX);
+  if (E = '.pptx') or (E = '.pptm') or (E = '.potx') or (E = '.potm') or (E = '.ppsx') then Exit(PD_CONV_PPTX);
   if E = '.txt' then Exit(PD_CONV_TEXT);
   if (E = '.pdoc') or (E = '.jdoc') then Exit(PD_CONV_JDATA);
   Result := -1;

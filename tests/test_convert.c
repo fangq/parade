@@ -2261,6 +2261,88 @@ static void test_theme_links(void) {
     }
 }
 
+/* a template: read as a document, written as a template; its styles, theme and page applied to another document
+   (and undone) */
+static void test_templates(void) {
+    const char* names[3] = { "word/theme/theme1.xml", "word/styles.xml", "word/document.xml" };
+    const char* texts[3];
+    size_t lens[3];
+    pd_doc* tmpl = NULL;
+    buf_t z;
+    int i;
+    pd_doc* d = NULL, *again = NULL;
+    buf_t b = { NULL, 0 };
+    pd_block_id body, h;
+    pd_section_props sp;
+    pd_char_props cp;
+    pd_theme th;
+
+    texts[0] =
+        "<a:theme xmlns:a=\"a\" name=\"Tmpl\"><a:themeElements><a:clrScheme name=\"T\"><a:accent1><a:srgbClr "
+        "val=\"AA2200\"/></a:accent1></a:clrScheme><a:fontScheme name=\"T\"><a:majorFont><a:latin typeface=\"Georgia\"/>"
+        "</a:majorFont><a:minorFont><a:latin typeface=\"Verdana\"/></a:minorFont></a:fontScheme></a:themeElements>"
+        "</a:theme>";
+    texts[1] =
+        "<w:styles xmlns:w=\"w\"><w:style w:type=\"paragraph\" w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/>"
+        "<w:rPr><w:rFonts w:asciiTheme=\"majorHAnsi\" w:hAnsiTheme=\"majorHAnsi\"/><w:color w:val=\"AA2200\" "
+        "w:themeColor=\"accent1\"/><w:sz w:val=\"40\"/></w:rPr></w:style>"
+        "<w:style w:type=\"paragraph\" w:styleId=\"Remark\"><w:name w:val=\"Remark\"/><w:rPr><w:i/></w:rPr></w:style>"
+        "<w:style w:type=\"table\" w:styleId=\"Fancy\"><w:name w:val=\"Fancy\"/><w:tblStylePr w:type=\"firstRow\">"
+        "<w:tcPr><w:shd w:val=\"clear\" w:fill=\"AA2200\" w:themeFill=\"accent1\"/></w:tcPr></w:tblStylePr></w:style>"
+        "</w:styles>";
+    texts[2] =
+        "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:pStyle w:val=\"Remark\"/></w:pPr><w:r><w:t>boilerplate</w:t>"
+        "</w:r></w:p><w:tbl><w:tblPr><w:tblStyle w:val=\"Fancy\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"1000\"/>"
+        "</w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/><w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/>"
+        "<w:pgMar w:top=\"720\" w:right=\"720\" w:bottom=\"720\" w:left=\"720\"/></w:sectPr></w:body></w:document>";
+
+    for (i = 0; i < 3; i++) {
+        lens[i] = strlen(texts[i]);
+    }
+
+    z = stored_zip_n(names, texts, lens, 3);
+    CHECK(pd_doc_import(z.p, z.n, PD_CONV_DOTX, &tmpl) == PD_OK);   /* read as a template: every style it has */
+    free(z.p);
+    CHECK(tmpl != NULL);
+
+    if (!tmpl) {
+        return;
+    }
+
+    /* written as a template and read back: a new document of what it has */
+    CHECK(pd_doc_export(tmpl, PD_CONV_DOTX, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOTX, &again) == PD_OK && again);
+    free(b.p);
+
+    if (again) {
+        CHECK(pd_doc_style_find(again, "Remark") && pd_doc_style_find(again, "Fancy"));
+        pd_doc_free(again);
+    }
+
+    /* another document, a heading in it, given the template's look */
+    CHECK(pd_doc_new(&d) == PD_OK);
+    body = pd_doc_child(d, pd_doc_root(d), 0);
+    h = pd_doc_child(d, body, 0);
+    pd_doc_insert_text(d, (pd_pos) { h, 0 }, "Title", 5, PD_FORMAT_INHERIT, NULL);
+    CHECK(pd_doc_set_para_style(d, h, pd_doc_style_find(d, "Heading 1")) == PD_OK);
+    cp = chars_at(d, h, 0);
+    CHECK(cp.color != 0xFFAA2200u && strcmp(cp.family, "Georgia") != 0);
+    CHECK(pd_doc_adopt(d, tmpl, PD_ADOPT_STYLES | PD_ADOPT_THEME | PD_ADOPT_PAGE) == PD_OK);
+    cp = chars_at(d, h, 0);
+    CHECK(cp.color == 0xFFAA2200u && !strcmp(cp.family, "Georgia") && cp.size == PD_PT(20));
+    CHECK(pd_doc_style_find(d, "Remark") && pd_doc_style_find(d, "Fancy"));
+    CHECK(pd_doc_theme(d, &th) == PD_OK && th.color[PD_THEME_ACCENT1] == 0xFFAA2200u);
+    CHECK(pd_doc_section_props(d, body, &sp) == PD_OK && sp.page_width == PD_PT(595.3) && sp.margin_left == PD_PT(36));
+
+    /* one step back: as it was */
+    CHECK(pd_doc_undo(d) == PD_OK);
+    cp = chars_at(d, h, 0);
+    CHECK(cp.color != 0xFFAA2200u && !pd_doc_style_find(d, "Remark"));
+    CHECK(pd_doc_section_props(d, body, &sp) == PD_OK && sp.margin_left != PD_PT(36));
+    pd_doc_free(d);
+    pd_doc_free(tmpl);
+}
+
 /* East Asian and complex-script fonts (named, and the theme's), complex scripts' size, bold and italic; a ruby
    over its base; the document grid and a paragraph off it. Read, and kept through DOCX. */
 static void test_docx_east_asian(void) {
@@ -5421,6 +5503,7 @@ int main(void) {
     test_docx_turned_text();
     test_docx_rtl();
     test_theme_links();
+    test_templates();
     test_rtl_html_rtf();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();

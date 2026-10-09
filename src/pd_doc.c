@@ -5418,3 +5418,116 @@ pd_status pd_doc_table_style_define(pd_doc* d, const char* name, pd_style_id par
     op_end(d, 0, 0, 0);
     return PD_OK;
 }
+
+/* ------------------------------------------------------------------ */
+/* templates                                                          */
+/* ------------------------------------------------------------------ */
+
+/* from's style made one of d's by name: on pass 0 by itself, so that every name is there; on pass 1 with what it is
+   based on and the style that comes next, as from has them */
+static void adopt_style(pd_doc* d, const pd_doc* from, pd_style_id id, int pass) {
+    const dstyle* s = style_of(from, id), *ps, *ns;
+    pd_style_id have, parent = 0;
+    pd_para_props pp;
+    pd_char_props cp;
+
+    if (!s || !s->alive) {
+        return;
+    }
+
+    have = pd_doc_style_find(d, s->name);
+
+    if (have && d->styles[have - 1].kind != s->kind) {
+        return;     /* the same name, another kind: left as it is */
+    }
+
+    if (pass == 1 && (ps = style_of(from, s->parent)) != NULL) {
+        parent = pd_doc_style_find(d, ps->name);
+        parent = parent && d->styles[parent - 1].kind == s->kind ? parent : 0;
+    }
+
+    if (s->kind == PD_STYLE_TABLE) {
+        pd_table_style ts;
+
+        if (s->ts) {
+            ts = *s->ts;
+        } else {
+            pd_table_style_init(&ts);
+        }
+
+        pd_doc_table_style_define(d, s->name, parent, &ts, NULL);
+        return;
+    }
+
+    pp = s->pp;
+    cp = s->cp;
+    cp.mask &= ~(PD_CP_LINK | PD_CP_REVISION);  /* what names the other document's blocks and revisions */
+    cp.link_target = 0;
+    cp.revision = 0;
+    ns = pass == 1 && (pp.mask & PD_PP_NEXT_STYLE) ? style_of(from, pp.next_style) : NULL;
+    pp.next_style = ns ? pd_doc_style_find(d, ns->name) : 0;
+    pp.next_style = pp.next_style && d->styles[pp.next_style - 1].kind == PD_STYLE_PARAGRAPH ? pp.next_style : 0;
+    pp.mask = pp.next_style ? pp.mask : pp.mask & ~PD_PP_NEXT_STYLE;
+    pd_doc_style_define(d, s->name, (pd_style_kind)s->kind, parent, &pp, &cp, NULL);
+}
+
+pd_status pd_doc_adopt(pd_doc* d, const pd_doc* from, uint32_t what) {
+    int32_t i;
+    pd_status st = PD_OK;
+
+    if (!d || !from || d == from || (what & ~(uint32_t)(PD_ADOPT_STYLES | PD_ADOPT_THEME | PD_ADOPT_PAGE))) {
+        return PD_ERR_ARG;
+    }
+
+    pd_doc_begin_group(d, "Apply template");
+
+    if (what & PD_ADOPT_THEME) {
+        st = pd_doc_set_theme(d, &from->theme);
+    }
+
+    if ((what & PD_ADOPT_STYLES) && st == PD_OK) {
+        int pass;
+
+        for (pass = 0; pass < 2; pass++) {
+            for (i = 0; i < from->nstyles; i++) {
+                adopt_style(d, from, (pd_style_id)(i + 1), pass);
+            }
+        }
+    }
+
+    if ((what & PD_ADOPT_PAGE) && st == PD_OK) {
+        const blk* fs = NULL;
+        const blk* root = pd_doc_blk(from, PD_ROOT_ID);
+        blk* r = pd_doc_blk(d, PD_ROOT_ID);
+
+        for (i = 0; root && i < root->nkids && !fs; i++) {
+            const blk* k = pd_doc_blk(from, root->kids[i]);
+
+            fs = k && k->kind == PD_BLOCK_SECTION ? k : NULL;
+        }
+
+        for (i = 0; fs && r && i < r->nkids; i++) {
+            blk* k = pd_doc_blk(d, r->kids[i]);
+            pd_section_props sp;
+
+            if (!k || k->kind != PD_BLOCK_SECTION) {
+                continue;
+            }
+
+            sp = k->st.sp;
+            sp.page_width = fs->st.sp.page_width;
+            sp.page_height = fs->st.sp.page_height;
+            sp.margin_top = fs->st.sp.margin_top;
+            sp.margin_bottom = fs->st.sp.margin_bottom;
+            sp.margin_left = fs->st.sp.margin_left;
+            sp.margin_right = fs->st.sp.margin_right;
+            sp.header_distance = fs->st.sp.header_distance;
+            sp.footer_distance = fs->st.sp.footer_distance;
+            sp.gutter = fs->st.sp.gutter;
+            pd_doc_set_section_props(d, k->id, &sp);
+        }
+    }
+
+    pd_doc_end_group(d);
+    return st;
+}

@@ -173,7 +173,10 @@ pd_status pd_latex_export(const pd_doc* d, pd_buf* out);
 pd_status pd_rtf_export(const pd_doc* d, pd_buf* out);
 pd_status pd_rtf_import(pd_doc* d, const char* s, size_t n);
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out);
+pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl);
 pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n);
+/* all_styles: every style the document has made Parade's, used or not (a template) */
+pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all_styles);
 /* PowerPoint: each slide a page that is a canvas, read as a .docx made of them (pd_pptx.c) */
 pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n);
 /* an entry of a zip (caller frees), NULL if none; a zip written into o, an entry at a time */

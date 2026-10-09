@@ -943,6 +943,7 @@ const
   PD_CONV_DOCX = 5;
   PD_CONV_JDATA = 6;
   PD_CONV_PPTX = 7;     { import only: each slide a page that is a canvas }
+  PD_CONV_DOTX = 8;     { a Word template: read as DOCX, written as a template }
 
 function pd_doc_export(doc: Ppd_doc; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 function pd_doc_export_range(doc: Ppd_doc; range: pd_range; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;

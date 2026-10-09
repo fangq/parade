@@ -762,6 +762,19 @@ typedef struct {
     uint32_t border_theme;
 } pd_table_style;
 
+/* what pd_doc_adopt takes from another document */
+#define PD_ADOPT_STYLES 1       /**< its styles (paragraph, character, table), by name, over the document's */
+#define PD_ADOPT_THEME  2       /**< its theme */
+#define PD_ADOPT_PAGE   4       /**< its first section's page size and margins, for every section */
+
+/**
+ * A template's look applied to a document (Word's "automatically update
+ * styles"): what is asked for of from, as one undoable step. Styles of the
+ * same name are redefined, those it lacks added; a style of another kind of
+ * the same name is left.
+ */
+PD_API pd_status pd_doc_adopt(pd_doc* doc, const pd_doc* from, uint32_t what);
+
 /** an empty table style: no part given, padding unsaid */
 PD_API void      pd_table_style_init(pd_table_style* ts);
 /**

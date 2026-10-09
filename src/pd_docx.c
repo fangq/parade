@@ -4023,6 +4023,11 @@ static void dx_core(const pd_doc* d, pd_buf* o) {
 }
 
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
+    return pd_docx_export_as(d, out, 0);
+}
+
+/* a .docx, or (tmpl) a Word template, .dotx: the same package, its main part another type */
+pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     dxo* x = (dxo*)calloc(1, sizeof(dxo));
     pd_buf doc, part, cxml, cext, fonts;
     int has_fonts, has_theme;
@@ -4167,7 +4172,9 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
             "<Default Extension=\"wmf\" ContentType=\"image/x-wmf\"/>"
             "<Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"/>"
             "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
-            "wordprocessingml.document.main+xml\"/>"
+            "wordprocessingml.");
+    pb_puts(&part, tmpl ? "template.main+xml\"/>" : "document.main+xml\"/>");
+    pb_puts(&part,
             "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "wordprocessingml.styles+xml\"/>"
             "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
@@ -4555,6 +4562,8 @@ typedef struct {
     char theme_major[64], theme_minor[64];  /* the theme's heading and body fonts */
     char theme_major_ea[64], theme_minor_ea[64], theme_major_cs[64], theme_minor_cs[64];  /* other scripts' */
     char theme_name[64];
+    char builtin[16][24];       /* Parade's own styles made what the document's Word styles of them say */
+    int nbuiltin;
     uint32_t theme_clr[12];     /* the theme's colours: dk1 lt1 dk2 lt2 accent1..6 hlink folHlink */
     pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
     struct {                    /* bookmarks read: where they are */
@@ -6423,16 +6432,26 @@ static void dw_table_props(dw* w) {
    say: the paragraph then carries only what it sets itself, and keeps its
    style's name (and contextual spacing knows its neighbours' styles). */
 /* Word's paragraph style WID as one of the document's, made from its chain on first use: its id, 0 if it is none */
-static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid) {
+/* as: one of Parade's own styles the Word style is (Heading 1, Title, Quote, ...), defined as it says the first time */
+static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid, const char* as) {
     const dstyle_x* st = find_style(X, wid);
-    const char* name = st && st->name[0] ? st->name : wid;
+    const char* name = as ? as : st && st->name[0] ? st->name : wid;
     pd_style_id normal = pd_doc_style_find(b->d, "Normal"), sid = pd_doc_style_find(b->d, name);
+    int k, fresh = !sid;
 
     if (!st || st->type != 1 || !name[0] || strcmp(name, "Normal") == 0) {
         return sid;
     }
 
-    if (!sid) {
+    for (k = 0; as && k < X->nbuiltin && strcmp(X->builtin[k], as) != 0; k++) {
+    }
+
+    if (as && k == X->nbuiltin && k < 16) {     /* Parade's own, not yet what the document says */
+        snprintf(X->builtin[X->nbuiltin++], sizeof(X->builtin[0]), "%s", as);
+        fresh = 1;
+    }
+
+    if (fresh) {
         dprops sty;
         pd_para_props rp;
         pd_char_props rc;
@@ -6516,6 +6535,15 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid) {
             sty.pp.mask &= ~PD_PP_BORDER;
         }
 
+        if (as && sid) {    /* Parade's own keeps the style that comes after it */
+            pd_para_props own;
+
+            if (pd_doc_style_info(b->d, sid, NULL, NULL, &own, NULL) == PD_OK && (own.mask & PD_PP_NEXT_STYLE)) {
+                sty.pp.mask |= PD_PP_NEXT_STYLE;
+                sty.pp.next_style = own.next_style;
+            }
+        }
+
         if (pd_doc_style_define(b->d, name, PD_STYLE_PARAGRAPH, normal, &sty.pp, &sty.cp, &sid) != PD_OK) {
             return 0;
         }
@@ -6528,7 +6556,7 @@ static void dw_custom_style(dw* w, pd_bld* b) {
     const dstyle_x* st = find_style(w->X, w->pstyle);
     const char* name = st && st->name[0] ? st->name : w->pstyle;
 
-    if (!st || st->type != 1 || !name[0] || strcmp(name, "Normal") == 0 || !custom_style_define(w->X, b, w->pstyle)) {
+    if (!st || st->type != 1 || !name[0] || strcmp(name, "Normal") == 0 || !custom_style_define(w->X, b, w->pstyle, NULL)) {
         return;
     }
 
@@ -6572,7 +6600,9 @@ static void dw_begin_para(dw* w) {
 
     low[k] = '\0';
 
+    /* Parade's own styles for Word's: what Word's of the very name says made theirs (a template's headings) */
     if (strcmp(low, "title") == 0) {
+        custom_style_define(w->X, b, w->pstyle, "Title");
         bld_para_style(b, "Title", PD_ROLE_TITLE, 0);
     } else if ((strncmp(low, "heading", 7) == 0 && isdigit((unsigned char)low[strlen(low) - 1])) ||
                (outline >= 0 && outline < 6)) {
@@ -6581,13 +6611,23 @@ static void dw_begin_para(dw* w) {
 
         lvl = lvl < 1 ? 1 : lvl > 6 ? 6 : lvl;
         snprintf(sname, sizeof(sname), "Heading %d", lvl);
+
+        if (!strncmp(low, "heading ", 8) && low[8] - '0' == lvl && !low[9]) {
+            custom_style_define(w->X, b, w->pstyle, sname);
+        }
+
         bld_para_style(b, sname, PD_ROLE_HEADING, lvl);
     } else if (strstr(low, "quote") || strcmp(low, "block text") == 0) {
+        if (!strcmp(low, "quote")) {
+            custom_style_define(w->X, b, w->pstyle, "Quote");
+        }
+
         bld_para_style(b, "Quote", PD_ROLE_QUOTE, 0);
     } else if (strstr(low, "source") || strstr(low, "code") || strstr(low, "preformatted") ||
                strcmp(low, "plain text") == 0) {
         bld_para_style(b, "Code", PD_ROLE_CODE, 0);
     } else if (strcmp(low, "caption") == 0) {
+        custom_style_define(w->X, b, w->pstyle, "Caption");
         bld_para_style(b, "Caption", PD_ROLE_CAPTION, 0);
     } else if (w->pstyle[0] && strcmp(w->pstyle, w->X->def_pstyle) != 0) {
         dw_custom_style(w, b);  /* one of the document's own */
@@ -7726,7 +7766,7 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
                 }
 
                 if (!sid && st && st->type == 1) {  /* used in the drawing alone: made now, as the body would */
-                    sid = custom_style_define(X, X->b, id);
+                    sid = custom_style_define(X, X->b, id, NULL);
                 } else if (!sid && st && st->type == 2) {   /* a character style: its properties, under its name */
                     dprops cs;
 
@@ -10861,6 +10901,47 @@ static void read_comments(dxi* X, pd_doc* d) {
 }
 
 pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
+    return pd_docx_import_ex(d, s, n, 0);
+}
+
+/* every paragraph and table style of the document's made Parade's, whether used or not (a template's) */
+static void dx_define_all_styles(dxi* X, pd_bld* b) {
+    int i;
+
+    for (i = 0; i < X->nstyles; i++) {
+        const dstyle_x* st = &X->styles[i];
+        char low[64], as[16] = "";
+        size_t k;
+
+        if (st->type != 1 || !strcmp(st->id, X->def_pstyle)) {
+            continue;
+        }
+
+        for (k = 0; k + 1 < sizeof(low) && st->name[k]; k++) {
+            low[k] = (char)tolower((unsigned char)st->name[k]);
+        }
+
+        low[k] = '\0';
+
+        if (!strncmp(low, "heading ", 8) && low[8] >= '1' && low[8] <= '6' && !low[9]) {
+            snprintf(as, sizeof(as), "Heading %c", low[8]);
+        } else if (!strcmp(low, "title") || !strcmp(low, "quote") || !strcmp(low, "caption")) {
+            snprintf(as, sizeof(as), "%c%.7s", toupper((unsigned char)low[0]), low + 1);
+        } else if (!strncmp(low, "heading", 7) || strstr(low, "quote") || !strcmp(low, "block text") ||
+                   strstr(low, "source") || strstr(low, "code") || strstr(low, "preformatted") ||
+                   !strcmp(low, "plain text")) {
+            continue;   /* read as one of Parade's own, by role */
+        }
+
+        custom_style_define(X, b, st->id, as[0] ? as : NULL);
+    }
+
+    for (i = 0; i < X->ntstyles; i++) {
+        dx_table_style_define(X, b, X->tstyles[i].id, 0);
+    }
+}
+
+pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all_styles) {
     dxi X;
     pd_bld b;
     char* xml, *theme_xml = NULL;
@@ -11035,6 +11116,11 @@ pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n) {
         theme_xml = NULL;
         dx_theme_set(&X, d);
     }
+
+    if (all_styles) {
+        dx_define_all_styles(&X, &b);
+    }
+
     dw_parse(&X, xml, len, 0);
 
     while (b.ntables > 0) {

@@ -51,6 +51,12 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   `pd_doc_cell_resolve`, `pd_doc_table_resolve`, `pd_doc_para_resolve`), so
   adding a row moves the banding and redefining the style restyles every
   table. Read from and written to .docx (`w:tblStyle`, `w:tblStylePr`).
+- **Templates**: `.dotx` (`PD_CONV_DOTX`: read as a new document with every
+  style the template defines, used or not; written with the template's
+  content type), `.dotm`/`.docm`, `.potx`/`.pptm` read as their documents.
+  `pd_doc_adopt(doc, template, PD_ADOPT_STYLES | PD_ADOPT_THEME |
+  PD_ADOPT_PAGE)` gives a document a template's styles (by name), theme and
+  page setup in one undoable step, as Word's "automatically update styles".
 - **Inline objects** (images, equations, fields, footnote marks, links,
   bookmarks, tabs) occupy U+FFFC, so document and layout offsets agree.
 - **Editing**: every change is an operation recording its inverse —
