@@ -341,7 +341,7 @@ static void rx_para_props(rx* x, pd_block_id p, int in_table) {
     pd_char_props base;
 
     pd_doc_block_info(x->d, p, &bi);
-    pd_doc_style_resolve(x->d, bi.style, &pp, NULL);
+    pd_conv_style_pp(x->d, p, bi.style, &pp);
 
     if (pd_doc_para_props(x->d, p, &dp) == PD_OK) {
         if (dp.mask & PD_PP_ALIGN) {

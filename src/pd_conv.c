@@ -379,6 +379,15 @@ const char* pd_conv_style_name(const pd_doc* d, pd_block_id para) {
     return n ? n : "Normal";
 }
 
+/* a paragraph's style's properties as they come to where it is: its table style's under them in a cell */
+void pd_conv_style_pp(const pd_doc* d, pd_block_id para, pd_style_id style, pd_para_props* out) {
+    pd_block_info pi;
+    pd_table_style_part part;
+    int in_cell = pd_doc_block_info(d, para, &pi) == PD_OK && pd_doc_cell_style(d, pi.parent, &part) == PD_OK;
+
+    pd_doc_style_resolve_with(d, style, in_cell ? &part : NULL, out, NULL);
+}
+
 void pd_conv_base_props(const pd_doc* d, pd_block_id para, pd_char_props* out) {
     if (pd_doc_format_resolve(d, para, 0, out) != PD_OK) {
         memset(out, 0, sizeof(*out));

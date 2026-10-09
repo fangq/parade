@@ -442,7 +442,7 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
     uint32_t cn;
 
     pd_doc_block_info(x->d, p, &bi);
-    pd_doc_style_resolve(x->d, bi.style, &pp, NULL);
+    pd_conv_style_pp(x->d, p, bi.style, &pp);
 
     {
         pd_para_props dp;

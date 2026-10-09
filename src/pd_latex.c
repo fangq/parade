@@ -348,7 +348,7 @@ static void lx_para(lx* x, pd_block_id p, int in_figure) {
                                 };
 
     pd_doc_block_info(x->d, p, &bi);
-    pd_doc_style_resolve(x->d, bi.style, &pp, NULL);
+    pd_conv_style_pp(x->d, p, bi.style, &pp);
 
     if (pd_doc_para_props(x->d, p, &dp) == PD_OK && (dp.mask & PD_PP_ALIGN)) {
         pp.align = dp.align;
