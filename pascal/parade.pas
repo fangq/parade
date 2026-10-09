@@ -535,6 +535,7 @@ type
     gutter: pd_sp;
     page_valign: Int32;
     line_pitch: pd_sp;        { the document grid's line pitch; 0 none }
+    direction: Int32;         { pd_direction: PD_DIR_RTL puts its first column at the right }
   end;
   Ppd_section_props = ^pd_section_props;
 
@@ -548,6 +549,7 @@ type
     indent: pd_sp;
     width_pct, border_sides: Int32;
     cell_padding_v: pd_sp;
+    direction: Int32;        { pd_direction: PD_DIR_RTL lays its columns out from the right }
   end;
   Ppd_table_props = ^pd_table_props;
 
@@ -681,6 +683,7 @@ function pd_para_get_glyphs(para: Ppd_para; line: Int32; buf: Ppd_glyph; cap: In
 function pd_para_get_style(para: Ppd_para; index: Int32; out style: pd_style): pd_status; cdecl; PDEXT;
 function pd_para_hit_test(para: Ppd_para; x, y: pd_sp; out offset: UInt32; line: PInt32): pd_status; cdecl; PDEXT;
 function pd_para_caret(para: Ppd_para; offset: UInt32; line: PInt32; out x: pd_sp; baseline: Ppd_sp): pd_status; cdecl; PDEXT;
+function pd_para_caret_step(para: Ppd_para; offset: UInt32; dir: Int32; out res: UInt32): pd_status; cdecl; PDEXT;
 function pd_para_text_length(para: Ppd_para): UInt32; cdecl; PDEXT;
 
 { ---- parade_doc.h ---- }
@@ -773,6 +776,8 @@ function pd_doc_format_info(doc: Ppd_doc; format: pd_format_id; char_style: PUIn
 function pd_doc_style_info(doc: Ppd_doc; style: pd_style_id; kind: PInt32; parent: PUInt32; para: Ppd_para_props;
   chr: Ppd_char_props): pd_status; cdecl; PDEXT;
 function pd_doc_para_props(doc: Ppd_doc; paragraph: pd_block_id; out props: pd_para_props): pd_status; cdecl; PDEXT;
+{ 1: the paragraph reads right to left (LEFT alignment at the right); 2: left to right with right-to-left text }
+function pd_doc_para_rtl(doc: Ppd_doc; paragraph: pd_block_id): Int32; cdecl; PDEXT;
 function pd_doc_list_count(doc: Ppd_doc): Int32; cdecl; PDEXT;
 function pd_doc_list_info(doc: Ppd_doc; list: pd_list_id; nlevels: PInt32; levels: Ppd_list_level): pd_status; cdecl; PDEXT;
 
@@ -822,6 +827,8 @@ function pd_layout_page_markup(layout: Ppd_layout; page: Int32; buf: Ppd_markup_
   out count: Int32): pd_status; cdecl; PDEXT;
 function pd_layout_hit_test(layout: Ppd_layout; page: Int32; x, y: pd_sp; out pos: pd_pos): pd_status; cdecl; PDEXT;
 function pd_layout_caret(layout: Ppd_layout; pos: pd_pos; out page: Int32; out x, baseline, ascent, descent: pd_sp): pd_status; cdecl; PDEXT;
+{ one step left (dir < 0) or right (dir > 0) as the line is shown; PD_ERR_RANGE at that end of it }
+function pd_layout_caret_step(layout: Ppd_layout; pos: pd_pos; dir: Int32; out res: pd_pos): pd_status; cdecl; PDEXT;
 
 procedure pd_pdf_options_init(out options: pd_pdf_options); cdecl; PDEXT;
 function pd_layout_write_pdf(layout: Ppd_layout; options: Ppd_pdf_options; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;

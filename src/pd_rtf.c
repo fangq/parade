@@ -356,8 +356,13 @@ static void rx_para_props(rx* x, pd_block_id p, int in_table) {
         pb_printf(x->o, "\\outlinelevel%d", (int)bi.level - 1);
     }
 
-    pb_puts(x->o, pp.align == PD_ALIGN_CENTER ? "\\qc" : pp.align == PD_ALIGN_RIGHT ? "\\qr" : pp.align == PD_ALIGN_JUSTIFY ?
-            "\\qj" : "\\ql");
+    if (pd_doc_para_rtl(x->d, p) == 1) {   /* right to left: its start on the right */
+        pb_puts(x->o, pp.align == PD_ALIGN_CENTER ? "\\rtlpar\\qc" : pp.align == PD_ALIGN_RIGHT ? "\\rtlpar\\ql" :
+                pp.align == PD_ALIGN_JUSTIFY ? "\\rtlpar\\qj" : "\\rtlpar\\qr");
+    } else {
+        pb_puts(x->o, pp.align == PD_ALIGN_CENTER ? "\\qc" : pp.align == PD_ALIGN_RIGHT ? "\\qr" :
+                pp.align == PD_ALIGN_JUSTIFY ? "\\qj" : "\\ql");
+    }
 
     if (bi.role == PD_ROLE_QUOTE) {
         pb_puts(x->o, "\\li720\\ri720");
@@ -421,7 +426,8 @@ static void rx_table(rx* x, pd_block_id t) {
         int colw = TWIPS(x->text_w) / ncols, edge = 0;
 
         pd_doc_block_info(x->d, row, &ri);
-        pb_printf(x->o, "\\trowd\\trgaph108\\trleft0%s\n", r < tp.header_rows ? "\\trhdr" : "");
+        pb_printf(x->o, "\\trowd\\trgaph108\\trleft0%s%s\n", r < tp.header_rows ? "\\trhdr" : "",
+                  tp.direction == PD_DIR_RTL ? "\\taprtl" : "");
 
         for (c = 0; c < ri.child_count; c++) {
             pd_cell_props cp;
@@ -677,6 +683,8 @@ typedef struct {
     int cur_list, cur_level;
     /* paragraph state (\pard resets it) */
     int style, align, outline, intbl, ls, ilvl, li;
+    int rtl;                    /* \rtlpar 1, \ltrpar 0, -1 unsaid */
+    int row_rtl;                /* \taprtl: the row's table from the right */
     /* tables */
     int table_open, row_open, cell_open, ncells_row;
     int cell_bg[64], cell_merge[64], cell_valign[64], ncelldefs, row_header;
@@ -780,6 +788,15 @@ static void ri_close_table(ri* r) {
     }
 
     if (r->table_open) {
+        if (r->row_rtl && r->b->ntables >= 1 && r->b->ntables <= 8) {  /* \taprtl: its columns from the right */
+            pd_table_props tp;
+
+            if (pd_doc_table_props(r->b->d, r->b->table[r->b->ntables - 1], &tp) == PD_OK) {
+                tp.direction = PD_DIR_RTL;
+                pd_doc_set_table_props(r->b->d, r->b->table[r->b->ntables - 1], &tp);
+            }
+        }
+
         bld_table_end(r->b);
         r->table_open = r->row_open = 0;
     }
@@ -865,9 +882,15 @@ static void ri_begin_para(ri* r) {
         bld_list(b, kind, r->ilvl);
     }
 
-    if (r->align >= 0) {
+    if (r->rtl >= 0) {
+        b->pp.mask |= PD_PP_DIRECTION;
+        b->pp.direction = r->rtl ? PD_DIR_RTL : PD_DIR_LTR;
+    }
+
+    if (r->align >= 0) {    /* (RTF's \ql, \qr: sides of the page; right to left, the text's end and start) */
         b->pp.mask |= PD_PP_ALIGN;
-        b->pp.align = r->align;
+        b->pp.align = r->rtl == 1 && r->align == PD_ALIGN_LEFT ? PD_ALIGN_RIGHT : r->rtl == 1 &&
+                      r->align == PD_ALIGN_RIGHT ? PD_ALIGN_LEFT : r->align;
     }
 
     bld_begin_para(b);
@@ -1244,6 +1267,7 @@ static void ri_word(ri* r, const char* w, int has_num, int num) {
     else if (IS("pard")) {
         r->style = 0;
         r->align = -1;
+        r->rtl = -1;
         r->outline = -1;
         r->intbl = 0;
         r->ls = 0;
@@ -1259,6 +1283,12 @@ static void ri_word(ri* r, const char* w, int has_num, int num) {
         r->align = PD_ALIGN_RIGHT;
     } else if (IS("qj")) {
         r->align = PD_ALIGN_JUSTIFY;
+    } else if (IS("rtlpar")) {
+        r->rtl = 1;
+    } else if (IS("ltrpar")) {
+        r->rtl = 0;
+    } else if (IS("taprtl")) {
+        r->row_rtl = 1;
     } else if (IS("outlinelevel")) {
         r->outline = num;
     } else if (IS("intbl")) {
@@ -1309,6 +1339,7 @@ static void ri_word(ri* r, const char* w, int has_num, int num) {
     /* tables */
     else if (IS("trowd")) {
         r->ncelldefs = 0;
+        r->row_rtl = 0;
         r->row_header = 0;
         memset(r->cell_bg, 0, sizeof(r->cell_bg));
         memset(r->cell_merge, 0, sizeof(r->cell_merge));
@@ -1376,6 +1407,7 @@ pd_status pd_rtf_import(pd_doc* d, const char* s, size_t n) {
     r->g[0].fs = 24;
     r->style = 0;
     r->align = -1;
+    r->rtl = -1;
     r->outline = -1;
 
     while (i < n) {

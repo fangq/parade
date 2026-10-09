@@ -2877,6 +2877,199 @@ static int count_draws(pd_doc* d, int32_t kind, uint32_t color) {
     return c;
 }
 
+static pd_font* rtl_font;
+
+static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
+    (void)user;
+    (void)family;
+    (void)weight;
+    (void)italic;
+    return rtl_font;
+}
+
+/* the glyphs drawn on page 0 for a code point: the leftmost x, the rightmost x + w; 0 when there are none */
+static int glyph_span(pd_layout* L, uint32_t cp, pd_sp* lo, pd_sp* hi) {
+    int32_t n = 0, k, any = 0;
+    pd_draw* it;
+
+    if (pd_layout_page_items(L, 0, NULL, 0, &n) != PD_OK || !(it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw)))) {
+        return 0;
+    }
+
+    pd_layout_page_items(L, 0, it, n, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].text == cp) {
+            *lo = any && *lo < it[k].x ? *lo : it[k].x;
+            *hi = any && *hi > it[k].x + it[k].w ? *hi : it[k].x + it[k].w;
+            any = 1;
+        }
+    }
+
+    free(it);
+    return any;
+}
+
+/* Right-to-left text from Word: a bidi paragraph at the right (Word's left alignment, its start), its indent and
+   first-line indent from the right, a justified one's last line at the right, a list label right of its text; a
+   left-to-right paragraph at the left; a bidiVisual table's first column at the right; Arabic letters joined (the
+   font's initial, medial, final forms; lam with alef one glyph); the caret stepping as the text is shown */
+static void test_docx_rtl(void) {
+    pd_doc* d;
+    pd_layout* L = NULL;
+    pd_sp lo = 0, hi = 0, lo2 = 0, hi2 = 0, right = PD_PT(612 - 72), left = PD_PT(72);
+
+    if (!rtl_font && pd_font_load_file("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0, &rtl_font) != PD_OK) {
+        return;     /* no font with Hebrew and Arabic: skipped */
+    }
+
+    d = docx_doc("word/numbering.xml",
+                 "<w:numbering xmlns:w=\"w\"><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start "
+                 "w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.\"/><w:pPr><w:ind w:left=\"720\" "
+                 "w:hanging=\"360\"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId "
+                 "w:val=\"1\"/></w:num></w:numbering>",
+                 "word/document.xml",
+                 "<w:document xmlns:w=\"w\"><w:body>"
+                 "<w:p><w:pPr><w:bidi/></w:pPr><w:r><w:t>\xD7\x90\xD7\x91\xD7\x92</w:t></w:r></w:p>"     /* aleph bet gimel */
+                 "<w:p><w:pPr><w:bidi/><w:ind w:left=\"1440\" w:firstLine=\"720\"/></w:pPr><w:r><w:t>\xD7\x93</w:t>"
+                 "</w:r></w:p>"                                                                            /* dalet */
+                 "<w:p><w:r><w:t>Q</w:t></w:r></w:p>"
+                 "<w:p><w:pPr><w:bidi/><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r>"
+                 "<w:t>\xD7\x94</w:t></w:r></w:p>"                                                        /* he */
+                 "<w:tbl><w:tblPr><w:bidiVisual/><w:tblW w:w=\"4000\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol "
+                 "w:w=\"2000\"/><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>X</w:t></w:r></w:p>"
+                 "</w:tc><w:tc><w:p><w:r><w:t>Y</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+                 "<w:p><w:pPr><w:bidi/></w:pPr><w:r><w:t>\xD8\xA8\xD9\x8A\xD8\xAA \xD9\x84\xD8\xA7</w:t></w:r></w:p>"
+                 "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" "
+                 "w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>"
+                 "</w:body></w:document>", NULL);
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    pd_doc_set_font_resolver(d, rtl_resolver, NULL);
+    CHECK(pd_doc_para_rtl(d, pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0)) == 1);
+    CHECK(pd_doc_para_rtl(d, pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 2)) == 0);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+        pd_pos at, to;
+
+        CHECK(glyph_span(L, 0x05D0, &lo, &hi) && hi > right - PD_PT(1) && hi <= right + PD_PT(1));     /* at the right */
+        CHECK(glyph_span(L, 0x05D2, &lo2, &hi2) && hi2 <= lo + 1);     /* gimel left of aleph: read from the right */
+        CHECK(glyph_span(L, 0x05D3, &lo, &hi) && hi > right - PD_PT(109) && hi < right - PD_PT(107));  /* 1.5in */
+        CHECK(glyph_span(L, 'Q', &lo, &hi) && lo > left - PD_PT(1) && lo < left + PD_PT(1));
+        CHECK(glyph_span(L, 0x05D4, &lo, &hi) && glyph_span(L, '1', &lo2, &hi2) && lo2 > hi);         /* label right */
+        CHECK(glyph_span(L, 'X', &lo, &hi) && glyph_span(L, 'Y', &lo2, &hi2) && lo > hi2);             /* X right of Y */
+        CHECK(glyph_span(L, 'X', &lo, &hi) && hi > right - PD_PT(101) && hi <= right);                 /* from the right */
+
+        at.block = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0);
+        at.offset = 0;
+        CHECK(pd_layout_caret_step(L, at, -1, &to) == PD_OK && to.offset == 2);    /* left: forward, past aleph */
+        CHECK(pd_layout_caret_step(L, at, 1, &to) == PD_ERR_RANGE);                /* right: its start, the edge */
+    }
+
+    {   /* Arabic joined: beh initial, yeh medial, teh final (not their isolated glyphs); lam with alef one glyph */
+        pd_para* p = NULL;
+        pd_style st;
+        pd_params prm;
+        pd_glyph g[16];
+        int32_t n = 0;
+        const char* ar = "\xD8\xA8\xD9\x8A\xD8\xAA \xD9\x84\xD8\xA7";
+
+        pd_style_init(&st, rtl_font, PD_PT(12));
+        pd_params_init(&prm);
+        prm.width = PD_PT(300);
+        prm.direction = PD_DIR_RTL;
+        CHECK(pd_para_new(&p) == PD_OK && pd_para_add_text(p, ar, strlen(ar), &st) == PD_OK &&
+              pd_para_break(p, &prm, NULL) == PD_OK && pd_para_get_glyphs(p, 0, g, 16, &n) == PD_OK);
+
+        if (p && n > 0) {
+            int32_t k, glyphs = 0, isolated = 0;
+
+            for (k = 0; k < n; k++) {
+                if (g[k].kind == PD_GLYPH) {
+                    glyphs++;
+                    isolated += g[k].glyph == pd_font_glyph_index(rtl_font, 0x0628) ||
+                                g[k].glyph == pd_font_glyph_index(rtl_font, 0x064A) ||
+                                g[k].glyph == pd_font_glyph_index(rtl_font, 0x062A);
+                }
+            }
+
+            CHECK(glyphs == 4 && isolated == 0);
+        }
+
+        pd_para_free(p);
+    }
+
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* Direction through HTML and RTF: dir="rtl" (CSS's right its start), a right-to-left table; RTF's \rtlpar with
+   \qr (the right, its start) and \taprtl; each written back the same */
+static void test_rtl_html_rtf(void) {
+    static const char html[] = "<p dir=\"rtl\" style=\"text-align:right\">\xD7\x90</p><p style=\"text-align:right\">"
+                               "Q</p><table dir=\"rtl\"><tr><td>X</td><td>Y</td></tr></table>";
+    static const char rtf[] = "{\\rtf1\\ansi{\\fonttbl{\\f0 Arial;}}\\pard\\rtlpar\\qr A\\par\\pard\\ql B\\par"
+                              "\\trowd\\taprtl\\cellx2000\\cellx4000\\pard\\intbl X\\cell Y\\cell\\row\\pard C\\par}";
+    pd_doc* d = NULL;
+    pd_para_props pp;
+    pd_table_props tp;
+    buf_t b = { NULL, 0 };
+    pd_block_id sec;
+
+    CHECK(pd_doc_import(html, sizeof(html) - 1, PD_CONV_HTML, &d) == PD_OK && d);
+
+    if (d) {
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        CHECK(pd_doc_para_props(d, pd_doc_child(d, sec, 0), &pp) == PD_OK && pp.direction == PD_DIR_RTL &&
+              pp.align == PD_ALIGN_LEFT);   /* right: its start */
+        CHECK(pd_doc_para_props(d, pd_doc_child(d, sec, 1), &pp) == PD_OK && pp.align == PD_ALIGN_RIGHT);
+        CHECK(pd_doc_table_props(d, pd_doc_child(d, sec, 2), &tp) == PD_OK && tp.direction == PD_DIR_RTL);
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK && b.p && strstr(b.p, "<p dir=\"rtl\">") &&
+              count_of(b.p, " dir=\"rtl\">") == 2);
+        free(b.p);
+        b.p = NULL;
+        b.n = 0;
+        CHECK(pd_doc_export(d, PD_CONV_RTF, to_buf, &b) == PD_OK && b.p && strstr(b.p, "\\rtlpar\\qr") &&
+              strstr(b.p, "\\taprtl"));
+        free(b.p);
+        b.p = NULL;
+        b.n = 0;
+        pd_doc_free(d);
+        d = NULL;
+    }
+
+    CHECK(pd_doc_import(rtf, sizeof(rtf) - 1, PD_CONV_RTF, &d) == PD_OK && d);
+
+    if (d) {
+        int32_t k, n = 0, tables = 0, rtl = 0;
+        pd_block_info bi;
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        CHECK(pd_doc_para_props(d, pd_doc_child(d, sec, 0), &pp) == PD_OK && pp.direction == PD_DIR_RTL &&
+              pp.align == PD_ALIGN_LEFT);
+
+        if (pd_doc_block_info(d, sec, &bi) == PD_OK) {
+            n = bi.child_count;
+        }
+
+        for (k = 0; k < n; k++) {
+            pd_block_info ci;
+
+            if (pd_doc_block_info(d, pd_doc_child(d, sec, k), &ci) == PD_OK && ci.kind == PD_BLOCK_TABLE) {
+                tables++;
+                rtl += pd_doc_table_props(d, pd_doc_child(d, sec, k), &tp) == PD_OK && tp.direction == PD_DIR_RTL;
+            }
+        }
+
+        CHECK(tables == 1 && rtl == 1);
+        pd_doc_free(d);
+    }
+}
+
 /* A text box in a shape turned a quarter: its text laid out across the shape's own width and drawn turned with it
    (each glyph turned, the line running down the page); one whose bodyPr keeps it upright: drawn as it is */
 static void test_docx_turned_text(void) {
@@ -5065,6 +5258,8 @@ int main(void) {
     test_pptx_smartart();
     test_docx_smartart();
     test_docx_turned_text();
+    test_docx_rtl();
+    test_rtl_html_rtf();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();
     printf("EMF pictures\n");

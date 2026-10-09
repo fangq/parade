@@ -550,6 +550,7 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
     wid[1] = w;
     pd_para_set_shape(out, 2, ind, wid);
     pd_para_set_tabs(out, pp.ntabs, pp.tabs, pp.tab_interval, 0);   /* measured from the column's edge */
+    out->mirror_w = column;     /* (right to left: indents and tabs from the start edge, the right one) */
 
     for (r = 0; r < s->nruns; r++) {
         uint32_t pos = s->runs[r].start, end = s->runs[r].end;

@@ -531,6 +531,7 @@ static pd_status parse_font(pd_font* f, int32_t face) {
     kern = find_table(f, base, TAG('k', 'e', 'r', 'n'), &klen);
     setup_kern(f, kern, klen);
     gpos = find_table(f, base, TAG('G', 'P', 'O', 'S'), NULL);
+    f->gsub = find_table(f, base, TAG('G', 'S', 'U', 'B'), NULL);
 
     if (setup_gpos(f, gpos)) {
         return PD_ERR_NOMEM;
@@ -728,4 +729,215 @@ int32_t pd_font_glyph_advance(const pd_font* f, uint32_t g) {
 
     i = g < f->num_hmetrics ? g : f->num_hmetrics - 1;
     return (int32_t)U16(f, (uint64_t)f->hmtx + 4 * i);
+}
+
+/* ------------------------------------------------------------------ */
+/* GSUB: single substitutions and ligatures, for Parade's own shaping  */
+/* ------------------------------------------------------------------ */
+
+/* the LangSys a script uses (its default), else DFLT's; 0 none */
+static uint32_t gsub_langsys(const pd_font* f, uint32_t script) {
+    uint32_t sl, n, i, found = 0, dflt = 0;
+
+    if (!f->gsub || U32(f, f->gsub) != 0x00010000u) {
+        return 0;
+    }
+
+    sl = f->gsub + U16(f, (uint64_t)f->gsub + 4);
+    n = U16(f, sl);
+
+    for (i = 0; i < n; i++) {
+        uint64_t rec = (uint64_t)sl + 2 + 6 * i;
+        uint32_t tag = U32(f, rec), st = sl + U16(f, rec + 4), def = U16(f, st);
+
+        if (def && tag == script) {
+            found = st + def;
+        } else if (def && tag == TAG('D', 'F', 'L', 'T')) {
+            dflt = st + def;
+        }
+    }
+
+    return found ? found : dflt;
+}
+
+/* each lookup subtable of a feature for a script, through a callback (stopping when it returns nonzero);
+   Extension lookups unwrapped */
+typedef int (*gsub_fn)(const pd_font* f, uint32_t type, uint32_t sub, void* user);
+
+static int gsub_each(const pd_font* f, uint32_t script, uint32_t feature, gsub_fn fn, void* user) {
+    uint32_t ls = gsub_langsys(f, script), fl, ll, nfi, i, j, k, nl;
+
+    if (!ls) {
+        return 0;
+    }
+
+    fl = f->gsub + U16(f, (uint64_t)f->gsub + 6);
+    ll = f->gsub + U16(f, (uint64_t)f->gsub + 8);
+    nl = U16(f, ll);
+    nfi = U16(f, (uint64_t)ls + 4);
+
+    for (i = 0; i < nfi + 1; i++) {     /* (the required feature first, if any) */
+        uint32_t fi = i == 0 ? U16(f, (uint64_t)ls + 2) : U16(f, (uint64_t)ls + 6 + 2 * (i - 1)), ft, nli;
+        uint64_t rec;
+
+        if (fi == 0xFFFF || fi >= U16(f, fl)) {
+            continue;
+        }
+
+        rec = (uint64_t)fl + 2 + 6 * fi;
+
+        if (U32(f, rec) != feature) {
+            continue;
+        }
+
+        ft = fl + U16(f, rec + 4);
+        nli = U16(f, (uint64_t)ft + 2);
+
+        for (j = 0; j < nli; j++) {
+            uint32_t li = U16(f, (uint64_t)ft + 4 + 2 * j), lk, type, nsub;
+
+            if (li >= nl) {
+                continue;
+            }
+
+            lk = ll + U16(f, (uint64_t)ll + 2 + 2 * li);
+            type = U16(f, lk);
+            nsub = U16(f, (uint64_t)lk + 4);
+
+            for (k = 0; k < nsub; k++) {
+                uint32_t sub = lk + U16(f, (uint64_t)lk + 6 + 2 * k), t = type;
+
+                if (t == 7 && U16(f, sub) == 1) {   /* Extension */
+                    t = U16(f, (uint64_t)sub + 2);
+                    sub = sub + U32(f, (uint64_t)sub + 4);
+                }
+
+                if (fn(f, t, sub, user)) {
+                    return 1;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+static int gsub_any(const pd_font* f, uint32_t type, uint32_t sub, void* user) {
+    (void)f;
+    (void)type;
+    (void)sub;
+    (void)user;
+    return 1;
+}
+
+int pd_font_gsub_has(const pd_font* f, uint32_t script, uint32_t feature) {
+    return f && gsub_each(f, script, feature, gsub_any, NULL);
+}
+
+static int gsub_single_fn(const pd_font* f, uint32_t type, uint32_t sub, void* user) {
+    uint32_t* g = (uint32_t*)user, fmt;
+    int32_t ci;
+
+    if (type != 1 || (ci = coverage(f, sub + U16(f, (uint64_t)sub + 2), *g)) < 0) {
+        return 0;
+    }
+
+    fmt = U16(f, sub);
+
+    if (fmt == 1) {
+        *g = (*g + (uint32_t)S16(f, (uint64_t)sub + 4)) & 0xFFFF;
+        return 1;
+    }
+
+    if (fmt == 2 && (uint32_t)ci < U16(f, (uint64_t)sub + 4)) {
+        *g = U16(f, (uint64_t)sub + 6 + 2 * (uint32_t)ci);
+        return 1;
+    }
+
+    return 0;
+}
+
+uint32_t pd_font_gsub_single(const pd_font* f, uint32_t script, uint32_t feature, uint32_t glyph) {
+    uint32_t g = glyph;
+
+    if (f) {
+        gsub_each(f, script, feature, gsub_single_fn, &g);
+    }
+
+    return g;
+}
+
+typedef struct {
+    const uint32_t* g;
+    int32_t n, used;
+    uint32_t out;
+} ligq;
+
+static int gsub_lig_fn(const pd_font* f, uint32_t type, uint32_t sub, void* user) {
+    ligq* q = (ligq*)user;
+    int32_t ci;
+    uint32_t set, nl, i, k;
+
+    if (type != 4 || U16(f, sub) != 1 || (ci = coverage(f, sub + U16(f, (uint64_t)sub + 2), q->g[0])) < 0 ||
+            (uint32_t)ci >= U16(f, (uint64_t)sub + 4)) {
+        return 0;
+    }
+
+    set = sub + U16(f, (uint64_t)sub + 6 + 2 * (uint32_t)ci);
+    nl = U16(f, set);
+
+    for (i = 0; i < nl; i++) {
+        uint32_t lig = set + U16(f, (uint64_t)set + 2 + 2 * i), nc = U16(f, (uint64_t)lig + 2);
+
+        if (nc < 2 || (int32_t)nc > q->n) {
+            continue;
+        }
+
+        for (k = 1; k < nc && U16(f, (uint64_t)lig + 4 + 2 * (k - 1)) == q->g[k]; k++) {
+        }
+
+        if (k == nc) {
+            q->used = (int32_t)nc;
+            q->out = U16(f, lig);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+int32_t pd_font_gsub_ligature(const pd_font* f, uint32_t script, uint32_t feature, const uint32_t* glyphs, int32_t n,
+                              uint32_t* out) {
+    ligq q;
+
+    if (!f || n < 2) {
+        return 0;
+    }
+
+    q.g = glyphs;
+    q.n = n;
+    q.used = 0;
+    q.out = 0;
+    gsub_each(f, script, feature, gsub_lig_fn, &q);
+    *out = q.out;
+    return q.used;
+}
+
+int pd_font_glyph_xrange(const pd_font* f, uint32_t glyph, int32_t* xmin, int32_t* xmax) {
+    uint32_t a, b;
+
+    if (!f || !f->glyf || !f->loca || glyph >= (uint32_t)f->m.num_glyphs) {
+        return 0;
+    }
+
+    a = f->loca_long ? U32(f, (uint64_t)f->loca + 4 * glyph) : 2 * U16(f, (uint64_t)f->loca + 2 * glyph);
+    b = f->loca_long ? U32(f, (uint64_t)f->loca + 4 * glyph + 4) : 2 * U16(f, (uint64_t)f->loca + 2 * glyph + 2);
+
+    if (b <= a) {
+        return 0;
+    }
+
+    *xmin = S16(f, (uint64_t)f->glyf + a + 2);
+    *xmax = S16(f, (uint64_t)f->glyf + a + 6);
+    return 1;
 }

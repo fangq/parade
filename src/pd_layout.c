@@ -163,6 +163,11 @@ typedef struct {                /* a table: column grid and header rows */
     pd_table_props tp;
 } ptable;
 
+/* where a cell (column c, span columns) starts across its table: from the left, or (right to left) the right */
+static pd_sp col_left(const ptable* T, int32_t c, int32_t span) {
+    return T->tp.direction == PD_DIR_RTL ? T->width - T->colx[c + span] : T->colx[c];
+}
+
 enum {
     FL_NONE = 0,
     FL_QUEUED = 1,
@@ -1553,6 +1558,10 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
     T->x = tp->align == PD_ALIGN_CENTER ? (colw - T->width) / 2 : tp->align == PD_ALIGN_RIGHT ? colw - T->width :
           tp->indent;
     T->x = T->x < 0 && tp->align != PD_ALIGN_LEFT ? 0 : T->x;
+
+    if (tp->direction == PD_DIR_RTL && tp->align != PD_ALIGN_CENTER) {  /* from the right: its start */
+        T->x = tp->align == PD_ALIGN_RIGHT ? 0 : colw - T->width - tp->indent;
+    }
     T->header_rows = tp->header_rows < t->nkids ? tp->header_rows : t->nkids - 1;
     T->header_rows = T->header_rows < 0 ? 0 : T->header_rows;
 }
@@ -2007,6 +2016,10 @@ static pd_status rebuild_flow(filler* F) {
 }
 
 static pd_sp col_x(const filler* F, int32_t page, int32_t col) {
+    if (F->sp && F->sp->direction == PD_DIR_RTL) {  /* right to left: the first column at the right */
+        col = F->ncols - 1 - col;
+    }
+
     return F->L->pages[page].text_x + col * (F->colw + F->gap);
 }
 
@@ -2220,7 +2233,8 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
         for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
             const blk* cell = d->tab[row->kids[k]];
             int32_t span = cell_span(&T, cell, c);
-            pd_sp cx = tx + T.colx[c], cw = T.colx[c + span] - T.colx[c], inner = cw - 2 * pad, bw, ch, off = 0;
+            pd_sp cx = tx + col_left(&T, c, span), cw = T.colx[c + span] - T.colx[c], inner = cw - 2 * pad, bw, ch;
+            pd_sp off = 0;
             uint32_t bc;
 
             inner = inner < PD_PT(1) ? PD_PT(1) : inner;
@@ -2295,7 +2309,7 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
         const blk* cell = d->tab[row->kids[k]];
         const blk* below = next ? cell_at(d, T, next, c) : NULL;
         int32_t span = cell_span(T, cell, c), down = t ? merge_rows(d, T, t, v->line, c) : 1, j;
-        pd_sp cx = tx + T->colx[c], cw = T->colx[c + span] - T->colx[c], inner = cw - 2 * pad, h, off = 0;
+        pd_sp cx = tx + col_left(T, c, span), cw = T->colx[c + span] - T->colx[c], inner = cw - 2 * pad, h, off = 0;
         pd_sp ch = 0, bw;
         uint32_t bc;
 
@@ -5016,8 +5030,8 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
             memset(&M, 0, sizeof(M));
             w = emit_text(L, &M, l->pc->label, &ls, 0, 0, b->id, 0, l->region);
             free(M.d);
-            emit_text(L, D, l->pc->label, &ls, l->ox + ln.x - w - PD_PT(1), l->oy + ln.baseline - ls.size / 2, b->id, 0,
-                      l->region);
+            emit_text(L, D, l->pc->label, &ls, (l->pc->para->para_level & 1) ? l->ox + ln.x + ln.width + PD_PT(1) :
+                      l->ox + ln.x - w - PD_PT(1), l->oy + ln.baseline - ls.size / 2, b->id, 0, l->region);
         } else if (b->st.at.task) {     /* a checklist's box, drawn, so that no font has to have one */
             char lab[32];
             size_t k = strlen(l->pc->label);
@@ -5055,6 +5069,15 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
                 BOXR(bx + 3 * bw, top + 3 * bw, side - 6 * bw, side - 6 * bw);
             }
 #undef BOXR
+        } else if (l->pc->para->para_level & 1) {  /* right to left: hanging right of the first line, mirrored */
+            dlist_t M;
+            pd_sp w;
+
+            memset(&M, 0, sizeof(M));
+            w = emit_text(L, &M, l->pc->label, &ls, 0, 0, b->id, 0, l->region);
+            free(M.d);
+            emit_text(L, D, l->pc->label, &ls, l->ox + l->pc->width - l->pc->label_x - w, l->oy + ln.baseline, b->id, 0,
+                      l->region);
         } else {
             emit_text(L, D, l->pc->label, &ls, l->ox + l->pc->label_x, l->oy + ln.baseline, b->id, 0, l->region);
         }
@@ -5663,6 +5686,37 @@ pd_status pd_layout_caret(const pd_layout* L, pd_pos pos, int32_t* page, pd_sp* 
     }
 
     return c ? PD_ERR_STATE : PD_ERR_ARG;
+}
+
+pd_status pd_layout_caret_step(const pd_layout* L, pd_pos pos, int32_t dir, pd_pos* out) {
+    int32_t pg, i, line = -1;
+    pd_sp cx, cb;
+
+    if (!L || !out || !pd_doc_blk(L->doc, pos.block)) {
+        return PD_ERR_ARG;
+    }
+
+    for (pg = 0; pg < L->npages; pg++) {    /* the layout of the paragraph on the pages */
+        for (i = 0; i < L->pages[pg].n; i++) {
+            const pline* l = &L->pages[pg].lines[i];
+            uint32_t o;
+
+            if (l->pc->block != pos.block || pd_para_caret(l->pc->para, pos.offset, &line, &cx, &cb) != PD_OK ||
+                    l->line != line) {
+                continue;
+            }
+
+            if (pd_para_caret_step(l->pc->para, pos.offset, dir, &o) != PD_OK) {
+                return PD_ERR_RANGE;
+            }
+
+            out->block = pos.block;
+            out->offset = o;
+            return PD_OK;
+        }
+    }
+
+    return PD_ERR_STATE;
 }
 
 /* ------------------------------------------------------------------ */

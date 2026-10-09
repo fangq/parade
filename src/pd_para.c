@@ -1188,7 +1188,9 @@ static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t
         na++; \
     } while (0)
 
-    if (slack > 0 && L->total_stretch[1] > 0) {
+    if (slack > 0 && L->total_stretch[1] > 0 && (p->para_level & 1)) {
+        mode = 0;   /* right to left: the line as wide as its text, mirrored to its start (pd_break.c) */
+    } else if (slack > 0 && L->total_stretch[1] > 0) {
         mode = 2;
         den = L->total_stretch[1];
     } else if (slack > 0 && L->total_stretch[0] > 0) {
@@ -1598,6 +1600,65 @@ pd_status pd_para_caret(const pd_para* p, uint32_t off, int32_t* line, pd_sp* x,
     }
 
     return PD_OK;
+}
+
+pd_status pd_para_caret_step(const pd_para* p, uint32_t off, int32_t dir, uint32_t* out) {
+    int32_t li, n, k;
+    pd_glyph* st;
+    uint8_t* lv;
+    uint32_t* af;
+    pd_sp cx, base, best = 0, end_x;
+    pd_status r;
+    int have = 0, tries;
+
+    if (!p || !out || dir == 0) {
+        return PD_ERR_ARG;
+    }
+
+    if ((r = pd_para_caret(p, off, &li, &cx, &base)) != PD_OK) {
+        return r;
+    }
+
+    st = line_stops(p, li, &n, &lv, &af);
+
+    if (!st) {
+        return PD_ERR_NOMEM;
+    }
+
+    end_x = (p->para_level & 1) ? p->lines[li].pub.x : p->lines[li].pub.x + p->lines[li].pub.width;
+
+    for (tries = 0; tries < n + 2; tries++) {   /* the nearest edge that way that is another position */
+        uint32_t o = off;
+
+        have = 0;
+
+        for (k = -1; k < 2 * n; k++) {
+            pd_sp e = k < 0 ? end_x : (k & 1) ? st[k / 2].x + st[k / 2].advance : st[k / 2].x;
+
+            if ((dir > 0 ? e > cx : e < cx) && (!have || (dir > 0 ? e < best : e > best))) {
+                best = e;
+                have = 1;
+            }
+        }
+
+        if (!have || pd_para_hit_test(p, best, base, &o, NULL) != PD_OK) {
+            have = 0;
+            break;
+        }
+
+        if (o != off) {
+            *out = o;
+            break;
+        }
+
+        cx = best;  /* the same position there: past it */
+        have = 0;
+    }
+
+    free(st);
+    free(lv);
+    free(af);
+    return have ? PD_OK : PD_ERR_RANGE;
 }
 
 pd_status pd_para_hit_test(const pd_para* p, pd_sp x, pd_sp y, uint32_t* off, int32_t* line) {

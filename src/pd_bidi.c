@@ -707,3 +707,46 @@ int32_t pd_bidi_line(const uint32_t* cp, const uint8_t* levels, int32_t from, in
 
     return cnt;
 }
+
+/* P2/P3 over UTF-8: 1 when the first strong character (isolates skipped) is right to left, 0 when it is left to
+   right or there is none */
+int pd_bidi_para_rtl(const char* utf8, size_t len) {
+    const unsigned char* s = (const unsigned char*)utf8;
+    size_t i = 0;
+    int iso = 0;
+
+    while (i < len) {
+        unsigned c = s[i];
+        uint32_t cp = c;
+        int extra = c < 0x80 ? 0 : (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : -1, k, t;
+
+        if (extra < 0 || i + (size_t)extra >= len + (extra ? 0 : 1)) {
+            return 0;
+        }
+
+        if (extra) {
+            cp = c & (0x3F >> extra);
+
+            for (k = 1; k <= extra; k++) {
+                cp = (cp << 6) | (s[i + k] & 0x3F);
+            }
+        }
+
+        i += (size_t)extra + 1;
+        t = pd_uni_bidi(cp);
+
+        if (t == BC_LRI || t == BC_RLI || t == BC_FSI) {
+            iso++;
+        } else if (t == BC_PDI && iso > 0) {
+            iso--;
+        } else if (!iso && t == BC_L) {
+            return 0;
+        } else if (!iso && (t == BC_R || t == BC_AL)) {
+            return 1;
+        } else if (t == BC_B) {
+            return 0;
+        }
+    }
+
+    return 0;
+}

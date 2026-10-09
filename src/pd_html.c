@@ -435,7 +435,7 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
     pd_block_info bi;
     pd_para_props pp;
     int32_t level = 0;
-    int kind = pd_conv_list_kind(x->d, p, &level), task = 0, cont = 0, loose = 0;
+    int kind = pd_conv_list_kind(x->d, p, &level), task = 0, cont = 0, loose = 0, rtl;
     const char* align = "";
     char lang[32];
     const char* ct;
@@ -452,8 +452,12 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
         }
     }
 
-    align = pp.align == PD_ALIGN_CENTER ? " style=\"text-align:center\"" : pp.align == PD_ALIGN_RIGHT ?
-            " style=\"text-align:right\"" : "";
+    rtl = pd_doc_para_rtl(x->d, p) == 1;    /* right to left: its end on the left */
+    align = pp.align == PD_ALIGN_CENTER ? (rtl ? " dir=\"rtl\" style=\"text-align:center\"" :
+                                           " style=\"text-align:center\"") :
+            pp.align == PD_ALIGN_RIGHT ? (rtl ? " dir=\"rtl\" style=\"text-align:left\"" :
+                                          " style=\"text-align:right\"") :
+            rtl ? " dir=\"rtl\"" : "";
 
     {
         pd_para_attrs at;
@@ -705,7 +709,7 @@ static void hx_table(hx* x, pd_block_id t) {
 
     pd_doc_block_info(x->d, t, &ti);
     pd_doc_table_props(x->d, t, &tp);
-    pb_puts(x->o, tp.border ? "<table class=\"grid\">\n" : "<table>\n");
+    pb_printf(x->o, "<table%s%s>\n", tp.border ? " class=\"grid\"" : "", tp.direction == PD_DIR_RTL ? " dir=\"rtl\"" : "");
 
     for (r = 0; r < ti.child_count; r++) {
         pd_block_id row = pd_doc_child(x->d, t, r);
@@ -942,7 +946,8 @@ typedef struct {
     char name[64];
     int kind;
     int level;                  /* headings */
-    int align;                  /* -1 = none */
+    int align;                  /* -1 = none; ALIGN_PHYS_LEFT, _RIGHT: CSS's sides, made the text's start or end */
+    int dir;                    /* pd_direction from dir= (or CSS direction), -1 none */
     pd_char_props cp;           /* character state to restore on close */
     int title;                  /* E_P: 2 an equation, 3 a <dt>, 4 a <dd> */
     pd_list_id list;            /* E_UL/E_OL: its list, made with its first item */
@@ -1227,17 +1232,29 @@ static void apply_style(pd_char_props* cp, const char* style) {
     }
 }
 
+#define ALIGN_PHYS_LEFT 10      /* text-align: left, right -- sides of the page, not of the text */
+#define ALIGN_PHYS_RIGHT 11
+
 static int align_of(const pd_markup* m) {
     char v[64], st[512];
 
-    if (mu_attr(m, "style", st, sizeof(st)) && css_prop(st, "text-align", v, sizeof(v))) {
-        return strstr(v, "center") ? PD_ALIGN_CENTER : strstr(v, "right") ? PD_ALIGN_RIGHT : strstr(v, "justify") ?
-               PD_ALIGN_JUSTIFY : PD_ALIGN_LEFT;
+    if ((mu_attr(m, "style", st, sizeof(st)) && css_prop(st, "text-align", v, sizeof(v))) ||
+            mu_attr(m, "align", v, sizeof(v))) {
+        return strstr(v, "center") ? PD_ALIGN_CENTER : strstr(v, "justify") ? PD_ALIGN_JUSTIFY : strstr(v, "end") ?
+               PD_ALIGN_RIGHT : strstr(v, "start") ? PD_ALIGN_LEFT : strstr(v, "right") ? ALIGN_PHYS_RIGHT :
+               ALIGN_PHYS_LEFT;
     }
 
-    if (mu_attr(m, "align", v, sizeof(v))) {
-        return strstr(v, "center") ? PD_ALIGN_CENTER : strstr(v, "right") ? PD_ALIGN_RIGHT : strstr(v, "justify") ?
-               PD_ALIGN_JUSTIFY : PD_ALIGN_LEFT;
+    return -1;
+}
+
+/* an element's direction: dir=, or CSS direction; -1 none */
+static int dir_of(const pd_markup* m) {
+    char v[64], st[512];
+
+    if (mu_attr(m, "dir", v, sizeof(v)) || (mu_attr(m, "style", st, sizeof(st)) && css_prop(st, "direction", v,
+                                            sizeof(v)))) {
+        return strstr(v, "rtl") ? PD_DIR_RTL : strstr(v, "ltr") ? PD_DIR_LTR : PD_DIR_AUTO;
     }
 
     return -1;
@@ -1320,7 +1337,7 @@ static int block_kind(const char* n, int* level) {
 /* the paragraph a text run opens, from the enclosing elements */
 static void hi_begin_para(hi* h) {
     pd_bld* b = h->b;
-    int32_t i, lists = 0, lkind = 1, align = -1, quotes = 0, inner_at = -1, item_at = -1;
+    int32_t i, lists = 0, lkind = 1, align = -1, dir = -1, quotes = 0, inner_at = -1, item_at = -1;
     hel* inner = NULL, *list = NULL, *item = NULL;
     pd_para_attrs at;
     pd_block_id p;
@@ -1341,6 +1358,10 @@ static void hi_begin_para(hi* h) {
 
         if (align < 0 && e->align >= 0) {
             align = e->align;
+        }
+
+        if (dir < 0 && e->dir >= 0) {
+            dir = e->dir;
         }
 
         if (e->kind == E_LI && !item && lists == 0) {
@@ -1427,9 +1448,17 @@ static void hi_begin_para(hi* h) {
         item->labelled = 1;
     }
 
-    if (align >= 0) {
+    if (dir >= 0) {
+        b->pp.mask |= PD_PP_DIRECTION;
+        b->pp.direction = dir;
+    }
+
+    if (align >= 0) {   /* (CSS's left and right: the start and end of left-to-right text, the other way round) */
+        int rtl = dir == PD_DIR_RTL;
+
         b->pp.mask |= PD_PP_ALIGN;
-        b->pp.align = align;
+        b->pp.align = align == ALIGN_PHYS_LEFT ? (rtl ? PD_ALIGN_RIGHT : PD_ALIGN_LEFT) :
+                      align == ALIGN_PHYS_RIGHT ? (rtl ? PD_ALIGN_LEFT : PD_ALIGN_RIGHT) : align;
     }
 
     p = bld_begin_para(b);
@@ -1669,6 +1698,16 @@ static void close_from(hi* h, int32_t i) {
             case E_TABLE:
                 hi_end_para(h);
                 hi_merged_cells(h, 1);
+
+                if (e->dir == PD_DIR_RTL && h->b->ntables >= 1 && h->b->ntables <= 8) {    /* columns from the right */
+                    pd_table_props tp;
+
+                    if (pd_doc_table_props(h->b->d, h->b->table[h->b->ntables - 1], &tp) == PD_OK) {
+                        tp.direction = PD_DIR_RTL;
+                        pd_doc_set_table_props(h->b->d, h->b->table[h->b->ntables - 1], &tp);
+                    }
+                }
+
                 bld_table_end(h->b);
                 break;
 
@@ -1780,6 +1819,7 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
             snprintf(e.name, sizeof(e.name), "%s", m.name);
             e.cp = h->b->cp;
             e.align = -1;
+            e.dir = -1;
             e.kind = kind;
 
             if (!strcmp(m.name, "br")) {
@@ -1874,6 +1914,7 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                                 strcpy(h->stack[h->depth].name, "#note");
                                 h->stack[h->depth].kind = E_BARRIER;
                                 h->stack[h->depth].align = -1;
+                                h->stack[h->depth].dir = -1;
                                 h->stack[h->depth].cp = h->b->cp;
                                 h->depth++;
                             }
@@ -2059,6 +2100,7 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
 
             /* block elements */
             e.align = align_of(&m);
+            e.dir = dir_of(&m);
             e.level = level;
 
             if (kind == E_H && mu_attr(&m, "class", v, sizeof(v)) && strstr(v, "title")) {

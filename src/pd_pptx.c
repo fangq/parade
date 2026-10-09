@@ -38,6 +38,7 @@ typedef struct {
     char media_id[256][16];     /* and their ids in the .docx */
     uint32_t theme[12];         /* dk1 lt1 dk2 lt2 accent1-6 hlink folHlink */
     char major[64], minor[64];  /* the theme's fonts: headings, body */
+    char major_cs[64], minor_cs[64];    /* and for complex scripts (cs, else its Arabic or Hebrew font), "" none */
     double line_w[3];           /* the theme's line widths (EMU) */
     char theme_path[256];       /* the theme's part, "" none */
     int docpr;
@@ -344,6 +345,7 @@ static void theme_load(pptx* P, const char* path) {
     P->line_w[2] = 19050;
     snprintf(P->major, sizeof(P->major), "Calibri Light");
     snprintf(P->minor, sizeof(P->minor), "Calibri");
+    P->major_cs[0] = P->minor_cs[0] = '\0';
     P->theme_path[0] = '\0';
 
     if (!path || !part_load(P, &t, path)) {
@@ -376,6 +378,29 @@ static void theme_load(pptx* P, const char* path) {
     xd_attr(&t.x, f, "typeface", P->major, sizeof(P->major));
     f = xd_path(&t.x, xd_find(&t.x, "minorFont"), "latin");
     xd_attr(&t.x, f, "typeface", P->minor, sizeof(P->minor));
+
+    for (k = 0; k < 2; k++) {   /* the complex scripts' faces: cs, else the Arabic script's, else the Hebrew */
+        int ft = xd_find(&t.x, k ? "minorFont" : "majorFont"), e;
+        char* out = k ? P->minor_cs : P->major_cs;
+
+        xd_attr(&t.x, xd_kid(&t.x, ft, "cs"), "typeface", out, 64);
+
+        for (e = ft >= 0 ? t.x.v[ft].kid : -1; e >= 0 && !out[0]; e = t.x.v[e].next) {
+            char sc[16];
+
+            if (!strcmp(t.x.v[e].name, "font") && xd_attr(&t.x, e, "script", sc, sizeof(sc)) && !strcmp(sc, "Arab")) {
+                xd_attr(&t.x, e, "typeface", out, 64);
+            }
+        }
+
+        for (e = ft >= 0 ? t.x.v[ft].kid : -1; e >= 0 && !out[0]; e = t.x.v[e].next) {
+            char sc[16];
+
+            if (!strcmp(t.x.v[e].name, "font") && xd_attr(&t.x, e, "script", sc, sizeof(sc)) && !strcmp(sc, "Hebr")) {
+                xd_attr(&t.x, e, "typeface", out, 64);
+            }
+        }
+    }
     part_free(&t);
 }
 
@@ -648,6 +673,24 @@ static void rpr_font(const tctx* T, const xdoc* d, int rpr, char* face, size_t c
     }
 }
 
+/* a run's face for complex scripts (Arabic, Hebrew): its own cs, its list styles', the theme's; "" none */
+static void rpr_cs_font(const tctx* T, const xdoc* d, int rpr, char* face, size_t cap) {
+    int k;
+
+    face[0] = '\0';
+    xd_attr(d, rpr >= 0 ? xd_kid(d, rpr, "cs") : -1, "typeface", face, cap);
+
+    for (k = 0; !face[0] && k < T->nlvl; k++) {
+        xd_attr(T->lvl[k].d, xd_path(T->lvl[k].d, T->lvl[k].n, "defRPr/cs"), "typeface", face, cap);
+    }
+
+    if (!face[0] || !strcmp(face, "+mn-cs")) {
+        snprintf(face, cap, "%s", T->title ? T->P->major_cs : T->P->minor_cs);
+    } else if (!strcmp(face, "+mj-cs")) {
+        snprintf(face, cap, "%s", T->P->major_cs);
+    }
+}
+
 static void put_esc(pd_buf* o, const char* s) {
     for (; *s; s++) {
         if (*s == '&') {
@@ -710,7 +753,12 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
     pb_puts(o, "\" w:hAnsi=\"");
     put_esc(o, v);
     pb_puts(o, "\" w:cs=\"");
-    put_esc(o, v);
+    {
+        char cs[64];
+
+        rpr_cs_font(T, d, rpr, cs, sizeof(cs));
+        put_esc(o, cs[0] ? cs : v);
+    }
     pb_puts(o, "\"/>");
 
     if (heavy || T->force_bold || (rpr_attr(T, d, rpr, "b", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true")))) {
@@ -821,7 +869,7 @@ static const char* symbol_bullet(const char* ch, const char* face) {
 }
 
 static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum) {
-    int ppr = xd_kid(d, p, "pPr"), k, first_rpr = -1, pct, sp, any = 0;
+    int ppr = xd_kid(d, p, "pPr"), k, first_rpr = -1, pct, sp, any = 0, rtl;
     char v[64], bu[16] = "";
     xref r;
     long long marl, ind;
@@ -842,7 +890,8 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
     /* a line of its text, in twips: PowerPoint's 1.2 times its size */
     line = (rpr_attr(T, d, first_rpr, "sz", v, sizeof(v)) ? atof(v) : T->def_sz > 0 ? T->def_sz : 1800) * T->scale *
            1.2 / 5;
-    pb_puts(o, "<w:p><w:pPr>");
+    rtl = ppr_attr(T, d, ppr, "rtl", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
+    pb_puts(o, rtl ? "<w:p><w:pPr><w:bidi/>" : "<w:p><w:pPr>");    /* right to left: its margins from the right */
     /* line spacing and the space around (a percentage: of a line); autofit's line spacing reduction takes from
        the space around too */
     pb_puts(o, "<w:spacing");
@@ -873,9 +922,9 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
                   (ind < 0 ? -ind : ind) / 635);
     }
 
-    if (ppr_attr(T, d, ppr, "algn", v, sizeof(v))) {
-        const char* jc = !strcmp(v, "ctr") ? "center" : !strcmp(v, "r") ? "right" : !strcmp(v, "just") ||
-                         !strcmp(v, "dist") ? "both" : "left";
+    if (ppr_attr(T, d, ppr, "algn", v, sizeof(v))) {    /* (DrawingML's sides, Word's from the text's start) */
+        const char* jc = !strcmp(v, "ctr") ? "center" : !strcmp(v, "r") ? (rtl ? "left" : "right") :
+                         !strcmp(v, "just") || !strcmp(v, "dist") ? "both" : rtl ? "right" : "left";
 
         pb_printf(o, "<w:jc w:val=\"%s\"/>", jc);
     }

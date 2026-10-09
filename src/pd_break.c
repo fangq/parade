@@ -691,6 +691,25 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
                        prm->align == PD_ALIGN_CENTER ? off / 2 : 0);
         }
 
+        if (p->para_level & 1) {
+            /* right to left: laid out from its start (indents, tabs, alignment as for left to right, measured from
+               the start edge), then mirrored in the paragraph's width -- left aligned is at the right, a first-line
+               indent and the last line of a justified paragraph there too */
+            pd_sp mw = p->mirror_w;
+
+            if (mw <= 0) {
+                int32_t q;
+
+                mw = p->n_shape ? 0 : prm->width;
+
+                for (q = 0; q < p->n_shape; q++) {
+                    mw = p->shape_indent[q] + p->shape_width[q] > mw ? p->shape_indent[q] + p->shape_width[q] : mw;
+                }
+            }
+
+            L->pub.x = mw - L->pub.x - L->pub.width;
+        }
+
         /* vertical extents from the boxes on the line */
         for (k = s; k <= ib && k < p->n_items; k++) {
             const pd_item* it = &p->items[k];

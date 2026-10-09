@@ -2530,6 +2530,10 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         pb_puts(o, "<w:tblW w:w=\"0\" w:type=\"auto\"/>");
     }
 
+    if (tp.direction == PD_DIR_RTL) {
+        pb_puts(o, "<w:bidiVisual/>");
+    }
+
     if (tp.align == PD_ALIGN_CENTER || tp.align == PD_ALIGN_RIGHT) {
         pb_puts(o, tp.align == PD_ALIGN_CENTER ? "<w:jc w:val=\"center\"/>" : "<w:jc w:val=\"right\"/>");
     } else if (tp.indent) {
@@ -2866,6 +2870,10 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
 
     if (sp->title_page) {
         pb_puts(o, "<w:titlePg/>");
+    }
+
+    if (sp->direction == PD_DIR_RTL) {
+        pb_puts(o, "<w:bidi/>");
     }
 
     if (sp->line_pitch > 0) {
@@ -5301,6 +5309,7 @@ typedef struct {               /* a table being read */
     pd_sp mar[4];               /* its own w:tblCellMar, -1 unsaid */
     pd_sp ind, width_pct;
     int has_ind;
+    int rtl;                    /* w:bidiVisual: its columns from the right */
     pd_sp row_h;                /* w:trHeight of the row under way */
     int cspan;                  /* the grid columns the cell under way takes */
     dtpart cell;                /* what the style does to the cell under way */
@@ -5620,6 +5629,7 @@ static void dw_table_props(dw* w) {
         tp.cell_padding = T->mar[3] >= 0 ? T->mar[3] : T->st.mar[3] >= 0 ? T->st.mar[3] : twips(108);
         tp.cell_padding_v = T->mar[0] >= 0 ? T->mar[0] : T->st.mar[0] >= 0 ? T->st.mar[0] : 0;
         tp.indent = T->has_ind ? T->ind : T->st.has_ind ? T->st.ind : 0;
+        tp.direction = T->rtl ? PD_DIR_RTL : PD_DIR_AUTO;
         tp.width_pct = (int32_t)T->width_pct;
 
         if (tp.width_pct > 0) {
@@ -9354,6 +9364,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->sp.title_page = attr_on(&m);
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->sp.page_valign = !strcmp(v, "center") ? 1 : !strcmp(v, "bottom") ? 2 : 0;
+                } else if (strcmp(t, "bidi") == 0) {    /* right to left: its columns from the right */
+                    w->sp.direction = attr_on(&m) ? PD_DIR_RTL : PD_DIR_AUTO;
                 } else if (strcmp(t, "docGrid") == 0) {     /* a grid of lines: not the default one, which is none */
                     char ty[24] = "default";
 
@@ -9680,6 +9692,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 look = attr_int(&m, "w:noHBand", (look >> 9) & 1) ? look | 0x200 : look & ~0x200;
                 look = attr_int(&m, "w:noVBand", (look >> 10) & 1) ? look | 0x400 : look & ~0x400;
                 w->tabs[w->ntab - 1].look = look;
+            } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "bidiVisual") == 0) {
+                w->tabs[w->ntab - 1].rtl = attr_on(&m);
             } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblInd") == 0) {
                 w->tabs[w->ntab - 1].ind = twips(attr_int(&m, "w:w", 0));
                 w->tabs[w->ntab - 1].has_ind = 1;

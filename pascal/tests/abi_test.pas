@@ -299,6 +299,7 @@ begin
   WriteLn('pd_section_props.gutter ', PtrUInt(@v_pd_section_props.gutter) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.page_valign ', PtrUInt(@v_pd_section_props.page_valign) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.line_pitch ', PtrUInt(@v_pd_section_props.line_pitch) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.direction ', PtrUInt(@v_pd_section_props.direction) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_table_props ', SizeOf(pd_table_props));
   WriteLn('pd_table_props.width ', PtrUInt(@v_pd_table_props.width) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.align ', PtrUInt(@v_pd_table_props.align) - PtrUInt(@v_pd_table_props));
@@ -312,6 +313,7 @@ begin
   WriteLn('pd_table_props.width_pct ', PtrUInt(@v_pd_table_props.width_pct) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.border_sides ', PtrUInt(@v_pd_table_props.border_sides) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.cell_padding_v ', PtrUInt(@v_pd_table_props.cell_padding_v) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.direction ', PtrUInt(@v_pd_table_props.direction) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_cell_props ', SizeOf(pd_cell_props));
   WriteLn('pd_cell_props.col_span ', PtrUInt(@v_pd_cell_props.col_span) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.valign ', PtrUInt(@v_pd_cell_props.valign) - PtrUInt(@v_pd_cell_props));

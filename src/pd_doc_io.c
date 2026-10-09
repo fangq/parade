@@ -552,6 +552,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "LinePitch", p->line_pitch);
             }
 
+            if (p->direction == PD_DIR_RTL) {
+                put_str(w, "Direction", "rtl");
+            }
+
             if (p->line_numbers) {
                 put_int(w, "LineNumbers", p->line_numbers);
                 put_int(w, "LineNumberStart", p->line_number_start);
@@ -589,6 +593,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
             if (p->cell_padding_v >= 0) {
                 put_int(w, "CellPaddingV", p->cell_padding_v);
+            }
+
+            if (p->direction == PD_DIR_RTL) {
+                put_str(w, "Direction", "rtl");
             }
 
             if (p->ncols) {
@@ -1486,6 +1494,8 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->gutter = (pd_sp)int_or(pj_get(x, "Gutter"), 0, 0, PD_PT(1000), L);
     p->page_valign = (int32_t)int_or(pj_get(x, "PageVAlign"), 0, 0, 2, L);
     p->line_pitch = (pd_sp)int_or(pj_get(x, "LinePitch"), 0, 0, PD_PT(1000), L);
+    p->direction = pj_get(x, "Direction") ? enum_of(pj_get(x, "Direction"), NAMES(dir_names)) : PD_DIR_AUTO;
+    REQUIRE(p->direction >= 0);
     p->line_number_start = (int32_t)int_or(pj_get(x, "LineNumberStart"), 0, 0, 1000000, L);
     p->line_number_distance = (pd_sp)int_or(pj_get(x, "LineNumberDistance"), 0, 0, PD_PT(1000), L);
     p->line_number_restart = (int32_t)int_or(pj_get(x, "LineNumberRestart"), 0, 0, 2, L);
@@ -1526,6 +1536,8 @@ static void load_table(loader* L, const pj_node* o, pd_table_props* p) {
     p->width_pct = (int32_t)int_or(pj_get(x, "WidthPerMille"), 0, 0, 1000, L);
     p->border_sides = (int32_t)int_or(pj_get(x, "BorderSides"), 0, 0, 63, L);
     p->cell_padding_v = (pd_sp)int_or(pj_get(x, "CellPaddingV"), -1, -1, SP_MAX, L);
+    p->direction = pj_get(x, "Direction") ? enum_of(pj_get(x, "Direction"), NAMES(dir_names)) : PD_DIR_AUTO;
+    REQUIRE(p->direction >= 0);
 
     if ((c = pj_get(x, "ColumnWidths")) != NULL) {
         int32_t i;

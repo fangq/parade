@@ -1360,6 +1360,24 @@ pd_status pd_doc_para_props(const pd_doc* d, pd_block_id para, pd_para_props* ou
     return PD_OK;
 }
 
+int32_t pd_doc_para_rtl(const pd_doc* d, pd_block_id para) {
+    blk* b = d ? para_of(d, para) : NULL;
+    pd_para_props pp;
+
+    if (!b) {
+        return 0;
+    }
+
+    pd_doc_effective_pp(d, b, &pp, NULL);
+
+    if (pp.direction == PD_DIR_RTL || (pp.direction == PD_DIR_AUTO && b->st.text &&
+                                       pd_bidi_para_rtl(b->st.text, b->st.len))) {
+        return 1;
+    }
+
+    return b->st.text && pd_bidi_maybe_rtl(b->st.text, b->st.len, 0) ? 2 : 0;
+}
+
 int32_t pd_doc_list_count(const pd_doc* d) {
     return d ? d->nlists : 0;
 }
@@ -2978,6 +2996,7 @@ pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_p
              sp->page_breaking <= PD_PAGES_OPTIMAL && sp->footnote_skip >= 0 && sp->line_numbers >= 0 &&
              sp->line_numbers <= 100 && sp->line_number_start >= 0 && sp->line_number_distance >= 0 &&
              sp->line_number_restart >= PD_LINENUM_PAGE && sp->line_number_restart <= PD_LINENUM_CONTINUOUS &&
+             sp->direction >= PD_DIR_AUTO && sp->direction <= PD_DIR_RTL &&
              sp->mirror_margins >= -1 && sp->mirror_margins <= 1 && sp->gutter >= 0 &&
              (int64_t)sp->margin_left + sp->margin_right + sp->gutter < sp->page_width && sp->page_valign >= 0 &&
              sp->page_valign <= 2,
@@ -2990,7 +3009,8 @@ int pd_doc_table_props_ok(const pd_table_props* tp) {
     if (!tp || tp->width < 0 || tp->align < PD_ALIGN_JUSTIFY || tp->align > PD_ALIGN_CENTER || tp->header_rows < 0 ||
             tp->header_rows > 1000 || tp->cell_padding < 0 || tp->border < 0 || tp->ncols < 0 ||
             tp->ncols > PD_TABLE_MAX_COLS || tp->indent < -PD_PT(10000) || tp->indent > PD_PT(10000) ||
-            tp->width_pct < 0 || tp->width_pct > 1000 || tp->border_sides < 0 || tp->border_sides > 63) {
+            tp->width_pct < 0 || tp->width_pct > 1000 || tp->border_sides < 0 || tp->border_sides > 63 ||
+            tp->direction < PD_DIR_AUTO || tp->direction > PD_DIR_RTL) {
         return 0;
     }
 

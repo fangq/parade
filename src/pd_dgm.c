@@ -3229,17 +3229,29 @@ static void put_text(pd_buf* o, dgm* D, int n, const char* anchor, int actr, dou
     const xdoc* m = D->dm;
     pnode* N = &D->n[n];
     char be[8], stb[8], algn[16], calgn[16], rotattr[32] = "";
-    int i, base = 99, bullets, st, any = 0;
+    int i, base = 99, bullets, st, any = 0, rtl;
     double f = N->font > 0 ? N->font : 18, mg[4];
 
     var_of(D, n, "bulletEnabled", be, sizeof(be));
     param(D, n, "stBulletLvl", stb, sizeof(stb), "");
-    param(D, n, "shpTxLTRAlignCh", calgn, sizeof(calgn), "l");     /* its children's text */
+
+    {   /* text that reads right to left (its first strong character's): the layout's alignments for that */
+        tpara ps[64];
+        pd_buf tb;
+
+        memset(&tb, 0, sizeof(tb));
+        paras_of(D, n, &tb, ps, 64);
+        rtl = tb.n && pd_bidi_para_rtl(tb.p, tb.n);
+        pb_free(&tb);
+    }
+
+    param(D, n, rtl ? "shpTxRTLAlignCh" : "shpTxLTRAlignCh", calgn, sizeof(calgn), rtl ? "r" : "l");    /* children */
 
     if (fabs(trot) > 1e-6) {
         snprintf(rotattr, sizeof(rotattr), " rot=\"%.0f\"", fmod(trot + 360, 360) * 60000);
     }
-    param(D, n, "parTxLTRAlign", algn, sizeof(algn), "ctr");
+
+    param(D, n, rtl ? "parTxRTLAlign" : "parTxLTRAlign", algn, sizeof(algn), "ctr");
     bullets = !strcmp(be, "1") || !strcmp(be, "true");
     st = stb[0] ? atoi(stb) : 1;
 
@@ -3287,14 +3299,16 @@ static void put_text(pd_buf* o, dgm* D, int n, const char* anchor, int actr, dou
             any = 1;
 
             if (bul) {
-                pb_printf(o, "<a:p><a:pPr marL=\"%.0f\" lvl=\"%d\" indent=\"%.0f\" algn=\"%s\" defTabSz=\"%.0f\">"
+                pb_printf(o, "<a:p><a:pPr marL=\"%.0f\" lvl=\"%d\" indent=\"%.0f\" algn=\"%s\" defTabSz=\"%.0f\"%s>"
                           "<a:lnSpc><a:spcPct val=\"90000\"/></a:lnSpc><a:spcBef><a:spcPct val=\"0\"/></a:spcBef>"
                           "<a:spcAft><a:spcPct val=\"15000\"/></a:spcAft><a:buChar char=\"&#8226;\"/></a:pPr>",
-                          f * 0.9 * EMU_PT * (lvl > 0 ? lvl : 1), lvl, -f * 0.9 * EMU_PT, calgn, f * 4 * EMU_PT);
+                          f * 0.9 * EMU_PT * (lvl > 0 ? lvl : 1), lvl, -f * 0.9 * EMU_PT, calgn, f * 4 * EMU_PT,
+                          rtl ? " rtl=\"1\"" : "");
             } else {
-                pb_printf(o, "<a:p><a:pPr lvl=\"%d\" algn=\"%s\" defTabSz=\"%.0f\"><a:lnSpc><a:spcPct val=\"90000\"/>"
+                pb_printf(o, "<a:p><a:pPr lvl=\"%d\" algn=\"%s\" defTabSz=\"%.0f\"%s><a:lnSpc><a:spcPct val=\"90000\"/>"
                           "</a:lnSpc><a:spcBef><a:spcPct val=\"0\"/></a:spcBef><a:spcAft><a:spcPct val=\"35000\"/>"
-                          "</a:spcAft><a:buNone/></a:pPr>", lvl, lvl > 0 ? calgn : algn, f * 4 * EMU_PT);
+                          "</a:spcAft><a:buNone/></a:pPr>", lvl, lvl > 0 ? calgn : algn, f * 4 * EMU_PT,
+                          rtl ? " rtl=\"1\"" : "");
             }
 
             for (r = m->v[p].kid; r >= 0; r = m->v[r].next) {

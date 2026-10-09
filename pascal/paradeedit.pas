@@ -635,7 +635,8 @@ type
     procedure ApplyParaProps(const Props: pd_para_props);
     { the paragraph at the caret: its style's properties with its own over them }
     function CurrentParaProps: pd_para_props;
-    procedure SetAlignment(AAlign: Integer);    { PD_ALIGN_* }
+    procedure SetAlignment(AAlign: Integer);    { PD_ALIGN_*, as it is shown (right to left: LEFT is the end) }
+    function CurrentAlignment: Integer;         { the caret paragraph's, as it is shown }
     { half an inch more or less left indent; in a list, a level deeper or shallower }
     procedure ChangeIndent(Deeper: Boolean);
     procedure SetLineSpacing(PerMille: Integer);   { 1000: single }
@@ -3191,7 +3192,18 @@ begin
   FillChar(P, SizeOf(P), 0);
   P.mask := PD_PP_ALIGN;
   P.align := AAlign;
+  if pd_doc_para_rtl(FDoc, CaretPos.block) = 1 then  { right to left: its alignments from the right }
+    if AAlign = PD_ALIGN_LEFT then P.align := PD_ALIGN_RIGHT
+    else if AAlign = PD_ALIGN_RIGHT then P.align := PD_ALIGN_LEFT;
   ApplyParaProps(P);
+end;
+
+function TParadeEdit.CurrentAlignment: Integer;
+begin
+  Result := CurrentParaProps.align;
+  if pd_doc_para_rtl(FDoc, CaretPos.block) = 1 then
+    if Result = PD_ALIGN_LEFT then Result := PD_ALIGN_RIGHT
+    else if Result = PD_ALIGN_RIGHT then Result := PD_ALIGN_LEFT;
 end;
 
 procedure TParadeEdit.ChangeIndent(Deeper: Boolean);
@@ -5868,7 +5880,8 @@ end;
 
 procedure TParadeEdit.ProcessKey(Key: Word; Shift: TShiftState);
 var
-  Ext: Boolean;
+  Ext, Back: Boolean;
+  Bidi: Int32;
   P, After: pd_pos;
   BI, BJ: pd_block_info;
   Boxes: TParadeShapeBoxes;
@@ -6015,10 +6028,21 @@ begin
     Exit;
   end;
   case Key of
-    VK_LEFT:
-      if HasSelection and not Ext then SetCaret(SelStart, False) else SetCaret(PrevPos(CaretPos), Ext);
-    VK_RIGHT:
-      if HasSelection and not Ext then SetCaret(SelEnd, False) else SetCaret(NextPos(CaretPos), Ext);
+    VK_LEFT, VK_RIGHT:   { as the text is shown: in right-to-left text left goes forward }
+      begin
+        Bidi := pd_doc_para_rtl(FDoc, CaretPos.block);
+        Back := (Key = VK_LEFT) <> (Bidi = 1);
+        if HasSelection and not Ext then
+        begin
+          if Back then SetCaret(SelStart, False) else SetCaret(SelEnd, False);
+        end
+        else if (Bidi <> 0) and (pd_layout_caret_step(FLayout, CaretPos, Ord(Key = VK_RIGHT) * 2 - 1, P) = PD_OK) then
+          SetCaret(P, Ext)
+        else if Back then
+          SetCaret(PrevPos(CaretPos), Ext)
+        else
+          SetCaret(NextPos(CaretPos), Ext);
+      end;
     VK_UP: MoveVertical(-1, Ext);
     VK_DOWN: MoveVertical(1, Ext);
     VK_HOME: MoveLineEdge(False, Ext);

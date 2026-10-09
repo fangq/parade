@@ -394,6 +394,8 @@ PD_API pd_status pd_para_get_style(const pd_para* para, int32_t index, pd_style*
 PD_API pd_status pd_para_hit_test(const pd_para* para, pd_sp x, pd_sp y, uint32_t* offset, int32_t* line);
 /** caret position for a byte offset; at a line break the caret goes to the start of the next line */
 PD_API pd_status pd_para_caret(const pd_para* para, uint32_t offset, int32_t* line, pd_sp* x, pd_sp* baseline);
+/** the offset one step left (dir < 0) or right (dir > 0) of offset as its line is shown; PD_ERR_RANGE at that end */
+PD_API pd_status pd_para_caret_step(const pd_para* para, uint32_t offset, int32_t dir, uint32_t* out);
 
 /** total UTF-8 text length of the paragraph in bytes */
 PD_API uint32_t pd_para_text_length(const pd_para* para);

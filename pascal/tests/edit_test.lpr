@@ -1016,6 +1016,35 @@ begin
 end;
 
 { a PowerPoint file opened: each slide a canvas page, its shapes there to edit; the slides sized together }
+{ a right-to-left paragraph: Left steps forward through its letters, as they are shown; the Left button aligns it
+  left as it is seen (its end), and the alignment it reports is the one seen }
+procedure TestRightToLeft(E: TParadeEdit);
+var
+  S: TStringStream;
+  B: pd_block_id;
+  Pp: pd_para_props;
+begin
+  S := TStringStream.Create('<p dir="rtl">'#$D7#$90#$D7#$91#$D7#$92'</p><p>abc</p>');
+  try
+    E.LoadFromStream(S, PD_CONV_HTML);
+  finally
+    S.Free;
+  end;
+  B := pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0);
+  E.GoToPos(PdPos(B, 0));
+  E.ProcessKey(VK_LEFT, []);
+  Check((E.CaretPos.block = B) and (E.CaretPos.offset = 2), Format('Left in Hebrew: forward (%d)', [E.CaretPos.offset]));
+  E.ProcessKey(VK_RIGHT, []);
+  Check(E.CaretPos.offset = 0, 'Right: back');
+  Check(E.CurrentAlignment = PD_ALIGN_RIGHT, 'a right-to-left paragraph shown at the right');
+  E.SetAlignment(PD_ALIGN_LEFT);
+  pd_doc_para_props(E.Doc, B, Pp);
+  Check((Pp.align = PD_ALIGN_RIGHT) and (E.CurrentAlignment = PD_ALIGN_LEFT), 'aligned left as seen: its end');
+  E.GoToPos(PdPos(pd_doc_next_paragraph(E.Doc, B), 0));
+  E.ProcessKey(VK_RIGHT, []);
+  Check(E.CaretPos.offset = 1, 'Right in a left-to-right paragraph: forward');
+end;
+
 { SmartArt labels turned a quarter (tests/data/smartart.pptx, slide 12): their text painted turned, a column of
   white glyphs in each blue box taller than it is wide }
 procedure TestTurnedText(E: TParadeEdit);
@@ -2411,6 +2440,7 @@ begin
   TestCanvasPage(E);
   TestSlides(E);
   TestTurnedText(E);
+  TestRightToLeft(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

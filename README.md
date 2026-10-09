@@ -110,7 +110,20 @@ poppler over the output.
 - Complex scripts: build with `HARFBUZZ=1` and word segments containing
   Arabic, Indic, Southeast Asian etc. characters are shaped by HarfBuzz
   (with the whole paragraph as context); Latin/CJK keep the built-in
-  shaper. Without HarfBuzz the interface stays and returns nothing.
+  shaper. Without HarfBuzz, Arabic still joins: each letter's isolated,
+  initial, medial or final form from the font's GSUB (else its
+  presentation forms), lam-alef ligatures, marks over their letter;
+  other complex scripts are shaped one glyph per character.
+- Right-to-left paragraphs (their direction, or automatic and starting
+  with a right-to-left letter) are laid out from their start edge and
+  mirrored: alignment, indents, first-line indents and tab stops count
+  from the right, as Word has them (LEFT alignment is at the right), and
+  list labels hang right of the text. Tables (`direction`, Word's
+  `bidiVisual`) put their first column at the right, sections their
+  first column. DOCX, PPTX (`rtl`), HTML (`dir`) and RTF (`\rtlpar`,
+  `\taprtl`) read and write it; the editor's arrow keys move as the text
+  is shown (`pd_layout_caret_step`) and its alignment buttons act on
+  what is seen.
 - Font fallback: `pd_doc_set_fallback_fonts` lists fonts tried for
   characters the run's font lacks (marks follow their base).
 - Hyphenation: Liang patterns from libhyphen `.dic` files

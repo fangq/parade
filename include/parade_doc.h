@@ -417,6 +417,12 @@ PD_API pd_status pd_doc_para_runs(const pd_doc* doc, pd_block_id paragraph, pd_r
 /** a paragraph's direct properties (only the masked fields are set on the paragraph itself) */
 PD_API pd_status pd_doc_para_props(const pd_doc* doc, pd_block_id paragraph, pd_para_props* out);
 
+/** 1 when a paragraph reads right to left: its direction (its own or its style's) RTL, or automatic and its first
+    strong character right-to-left; then its alignment, indents and tabs are measured from the right (LEFT
+    alignment is at the right, as Word has it), and its list label hangs right of it. 2 when it reads left to right
+    with right-to-left text in it; 0 otherwise */
+PD_API int32_t   pd_doc_para_rtl(const pd_doc* doc, pd_block_id paragraph);
+
 /* inline objects occupy U+FFFC (3 bytes) in the paragraph text */
 typedef enum {
     PD_INLINE_IMAGE = 0,        /**< resource + display size */
@@ -562,6 +568,7 @@ typedef struct {
     int32_t page_valign;        /**< text on the page: 0 at the top, 1 centred, 2 at the bottom */
     pd_sp line_pitch;           /**< the document grid (East Asian layout): every line a whole number of this high,
                                      in paragraphs that snap to it (0 = no grid) */
+    int32_t direction;          /**< pd_direction: PD_DIR_RTL puts its first column at the right */
 } pd_section_props;
 
 typedef enum {
@@ -585,6 +592,8 @@ typedef struct {
     int32_t width_pct;          /**< width in per-mille of the text column, 0 = width says */
     int32_t border_sides;       /**< PD_TBORDER_* rules the grid has, 0 = all */
     pd_sp cell_padding_v;       /**< top and bottom padding of the cells, < 0 = cell_padding */
+    int32_t direction;          /**< pd_direction: PD_DIR_RTL lays its columns out from the right (the first at the
+                                     right edge), its indent and LEFT alignment measured from the right */
 } pd_table_props;
 
 /* when line numbers start again */

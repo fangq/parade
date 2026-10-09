@@ -152,6 +152,10 @@ PD_API pd_status pd_layout_hit_test(const pd_layout* layout, int32_t page, pd_sp
 PD_API pd_status pd_layout_caret(const pd_layout* layout, pd_pos pos, int32_t* page, pd_sp* x, pd_sp* baseline,
                                  pd_sp* ascent, pd_sp* descent);
 
+/** the position one step left (dir < 0) or right (dir > 0) of pos as its line is shown: in right-to-left text
+    left goes forward; PD_ERR_RANGE at that end of the line (the caller goes on to the next or previous line) */
+PD_API pd_status pd_layout_caret_step(const pd_layout* layout, pd_pos pos, int32_t dir, pd_pos* out);
+
 /* ------------------------------------------------------------------ */
 /* PDF                                                                */
 /* ------------------------------------------------------------------ */

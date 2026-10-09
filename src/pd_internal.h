@@ -31,6 +31,7 @@ struct pd_font {
     int32_t loca_long;      /* head.indexToLocFormat */
     uint32_t cff, cff_len;  /* CFF outlines, 0 = absent */
     uint32_t math, math_len;    /* OpenType MATH table, 0 = absent */
+    uint32_t gsub;          /* GSUB table, 0 = absent (Parade's own Arabic shaping) */
     int32_t face_index;
     void* hb_font;          /* HarfBuzz font when built with PD_WITH_HARFBUZZ */
 };
@@ -139,6 +140,7 @@ struct pd_para {
     uint8_t* blev;          /* bidi level per text byte (n_text + 1), NULL if all left-to-right */
     int32_t cap_blev;
     int32_t para_level;
+    pd_sp mirror_w;         /* a right-to-left paragraph's lines mirrored in this width (0: its shape's) */
     pd_sp height;
     /* tab stops (pd_para_set_tabs) */
     pd_tab_stop tabs[PD_MAX_TABS];
@@ -174,7 +176,18 @@ void pd_para_natural(const pd_para* p, pd_sp* minw, pd_sp* maxw);
 /* hyphenation (pd_hyph.c): points[i] = 1 for a hyphen before letter i */
 int pd_hyph_points(const pd_hyph* h, const uint32_t* word, int32_t n, uint8_t* points);
 
-/* complex shaping (pd_shape.c): available when built with HarfBuzz */
+/* GSUB (pd_font.c), for Parade's own shaping: a glyph through a feature's single substitutions for a script
+   (the script's default language), unchanged when none applies; a ligature of a feature starting a run of glyphs:
+   how many of them it takes (0 none), its glyph in *out */
+uint32_t pd_font_gsub_single(const pd_font* f, uint32_t script, uint32_t feature, uint32_t glyph);
+int32_t  pd_font_gsub_ligature(const pd_font* f, uint32_t script, uint32_t feature, const uint32_t* glyphs, int32_t n,
+                               uint32_t* out);
+/* whether a font's GSUB has a feature for a script */
+int      pd_font_gsub_has(const pd_font* f, uint32_t script, uint32_t feature);
+/* a glyph's horizontal extent in font units (TrueType outlines), 0 when unknown */
+int      pd_font_glyph_xrange(const pd_font* f, uint32_t glyph, int32_t* xmin, int32_t* xmax);
+
+/* complex shaping (pd_shape.c): HarfBuzz when built with it, else Parade's own (Arabic joining) */
 int  pd_shape_available(void);
 int  pd_shape_needed(uint32_t cp);
 void pd_shape_font_init(pd_font* f);
@@ -197,6 +210,8 @@ int     pd_grapheme_boundary(const uint32_t* cp, int32_t n, int32_t i);
 int     pd_bidi_levels(const uint32_t* cp, int32_t n, int dir, uint8_t* levels);
 /* 0 if every level of the paragraph is surely even (no right-to-left text): the levels can be skipped */
 int     pd_bidi_maybe_rtl(const char* utf8, size_t len, int dir);
+/* whether text's first strong character (P2/P3) is right to left */
+int     pd_bidi_para_rtl(const char* utf8, size_t len);
 int32_t pd_bidi_line(const uint32_t* cp, const uint8_t* levels, int32_t from, int32_t to, int para, uint8_t* lev,
                      int32_t* order);
 
