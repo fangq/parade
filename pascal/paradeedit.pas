@@ -149,11 +149,12 @@ type
     FDrawCursor: TCursor;          { the cursor before drawing began }
     FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape,
                                      9 a shape drawn, 10 a turn, 11 an adjustment, 12 a point, 13 a rubber band,
-                                     14 the whole drawing moved, 15 a connector's end }
+                                     14 the whole drawing moved, 15 a connector's end, 16 the canvas page's corner }
     FShapeFrom: TPoint;            { where it began (client pixels) }
     FBandTo: TPoint;               { a rubber band: its other corner }
     FGuideX, FGuideY: array of Double;   { a drag snapped to these: lines shown across the canvas (its units) }
     FSnapShapes: Boolean;          { a drag snaps to the other shapes' edges and middles, and the canvas's }
+    FCanvasPage: Boolean;          { the document is a page to draw on: its page a canvas, not an object to select }
     FSnapGrid: Double;             { and to a grid this many points apart (0: none) }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
     FFrameKey: string;             { the text box the caret is in, as last looked up: story and revision }
@@ -317,6 +318,17 @@ type
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
     function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
     procedure PushShapeStep(const Lbl: string; const At: pd_pos);
+    { a drawing's object selected as text (delete, cut and copy take it) -- the canvas page's only as the caret }
+    procedure SelectObject(const P: pd_pos);
+    { the canvas page's canvas: its object's place }
+    { the canvas page's canvas selected, to draw in, when nothing else is (and the caret is not in a text box) }
+    procedure EnsureCanvas;
+    { the canvas page's text is not to be typed in: the caret out of any text box }
+    function TextLocked: Boolean;
+    function DetectCanvasPage: Boolean;
+    { the canvas page's corner, where a drag makes it (and its canvas) bigger or smaller: near (X, Y) }
+    function OnPageCorner(X, Y: Integer): Boolean;
+    procedure PaintPageCorner;
     { the selected shapes as the clipboard has them (JSON: their XML, their text boxes' stories); Whole: each
       shape with the group it is in }
     function ShapesPayload(out S: string): Boolean;
@@ -531,9 +543,17 @@ type
     { the selected object (a picture or a drawing) made W by H (sp) -- a canvas given that much room, its shapes
       not stretched; one step of undo }
     function ResizeObject(W, H: pd_sp): Boolean;
-    { the document made a page to draw on: landscape, half-inch margins, a canvas as big as the page's text,
-      selected (Word's drawing canvas, for a diagram); what is not to be undone, and not a change }
+    { the document made a page to draw on: landscape, no margins, the page a canvas (a drawing canvas in front of
+      the text, as big as the page), ready to draw in; what is not to be undone, and not a change }
     function StartCanvasPage: Boolean;
+    { the document is such a page: its page a canvas, the canvas not selected as an object, the page's corner
+      dragged to size both }
+    property CanvasPage: Boolean read FCanvasPage;
+    { the canvas page's canvas: its object's place }
+    function CanvasPagePos(out P: pd_pos): Boolean;
+
+    { the canvas page (and its canvas) made W by H (sp); one step of undo }
+    function ResizeCanvasPage(W, H: pd_sp): Boolean;
     { the selected drawing is a canvas (made here, or read from Word) shapes can go into }
     function CanvasSelected: Boolean;
     { the selected object, in the text, moved to P (as text is dragged); one step of undo }
@@ -1635,6 +1655,8 @@ begin
   FFileName := '';
   FModified := False;
   FOrderRev := High(UInt64);
+  FCanvasPage := False;
+  FShapeOn := False;
   Relayout;
 end;
 
@@ -1696,7 +1718,10 @@ begin
   FFileName := FileName;
   FModified := False;
   FOrderRev := High(UInt64);
+  FShapeOn := False;
   Relayout;
+  FCanvasPage := DetectCanvasPage;    { a page to draw on, as it was made }
+  EnsureCanvas;
   FPrefetchRes := 1;            { its pictures decoded in the pauses, so that paging to them does not wait }
   FPrefetch.Interval := 500;    { once the first page is up }
   FPrefetch.Enabled := True;
@@ -2553,7 +2578,7 @@ var
   Grouped: Boolean;
   Fmt: pd_format_id;
 begin
-  if FReadOnly then
+  if FReadOnly or TextLocked then
     Exit;
   if S = '' then
     Exit;
@@ -3241,6 +3266,7 @@ begin
   O.alt_len := Length(Alt);
   { its own size, 96 dpi; no wider than the text }
   pd_doc_image_display_size(FDoc, O, W, H);
+  EnsureCanvas;
   if FShapeOn and CanvasSelected then
   begin   { a canvas selected: a picture of the canvas, in its middle, no bigger than it }
     Result := AddPictureShape(Res, W, H);
@@ -5250,6 +5276,13 @@ end;
 
 procedure TParadeEdit.SelectAll;
 begin
+  if TextLocked then
+  begin   { the canvas page: every shape on it }
+    FShapeOn := False;
+    EnsureCanvas;
+    SelectShapesIn(-1e12, -1e12, 1e12, 1e12);
+    Exit;
+  end;
   pd_doc_marker_set(FDoc, FAnchor, PdPos(FirstPara, 0));
   pd_doc_marker_set(FDoc, FCaret, LastPos);
   Invalidate;
@@ -5358,6 +5391,8 @@ procedure TParadeEdit.CutToClipboard;
 begin
   if FReadOnly then
     Exit;
+  if TextLocked and not (FShapeOn and (FShapeSid >= 0)) then
+    Exit;
   if FShapeOn and (FShapeSid >= 0) then
   begin
     CutShapes;
@@ -5375,7 +5410,7 @@ procedure TParadeEdit.PasteData(Data: Pointer; Len: Integer; Format: Int32);
 var
   After: pd_pos;
 begin
-  if FReadOnly then
+  if FReadOnly or TextLocked then
     Exit;
   if Len <= 0 then
     Exit;
@@ -5514,7 +5549,7 @@ begin
   FShapeAt := D;
   FShapeSid := Sid;
   if Sid < 0 then
-    SelectRange(PdRange(D, PdPos(D.block, D.offset + 3)))
+    SelectObject(D)
   else
     SetCaret(D, False);
   Invalidate;
@@ -5609,6 +5644,11 @@ var
   Boxes: TParadeShapeBoxes;
   K, J: Integer;
 begin
+  if TextLocked and FShapeOn and (FShapeSid < 0) and not (ssCtrl in Shift) and (FDrawKind = '') and
+     (Length(FDrawPts) = 0) then
+    Exit;     { the canvas page itself: not moved off, deleted or typed over }
+  if TextLocked and not FShapeOn and (Key in [VK_RETURN, VK_BACK, VK_DELETE, VK_TAB]) then
+    Exit;
   if FShapeOn and (ssCtrl in Shift) then
     case Key of     { the shapes' own: the drawing stays selected }
       VK_Z: begin Undo; Exit; end;
@@ -5653,10 +5693,12 @@ begin
           if FShapeSid >= 0 then
           begin
             FShapeSid := -1;
-            SelectRange(PdRange(FShapeAt, PdPos(FShapeAt.block, FShapeAt.offset + 3)));
+            SelectObject(FShapeAt);
           end
           else
           begin
+            if FCanvasPage then
+              Exit;   { the canvas page: still there to draw in }
             ClearShapeSelection;
             SetCaret(PdPos(FShapeAt.block, FShapeAt.offset + 3), False);
           end;
@@ -5858,7 +5900,7 @@ begin
         Exit;
       end;
     end
-    else if FShapeOn and (FShapeSid >= 0) then
+    else if (FShapeOn and (FShapeSid >= 0)) or TextLocked then
     begin
       UTF8Key := '';
       Exit;
@@ -6163,7 +6205,7 @@ begin
   FShapeAt := D;
   FShapeSid := Sid;
   if Sid < 0 then   { the whole drawing: its object selected, so delete, cut and copy take it }
-    SelectRange(PdRange(D, PdPos(D.block, D.offset + 3)))
+    SelectObject(D)
   else
     SetCaret(D, False);
   Invalidate;
@@ -6282,11 +6324,12 @@ begin
   Canvas.Pen.Color := $00D77800;
   Canvas.Pen.Width := 1;
   Canvas.Pen.Style := psSolid;
-  Canvas.Rectangle(L, T, R + 1, B + 1);
+  if not (FCanvasPage and (FShapeSid < 0)) then     { (the canvas page's own canvas: no box, no handles) }
+    Canvas.Rectangle(L, T, R + 1, B + 1);
   Canvas.Brush.Style := bsSolid;
   Canvas.Brush.Color := clWhite;
   K := 3;
-  for I := 0 to 7 do    { the corners and the middles of the sides }
+  for I := 0 to 7 * Ord(not (FCanvasPage and (FShapeSid < 0))) - Ord(FCanvasPage and (FShapeSid < 0)) do
   begin
     case I of
       0: begin HX := L; HY := T; end;
@@ -6817,7 +6860,7 @@ begin
     end;
   end;
   if FShapeSid < 0 then
-    SelectRange(PdRange(S.At, PdPos(S.At.block, S.At.offset + 3)))
+    SelectObject(S.At)
   else
     SetCaret(S.At, False);
   Invalidate;
@@ -7429,24 +7472,239 @@ begin
   Result := Point(PageLeft(Page) + Round(XPt * PD_SP_PER_PT * PxPerSp), PageTop(Page) + Round(YPt * PD_SP_PER_PT * PxPerSp));
 end;
 
+procedure TParadeEdit.SelectObject(const P: pd_pos);
+var
+  C: pd_pos;
+begin
+  if CanvasPagePos(C) and (C.block = P.block) and (C.offset = P.offset) then
+    SetCaret(P, False)    { the page's canvas: never taken as text }
+  else
+    SelectRange(PdRange(P, PdPos(P.block, P.offset + 3)));
+end;
+
+function TParadeEdit.CanvasPagePos(out P: pd_pos): Boolean;
+var
+  Sec, Fl, Para: pd_block_id;
+  Info: pd_block_info;
+  O: pd_inline;
+begin
+  Result := False;
+  P := PdPos(0, 0);
+  if not FCanvasPage then
+    Exit;
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), 0);
+  Fl := pd_doc_child(FDoc, Sec, 0);
+  if (pd_doc_block_info(FDoc, Fl, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_FLOAT) then
+    Exit;
+  Para := pd_doc_child(FDoc, Fl, 0);
+  Result := (pd_doc_inline_at(FDoc, PdPos(Para, 0), O) = PD_OK) and (O.kind = PD_INLINE_IMAGE);
+  if Result then
+    P := PdPos(Para, 0);
+end;
+
+function TParadeEdit.DetectCanvasPage: Boolean;
+var
+  Sec, Fl: pd_block_id;
+  Info: pd_block_info;
+  Sp: pd_section_props;
+  Fp: pd_float_props;
+  P: pd_pos;
+  J: TJSONObject;
+begin
+  Result := False;
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), 0);
+  Fl := pd_doc_child(FDoc, Sec, 0);
+  if (pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK) or (Sp.margin_left <> 0) or (Sp.margin_top <> 0) or
+     (pd_doc_block_info(FDoc, Fl, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_FLOAT) or
+     (pd_doc_float_props(FDoc, Fl, Fp) <> PD_OK) or (Fp.wrap <> PD_WRAP_FRONT) or
+     (Fp.offset_from <> PD_FROM_PAGE) then
+    Exit;
+  FCanvasPage := True;     { for CanvasPagePos }
+  try
+    if not CanvasPagePos(P) then
+      Exit;
+    J := DrawingJson(FDoc, P);
+    if J = nil then
+      Exit;
+    try
+      Result := (J.Find('xml') <> nil) and (Pos('<wpc:wpc', J.Get('xml', '')) > 0);
+    finally
+      J.Free;
+    end;
+  finally
+    FCanvasPage := Result;
+  end;
+end;
+
+procedure TParadeEdit.EnsureCanvas;
+var
+  P: pd_pos;
+begin
+  if FShapeOn or (StoryTopOf(CaretPos.block) <> 0) or not CanvasPagePos(P) then
+    Exit;
+  FShapeOn := True;
+  FShapeAt := P;
+  FShapeSid := -1;
+  SetLength(FShapeMore, 0);
+  SetCaret(P, False);
+  Invalidate;
+end;
+
+function TParadeEdit.TextLocked: Boolean;
+begin
+  Result := FCanvasPage and (StoryTopOf(CaretPos.block) = 0);
+end;
+
+function TParadeEdit.OnPageCorner(X, Y: Integer): Boolean;
+var
+  Info: pd_page_info;
+  CX, CY: Integer;
+begin
+  Result := False;
+  if not FCanvasPage or FReadOnly or (PageCount = 0) then
+    Exit;
+  pd_layout_page_info(FLayout, 0, Info);
+  CX := PageLeft(0) + Round(Info.width * PxPerSp);
+  CY := PageTop(0) + Round(Info.height * PxPerSp);
+  Result := (Abs(X - CX) <= 7) and (Abs(Y - CY) <= 7);
+end;
+
+{ the canvas page's corner: a handle to size it by; as dragged, the page it would make }
+procedure TParadeEdit.PaintPageCorner;
+var
+  Info: pd_page_info;
+  CX, CY: Integer;
+begin
+  if not FCanvasPage or FReadOnly or (PageCount = 0) then
+    Exit;
+  pd_layout_page_info(FLayout, 0, Info);
+  CX := PageLeft(0) + Round(Info.width * PxPerSp);
+  CY := PageTop(0) + Round(Info.height * PxPerSp);
+  Canvas.Pen.Color := $00D77800;
+  Canvas.Pen.Style := psSolid;
+  Canvas.Pen.Width := 1;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Brush.Color := clWhite;
+  Canvas.Rectangle(CX - 5, CY - 5, CX + 1, CY + 1);
+  Canvas.Line(CX - 3, CY - 1, CX - 1, CY - 3);
+  if FShapeDrag = 16 then
+  begin
+    Canvas.Brush.Style := bsClear;
+    Canvas.Pen.Style := psDash;
+    Canvas.Rectangle(PageLeft(0), PageTop(0), Max(PageLeft(0) + 20, FBandTo.X) + 1, Max(PageTop(0) + 20, FBandTo.Y) + 1);
+    Canvas.Pen.Style := psSolid;
+  end;
+end;
+
+function TParadeEdit.ResizeCanvasPage(W, H: pd_sp): Boolean;
+var
+  P: pd_pos;
+  O: pd_inline;
+  Keep: array[0..2] of string;
+  Info: pd_block_info;
+  Sec: pd_block_id;
+  Sp: pd_section_props;
+  Fp: pd_float_props;
+  J: TJSONObject;
+  R: pd_res_id;
+  S: string;
+begin
+  Result := False;
+  W := Max(W, Round(144 * PD_SP_PER_PT));     { two inches at least }
+  H := Max(H, Round(144 * PD_SP_PER_PT));
+  if FReadOnly or not CanvasPagePos(P) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or (O.width <= 0) or
+     (O.height <= 0) or (pd_doc_block_info(FDoc, P.block, Info) <> PD_OK) then
+    Exit;
+  KeepInlineText(O, Keep);
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), 0);
+  if (pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK) or (pd_doc_float_props(FDoc, Info.parent, Fp) <> PD_OK) then
+    Exit;
+  J := DrawingJson(FDoc, P);
+  if J = nil then
+    Exit;
+  try
+    J.Integers['w'] := Max(1, Round(J.Get('w', 0.0) * W / O.width));    { its room, its shapes as they are }
+    J.Integers['h'] := Max(1, Round(J.Get('h', 0.0) * H / O.height));
+    S := J.AsJSON;
+  finally
+    J.Free;
+  end;
+  if pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(S), Length(S), R) <> PD_OK then
+    Exit;
+  O.resource := R;
+  O.width := W;
+  O.height := H;
+  PushShapeStep('Page size', P);
+  pd_doc_begin_group(FDoc, 'Page size');
+  try
+    Sp.page_width := W;
+    Sp.page_height := H;
+    pd_doc_set_section_props(FDoc, Sec, Sp);
+    Fp.width := W;
+    pd_doc_set_float_props(FDoc, Info.parent, Fp);
+    pd_doc_delete(FDoc, PdRange(P, PdPos(P.block, P.offset + 3)), nil);
+    Result := pd_doc_insert_inline(FDoc, P, O, nil) = PD_OK;
+  finally
+    pd_doc_end_group(FDoc);
+  end;
+  Changed;
+  FShapeOn := False;
+  EnsureCanvas;
+end;
+
 function TParadeEdit.StartCanvasPage: Boolean;
 var
   P: pd_section_props;
+  Fp: pd_float_props;
+  Sec, Fl: pd_block_id;
+  J: TJSONObject;
+  S, Xml: string;
+  R0, R: pd_res_id;
+  O: pd_inline;
 begin
   Result := False;
   if FReadOnly then
     Exit;
   SetOrientation(True);
-  SetMargins(36, 36, 36, 36);
+  SetMargins(0, 0, 0, 0);
   P := CurrentSectionProps;
-  SetCaret(PdPos(FirstPara, 0), False);
-  { the room the text has, less a line's depth below the canvas, which sits in a line of its own }
-  Result := InsertCanvas((P.page_width - P.margin_left - P.margin_right) / PD_SP_PER_PT,
-    (P.page_height - P.margin_top - P.margin_bottom) / PD_SP_PER_PT - 24);
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), 0);
+  Xml := '<wpc:wpc><wpc:bg/><wpc:whole/></wpc:wpc>';
+  J := TJSONObject.Create(['w', Integer(P.page_width), 'h', Integer(P.page_height), 'items', TJSONArray.Create,
+    'kind', 'wpc', 'rels', TJSONObject.Create, 'xml', Xml]);
+  try
+    S := J.AsJSON;
+  finally
+    J.Free;
+  end;
+  if (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(S), Length(S), R0) <> PD_OK) or
+     (pd_docx_drawing_rebuild(FDoc, R0, PAnsiChar(Xml), Length(Xml), R) <> PD_OK) or
+     (pd_doc_insert_block(FDoc, Sec, 0, PD_BLOCK_FLOAT, Fl) <> PD_OK) then
+    Exit;
+  { the canvas in front of the text, from the page's corner, as big as the page }
+  pd_doc_float_props(FDoc, Fl, Fp);
+  Fp.placement := PD_PLACE_HERE or PD_PLACE_FORCE or PD_PLACE_OFFSET;
+  Fp.wrap := PD_WRAP_FRONT;
+  Fp.width := P.page_width;
+  Fp.gap := 0;
+  Fp.offset_x := 0;
+  Fp.offset_y := 0;
+  Fp.offset_from := PD_FROM_PAGE;
+  pd_doc_set_float_props(FDoc, Fl, Fp);
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_IMAGE;
+  O.resource := R;
+  O.width := P.page_width;
+  O.height := P.page_height;
+  Result := pd_doc_insert_inline(FDoc, PdPos(pd_doc_child(FDoc, Fl, 0), 0), O, nil) = PD_OK;
   pd_doc_clear_undo(FDoc);
   SetLength(FSelUndo, 0);
   SetLength(FSelRedo, 0);
+  Changed;
   FModified := False;
+  FCanvasPage := Result;
+  FShapeOn := False;
+  EnsureCanvas;
 end;
 
 function TParadeEdit.ResizeObject(W, H: pd_sp): Boolean;
@@ -7495,7 +7753,7 @@ begin
   FShapeOn := True;
   FShapeAt := P;
   FShapeSid := -1;
-  SelectRange(PdRange(P, PdPos(P.block, P.offset + 3)));
+  SelectObject(P);
   Changed;
 end;
 
@@ -8214,6 +8472,7 @@ begin
     end;
     if (Length(Parts) = 0) or (X1 < X0) then
       Exit;
+    EnsureCanvas;
     PushShapeStep(Lbl, FShapeAt);
     if FShapeOn and (FShapeSid >= 0) then
       FShapeSid := -1;
@@ -8452,7 +8711,7 @@ begin
   FShapeAt := P;
   FShapeSid := -1;
   SetLength(FShapeMore, 0);
-  SelectRange(PdRange(P, PdPos(P.block, P.offset + 3)));
+  SelectObject(P);
   Invalidate;
   Result := True;
 end;
@@ -8473,6 +8732,7 @@ begin
   Result := False;
   if FReadOnly or (Kind = '') then
     Exit;
+  EnsureCanvas;
   if FShapeOn and (FShapeSid >= 0) then
     FShapeSid := -1;    { into the drawing the shape is in }
   if FShapeOn and CanvasSelected then
@@ -9788,6 +10048,8 @@ begin
       end;
     end;
   end;
+  if (FShapeSid < 0) and FCanvasPage then
+    Exit;     { the canvas page: its corner, not the canvas's handles }
   if FShapeSid < 0 then
   begin
     if not DrawMap(M) then
@@ -10732,7 +10994,7 @@ var
   PX, PY, W, H, JW, JH, DX, DY, K: Double;
   Cp: TPoint;
 begin
-  if FShapeDrag in [13, 14, 15] then
+  if FShapeDrag in [13, 14, 15, 16] then
   begin
     FBandTo := Point(X, Y);
     Invalidate;
@@ -11059,7 +11321,7 @@ begin
   FShapeAt := At;
   FShapeSid := Sid;
   if Sid < 0 then
-    SelectRange(PdRange(At, PdPos(At.block, At.offset + 3)))
+    SelectObject(At)
   else
     SetCaret(At, False);
   Invalidate;
@@ -11072,7 +11334,7 @@ var
   R: TRect;
 begin
   Result := False;
-  if not FShapeOn or (FShapeSid >= 0) or (FDrawKind <> '') or FReadOnly or
+  if not FShapeOn or (FShapeSid >= 0) or (FDrawKind <> '') or FReadOnly or FCanvasPage or
      not DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) then
     Exit;
   R := Rect(PageLeft(Pg) + Round(PX * PxPerSp), PageTop(Pg) + Round(PY * PxPerSp),
@@ -11116,7 +11378,7 @@ begin
     FShapeAt := Q;
     FShapeSid := -1;
     SetLength(FShapeMore, 0);
-    SelectRange(PdRange(Q, PdPos(Q.block, Q.offset + 3)));
+    SelectObject(Q);
   end;
   Invalidate;
 end;
@@ -11235,7 +11497,7 @@ begin
     pd_doc_end_group(FDoc);
   end;
   Changed;
-  SelectRange(PdRange(FShapeAt, PdPos(FShapeAt.block, FShapeAt.offset + 3)));
+  SelectObject(FShapeAt);
   FShapeOn := True;
   FShapeSid := -1;
   Invalidate;
@@ -11424,7 +11686,7 @@ begin
   begin
     FShapeSid := -1;
     SetLength(FShapeMore, 0);
-    SelectRange(PdRange(FShapeAt, PdPos(FShapeAt.block, FShapeAt.offset + 3)));
+    SelectObject(FShapeAt);
   end
   else
   begin
@@ -11452,6 +11714,13 @@ begin
         SelectRange(FBalloons[I].Range);
         Exit;
       end;
+  if (Button = mbLeft) and OnPageCorner(X, Y) then
+  begin   { the canvas page's corner: the page, and its canvas, sized }
+    FShapeDrag := 16;
+    FShapeFrom := Point(X, Y);
+    FBandTo := FShapeFrom;
+    Exit;
+  end;
   if (Button = mbLeft) and (ssTriple in Shift) and not FShapeOn and PointToPos(X, Y, P) then
   begin   { the third press: the paragraph (the LCL calls TripleClick before this press, which would undo it) }
     FDragging := False;
@@ -11528,6 +11797,8 @@ begin
       (TextBoxEdgeAt(D, Round((X - PageLeft(Pg)) / PxPerSp), Round((Y - PageTop(Pg)) / PxPerSp)) = Sid);
     if Edge then
       Want := crSizeAll
+    else if not FDragging and OnPageCorner(X, Y) then
+      Want := crSizeNWSE
     else if not FDragging and FShapeOn then
       case ShapeHandleAt(X, Y, Sid) of
         0, 4: Want := crSizeNWSE;
@@ -11570,7 +11841,12 @@ begin
     SetLength(FGuideX, 0);
     SetLength(FGuideY, 0);
     Moved := (Abs(X - FShapeFrom.X) > 2) or (Abs(Y - FShapeFrom.Y) > 2);
-    if D = 15 then
+    if D = 16 then
+    begin   { the canvas page's corner dropped: the page and its canvas that big }
+      if Moved then
+        ResizeCanvasPage(Round((X - PageLeft(0)) / PxPerSp), Round((Y - PageTop(0)) / PxPerSp));
+    end
+    else if D = 15 then
     begin   { a connector's end: on the site it is dropped by, or just there }
       if Moved then
       begin
@@ -12009,7 +12285,7 @@ begin
           end;
       end;
 
-  if FShowMarks then
+  if FShowMarks and not FCanvasPage then     { (the canvas page's paragraph under the canvas: not shown) }
     PaintMarks(Img, Page, OX, OY, PxScale);
 
   { the others' carets, each with its name above it }
@@ -12334,6 +12610,7 @@ begin
   end;
   PaintTextBoxFrame;
   PaintShapeSelection;
+  PaintPageCorner;
 end;
 
 procedure TParadeEdit.RenderPage(Page: Integer; Bmp: TBitmap; Scale: Double);

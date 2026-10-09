@@ -839,7 +839,6 @@ begin
   E.GoToPos(PdPos(pd_doc_next_paragraph(E.Doc, pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0)), 0));
   Xml := DrawingText(E, E.CaretPos);
   Check((Pos('"img":', Xml) > 0) and (Pos('stCxn', Xml) > 0), 'saved and read back: the picture, the joins');
-  SelectSid(SS);
   E.SaveToFile(ExtractFilePath(ParamStr(0)) + 'edit_connectors.docx');
   E.LoadFromFile(ExtractFilePath(ParamStr(0)) + 'edit_connectors.docx');
   E.GoToPos(PdPos(pd_doc_next_paragraph(E.Doc, pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0)), 0));
@@ -950,46 +949,70 @@ begin
     'saved and read back: in front of the text');
 end;
 
-{ a page to draw on: landscape, a canvas as big as its text, selected; its corner dragged: less room, the shapes as
-  they were }
+{ a page to draw on: landscape, the page a canvas, nothing to select but its shapes; its corner dragged: the page
+  and the canvas smaller, the shapes as they were; so saved }
 procedure TestCanvasPage(E: TParadeEdit);
 const
   K = PD_SP_PER_PT;
 var
-  D: pd_pos;
+  D, C: pd_pos;
   Sid: Integer;
   Sp: pd_section_props;
   Pg: Int32;
   X0, Y0, X1, Y1, SX0, SY0, SX1, SY1, NX0, NY0, NX1, NY1: Double;
   A, B: TPoint;
+  Info: pd_page_info;
+  Dir: string;
 begin
+  Dir := ExtractFilePath(ParamStr(0));
   E.NewDocument;
-  Check(E.StartCanvasPage, 'a page to draw on');
+  Check(E.StartCanvasPage and E.CanvasPage, 'a page to draw on');
   Sp := E.CurrentSectionProps;
-  Check((Sp.page_width > Sp.page_height) and (Sp.margin_left = 36 * K), 'landscape, half-inch margins');
+  Check((Sp.page_width > Sp.page_height) and (Sp.margin_left = 0) and (Sp.margin_top = 0), 'landscape, no margins');
   Check(E.SelectedShape(D, Sid) and (Sid = -1) and E.ShapePageBox(D, -1, Pg, X0, Y0, X1, Y1) and (Pg = 0) and
-    (Abs(X1 - X0 - (Sp.page_width - 72 * K)) < K) and (E.PageCount = 1),
-    Format('a canvas as wide as the text, selected (%.1f wide, %d page)', [(X1 - X0) / K, E.PageCount]));
-  Check(not E.Modified and (pd_doc_can_undo(E.Doc) = 0), 'not a change, nothing to undo');
+    (Abs(X0) < K) and (Abs(Y0) < K) and (Abs(X1 - Sp.page_width) < K) and (Abs(Y1 - Sp.page_height) < K) and
+    (E.PageCount = 1), Format('the page a canvas, ready to draw in (%.1f by %.1f at %.1f, %.1f; %d page)',
+    [(X1 - X0) / K, (Y1 - Y0) / K, X0 / K, Y0 / K, E.PageCount]));
+  Check(not E.SelectionRange(C, D) and not E.Modified and (pd_doc_can_undo(E.Doc) = 0),
+    'not selected as text, not a change, nothing to undo');
+  E.ProcessKey(VK_DELETE, []);
+  E.ProcessKey(VK_ESCAPE, []);
+  E.InsertText('typed');
+  Check(E.SelectedShape(D, Sid) and (Sid = -1) and (Length(E.DrawingShapes(D)) = 0) and
+    (Pos('typed', E.DocumentText) = 0) and E.CanvasPagePos(C), 'Delete, Escape, typing: the canvas as it was');
   E.AddShape('rect', 20 * K, 20 * K, 120 * K, 80 * K);
+  E.AddShape('ellipse', 200 * K, 20 * K, 300 * K, 80 * K);
   E.ShapePageBox(D, 0, Pg, SX0, SY0, SX1, SY1);
   E.ProcessKey(VK_ESCAPE, []);
-  Check(E.SelectedShape(D, Sid) and (Sid = -1), 'the canvas selected again');
-  A := E.PageToClient(Pg, X1 / K, Y1 / K);    { its bottom right corner }
+  E.SelectAll;
+  Check(Length(E.SelectedShapes) = 2, 'Ctrl+A: the shapes');
+  E.ProcessKey(VK_ESCAPE, []);
+  pd_layout_page_info(E.Layout, 0, Info);
+  A := E.PageToClient(0, Info.width / K, Info.height / K);    { the page's corner }
+  TParadeWheel(E).MouseMove([], A.X, A.Y);
+  Check(E.Cursor = crSizeNWSE, 'over the page''s corner: the sizing cursor');
   B := Point(A.X - Round(200 * E.Zoom * 96 / 72), A.Y - Round(100 * E.Zoom * 96 / 72));
   TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
   TParadeWheel(E).MouseMove([ssLeft], (A.X + B.X) div 2, (A.Y + B.Y) div 2);
   TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y);
   TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y);
-  Check(E.SelectedShape(D, Sid) and E.ShapePageBox(D, -1, Pg, NX0, NY0, NX1, NY1) and
-    (Abs((X1 - X0) - (NX1 - NX0) - 200 * K) < 2 * K) and (Abs((Y1 - Y0) - (NY1 - NY0) - 100 * K) < 2 * K),
-    Format('the corner dragged in: smaller (%.1f by %.1f)', [(NX1 - NX0) / K, (NY1 - NY0) / K]));
-  E.ShapePageBox(D, 0, Pg, NX0, NY0, NX1, NY1);
-  Check((Abs((NX1 - NX0) - (SX1 - SX0)) < 0.5 * K) and (Abs((NY1 - NY0) - (SY1 - SY0)) < 0.5 * K),
-    'the shape in it as big as it was');
-  E.ProcessKey(VK_ESCAPE, []);
-  E.ProcessKey(VK_ESCAPE, []);
-  E.ClearShapeSelection;
+  Sp := E.CurrentSectionProps;
+  Check((Abs(X1 - X0 - Sp.page_width - 200 * K) < 2 * K) and (Abs(Y1 - Y0 - Sp.page_height - 100 * K) < 2 * K) and
+    E.CanvasPagePos(C) and E.ShapePageBox(C, -1, Pg, NX0, NY0, NX1, NY1) and (Abs(NX1 - Sp.page_width) < K) and
+    (Abs(NY1 - Sp.page_height) < K), Format('the corner dragged in: the page and its canvas smaller (%.1f by %.1f)',
+    [Sp.page_width / K, Sp.page_height / K]));
+  E.ShapePageBox(C, 0, Pg, NX0, NY0, NX1, NY1);
+  Check((Abs((NX1 - NX0) - (SX1 - SX0)) < 0.5 * K) and (Abs(NX0 - SX0) < 0.5 * K), 'the shapes as they were');
+  E.Undo;
+  Check(Abs(E.CurrentSectionProps.page_width - (X1 - X0)) < K, 'undone: as big again');
+  E.Redo;
+  E.SaveToFile(Dir + 'edit_canvas.pdoc');
+  E.LoadFromFile(Dir + 'edit_canvas.pdoc');
+  Check(E.CanvasPage and E.SelectedShape(D, Sid) and (Sid = -1) and (Length(E.DrawingShapes(D)) = 2),
+    'saved and read back: a canvas page again, its shapes');
+  SavePage(E, 0, Dir + 'edit_canvas.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+  E.NewDocument;
+  Check(not E.CanvasPage, 'a new document: no canvas page');
 end;
 
 procedure Fail(E: Exception);
