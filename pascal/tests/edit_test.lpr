@@ -950,6 +950,48 @@ begin
     'saved and read back: in front of the text');
 end;
 
+{ a page to draw on: landscape, a canvas as big as its text, selected; its corner dragged: less room, the shapes as
+  they were }
+procedure TestCanvasPage(E: TParadeEdit);
+const
+  K = PD_SP_PER_PT;
+var
+  D: pd_pos;
+  Sid: Integer;
+  Sp: pd_section_props;
+  Pg: Int32;
+  X0, Y0, X1, Y1, SX0, SY0, SX1, SY1, NX0, NY0, NX1, NY1: Double;
+  A, B: TPoint;
+begin
+  E.NewDocument;
+  Check(E.StartCanvasPage, 'a page to draw on');
+  Sp := E.CurrentSectionProps;
+  Check((Sp.page_width > Sp.page_height) and (Sp.margin_left = 36 * K), 'landscape, half-inch margins');
+  Check(E.SelectedShape(D, Sid) and (Sid = -1) and E.ShapePageBox(D, -1, Pg, X0, Y0, X1, Y1) and (Pg = 0) and
+    (Abs(X1 - X0 - (Sp.page_width - 72 * K)) < K) and (E.PageCount = 1),
+    Format('a canvas as wide as the text, selected (%.1f wide, %d page)', [(X1 - X0) / K, E.PageCount]));
+  Check(not E.Modified and (pd_doc_can_undo(E.Doc) = 0), 'not a change, nothing to undo');
+  E.AddShape('rect', 20 * K, 20 * K, 120 * K, 80 * K);
+  E.ShapePageBox(D, 0, Pg, SX0, SY0, SX1, SY1);
+  E.ProcessKey(VK_ESCAPE, []);
+  Check(E.SelectedShape(D, Sid) and (Sid = -1), 'the canvas selected again');
+  A := E.PageToClient(Pg, X1 / K, Y1 / K);    { its bottom right corner }
+  B := Point(A.X - Round(200 * E.Zoom * 96 / 72), A.Y - Round(100 * E.Zoom * 96 / 72));
+  TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+  TParadeWheel(E).MouseMove([ssLeft], (A.X + B.X) div 2, (A.Y + B.Y) div 2);
+  TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y);
+  Check(E.SelectedShape(D, Sid) and E.ShapePageBox(D, -1, Pg, NX0, NY0, NX1, NY1) and
+    (Abs((X1 - X0) - (NX1 - NX0) - 200 * K) < 2 * K) and (Abs((Y1 - Y0) - (NY1 - NY0) - 100 * K) < 2 * K),
+    Format('the corner dragged in: smaller (%.1f by %.1f)', [(NX1 - NX0) / K, (NY1 - NY0) / K]));
+  E.ShapePageBox(D, 0, Pg, NX0, NY0, NX1, NY1);
+  Check((Abs((NX1 - NX0) - (SX1 - SX0)) < 0.5 * K) and (Abs((NY1 - NY0) - (SY1 - SY0)) < 0.5 * K),
+    'the shape in it as big as it was');
+  E.ProcessKey(VK_ESCAPE, []);
+  E.ProcessKey(VK_ESCAPE, []);
+  E.ClearShapeSelection;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -2238,6 +2280,7 @@ begin
   TestConnectors(E);
   TestSnap(E);
   TestWrap(E);
+  TestCanvasPage(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

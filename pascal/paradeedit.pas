@@ -332,7 +332,6 @@ type
     function DeleteText(const R: pd_range; After: Ppd_pos): pd_status;
     procedure RestoreShapeStep(const S: TParadeShapeStep);
     procedure OnlyShape;
-    function CanvasSelected: Boolean;
     function ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
     function ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
     function ShapeDragStart(X, Y: Integer): Boolean;
@@ -529,8 +528,14 @@ type
     function PageToClient(Page: Integer; XPt, YPt: Double): TPoint;
     { the shape kind waiting for a drag in the canvas ('' none) }
     property DrawKind: string read FDrawKind;
-    { the selected object (a picture or a drawing) made W by H (sp); one step of undo }
+    { the selected object (a picture or a drawing) made W by H (sp) -- a canvas given that much room, its shapes
+      not stretched; one step of undo }
     function ResizeObject(W, H: pd_sp): Boolean;
+    { the document made a page to draw on: landscape, half-inch margins, a canvas as big as the page's text,
+      selected (Word's drawing canvas, for a diagram); what is not to be undone, and not a change }
+    function StartCanvasPage: Boolean;
+    { the selected drawing is a canvas (made here, or read from Word) shapes can go into }
+    function CanvasSelected: Boolean;
     { the selected object, in the text, moved to P (as text is dragged); one step of undo }
     function MoveObjectTo(const P: pd_pos): Boolean;
     { the selected object, floating, moved by DX, DY on its page (sp): anchored in the paragraph it is moved by,
@@ -7424,17 +7429,62 @@ begin
   Result := Point(PageLeft(Page) + Round(XPt * PD_SP_PER_PT * PxPerSp), PageTop(Page) + Round(YPt * PD_SP_PER_PT * PxPerSp));
 end;
 
+function TParadeEdit.StartCanvasPage: Boolean;
+var
+  P: pd_section_props;
+begin
+  Result := False;
+  if FReadOnly then
+    Exit;
+  SetOrientation(True);
+  SetMargins(36, 36, 36, 36);
+  P := CurrentSectionProps;
+  SetCaret(PdPos(FirstPara, 0), False);
+  { the room the text has, less a line's depth below the canvas, which sits in a line of its own }
+  Result := InsertCanvas((P.page_width - P.margin_left - P.margin_right) / PD_SP_PER_PT,
+    (P.page_height - P.margin_top - P.margin_bottom) / PD_SP_PER_PT - 24);
+  pd_doc_clear_undo(FDoc);
+  SetLength(FSelUndo, 0);
+  SetLength(FSelRedo, 0);
+  FModified := False;
+end;
+
 function TParadeEdit.ResizeObject(W, H: pd_sp): Boolean;
 var
   O: pd_inline;
   Keep: array[0..2] of string;
   P: pd_pos;
+  J: TJSONObject;
+  R: pd_res_id;
+  S: string;
+  Sp: pd_section_props;
 begin
   Result := False;
   P := FShapeAt;
   if FReadOnly or not FShapeOn or (W <= 0) or (H <= 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
     Exit;
   KeepInlineText(O, Keep);
+  R := 0;
+  if CanvasSelected and (O.width > 0) and (O.height > 0) then
+  begin   { a canvas: more room or less to draw in, its shapes as they are (not stretched with it); no wider
+            than the text, no deeper than the page has room for }
+    Sp := CurrentSectionProps;
+    if TextWidthAt(P.block) > 0 then
+      W := Min(W, TextWidthAt(P.block));
+    if Sp.page_height > 0 then
+      H := Max(PD_SP_PER_PT, Min(H, Sp.page_height - Sp.margin_top - Sp.margin_bottom - Round(24 * PD_SP_PER_PT)));
+    J := DrawingJson(FDoc, P);
+    if J <> nil then
+      try
+        J.Integers['w'] := Max(1, Round(J.Get('w', 0.0) * W / O.width));
+        J.Integers['h'] := Max(1, Round(J.Get('h', 0.0) * H / O.height));
+        S := J.AsJSON;
+        if pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(S), Length(S), R) = PD_OK then
+          O.resource := R;
+      finally
+        J.Free;
+      end;
+  end;
   O.width := W;
   O.height := H;
   PushShapeStep('Size', P);
