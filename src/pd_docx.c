@@ -17,6 +17,7 @@
 #include <string.h>
 #include "pd_conv.h"
 #include "pd_json.h"
+#include "pd_preset.h"
 
 /* parts kept whole with the document, to write again */
 #define CHART_MIME "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
@@ -6632,120 +6633,27 @@ static pd_block_id dw_rebuild_story(dxi* X) {
     return 0;
 }
 
-/* a preset's adjustment by name ("adj", "adj1", ...), as the shape's avLst gave it; D when it gave none */
-static double dw_adj(const dw_guides* G, const char* name, double d) {
-    int i;
-
-    for (i = G->n - 1; i >= 0; i--) {
-        if (!strcmp(G->name[i], name)) {
-            return G->val[i];
-        }
-    }
-
-    return d;
+/* a preset drawn from Office's definitions (pd_preset.c): every one but those drawn here as they always were */
+static int dw_generic_preset(const char* p) {
+    return pd_preset_known(p) && strcmp(p, "rect") && strcmp(p, "ellipse") && strcmp(p, "roundRect") &&
+           strcmp(p, "line") && !strstr(p, "Connector");
 }
 
-static double dw_pin(double lo, double v, double hi) {
-    return v < lo ? lo : v > hi ? hi : v;
-}
+/* a colour as a preset's path shades it: darker or lighter for its sides (a cube's, a can's top) */
+static uint32_t dw_shade(uint32_t c, const char* mode) {
+    double k = !strcmp(mode, "darken") ? -0.4 : !strcmp(mode, "darkenLess") ? -0.2 : !strcmp(mode, "lighten") ? 0.4 :
+               !strcmp(mode, "lightenLess") ? 0.2 : 0;
+    uint32_t out = c & 0xFF000000u;
+    int sh;
 
-/* The polygon presets whose corners move with their adjustments, as Office's preset definitions place them: the
-   corners of preset PRST in a W by H box (EMU) into XY, their number returned; 0 for a preset not among them */
-static int dw_preset_adj(const char* prst, double w, double h, const dw_guides* G, double* xy) {
-    double ss = w < h ? w : h, hc = w / 2, vc = h / 2, a, a1, a2, x1, x2, y1, y2, d;
-    int n = 0, k;
+    for (sh = 0; sh <= 16; sh += 8) {
+        double v = (c >> sh) & 255;
 
-#define PT(X, Y) (xy[2 * n] = (X), xy[2 * n + 1] = (Y), n++)
-
-    if (ss <= 0) {
-        return 0;
+        v = k < 0 ? v * (1 + k) : v + (255 - v) * k;
+        out |= (uint32_t)(v + 0.5) << sh;
     }
 
-    if (!strcmp(prst, "triangle")) {
-        a = dw_pin(0, dw_adj(G, "adj", 50000), 100000);
-        PT(0, h); PT(w * a / 100000, 0); PT(w, h);
-    } else if (!strcmp(prst, "parallelogram") || !strcmp(prst, "trapezoid")) {
-        int par = prst[0] == 'p';
-
-        a = dw_pin(0, dw_adj(G, "adj", 25000), (par ? 100000 : 50000) * w / ss);
-        x2 = ss * a / 100000;
-
-        if (par) {
-            PT(0, h); PT(x2, 0); PT(w, 0); PT(w - x2, h);
-        } else {
-            PT(0, h); PT(x2, 0); PT(w - x2, 0); PT(w, h);
-        }
-    } else if (!strcmp(prst, "hexagon")) {
-        a = dw_pin(0, dw_adj(G, "adj", 25000), 50000 * w / ss);
-        x1 = ss * a / 100000;
-        PT(0, vc); PT(x1, 0); PT(w - x1, 0); PT(w, vc); PT(w - x1, h); PT(x1, h);
-    } else if (!strcmp(prst, "octagon")) {
-        a = dw_pin(0, dw_adj(G, "adj", 29289), 50000);
-        x1 = ss * a / 100000;
-        PT(0, x1); PT(x1, 0); PT(w - x1, 0); PT(w, x1); PT(w, h - x1); PT(w - x1, h); PT(x1, h); PT(0, h - x1);
-    } else if (!strcmp(prst, "homePlate") || !strcmp(prst, "chevron")) {
-        a = dw_pin(0, dw_adj(G, "adj", 50000), 100000 * w / ss);
-        x1 = ss * a / 100000;
-
-        if (prst[0] == 'h') {
-            PT(0, 0); PT(w - x1, 0); PT(w, vc); PT(w - x1, h); PT(0, h);
-        } else {
-            PT(0, 0); PT(w - x1, 0); PT(w, vc); PT(w - x1, h); PT(0, h); PT(x1, vc);
-        }
-    } else if (!strcmp(prst, "plus")) {
-        a = dw_pin(0, dw_adj(G, "adj", 25000), 50000);
-        x1 = ss * a / 100000;
-        x2 = w - x1;
-        y2 = h - x1;
-        PT(0, x1); PT(x1, x1); PT(x1, 0); PT(x2, 0); PT(x2, x1); PT(w, x1);
-        PT(w, y2); PT(x2, y2); PT(x2, h); PT(x1, h); PT(x1, y2); PT(0, y2);
-    } else if (!strcmp(prst, "rightArrow") || !strcmp(prst, "leftArrow")) {
-        a1 = dw_pin(0, dw_adj(G, "adj1", 50000), 100000);
-        a2 = dw_pin(0, dw_adj(G, "adj2", 50000), 100000 * w / ss);
-        d = ss * a2 / 100000;
-        y1 = vc - h * a1 / 200000;
-        y2 = vc + h * a1 / 200000;
-
-        if (prst[0] == 'r') {
-            PT(0, y1); PT(w - d, y1); PT(w - d, 0); PT(w, vc); PT(w - d, h); PT(w - d, y2); PT(0, y2);
-        } else {
-            PT(w, y1); PT(d, y1); PT(d, 0); PT(0, vc); PT(d, h); PT(d, y2); PT(w, y2);
-        }
-    } else if (!strcmp(prst, "upArrow") || !strcmp(prst, "downArrow")) {
-        a1 = dw_pin(0, dw_adj(G, "adj1", 50000), 100000);
-        a2 = dw_pin(0, dw_adj(G, "adj2", 50000), 100000 * h / ss);
-        d = ss * a2 / 100000;
-        x1 = hc - w * a1 / 200000;
-        x2 = hc + w * a1 / 200000;
-
-        if (prst[0] == 'u') {
-            PT(x1, h); PT(x1, d); PT(0, d); PT(hc, 0); PT(w, d); PT(x2, d); PT(x2, h);
-        } else {
-            PT(x1, 0); PT(x1, h - d); PT(0, h - d); PT(hc, h); PT(w, h - d); PT(x2, h - d); PT(x2, 0);
-        }
-    } else if (!strcmp(prst, "leftRightArrow")) {
-        a1 = dw_pin(0, dw_adj(G, "adj1", 50000), 100000);
-        a2 = dw_pin(0, dw_adj(G, "adj2", 50000), 50000 * w / ss);
-        d = ss * a2 / 100000;
-        y1 = vc - h * a1 / 200000;
-        y2 = vc + h * a1 / 200000;
-        PT(0, vc); PT(d, 0); PT(d, y1); PT(w - d, y1); PT(w - d, 0); PT(w, vc); PT(w - d, h); PT(w - d, y2);
-        PT(d, y2); PT(d, h);
-    } else if (!strcmp(prst, "star5")) {
-        double swd2 = w / 2 * 1.05146, shd2 = h / 2 * 1.10557, svc = vc * 1.10557, r;
-
-        a = dw_pin(0, dw_adj(G, "adj", 19098), 50000);
-
-        for (k = 0; k < 10; k++) {
-            double an = (-90 + 36 * k) * 3.14159265358979 / 180;
-
-            r = k % 2 ? a / 50000 : 1;
-            PT(hc + swd2 * r * cos(an), svc + shd2 * r * sin(an));
-        }
-    }
-
-#undef PT
-    return n;
+    return out;
 }
 
 /* Office's preset shapes that are polygons: their corners in a box of 1000 by 1000 (the adjustments at their
@@ -7373,6 +7281,43 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
                 int isline = !strcmp(geom, "line"), k;
                 double lwd = lw * (FR->sx + FR->sy) / 2;
+                pd_preset_flat* pf = NULL;
+
+                if (prst[0] && dw_generic_preset(prst) && bw > 0) {
+                    /* Office's own definition, at the shape's size with the adjustments it gives */
+                    char adjs[512];
+                    size_t an = 0;
+                    int q;
+
+                    adjs[0] = '\0';
+
+                    for (q = 0; q < gds.n && an < sizeof(adjs) - 64; q++) {
+                        if (!strncmp(gds.name[q], "adj", 3)) {
+                            an += (size_t)snprintf(adjs + an, sizeof(adjs) - an, "%s%s=%.0f", an ? " " : "",
+                                                   gds.name[q], gds.val[q]);
+                        }
+                    }
+
+                    pf = (pd_preset_flat*)malloc(sizeof(pd_preset_flat));
+
+                    if (pf && pd_preset_flatten(prst, bw, bh, adjs, pf)) {
+                        /* its first path the prism's front face, if it is extruded */
+                        strcpy(geom, "cust");
+                        cg_w = (long long)bw;
+                        cg_h = (long long)(bh > 0 ? bh : 1);
+                        cg_n = 0;
+
+                        for (q = 0; q < pf->path[0].n && cg_n < 2047; q++, cg_n++) {
+                            cg_xy[2 * cg_n] = pf->xy[2 * (pf->path[0].start + q)];
+                            cg_xy[2 * cg_n + 1] = pf->xy[2 * (pf->path[0].start + q) + 1];
+                        }
+
+                        cg_closed = pf->path[0].closed;
+                    } else {
+                        free(pf);
+                        pf = NULL;
+                    }
+                }
 
                 if (cam && ext_h > 0 && (f || l) && !isline) {
                     /* extruded and seen through a camera: a prism, its outline in the box as the front face */
@@ -7426,15 +7371,41 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     f = l = 0;
                 }
 
-                if (prst[0] && !strcmp(geom, "cust") && bw > 0 && bh > 0) {   /* a preset's corners where its adjustments put them */
-                    int np = dw_preset_adj(prst, bw, bh, &gds, cg_xy);
+                if (pf && (f || l)) {   /* each of the preset's paths: filled (or shaded) and outlined as it says */
+                    int i;
 
-                    if (np > 0) {
-                        cg_n = np;
-                        cg_w = (long long)bw;
-                        cg_h = (long long)bh;
+                    for (i = 0; i < pf->npath; i++) {
+                        uint32_t pfl = !f || !strcmp(pf->path[i].fill, "none") ? 0 : dw_shade(f, pf->path[i].fill);
+                        uint32_t pln = pf->path[i].stroke ? l : 0;
+                        double qx, qy;
+
+                        if ((!pfl && !pln) || pf->path[i].n < 2) {
+                            continue;
+                        }
+
+                        ITEM_SEP();
+                        pb_puts(&o, "{\"path\":[");
+
+                        for (k = 0; k < pf->path[i].n; k++) {
+                            const double* xy = &pf->xy[2 * (pf->path[i].start + k)];
+
+                            if (isnan(xy[0])) {
+                                pb_printf(&o, "%s%d,%d", k ? "," : "", (int)INT32_MIN, (int)INT32_MIN);
+                            } else {
+                                fr_pt(&sm, bx0 + xy[0], by0 + xy[1], &qx, &qy);
+                                pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(qx), (int)emu_sp(qy));
+                            }
+                        }
+
+                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", pf->path[i].closed && pfl,
+                                  (unsigned)pfl, (unsigned)pln, (int)emu_sp(lwd));
                     }
+
+                    f = l = 0;
                 }
+
+                free(pf);
+                pf = NULL;
 
                 if (!strcmp(geom, "cust") && cg_n >= 2 && (f || l)) {     /* custom geometry: its path in the box */
                     double gx = cg_w > 0 ? bw / cg_w : 1, gy = cg_h > 0 ? bh / cg_h : 1, qx, qy;

@@ -375,6 +375,8 @@ pd_para_break(p, &prm, NULL);
     src/pd_conv.c        converters: dispatch, builder, clipboard copy/paste, text
     src/pd_markup.c      HTML/XML tokenizer
     src/pd_html.c src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c
+    src/pd_preset.c      Office's preset shapes worked out (guides, arcs, handles); pd_presets.inc is
+                         generated from ECMA-376 presetShapeDefinitions.xml by tools/presets.py
     tests/               unit tests, Unicode conformance
     fuzz/                fuzz targets, stand-in driver, regression seeds
     bench/               quality and speed benchmark

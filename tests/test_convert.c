@@ -2403,6 +2403,25 @@ static void test_docx_drawing_rebuild(void) {
 /* A canvas without VML beside it (one made in the editor, or edited: its old VML is not kept) written with a
    fallback made from what it draws, for the readers that show a canvas only as VML: its box, its picture, its
    text box with the story's text. */
+/* Office's presets worked out: an ellipse's arcs (3cd4 a name, not the number 3), a handle dragged */
+static void test_preset_eval(void) {
+    char buf[8192];
+    size_t n;
+
+    CHECK(pd_preset_count() >= 180 && pd_preset_name(0) != NULL && pd_preset_name(pd_preset_count()) == NULL);
+    n = pd_preset_json("ellipse", 1000, 500, "", buf, sizeof(buf));
+    CHECK(n > 0 && n < sizeof(buf));
+    /* four quarter arcs from the left middle: through the top, the right, the bottom, and back */
+    CHECK(strstr(buf, "[\"m\",0,250]") && strstr(buf, ",1000,250]") &&
+          strstr(buf, ",500,500]"));
+    n = pd_preset_json("roundRect", 1000, 500, "adj=20000", buf, sizeof(buf));
+    CHECK(n > 0 && strstr(buf, "[\"adj\",20000,16667]") && strstr(buf, "\"g1\":\"adj\",\"g2\":\"\",\"x\":100,"));
+    /* its handle dragged to x = 150 of 1000 by 500: the radius 150, adj 30000 of the shorter side */
+    n = pd_preset_drag("roundRect", 1000, 500, "adj=20000", 0, 150, 0, buf, sizeof(buf));
+    CHECK(n > 0 && !strncmp(buf, "adj=", 4) && fabs(atof(buf + 4) - 30000) < 50);
+    CHECK(pd_preset_json("noSuchShape", 10, 10, "", buf, sizeof(buf)) == 0);
+}
+
 /* a preset's adjustments move its corners: a triangle's apex where adj puts it, at the middle without one */
 static void test_docx_preset_adjust(void) {
     static const char* avs[2] = { "<a:avLst/>", "<a:avLst><a:gd name=\"adj\" fmla=\"val 0\"/></a:avLst>" };
@@ -4625,6 +4644,7 @@ int main(void) {
     test_docx_drawing_rebuild();
     test_docx_canvas_fallback();
     test_docx_preset_adjust();
+    test_preset_eval();
     printf("docx embedded fonts\n");
     test_docx_embedded_font();
     printf("docx properties and page\n");

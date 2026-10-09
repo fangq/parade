@@ -224,6 +224,7 @@ var
   G: TParadeShapeGeom;
   Xml: string;
   W0: Double;
+  N0: Integer;
 
   function At(XPt, YPt: Double): TPoint;
   begin
@@ -312,6 +313,53 @@ begin
     'a text box drawn: the caret in it');
   E.InsertText('Typed');
   Check(E.ParaText(E.CaretPos.block) = 'Typed', 'typed in at once');
+  { the canvas again: drawn by hand, and Word's other shapes }
+  Pt := At(20, 20);
+  TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  N0 := Length(E.DrawingShapes(CP));
+  Check(E.InsertShape('freeform') and (E.DrawKind = 'freeform'), 'a freeform to draw');
+  for Sid := 0 to 2 do
+  begin
+    Pt := At(40 + 50 * Ord(Sid = 1), 160 - 40 * Ord(Sid = 1) + 30 * Ord(Sid = 2));
+    if Sid = 2 then Pt := At(20, 200);
+    TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  end;
+  Pt := At(40, 160);    { the first corner again: closed }
+  TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  Check((E.DrawKind = '') and (Length(E.DrawingShapes(CP)) = N0 + 1) and E.KeptXml(Xml) and
+    (Pos('name="Freeform: Shape', Xml) > 0) and (Pos('<a:close/>', Xml) > 0), 'drawn corner by corner, closed');
+  Check(E.InsertShape('curve'), 'a curve to draw');
+  Pt := At(150, 160); TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y); TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  Pt := At(190, 120); TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y); TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  Pt := At(230, 170); TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y); TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  TParadeWheel(E).MouseDown(mbLeft, [ssDouble], Pt.X, Pt.Y);
+  TParadeWheel(E).DblClick;
+  TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  Check((E.DrawKind = '') and (Length(E.DrawingShapes(CP)) = N0 + 2) and E.KeptXml(Xml) and
+    (Pos('<a:cubicBezTo>', Xml) > 0), 'a curve through three clicks, ended by a double click');
+  Check(E.InsertShape('scribble'), 'a scribble');
+  Pt := At(260, 150);
+  TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+  for Sid := 1 to 30 do
+    TParadeWheel(E).MouseMove([ssLeft], Pt.X + Sid * 3, Pt.Y + Round(10 * Sin(Sid / 3)));
+  TParadeWheel(E).MouseUp(mbLeft, [], Pt.X + 90, Pt.Y);
+  Check((Length(E.DrawingShapes(CP)) = N0 + 3) and E.SelectedShape(D, Sid) and (Sid = N0 + 2), 'drawn by hand');
+  Check(E.InsertShape('elbowDoubleArrow'), 'an elbow connector');
+  Drag(At(300, 100), At(380, 180));
+  Check(E.KeptXml(Xml) and (Pos('prst="bentConnector3"', Xml) > 0) and (Pos('<a:headEnd type="triangle"/>', Xml) > 0),
+    'with arrowheads at both ends');
+  Check(E.InsertShape('smileyFace'), 'one of Word''s other shapes');
+  Drag(At(400, 100), At(480, 180));
+  Check(E.SelectedShapeGeom(G) and (G.Prst = 'smileyFace') and (Length(G.HX) = 1), 'its handle, as Office defines it');
+  if E.ShapeHandlePoint('a', 0, Pt) then
+  begin
+    Drag(Pt, Point(Pt.X, Pt.Y - 15));
+    Check(E.KeptXml(Xml) and (Pos('<a:gd name="adj" fmla="val ', Xml) > 0) and E.SelectedShapeGeom(G) and
+      (G.AdjV[0] < 4653), Format('dragged: the smile turned (%.0f)', [G.AdjV[0]]));
+  end;
   SavePage(E, 0, ExtractFilePath(ParamStr(0)) + 'edit_handles.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
   E.SaveToFile(ExtractFilePath(ParamStr(0)) + 'edit_handles.docx');
   E.LoadFromFile(ExtractFilePath(ParamStr(0)) + 'edit_handles.docx');

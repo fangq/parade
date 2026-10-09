@@ -825,6 +825,15 @@ function pd_doc_export_range(doc: Ppd_doc; range: pd_range; format: Int32; fn: p
 function pd_doc_import(data: Pointer; len: csize_t; format: Int32; out doc: Ppd_doc): pd_status; cdecl; PDEXT;
 function pd_doc_paste(doc: Ppd_doc; at: pd_pos; data: Pointer; len: csize_t; format: Int32; after: Ppd_pos): pd_status; cdecl; PDEXT;
 function pd_conv_detect(data: Pointer; len: csize_t): Int32; cdecl; PDEXT;
+{ Office's preset shapes: how many, each one's name; one at a size with its adjustments as JSON (its adjustments,
+  handles and paths), a handle dragged to a point as the adjustments that put it there -- each written into buf,
+  the length it needs returned }
+function pd_preset_count: Int32; cdecl; PDEXT;
+function pd_preset_name(i: Int32): PAnsiChar; cdecl; PDEXT;
+function pd_preset_json(name: PAnsiChar; w, h: Double; adj: PAnsiChar; buf: PAnsiChar; cap: csize_t): csize_t;
+  cdecl; PDEXT;
+function pd_preset_drag(name: PAnsiChar; w, h: Double; adj: PAnsiChar; handle: Int32; u, v: Double; buf: PAnsiChar;
+  cap: csize_t): csize_t; cdecl; PDEXT;
 function pd_docx_drawing_rebuild(doc: Ppd_doc; drawing: pd_res_id; xml: PAnsiChar; len: csize_t;
   out res: pd_res_id): pd_status; cdecl; PDEXT;
 
