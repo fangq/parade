@@ -44,6 +44,7 @@ typedef struct {
     char doc_theme[256];        /* the theme the .docx made carries (the first master's): colours of the slides with
                                    it are linked to it */
     uint32_t last_ref;          /* the theme colour the last colour_of came to, 0 none (pd_theme_color) */
+    long ph;                    /* what a theme style's phClr is while it is copied, -1 none */
     int docpr;
     long long sw, sh;           /* the slide size (EMU) */
     int alias[4];               /* bg1, tx1, bg2, tx2: the theme's colours they are (the master's clrMap) */
@@ -446,6 +447,21 @@ static void put_mapped(const pptx* P, pd_buf* o, const char* s, size_t n) {
 
             v[k] = '\0';
             slot = theme_slot_of(P, v);
+
+            if (slot < 0 && P->ph >= 0 && !strcmp(v, "phClr")) {   /* a theme style's placeholder: its colour */
+                for (k = j; k < n && s[k] != '>'; k++) {
+                }
+
+                self = k > 0 && k < n && s[k - 1] == '/';
+                pb_printf(o, "<a:srgbClr val=\"%06lX\"", (unsigned long)(P->ph & 0xFFFFFF));
+                i = j + 1;
+
+                if (!self && depth < 64) {
+                    conv[depth++] = 1;
+                }
+
+                continue;
+            }
 
             for (k = j; k < n && s[k] != '>'; k++) {
             }
@@ -2062,6 +2078,10 @@ static int background_fill(const ppart* pt) {
 static void put_background_fill(conv* C, const ppart* pt, int f) {
     const xdoc* d = &pt->x;
 
+    if (f < 0) {
+        return;
+    }
+
     if (!strcmp(d->v[f].name, "blipFill")) {
         pb_printf(C->o, "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"Background\"/><pic:cNvPicPr/></pic:nvPicPr>"
                   "<pic:blipFill>", 3900000 + C->slide_no);
@@ -2153,6 +2173,25 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
 
         if (from && background_fill(from) >= 0) {
             put_background_fill(&C, from, background_fill(from));
+        } else if (from) {   /* the theme's background style (bgRef 1002, 1003...), its placeholder colour the ref's */
+            int br = xd_path(&from->x, xd_find(&from->x, "bg"), "bgRef");
+            long idx = br >= 0 ? xd_int(&from->x, br, "idx", 0) : 0;
+            ppart th;
+
+            if (idx > 1001 && P->theme_path[0] && part_load(P, &th, P->theme_path)) {
+                int lst = xd_find(&th.x, "bgFillStyleLst"), e = lst >= 0 ? th.x.v[lst].kid : -1;
+
+                for (; e >= 0 && idx > 1001; e = th.x.v[e].next, idx--) {
+                }
+
+                if (e >= 0 && (!strcmp(th.x.v[e].name, "gradFill") || !strcmp(th.x.v[e].name, "blipFill"))) {
+                    P->ph = bg >= 0 ? bg : 0xFFFFFF;
+                    put_background_fill(&C, &th, e);
+                    P->ph = -1;
+                }
+
+                part_free(&th);
+            }
         }
     }
 
@@ -2221,6 +2260,7 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     pd_status st;
 
     memset(&P, 0, sizeof(P));
+    P.ph = -1;
     P.zip = s;
     P.zn = n;
     P.alias[0] = 1;
@@ -2421,6 +2461,7 @@ char* pd_docx_smartart(const unsigned char* zip, size_t zn, const char* xml, siz
     }
 
     memset(&P, 0, sizeof(P));
+    P.ph = -1;
     P.zip = zip;
     P.zn = zn;
     P.alias[0] = 1;     /* Word's colour map: bg1 lt1, tx1 dk1 */
