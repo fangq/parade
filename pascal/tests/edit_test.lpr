@@ -710,6 +710,102 @@ begin
     Format('saved and read back: as far down and across (%.1f, %.1f)', [Fp2.offset_y / K, Fp2.offset_x / K]));
 end;
 
+{ connectors joined to shapes: put on their sites, moved with them, an end dragged to another shape }
+procedure TestConnectors(E: TParadeEdit);
+const
+  K = PD_SP_PER_PT;
+var
+  CP, D: pd_pos;
+  Sid, SS, ES: Integer;
+  Pg: Int32;
+  PX0, PY0, PX1, PY1, X1, Y1, X2, Y2: Double;
+  S: TParadeDrawPoints;
+  Xml: string;
+
+  function Pt(U, V: Double): TPoint;
+  begin
+    Result := E.PageToClient(Pg, PX0 / K + U, PY0 / K + V);
+  end;
+
+  procedure Drag(A, B: TPoint);
+  begin
+    TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+    TParadeWheel(E).MouseMove([ssLeft], (A.X + B.X) div 2, (A.Y + B.Y) div 2);
+    TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y);
+  end;
+
+  procedure SelectSid(N: Integer);
+  var
+    I: Integer;
+  begin
+    for I := 0 to 9 do
+      if E.SelectedShape(D, Sid) and (Sid = N) then
+        Exit
+      else
+        E.ProcessKey(VK_TAB, []);
+  end;
+
+  function Near(A, B: Double): Boolean;
+  begin
+    Result := Abs(A - B) < 1.5 * K;
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertText('Joined');
+  E.ProcessKey(VK_RETURN, []);
+  CP := E.CaretPos;
+  Check(E.InsertCanvas(400, 200), 'a canvas for connectors');
+  CP := PdPos(CP.block, 0);
+  E.ShapePageBox(CP, -1, Pg, PX0, PY0, PX1, PY1);
+  E.AddShape('rect', 20 * K, 20 * K, 100 * K, 80 * K);
+  E.AddShape('rect', 250 * K, 100 * K, 350 * K, 160 * K);
+  S := E.ShapeSites(0);
+  Check((Length(S) = 4) and Near(S[3].X, 100 * K) and Near(S[3].Y, 50 * K) and Near(S[0].X, 60 * K) and
+    Near(S[0].Y, 20 * K), 'a rectangle''s sites: the middles of its sides, as Office numbers them');
+  Check(E.AddConnector('elbowArrow', 100 * K, 50 * K, 250 * K, 130 * K, 0, 3, 1, 1), 'an elbow from one to the other');
+  Check(E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and (SS = 0) and (ES = 1) and Near(X1, 100 * K) and Near(Y1, 50 * K) and
+    Near(X2, 250 * K) and Near(Y2, 130 * K), 'joined at both ends');
+  SelectSid(0);
+  Check(E.SelectedShape(D, Sid) and (Sid = 0), 'the first rectangle');
+  Drag(Pt(60, 50), Pt(60, 90));
+  SelectSid(2);
+  Check(E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and Near(X1, 100 * K) and Near(Y1, 90 * K) and Near(X2, 250 * K),
+    Format('the rectangle dragged down: the connector''s start with it (%.1f, %.1f)', [X1 / K, Y1 / K]));
+  E.Undo;
+  SelectSid(2);
+  Check(E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and Near(Y1, 50 * K), 'undone: both back');
+  SelectSid(1);
+  E.ProcessKey(VK_RIGHT, [ssShift]);
+  SelectSid(2);
+  Check(E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and Near(X2, 260 * K), 'the other nudged: the end with it');
+  Check(E.MoveConnectorEnd(False, 60 * K, 140 * K) and E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and (SS = -1) and
+    (ES = 1) and Near(X1, 60 * K) and Near(Y1, 140 * K), 'its start let go, put elsewhere');
+  { drawn with the mouse: its ends dropped by sites, joined there }
+  SelectSid(0);
+  E.InsertShape('line');
+  Drag(Pt(61, 82), Pt(312, 103));    { by the first's bottom and the second's top }
+  Check(E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and (SS = 0) and (ES = 1) and Near(X1, 60 * K) and Near(Y1, 80 * K) and
+    Near(X2, 310 * K) and Near(Y2, 100 * K), Format('a line drawn between them: on their sites (%.1f, %.1f - %.1f, %.1f)',
+    [X1 / K, Y1 / K, X2 / K, Y2 / K]));
+  { an end dragged on to a site }
+  SelectSid(2);
+  if E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) then
+    Drag(E.PageToClient(Pg, PX0 / K + X1 / K, PY0 / K + Y1 / K), Pt(21, 50));
+  Check(E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and (SS = 0) and Near(X1, 20 * K) and Near(Y1, 50 * K),
+    Format('its start dragged on to the first''s left: joined there (%.1f, %.1f)', [X1 / K, Y1 / K]));
+  { an elbow between a bottom and a top: set off down }
+  E.AddConnector('elbow', 60 * K, 80 * K, 300 * K, 100 * K, 0, 2, 1, 0);
+  Check(E.KeptXml(Xml) and (Pos('rot="5400000"', Xml) > 0), 'an elbow from a bottom to a top: turned to go down');
+  SavePage(E, 0, ExtractFilePath(ParamStr(0)) + 'edit_connectors.png', 1.5 * 96 / 72 / PD_SP_PER_PT);
+  E.SaveToFile(ExtractFilePath(ParamStr(0)) + 'edit_connectors.docx');
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + 'edit_connectors.docx');
+  E.GoToPos(PdPos(pd_doc_next_paragraph(E.Doc, pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0)), 0));
+  Xml := DrawingText(E, E.CaretPos);
+  Check((Pos('stCxn', Xml) > 0) and (Pos('endCxn', Xml) > 0), 'saved and read back: still joined');
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -1995,6 +2091,7 @@ begin
   TestShapeHandles(E);
   TestShapeEditing(E);
   TestDrawingMove(E);
+  TestConnectors(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

@@ -653,6 +653,20 @@ PD_API size_t pd_preset_json(const char* name, double w, double h, const char* a
         pv_printf(&S, "]}");
     }
 
+    pv_printf(&S, "],\"sites\":[");
+    first = 1;
+
+    for (d = after ? after : def; *d;) {    /* where a connector's ends go: each site and its direction */
+        char a[3][40];
+
+        d = pv_next(d, s, sizeof(s));
+
+        if (s[0] == 'x' && s[1] == ' ' && sscanf(s + 2, "%39s %39s %39s", a[0], a[1], a[2]) == 3) {
+            pv_printf(&S, "%s[%.6g,%.6g,%.6g]", first ? "" : ",", pv_arg(E, a[1]), pv_arg(E, a[2]), pv_arg(E, a[0]));
+            first = 0;
+        }
+    }
+
     pv_printf(&S, "]}");
 
     if (buf && cap) {

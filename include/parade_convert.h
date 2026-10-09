@@ -84,7 +84,8 @@ PD_API const char* pd_preset_name(int i);
  * no such preset:
  * {"adj":[[name,value,default],...], "handles":[{"polar":0|1,"g1":x-or-radius adjustment,"g2":y-or-angle
  * adjustment,"x":..,"y":..},...], "paths":[{"fill":"norm|none|darken|...","stroke":1,"cmds":[["m",x,y],["l",x,y],
- * ["c",x1,y1,x2,y2,x,y],["z"],...]},...]} -- coordinates in the box, arcs as cubic curves.
+ * ["c",x1,y1,x2,y2,x,y],["z"],...]},...], "sites":[[x,y,angle],...]} -- coordinates in the box, arcs as cubic
+ * curves; sites where a connector's ends go (cxnLst), angle the way out of the shape (60000ths of a degree).
  */
 PD_API size_t pd_preset_json(const char* name, double w, double h, const char* adj, char* buf, size_t cap);
 /** a preset's handle dragged to (u, v) in its box: every adjustment as that leaves it ("adj1=... adj2=..."), into

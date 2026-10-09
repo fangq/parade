@@ -78,6 +78,11 @@ type
   end;
   TParadeShapeBoxes = array of TParadeShapeBox;
   TIntegerArray = array of Integer;
+  { a point of a drawing (its units) }
+  TParadeDrawPoint = record
+    X, Y: Double;
+  end;
+  TParadeDrawPoints = array of TParadeDrawPoint;
 
   { a shape as Word places it: its box before it is turned, the turn and the flips, its geometry }
   TParadeShapeGeom = record
@@ -144,7 +149,7 @@ type
     FDrawCursor: TCursor;          { the cursor before drawing began }
     FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape,
                                      9 a shape drawn, 10 a turn, 11 an adjustment, 12 a point, 13 a rubber band,
-                                     14 the whole drawing moved }
+                                     14 the whole drawing moved, 15 a connector's end }
     FShapeFrom: TPoint;            { where it began (client pixels) }
     FBandTo: TPoint;               { a rubber band: its other corner }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
@@ -351,6 +356,11 @@ type
     function ClientToDrawing(X, Y: Integer; out DX, DY: Double): Boolean;
     procedure FinishDrawPath(Closed: Boolean);
     procedure PaintDrawPath;
+    procedure PaintSites;
+    { the site of a shape of the selected canvas nearest a point of the control, within a few pixels (not of the
+      shape Skip): its shape, its index, where it is (the drawing's units) }
+    function NearestSite(X, Y, Skip: Integer; out Sid, Site: Integer; out DX, DY: Double): Boolean;
+    function SidId(const Xml: string; Sid: Integer): string;
     function ShapeHandleXY(N: Integer; out PX, PY: Double): Boolean;
     procedure DrawView(Img: TLazIntfImage; ATop, AHeight: Integer; PagesToo: Boolean);
     procedure RebuildBack;
@@ -465,6 +475,18 @@ type
       FlipH/FlipV: from the right, from the bottom); selected }
     function AddShape(const Kind: string; X0, Y0, X1, Y1: Double; FlipH: Boolean = False;
       FlipV: Boolean = False): Boolean;
+    { a connector (line, arrow, elbow..., curved...: the kinds InsertShape draws) from (X1, Y1) to (X2, Y2) in the
+      selected canvas (its units), its start joined to site StartSite of shape StartSid and its end to EndSite of
+      EndSid (-1: not joined): joined, it stays on them when they move. Selected; one step of undo }
+    function AddConnector(const Kind: string; X1, Y1, X2, Y2: Double; StartSid: Integer = -1; StartSite: Integer = -1;
+      EndSid: Integer = -1; EndSite: Integer = -1): Boolean;
+    { where connectors can be joined to a shape of the selected canvas (its units), as its sites are numbered }
+    function ShapeSites(Sid: Integer): TParadeDrawPoints;
+    { the selected connector's start (End_ False) or end moved to (X, Y), joined there to site Site of shape Sid
+      (-1: not joined); one step of undo }
+    function MoveConnectorEnd(End_: Boolean; X, Y: Double; Sid: Integer = -1; Site: Integer = -1): Boolean;
+    { the selected connector's ends (the canvas's units), and what each is joined to (sids; -1 none) }
+    function ConnectorInfo(out X1, Y1, X2, Y2: Double; out StartSid, EndSid: Integer): Boolean;
     { the selected shape turned to Deg degrees (clockwise), flipped (Horizontal, else vertically): one step of undo }
     function RotateShape(Deg: Double): Boolean;
     function FlipShape(Horizontal: Boolean): Boolean;
@@ -6175,6 +6197,9 @@ end;
 { the selection's box and handles, over the drawn page (not into it: the view's pixels stay as they are) }
 procedure TParadeEdit.PaintShapeSelection;
 var
+  M: TParadeDrawMap;
+  CX1, CY1, CX2, CY2: Double;
+  P0: TPoint;
   Pg: Int32;
   X, Y, W, H, JW, JH, BX0, BY0, BX1, BY1: Double;
   Boxes: TParadeShapeBoxes;
@@ -6263,6 +6288,21 @@ begin
              Boxes[I].Y1 + FShapeNew[1] - FShapeOld[1]], Rc) then
             Canvas.Rectangle(Rc.Left, Rc.Top, Rc.Right + 1, Rc.Bottom + 1);
     Canvas.Pen.Style := psSolid;
+  end;
+  if FShapeDrag = 15 then
+  begin   { a connector's end dragged: from its other end to the mouse }
+    if DrawMap(M) and ConnectorInfo(CX1, CY1, CX2, CY2, I, K) then
+    begin
+      Canvas.Pen.Color := $00D77800;
+      Canvas.Pen.Style := psDash;
+      if FDragIdx = 1 then
+        P0 := MapToClient(M, CX1, CY1)
+      else
+        P0 := MapToClient(M, CX2, CY2);
+      Canvas.Line(P0.X, P0.Y, FBandTo.X, FBandTo.Y);
+      Canvas.Pen.Style := psSolid;
+    end;
+    PaintSites;
   end;
   if FShapeDrag = 14 then
   begin   { the drawing where it would be dropped }
@@ -6799,13 +6839,18 @@ begin
   end;
 end;
 
+function RouteConnectors(var Xml: string): Boolean; forward;
+
 { the selected drawing made again from edited XML: its object swapped, the shape NewSid selected (-1: the drawing) }
 function TParadeEdit.ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
 var
   O: pd_inline;
   R: pd_res_id;
   N: Integer;
+  X: string;
 begin
+  X := Xml;
+  RouteConnectors(X);   { the connectors on the shapes they join, wherever those are now }
   Result := False;
   if FReadOnly or not FShapeOn or (pd_doc_inline_at(FDoc, FShapeAt, O) <> PD_OK) then
     Exit;
@@ -6814,7 +6859,7 @@ begin
   Inc(FStepDepth);
   pd_doc_begin_group(FDoc, PAnsiChar(Lbl));     { with the story a new text box is given }
   try
-    Result := (pd_docx_drawing_rebuild(FDoc, O.resource, PAnsiChar(Xml), Length(Xml), R) = PD_OK) and
+    Result := (pd_docx_drawing_rebuild(FDoc, O.resource, PAnsiChar(X), Length(X), R) = PD_OK) and
       ReplaceDrawingRes(FShapeAt, R, Lbl);
   finally
     pd_doc_end_group(FDoc);
@@ -8412,6 +8457,512 @@ begin
     AddCmd(Result, 'z', []);
 end;
 
+{ ---------------- connectors that stay on the shapes they join ---------------- }
+
+type
+  { where a connector's end can go on a shape (its cxnLst): in the canvas (EMU), and the way out of the shape
+    (degrees, clockwise from right) }
+  TParadeSite = record
+    X, Y, Ang: Double;
+  end;
+  TParadeSites = array of TParadeSite;
+
+{ the drawing's top: the canvas (or the group the drawing is); -1 if none }
+function TopOfDrawing(const Els: TXmlEls): Integer;
+var
+  I: Integer;
+begin
+  Result := -1;
+  for I := 0 to High(Els) do
+    if (Els[I].Name = 'wpc:wpc') or (Els[I].Name = 'wpg:wgp') then
+      Exit(I);
+end;
+
+{ a shape's own id (its cNvPr's) }
+function ElId(const Xml: string; const Els: TXmlEls; E: Integer): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := E + 1 to High(Els) do
+    if Els[I].A >= Els[E].B then
+      Break
+    else if (Els[I].Parent = E) and ((Els[I].Name = 'wps:cNvPr') or (Els[I].Name = 'pic:cNvPr') or
+       (Els[I].Name = 'wpg:cNvPr')) then
+      Exit(AttrOf(Xml, Els[I].A, 'id'));
+end;
+
+{ a shape of the canvas's top: where connectors can be joined to it (Office's sites for its preset; the middles of
+  its sides for any other), in the canvas's EMU as it is turned and flipped }
+function ElSites(const Xml: string; const Els: TXmlEls; E: Integer): TParadeSites;
+var
+  Pr, Xf, Off, Ext, Pg, Av, I, N: Integer;
+  OX, OY, CX, CY, Rot, U, V, C, S: Double;
+  FH, FV: Boolean;
+  Prst, Adj, F: string;
+  J: TJSONObject;
+  Sites: TJSONArray;
+  Loc: array of Double;
+begin
+  Result := nil;
+  Pr := PropsOf(Els, E);
+  if Pr < 0 then
+    Exit;
+  Xf := ChildNamed(Els, Pr, 'a:xfrm');
+  if Xf < 0 then
+    Exit;
+  Off := ChildNamed(Els, Xf, 'a:off');
+  Ext := ChildNamed(Els, Xf, 'a:ext');
+  if (Off < 0) or (Ext < 0) then
+    Exit;
+  OX := StrToFloatDef(AttrOf(Xml, Els[Off].A, 'x'), 0);
+  OY := StrToFloatDef(AttrOf(Xml, Els[Off].A, 'y'), 0);
+  CX := StrToFloatDef(AttrOf(Xml, Els[Ext].A, 'cx'), 0);
+  CY := StrToFloatDef(AttrOf(Xml, Els[Ext].A, 'cy'), 0);
+  Rot := StrToFloatDef(AttrOf(Xml, Els[Xf].A, 'rot'), 0) / 60000;
+  FH := AttrOf(Xml, Els[Xf].A, 'flipH') = '1';
+  FV := AttrOf(Xml, Els[Xf].A, 'flipV') = '1';
+  Loc := nil;
+  Pg := ChildNamed(Els, Pr, 'a:prstGeom');
+  if (Pg >= 0) and (CX > 0) and (CY > 0) then
+  begin
+    Prst := AttrOf(Xml, Els[Pg].A, 'prst');
+    Adj := '';
+    Av := ChildNamed(Els, Pg, 'a:avLst');
+    if Av >= 0 then
+      for I := Av + 1 to High(Els) do
+        if (Els[I].Parent = Av) and (Els[I].Name = 'a:gd') then
+        begin
+          F := AttrOf(Xml, Els[I].A, 'fmla');
+          if Copy(F, 1, 4) = 'val ' then
+            Adj := Adj + IfThen(Adj <> '', ' ', '') + AttrOf(Xml, Els[I].A, 'name') + '=' + Copy(F, 5, MaxInt);
+        end;
+    J := PresetJson(Prst, CX, CY, Adj);
+    if J <> nil then
+      try
+        Sites := J.Find('sites') as TJSONArray;
+        if Sites <> nil then
+          for I := 0 to Sites.Count - 1 do
+            if (Sites[I] is TJSONArray) and (TJSONArray(Sites[I]).Count >= 3) then
+            begin
+              N := Length(Loc);
+              SetLength(Loc, N + 3);
+              Loc[N] := TJSONArray(Sites[I])[0].AsFloat;
+              Loc[N + 1] := TJSONArray(Sites[I])[1].AsFloat;
+              Loc[N + 2] := TJSONArray(Sites[I])[2].AsFloat / 60000;
+            end;
+      finally
+        J.Free;
+      end;
+  end;
+  if Length(Loc) = 0 then
+  begin   { the middles of its sides: top, left, bottom, right, as a rectangle's }
+    SetLength(Loc, 12);
+    Loc[0] := CX / 2; Loc[1] := 0; Loc[2] := 270;
+    Loc[3] := 0; Loc[4] := CY / 2; Loc[5] := 180;
+    Loc[6] := CX / 2; Loc[7] := CY; Loc[8] := 90;
+    Loc[9] := CX; Loc[10] := CY / 2; Loc[11] := 0;
+  end;
+  SetLength(Result, Length(Loc) div 3);
+  C := Cos(Rot * Pi / 180);
+  S := Sin(Rot * Pi / 180);
+  for I := 0 to High(Result) do
+  begin
+    U := Loc[3 * I] - CX / 2;
+    V := Loc[3 * I + 1] - CY / 2;
+    Result[I].Ang := Loc[3 * I + 2];
+    if FH then
+    begin
+      U := -U;
+      Result[I].Ang := 180 - Result[I].Ang;
+    end;
+    if FV then
+    begin
+      V := -V;
+      Result[I].Ang := -Result[I].Ang;
+    end;
+    Result[I].X := OX + CX / 2 + U * C - V * S;
+    Result[I].Y := OY + CY / 2 + U * S + V * C;
+    Result[I].Ang := Result[I].Ang + Rot;
+    Result[I].Ang := Result[I].Ang - 360 * Floor(Result[I].Ang / 360);
+  end;
+end;
+
+{ a connector's ends (EMU of the canvas), from its box and flips }
+function ConnectorEnds(const Xml: string; const Els: TXmlEls; E: Integer; out X1, Y1, X2, Y2: Double): Boolean;
+var
+  Pr, Xf, Off, Ext: Integer;
+  OX, OY, CX, CY, Rot, MX, MY, DX, DY, C, S: Double;
+begin
+  Result := False;
+  Pr := PropsOf(Els, E);
+  Xf := -1;
+  if Pr >= 0 then
+    Xf := ChildNamed(Els, Pr, 'a:xfrm');
+  if Xf < 0 then
+    Exit;
+  Off := ChildNamed(Els, Xf, 'a:off');
+  Ext := ChildNamed(Els, Xf, 'a:ext');
+  if (Off < 0) or (Ext < 0) then
+    Exit;
+  OX := StrToFloatDef(AttrOf(Xml, Els[Off].A, 'x'), 0);
+  OY := StrToFloatDef(AttrOf(Xml, Els[Off].A, 'y'), 0);
+  CX := StrToFloatDef(AttrOf(Xml, Els[Ext].A, 'cx'), 0);
+  CY := StrToFloatDef(AttrOf(Xml, Els[Ext].A, 'cy'), 0);
+  Rot := StrToFloatDef(AttrOf(Xml, Els[Xf].A, 'rot'), 0) / 60000;
+  DX := CX / 2;
+  DY := CY / 2;
+  if AttrOf(Xml, Els[Xf].A, 'flipH') = '1' then DX := -DX;
+  if AttrOf(Xml, Els[Xf].A, 'flipV') = '1' then DY := -DY;
+  C := Cos(Rot * Pi / 180);
+  S := Sin(Rot * Pi / 180);
+  MX := OX + CX / 2;
+  MY := OY + CY / 2;
+  X1 := MX - (DX * C - DY * S);
+  Y1 := MY - (DX * S + DY * C);
+  X2 := MX + (DX * C - DY * S);
+  Y2 := MY + (DX * S + DY * C);
+  Result := True;
+end;
+
+{ a connector's box made to run from (X1, Y1) to (X2, Y2): its offset, extent and flips (an elbow or a curve between
+  two ends that leave up or down: turned a quarter, to set off that way) }
+function ConnectorXfrm(X1, Y1, X2, Y2: Double; Upright: Boolean): string;
+var
+  MX, MY, DX, DY, W, H: Double;
+begin
+  MX := (X1 + X2) / 2;
+  MY := (Y1 + Y2) / 2;
+  DX := X2 - X1;
+  DY := Y2 - Y1;
+  if Upright then
+  begin   { turned 90 degrees: its own across is the canvas's down }
+    W := Abs(DY);
+    H := Abs(DX);
+    Result := '<a:xfrm rot="5400000"' + IfThen(DY < 0, ' flipH="1"', '') + IfThen(DX > 0, ' flipV="1"', '');
+  end
+  else
+  begin
+    W := Abs(DX);
+    H := Abs(DY);
+    Result := '<a:xfrm' + IfThen(DX < 0, ' flipH="1"', '') + IfThen(DY < 0, ' flipV="1"', '');
+  end;
+  Result := Result + '><a:off x="' + IntToStr(Round(MX - W / 2)) + '" y="' + IntToStr(Round(MY - H / 2)) +
+    '"/><a:ext cx="' + IntToStr(Max(1, Round(W))) + '" cy="' + IntToStr(Max(1, Round(H))) + '"/></a:xfrm>';
+end;
+
+{ the end of a connector joined (a:stCxn, its start; a:endCxn): the shape's id and the site's index; '' if not }
+function CxnOf(const Xml: string; const Els: TXmlEls; E: Integer; const Name: string; out Idx: Integer): string;
+var
+  Nv, I: Integer;
+begin
+  Result := '';
+  Idx := -1;
+  Nv := ChildNamed(Els, E, 'wps:cNvCnPr');
+  if Nv < 0 then
+    Exit;
+  I := ChildNamed(Els, Nv, Name);
+  if I < 0 then
+    Exit;
+  Result := AttrOf(Xml, Els[I].A, 'id');
+  Idx := StrToIntDef(AttrOf(Xml, Els[I].A, 'idx'), -1);
+end;
+
+{ the connectors of the canvas joined to shapes put where those shapes' sites are now; whether any moved }
+function RouteConnectors(var Xml: string): Boolean;
+var
+  Els: TXmlEls;
+  Root, I, K, E, Pr, Xf, SIdx, EIdx: Integer;
+  SId, EId, Prst, NewXf: string;
+  X1, Y1, X2, Y2: Double;
+  Sites: TParadeSites;
+  Done: array of Boolean;
+  Upright: Boolean;
+  SAng, EAng: Double;
+
+  function Find(const Id: string): Integer;
+  var
+    Q: Integer;
+  begin
+    Result := -1;
+    if Id = '' then
+      Exit;
+    for Q := 0 to High(Els) do
+      if (Els[Q].Parent = Root) and IsShapeEl(Els[Q].Name) and (ElId(Xml, Els, Q) = Id) then
+        Exit(Q);
+  end;
+
+begin
+  Result := False;
+  if Pos('Cxn ', Xml) = 0 then
+    Exit;
+  Els := XmlElements(Xml);
+  SetLength(Done, Length(Els));
+  repeat
+    Els := XmlElements(Xml);
+    Root := TopOfDrawing(Els);
+    E := -1;
+    K := 0;
+    for I := 0 to High(Els) do
+      if (Els[I].Parent = Root) and (Els[I].Name = 'wps:wsp') and (ChildNamed(Els, I, 'wps:cNvCnPr') >= 0) then
+      begin
+        if (K < Length(Done)) and not Done[K] then
+        begin
+          E := I;
+          Done[K] := True;
+          Break;
+        end;
+        Inc(K);
+      end;
+    if E < 0 then
+      Break;
+    SId := CxnOf(Xml, Els, E, 'a:stCxn', SIdx);
+    EId := CxnOf(Xml, Els, E, 'a:endCxn', EIdx);
+    if ((SId = '') and (EId = '')) or not ConnectorEnds(Xml, Els, E, X1, Y1, X2, Y2) then
+      Continue;
+    SAng := -1;
+    EAng := -1;
+    K := Find(SId);
+    if K >= 0 then
+    begin
+      Sites := ElSites(Xml, Els, K);
+      if (SIdx >= 0) and (SIdx <= High(Sites)) then
+      begin
+        X1 := Sites[SIdx].X; Y1 := Sites[SIdx].Y; SAng := Sites[SIdx].Ang;
+      end;
+    end;
+    K := Find(EId);
+    if K >= 0 then
+    begin
+      Sites := ElSites(Xml, Els, K);
+      if (EIdx >= 0) and (EIdx <= High(Sites)) then
+      begin
+        X2 := Sites[EIdx].X; Y2 := Sites[EIdx].Y; EAng := Sites[EIdx].Ang;
+      end;
+    end;
+    Pr := PropsOf(Els, E);
+    Xf := ChildNamed(Els, Pr, 'a:xfrm');
+    if Xf < 0 then
+      Continue;
+    Prst := '';
+    if ChildNamed(Els, Pr, 'a:prstGeom') >= 0 then
+      Prst := AttrOf(Xml, Els[ChildNamed(Els, Pr, 'a:prstGeom')].A, 'prst');
+    Upright := (Pos('bent', Prst) = 1) or (Pos('curved', Prst) = 1);
+    Upright := Upright and ((SAng < 0) or (Abs(Sin(SAng * Pi / 180)) > 0.7)) and
+      ((EAng < 0) or (Abs(Sin(EAng * Pi / 180)) > 0.7)) and ((SAng >= 0) or (EAng >= 0));
+    NewXf := ConnectorXfrm(X1, Y1, X2, Y2, Upright);
+    if Copy(Xml, Els[Xf].A, Els[Xf].B - Els[Xf].A) <> NewXf then
+    begin
+      Xml := Copy(Xml, 1, Els[Xf].A - 1) + NewXf + Copy(Xml, Els[Xf].B, MaxInt);
+      Result := True;
+    end;
+  until False;
+end;
+
+const
+  EmuD = PD_SP_PER_PT / 12700;    { a canvas's units (sp) an EMU }
+
+function TParadeEdit.SidId(const Xml: string; Sid: Integer): string;
+var
+  Els: TXmlEls;
+  E: Integer;
+begin
+  Result := '';
+  Els := XmlElements(Xml);
+  E := SidElement(Els, Sid);
+  if E >= 0 then
+    Result := ElId(Xml, Els, E);
+end;
+
+function TParadeEdit.ShapeSites(Sid: Integer): TParadeDrawPoints;
+var
+  Xml: string;
+  Els: TXmlEls;
+  E, I: Integer;
+  S: TParadeSites;
+begin
+  Result := nil;
+  if not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, Sid);
+  if (E < 0) or (Els[E].Parent <> TopOfDrawing(Els)) or (ChildNamed(Els, E, 'wps:cNvCnPr') >= 0) then
+    Exit;
+  S := ElSites(Xml, Els, E);
+  SetLength(Result, Length(S));
+  for I := 0 to High(S) do
+  begin
+    Result[I].X := S[I].X * EmuD;
+    Result[I].Y := S[I].Y * EmuD;
+  end;
+end;
+
+function TParadeEdit.NearestSite(X, Y, Skip: Integer; out Sid, Site: Integer; out DX, DY: Double): Boolean;
+var
+  Xml: string;
+  Els: TXmlEls;
+  M: TParadeDrawMap;
+  Root, E, I, K: Integer;
+  S: TParadeSites;
+  P: TPoint;
+  Best, D: Double;
+begin
+  Result := False;
+  Sid := -1;
+  Site := -1;
+  DX := 0;
+  DY := 0;
+  if not FShapeOn or not KeptXml(Xml) or not DrawMap(M) then
+    Exit;
+  Els := XmlElements(Xml);
+  Root := TopOfDrawing(Els);
+  Best := 10;     { pixels }
+  K := -1;
+  for E := 0 to High(Els) do
+  begin
+    if (Els[E].Name = 'wps:wsp') or (Els[E].Name = 'pic:pic') then
+      Inc(K);
+    if (Els[E].Parent <> Root) or not ((Els[E].Name = 'wps:wsp') or (Els[E].Name = 'pic:pic')) or (K = Skip) or
+       (ChildNamed(Els, E, 'wps:cNvCnPr') >= 0) then
+      Continue;
+    S := ElSites(Xml, Els, E);
+    for I := 0 to High(S) do
+    begin
+      P := MapToClient(M, S[I].X * EmuD, S[I].Y * EmuD);
+      D := Hypot(P.X - X, P.Y - Y);
+      if D <= Best then
+      begin
+        Best := D;
+        Sid := K;
+        Site := I;
+        DX := S[I].X * EmuD;
+        DY := S[I].Y * EmuD;
+        Result := True;
+      end;
+    end;
+  end;
+end;
+
+function TParadeEdit.AddConnector(const Kind: string; X1, Y1, X2, Y2: Double; StartSid: Integer;
+  StartSite: Integer; EndSid: Integer; EndSite: Integer): Boolean;
+var
+  Xml, Sh, Cx, Id: string;
+begin
+  Result := False;
+  if not LineKind(Kind) or not FShapeOn or not KeptXml(Xml) then
+    Exit;
+  Cx := '';
+  if (StartSid >= 0) and (StartSite >= 0) then
+  begin
+    Id := SidId(Xml, StartSid);
+    if Id <> '' then
+      Cx := Cx + '<a:stCxn id="' + Id + '" idx="' + IntToStr(StartSite) + '"/>';
+  end;
+  if (EndSid >= 0) and (EndSite >= 0) then
+  begin
+    Id := SidId(Xml, EndSid);
+    if Id <> '' then
+      Cx := Cx + '<a:endCxn id="' + Id + '" idx="' + IntToStr(EndSite) + '"/>';
+  end;
+  Sh := ShapeXml(Kind, Round(Min(X1, X2) / EmuD), Round(Min(Y1, Y2) / EmuD), Max(1, Round(Abs(X2 - X1) / EmuD)),
+    Max(1, Round(Abs(Y2 - Y1) / EmuD)), X2 < X1, Y2 < Y1, HexRGB(FShapeFillDef), HexRGB(FShapeLineDef));
+  if Cx <> '' then
+    Sh := StringReplace(Sh, '<wps:cNvCnPr/>', '<wps:cNvCnPr>' + Cx + '</wps:cNvCnPr>', []);
+  Result := PutShapeXml(Sh, 'Insert shape');
+end;
+
+function TParadeEdit.ConnectorInfo(out X1, Y1, X2, Y2: Double; out StartSid, EndSid: Integer): Boolean;
+var
+  Xml, Id: string;
+  Els: TXmlEls;
+  E, I, K, Idx: Integer;
+begin
+  Result := False;
+  X1 := 0; Y1 := 0; X2 := 0; Y2 := 0;
+  StartSid := -1;
+  EndSid := -1;
+  if not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  if (E < 0) or (ChildNamed(Els, E, 'wps:cNvCnPr') < 0) or not ConnectorEnds(Xml, Els, E, X1, Y1, X2, Y2) then
+    Exit;
+  X1 := X1 * EmuD; Y1 := Y1 * EmuD; X2 := X2 * EmuD; Y2 := Y2 * EmuD;
+  for K := 0 to 1 do
+  begin
+    if K = 0 then
+      Id := CxnOf(Xml, Els, E, 'a:stCxn', Idx)
+    else
+      Id := CxnOf(Xml, Els, E, 'a:endCxn', Idx);
+    if Id = '' then
+      Continue;
+    for I := 0 to 100000 do
+    begin
+      if SidElement(Els, I) < 0 then
+        Break;
+      if ElId(Xml, Els, SidElement(Els, I)) = Id then
+      begin
+        if K = 0 then StartSid := I else EndSid := I;
+        Break;
+      end;
+    end;
+  end;
+  Result := True;
+end;
+
+function TParadeEdit.MoveConnectorEnd(End_: Boolean; X, Y: Double; Sid: Integer; Site: Integer): Boolean;
+var
+  Xml, Nv, Keep, Id: string;
+  Els: TXmlEls;
+  E, Pr, Xf, NvE, I, Idx: Integer;
+  X1, Y1, X2, Y2: Double;
+  SId_, EId_: string;
+  SIdx, EIdx: Integer;
+begin
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  NvE := -1;
+  if E >= 0 then
+    NvE := ChildNamed(Els, E, 'wps:cNvCnPr');
+  if (NvE < 0) or not ConnectorEnds(Xml, Els, E, X1, Y1, X2, Y2) then
+    Exit;
+  SId_ := CxnOf(Xml, Els, E, 'a:stCxn', SIdx);
+  EId_ := CxnOf(Xml, Els, E, 'a:endCxn', EIdx);
+  Id := '';
+  if (Sid >= 0) and (Site >= 0) then
+    Id := SidId(Xml, Sid);
+  if End_ then
+  begin
+    X2 := X / EmuD; Y2 := Y / EmuD; EId_ := Id; EIdx := Site;
+  end
+  else
+  begin
+    X1 := X / EmuD; Y1 := Y / EmuD; SId_ := Id; SIdx := Site;
+  end;
+  { what the connector's own properties keep (its locks), and its ends' joins as they are now }
+  Keep := '';
+  for I := NvE + 1 to High(Els) do
+    if (Els[I].Parent = NvE) and (Els[I].Name = 'a:cxnSpLocks') then
+      Keep := Copy(Xml, Els[I].A, Els[I].B - Els[I].A);
+  Nv := '<wps:cNvCnPr>' + Keep;
+  if SId_ <> '' then
+    Nv := Nv + '<a:stCxn id="' + SId_ + '" idx="' + IntToStr(SIdx) + '"/>';
+  if EId_ <> '' then
+    Nv := Nv + '<a:endCxn id="' + EId_ + '" idx="' + IntToStr(EIdx) + '"/>';
+  Nv := Nv + '</wps:cNvCnPr>';
+  Pr := PropsOf(Els, E);
+  Xf := ChildNamed(Els, Pr, 'a:xfrm');
+  if Xf < 0 then
+    Exit;
+  { the box first (it comes after the joins in the XML), then the joins }
+  Xml := Copy(Xml, 1, Els[Xf].A - 1) + ConnectorXfrm(X1, Y1, X2, Y2, False) + Copy(Xml, Els[Xf].B, MaxInt);
+  Xml := Copy(Xml, 1, Els[NvE].A - 1) + Nv + Copy(Xml, Els[NvE].B, MaxInt);
+  Result := ApplyKeptXml(Xml, 'Connector', FShapeSid);
+end;
+
 function TParadeEdit.AddShape(const Kind: string; X0, Y0, X1, Y1: Double; FlipH: Boolean;
   FlipV: Boolean): Boolean;
 const
@@ -8548,6 +9099,7 @@ end;
 
 function TParadeEdit.SetShapeBox(Sid: Integer; X0, Y0, X1, Y1: Double): Boolean;
 var
+  Routed: string;
   J, It, Mk: TJSONObject;
   Items: TJSONArray;
   I, K, Mi, Me: Integer;
@@ -8626,6 +9178,12 @@ begin
       Xml := J.Strings['xml'];
       PatchKeptXml(Xml, Sid, (X0 - OX0) * C / FSX, (Y0 - OY0) * C / FSY, KX, KY);
       J.Strings['xml'] := Xml;
+      Routed := Xml;
+      if RouteConnectors(Routed) then
+      begin   { connectors joined to it: the drawing made again from the XML, with them moved too }
+        Result := ApplyKeptXml(MarkTextBoxes(Routed), 'Shape', Sid);
+        Exit;
+      end;
     end;
     Result := ReplaceDrawing(FShapeAt, J.AsJSON, 'Shape');
     FShapeOn := True;     { the same shape, still selected }
@@ -8897,6 +9455,22 @@ begin
   Idx := -1;
   if not FShapeOn or (FDrawKind <> '') then
     Exit;
+  if (FShapeSid >= 0) and (Length(FShapeMore) = 0) and not FNodeOn and DrawMap(M) and
+     ConnectorInfo(U, V, PW, PH, HX, HY) then
+  begin   { a connector: its ends, to drag on to other shapes }
+    P := MapToClient(M, U, V);
+    if (Abs(X - P.X) <= 6) and (Abs(Y - P.Y) <= 6) then
+    begin
+      Idx := 0;
+      Exit(15);
+    end;
+    P := MapToClient(M, PW, PH);
+    if (Abs(X - P.X) <= 6) and (Abs(Y - P.Y) <= 6) then
+    begin
+      Idx := 1;
+      Exit(15);
+    end;
+  end;
   if (FShapeSid >= 0) and (Length(FShapeMore) = 0) and ShapeGeom(FShapeSid, G) and DrawMap(M) then
   begin
     if FNodeOn then
@@ -9545,6 +10119,37 @@ begin
 end;
 
 { the freeform, curve or scribble being drawn, and the line on to the mouse }
+procedure TParadeEdit.PaintSites;
+var
+  Xml: string;
+  Els: TXmlEls;
+  M: TParadeDrawMap;
+  Root, E, I: Integer;
+  S: TParadeSites;
+  P: TPoint;
+begin
+  if not KeptXml(Xml) or not DrawMap(M) then
+    Exit;
+  Els := XmlElements(Xml);
+  Root := TopOfDrawing(Els);
+  Canvas.Pen.Color := $00D77800;
+  Canvas.Pen.Style := psSolid;
+  Canvas.Pen.Width := 1;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Brush.Color := clWhite;
+  for E := 0 to High(Els) do
+    if (Els[E].Parent = Root) and ((Els[E].Name = 'wps:wsp') or (Els[E].Name = 'pic:pic')) and
+       (ChildNamed(Els, E, 'wps:cNvCnPr') < 0) then
+    begin
+      S := ElSites(Xml, Els, E);
+      for I := 0 to High(S) do
+      begin
+        P := MapToClient(M, S[I].X * EmuD, S[I].Y * EmuD);
+        Canvas.Ellipse(P.X - 3, P.Y - 3, P.X + 4, P.Y + 4);
+      end;
+    end;
+end;
+
 procedure TParadeEdit.PaintDrawPath;
 var
   M: TParadeDrawMap;
@@ -9552,6 +10157,8 @@ var
   Pts: array of TPoint;
   I, N: Integer;
 begin
+  if LineKind(FDrawKind) then
+    PaintSites;     { a connector to draw: where it can be joined }
   if (Length(FDrawPts) < 2) or not DrawMap(M) then
     Exit;
   if (FDrawKind = 'curve') and (Length(FDrawPts) >= 4) then
@@ -9784,6 +10391,14 @@ begin
     Exit;
   end;
   K := ShapeHandleAt(X, Y, I);
+  if K = 15 then
+  begin   { a connector's end }
+    FShapeDrag := 15;
+    FDragIdx := I;
+    FShapeFrom := Point(X, Y);
+    FBandTo := FShapeFrom;
+    Exit(True);
+  end;
   if K = 14 then
   begin   { the whole drawing: moved where it is dropped }
     FShapeDrag := 14;
@@ -9840,7 +10455,7 @@ var
   PX, PY, W, H, JW, JH, DX, DY, K: Double;
   Cp: TPoint;
 begin
-  if FShapeDrag in [13, 14] then
+  if FShapeDrag in [13, 14, 15] then
   begin
     FBandTo := Point(X, Y);
     Invalidate;
@@ -10400,7 +11015,7 @@ begin
         1, 5: Want := crSizeNS;
         3, 7: Want := crSizeWE;
         8, 14: Want := crSizeAll;
-        10, 11: Want := crHandPoint;
+        10, 11, 15: Want := crHandPoint;
         12: Want := crCross;
       end;
     HoverCursor(Want);
@@ -10414,6 +11029,10 @@ end;
 
 procedure TParadeEdit.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
+  DM: TParadeDrawMap;
+  PS, PE: TPoint;
+  SS, SI, ES, EI: Integer;
+  SX, SY, EX, EY: Double;
   D, I: Integer;
   P: pd_pos;
   Boxes: TParadeShapeBoxes;
@@ -10429,7 +11048,20 @@ begin
     D := FShapeDrag;
     FShapeDrag := -1;
     Moved := (Abs(X - FShapeFrom.X) > 2) or (Abs(Y - FShapeFrom.Y) > 2);
-    if D = 14 then
+    if D = 15 then
+    begin   { a connector's end: on the site it is dropped by, or just there }
+      if Moved then
+      begin
+        if not NearestSite(X, Y, FShapeSid, SS, SI, SX, SY) then
+        begin
+          SS := -1;
+          SI := -1;
+          ClientToDrawing(X, Y, SX, SY);
+        end;
+        MoveConnectorEnd(FDragIdx = 1, SX, SY, SS, SI);
+      end;
+    end
+    else if D = 14 then
     begin   { the whole drawing dropped: floating, where it is now; in the text, at the text there }
       if Moved and (SelectedFloat <> 0) then
         MoveFloatBy(Round((X - FShapeFrom.X) / PxPerSp), Round((Y - FShapeFrom.Y) / PxPerSp))
@@ -10448,6 +11080,22 @@ begin
       K := FDrawKind;
       FDrawKind := '';
       Cursor := FDrawCursor;
+      if Moved and LineKind(K) and DrawMap(DM) then
+      begin   { a connector: its ends on the sites of shapes they are dropped by }
+        PS := MapToClient(DM, FShapeNew[0], FShapeNew[1]);
+        PE := Point(X, Y);
+        if not NearestSite(PS.X, PS.Y, -1, SS, SI, SX, SY) then
+        begin
+          SX := FShapeNew[0]; SY := FShapeNew[1];
+        end;
+        if not NearestSite(PE.X, PE.Y, -1, ES, EI, EX, EY) then
+        begin
+          EX := FShapeNew[2]; EY := FShapeNew[3];
+        end;
+        AddConnector(K, SX, SY, EX, EY, SS, SI, ES, EI);
+        Invalidate;
+        Exit;
+      end;
       if not Moved then
       begin
         FShapeNew[2] := FShapeNew[0] + PD_SP_PER_PT * 72;
