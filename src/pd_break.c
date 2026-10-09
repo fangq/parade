@@ -242,6 +242,21 @@ static void measure(const ctx_t* c, int32_t a, int32_t b, measure_t* m) {
         m->nat += p->items[ib].width;
     }
 
+    if (p->items[ib].flags & PD_FLAG_FINAL) {   /* TeX's \unskip: the spaces the paragraph ends with hang */
+        int32_t k = ib - 1;
+
+        while (k >= s && (p->items[k].flags & PD_FLAG_FINAL)) {
+            k--;
+        }
+
+        for (; k >= s && p->items[k].type == PD_ITEM_GLUE && p->items[k].stretch_order == 0 &&
+                !(p->items[k].flags & PD_FLAG_TAB); k--) {
+            m->nat -= p->items[k].width;
+            m->st -= p->items[k].stretch;
+            m->sh -= p->items[k].shrink;
+        }
+    }
+
     if (c->expand > 0) {    /* glyphs may widen or narrow a little */
         int64_t bx = (p->sum_bx[ib] - p->sum_bx[s]) * c->expand / 1000;
 
@@ -726,7 +741,7 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
                     step = snapped - (snapped - step) / 2;
                 }
 
-                y += step > asc + desc ? (pd_sp)(step - asc - desc) : 0;
+                y += (pd_sp)(step - asc - desc);   /* a multiple under 1 takes from its top, as Word does */
             }
         } else {
             int64_t step = ((int64_t)prev_desc + asc + gap) * prm->line_spacing / 1000;

@@ -564,6 +564,8 @@ type
     function SlideCount: Integer;
     function CurrentSlide: Integer;
     function GoToSlide(Index: Integer): Boolean;
+    { a slide's page at the top of the view, the selection as it is }
+    procedure ShowSlide(Index: Integer);
     function NewSlide(After: Integer; Copy: Boolean = False): Boolean;
     function DeleteSlide(Index: Integer): Boolean;
     function MoveSlide(Index, ToIndex: Integer): Boolean;
@@ -7914,8 +7916,6 @@ end;
 function TParadeEdit.GoToSlide(Index: Integer): Boolean;
 var
   P: pd_pos;
-  Pg: Int32;
-  X0, Y0, X1, Y1: Double;
 begin
   Result := False;
   if (Index < 0) or (Index >= SlideCount) or
@@ -7924,13 +7924,23 @@ begin
   ClearShapeSelection;
   SetCaret(P, False);
   EnsureCanvas;
-  if ShapePageBox(P, -1, Pg, X0, Y0, X1, Y1) then
-  begin   { its page at the top of the view }
-    FScrollY := Max(0, PageTop(Pg) + FScrollY - FPageGap div 2);
-    UpdateScrollBar;
-  end;
-  Invalidate;
+  ShowSlide(Index);
   Result := True;
+end;
+
+procedure TParadeEdit.ShowSlide(Index: Integer);
+var
+  P: pd_pos;
+  Pg: Int32;
+  X0, Y0, X1, Y1: Double;
+begin
+  if (Index < 0) or (Index >= SlideCount) or
+     not SectionCanvas(FDoc, pd_doc_child(FDoc, pd_doc_root(FDoc), Index), P) or
+     not ShapePageBox(P, -1, Pg, X0, Y0, X1, Y1) then
+    Exit;
+  FScrollY := Max(0, PageTop(Pg) + FScrollY - FPageGap div 2);     { its page at the top of the view }
+  UpdateScrollBar;
+  Invalidate;
 end;
 
 function TParadeEdit.NewSlide(After: Integer; Copy: Boolean): Boolean;

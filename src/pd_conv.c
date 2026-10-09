@@ -626,6 +626,12 @@ static pd_format_id bld_format(pd_bld* b) {
     return b->cp.mask || b->cstyle ? pd_doc_format(b->d, b->cstyle, &b->cp) : 0;
 }
 
+void bld_mark_format(pd_bld* b) {
+    if (b->para && !b->pend.n) {
+        pd_doc_set_mark_format(b->d, b->para, bld_format(b));
+    }
+}
+
 void bld_text(pd_bld* b, const char* s, size_t n) {
     pd_format_id f;
     size_t i, j;

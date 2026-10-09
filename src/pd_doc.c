@@ -2844,6 +2844,15 @@ pd_status pd_doc_set_char_props(pd_doc* d, pd_range r, const pd_char_props* prop
     return for_range(d, r, 0, &cp, 0, 0, "Format");
 }
 
+/* an empty paragraph's format, from a file (its paragraph mark's): what its line is sized by */
+void pd_doc_set_mark_format(pd_doc* d, pd_block_id para, pd_format_id fmt) {
+    blk* b = para_of(d, para);
+
+    if (b && b->st.len == 0 && (!fmt || format_of(d, fmt))) {
+        b->st.empty_format = fmt;
+    }
+}
+
 pd_status pd_doc_set_format(pd_doc* d, pd_range r, pd_format_id fmt) {
     return d && format_of(d, fmt) ? for_range(d, r, 3, NULL, 0, (pd_style_id)fmt, "Format") : PD_ERR_ARG;
 }

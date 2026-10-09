@@ -223,6 +223,11 @@ typedef struct {
     char major[64], minor[64];  /* the theme's fonts: headings, body */
     int docpr;
     long long sw, sh;           /* the slide size (EMU) */
+    int alias[4];               /* bg1, tx1, bg2, tx2: the theme's colours they are (the master's clrMap) */
+    char fonts[96][64];         /* the faces the text names, for the font table: what each is like */
+    int nfonts;
+    const xdoc* tstyles;        /* ppt/tableStyles.xml, NULL if none */
+    int cells;                  /* tables' cell fills made shapes: their ids */
 } pptx;
 
 /* a path relative to a part's folder ("../media/a.png" from "ppt/slides/slide1.xml") */
@@ -377,26 +382,29 @@ static uint32_t hexrgb(const char* v) {
     return (uint32_t)strtoul(v, NULL, 16) & 0xFFFFFFu;
 }
 
-static int theme_slot(const char* v) {
-    static const char* names[] = { "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5",
-                                   "accent6", "hlink", "folHlink"
-                                 };
+static const char* const SLOTS[12] = { "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5",
+                                       "accent6", "hlink", "folHlink"
+                                     };
+
+/* a scheme colour's place in the theme: through the slide's colour map for the background and text ones */
+static int theme_slot_of(const pptx* P, const char* v) {
+    const char** names = (const char**)SLOTS;
     int k;
 
-    if (!strcmp(v, "tx1")) {
-        return 0;
-    }
-
     if (!strcmp(v, "bg1")) {
-        return 1;
+        return P->alias[0];
     }
 
-    if (!strcmp(v, "tx2")) {
-        return 2;
+    if (!strcmp(v, "tx1")) {
+        return P->alias[1];
     }
 
     if (!strcmp(v, "bg2")) {
-        return 3;
+        return P->alias[2];
+    }
+
+    if (!strcmp(v, "tx2")) {
+        return P->alias[3];
     }
 
     for (k = 0; k < 12; k++) {
@@ -441,10 +449,13 @@ static long colour_of(const pptx* P, const xdoc* d, int c) {
 
     if (!strcmp(d->v[c].name, "srgbClr") && xd_attr(d, c, "val", v, sizeof(v))) {
         rgb = hexrgb(v);
-    } else if (!strcmp(d->v[c].name, "schemeClr") && xd_attr(d, c, "val", v, sizeof(v)) && theme_slot(v) >= 0) {
-        rgb = P->theme[theme_slot(v)];
+    } else if (!strcmp(d->v[c].name, "schemeClr") && xd_attr(d, c, "val", v, sizeof(v)) && theme_slot_of(P, v) >= 0) {
+        rgb = P->theme[theme_slot_of(P, v)];
     } else if (!strcmp(d->v[c].name, "sysClr") && xd_attr(d, c, "lastClr", v, sizeof(v))) {
         rgb = hexrgb(v);
+    } else if (!strcmp(d->v[c].name, "scrgbClr")) {   /* percentages, linear */
+        rgb = ((uint32_t)(xd_int(d, c, "r", 0) * 255 / 100000) << 16) | ((uint32_t)(xd_int(d, c, "g", 0) * 255 / 100000) << 8) |
+              (uint32_t)(xd_int(d, c, "b", 0) * 255 / 100000);
     } else if (!strcmp(d->v[c].name, "prstClr") && xd_attr(d, c, "val", v, sizeof(v))) {
         rgb = !strcmp(v, "white") ? 0xFFFFFF : !strcmp(v, "red") ? 0xFF0000 : !strcmp(v, "blue") ? 0x0000FF : 0;
     } else {
@@ -513,6 +524,85 @@ static void theme_load(pptx* P, const char* path) {
     xd_attr(&t.x, f, "typeface", P->minor, sizeof(P->minor));
     part_free(&t);
 }
+
+/* markup copied with its scheme colours made the RGB the slide's theme and colour map give them -- the .docx made
+   has one theme, and a presentation a theme for each master and a colour map for each slide */
+static void put_mapped(const pptx* P, pd_buf* o, const char* s, size_t n) {
+    static const char open_[] = "<a:schemeClr val=\"", close_[] = "</a:schemeClr>";
+    char conv[64];
+    int depth = 0;
+    size_t i = 0;
+
+    while (i < n) {
+        if (s[i] == '<' && n - i >= sizeof(open_) - 1 && !memcmp(s + i, open_, sizeof(open_) - 1)) {
+            size_t j = i + sizeof(open_) - 1, k = 0;
+            char v[40];
+            int slot, self;
+
+            while (j < n && s[j] != '"' && k < sizeof(v) - 1) {
+                v[k++] = s[j++];
+            }
+
+            v[k] = '\0';
+            slot = theme_slot_of(P, v);
+
+            for (k = j; k < n && s[k] != '>'; k++) {
+            }
+
+            self = k > 0 && k < n && s[k - 1] == '/';
+
+            if (slot >= 0) {
+                pb_printf(o, "<a:srgbClr val=\"%06X\"", (unsigned)(P->theme[slot] & 0xFFFFFFu));
+                i = j + 1;  /* after its value's closing quote: its other attributes and its end as they are */
+
+                if (!self && depth < 64) {
+                    conv[depth++] = 1;
+                }
+
+                continue;
+            }
+
+            if (!self && depth < 64) {
+                conv[depth++] = 0;
+            }
+        } else if (s[i] == '<' && n - i >= sizeof(close_) - 1 && !memcmp(s + i, close_, sizeof(close_) - 1)) {
+            int was = depth > 0 ? conv[--depth] : 0;
+
+            pb_puts(o, was ? "</a:srgbClr>" : close_);
+            i += sizeof(close_) - 1;
+            continue;
+        }
+
+        pb_putc(o, s[i++]);
+    }
+}
+
+static void xd_raw_mapped(const pptx* P, pd_buf* o, const xdoc* d, int n) {
+    put_mapped(P, o, d->s + d->v[n].a, d->v[n].b - d->v[n].a);
+}
+
+/* the colour map a part gives (p:clrMap, or p:clrMapOvr's a:overrideClrMapping): bg1, tx1, bg2, tx2 */
+static void clrmap_load(pptx* P, const xdoc* d) {
+    static const char* names[4] = { "bg1", "tx1", "bg2", "tx2" };
+    int m = xd_find(d, "clrMap"), k, q;
+
+    if (m < 0) {
+        m = xd_find(d, "overrideClrMapping");
+    }
+
+    for (k = 0; m >= 0 && k < 4; k++) {
+        char v[32];
+
+        if (xd_attr(d, m, names[k], v, sizeof(v))) {
+            for (q = 0; q < 4; q++) {
+                if (!strcmp(v, SLOTS[q])) {
+                    P->alias[k] = q;
+                }
+            }
+        }
+    }
+}
+
 
 /* ---- placeholders: what a slide's take from its layout and master ---- */
 
@@ -586,6 +676,10 @@ typedef struct {
     long font_colour;           /* the shape's style's text colour (fontRef), -1 none */
     double scale, spacing;      /* autofit: the font's scale, the line spacing's */
     int slide_no;               /* for a slide-number field */
+    int force_bold;             /* a table style's bold text */
+    int bullet;                 /* while its bullet is put: */
+    long bu_colour;             /* the bullet's colour (buClr), -1 the text's */
+    double bu_scale;            /* and its size (buSzPct), 0 the text's */
 } tctx;
 
 /* the levels' properties for level L: the paragraph's own, the text body's list styles, the placeholders', the
@@ -666,6 +760,10 @@ static long rpr_colour(const tctx* T, const xdoc* d, int rpr) {
     long c = rpr >= 0 ? fill_colour(T->P, d, rpr) : -1;
     int k;
 
+    if (c < 0 && T->font_colour >= 0) {
+        return T->font_colour;  /* the shape's style's (or the table style's) over the master's defaults */
+    }
+
     for (k = 0; c < 0 && k < T->nlvl; k++) {
         int dr = xd_kid(T->lvl[k].d, T->lvl[k].n, "defRPr");
 
@@ -737,11 +835,21 @@ static int font_weight(char* face) {
 static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
     char v[80];
     long sz = 1800, c;
-    int heavy;
+    int heavy, link;
 
     pb_puts(o, "<w:rPr>");
     rpr_font(T, d, rpr, v, sizeof(v));
     heavy = font_weight(v);
+    {   /* the face, for the font table */
+        int q;
+
+        for (q = 0; q < T->P->nfonts && strcmp(T->P->fonts[q], v); q++) {
+        }
+
+        if (q == T->P->nfonts && q < 96) {
+            snprintf(T->P->fonts[T->P->nfonts++], sizeof(T->P->fonts[0]), "%s", v);
+        }
+    }
     pb_puts(o, "<w:rFonts w:ascii=\"");
     put_esc(o, v);
     pb_puts(o, "\" w:hAnsi=\"");
@@ -750,7 +858,7 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
     put_esc(o, v);
     pb_puts(o, "\"/>");
 
-    if (heavy || (rpr_attr(T, d, rpr, "b", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true")))) {
+    if (heavy || T->force_bold || (rpr_attr(T, d, rpr, "b", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true")))) {
         pb_puts(o, "<w:b/>");
     }
 
@@ -758,7 +866,9 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
         pb_puts(o, "<w:i/>");
     }
 
-    if (rpr_attr(T, d, rpr, "u", v, sizeof(v)) && strcmp(v, "none")) {
+    link = !T->bullet && rpr >= 0 && xd_kid(d, rpr, "hlinkClick") >= 0;
+
+    if (link || (rpr_attr(T, d, rpr, "u", v, sizeof(v)) && strcmp(v, "none"))) {
         pb_puts(o, "<w:u w:val=\"single\"/>");
     }
 
@@ -770,14 +880,15 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
         pb_printf(o, "<w:vertAlign w:val=\"%s\"/>", atoi(v) > 0 ? "superscript" : "subscript");
     }
 
-    c = rpr_colour(T, d, rpr);
+    /* a link in the theme's link colour */
+    c = T->bullet && T->bu_colour >= 0 ? T->bu_colour : link ? (long)T->P->theme[10] : rpr_colour(T, d, rpr);
     pb_printf(o, "<w:color w:val=\"%06lX\"/>", (unsigned long)c & 0xFFFFFFul);
 
     if (rpr_attr(T, d, rpr, "sz", v, sizeof(v))) {
         sz = atol(v);
     }
 
-    sz = (long)(sz * T->scale + 0.5);
+    sz = (long)(sz * T->scale * (T->bullet && T->bu_scale > 0 ? T->bu_scale : 1) + 0.5);
     pb_printf(o, "<w:sz w:val=\"%ld\"/><w:szCs w:val=\"%ld\"/></w:rPr>", (sz + 25) / 50, (sz + 25) / 50);
 }
 
@@ -803,23 +914,88 @@ static int spacing_of(const xref r, int* pct) {
     return -1;
 }
 
+/* a bullet character as Unicode: a symbol font's (Wingdings, Symbol; its code as is or at U+F0xx) as the
+   character it shows, a plain bullet when not known */
+static const char* symbol_bullet(const char* ch, const char* face) {
+    static const struct {
+        const char* face;
+        unsigned code;
+        const char* u;
+    } map[] = {
+        { "Wingdings", 0xA7, "\xE2\x96\xAA" }, { "Wingdings", 0x6C, "\xE2\x97\x8F" }, { "Wingdings", 0x6E, "\xE2\x96\xA0" },
+        { "Wingdings", 0x6F, "\xE2\x96\xA1" }, { "Wingdings", 0x71, "\xE2\x9D\x91" }, { "Wingdings", 0x75, "\xE2\x97\x86" },
+        { "Wingdings", 0x76, "\xE2\x9D\x96" }, { "Wingdings", 0x9F, "\xE2\x80\xA2" }, { "Wingdings", 0xA1, "\xE2\x97\x8B" },
+        { "Wingdings", 0xD8, "\xE2\x9E\xA2" }, { "Wingdings", 0xE0, "\xE2\x86\x92" }, { "Wingdings", 0xE8, "\xE2\x9E\x94" },
+        { "Wingdings", 0xFC, "\xE2\x9C\x93" }, { "Wingdings", 0xFB, "\xE2\x9C\x97" },
+        { "Wingdings 2", 0x97, "\xE2\x96\xAA" }, { "Wingdings 2", 0x98, "\xE2\x96\xAA" }, { "Wingdings 2", 0x9E, "\xE2\x97\x8F" },
+        { "Wingdings 2", 0xA2, "\xE2\x96\xA0" }, { "Wingdings 2", 0x50, "\xE2\x9C\x93" },
+        { "Wingdings 3", 0x7D, "\xE2\x96\xB8" }, { "Wingdings 3", 0x75, "\xE2\x96\xB6" }, { "Wingdings 3", 0xC6, "\xE2\x9E\x9C" },
+        { "Symbol", 0xB7, "\xE2\x80\xA2" }, { "Symbol", 0x2D, "\xE2\x80\x93" }, { "Symbol", 0xAE, "\xE2\x86\x92" }
+    };
+    const unsigned char* u = (const unsigned char*)ch;
+    unsigned code;
+    size_t k;
+    int sym = !strncmp(face, "Wingdings", 9) || !strcmp(face, "Symbol") || !strcmp(face, "Webdings") ||
+              !strcmp(face, "Marlett");
+
+    if (!u[0]) {
+        return "\xE2\x80\xA2";
+    }
+
+    code = u[0] < 0x80 ? u[0] : (u[0] & 0xE0) == 0xC0 && u[1] ? ((u[0] & 0x1Fu) << 6) | (u[1] & 0x3F) :
+           (u[0] & 0xF0) == 0xE0 && u[1] && u[2] ? ((u[0] & 0x0Fu) << 12) | ((u[1] & 0x3Fu) << 6) | (u[2] & 0x3F) : 0;
+
+    if (code >= 0xF000 && code <= 0xF0FF) {
+        code -= 0xF000;
+        sym = 1;
+    }
+
+    if (!sym) {
+        return ch;
+    }
+
+    for (k = 0; k < sizeof(map) / sizeof(map[0]); k++) {
+        if (map[k].code == code && (!strcmp(map[k].face, face) || (!face[0] && !strcmp(map[k].face, "Wingdings")))) {
+            return map[k].u;
+        }
+    }
+
+    return "\xE2\x80\xA2";
+}
+
 static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum) {
     int ppr = xd_kid(d, p, "pPr"), k, first_rpr = -1, pct, sp, any = 0;
     char v[64], bu[16] = "";
     xref r;
     long long marl, ind;
+    long bu_colour = -1;
+    double bu_scale = 0, line;
 
+    for (k = d->v[p].kid; k >= 0; k = d->v[k].next) {
+        if (!strcmp(d->v[k].name, "r") && first_rpr < 0) {
+            first_rpr = xd_kid(d, k, "rPr");
+            any = 1;
+        }
+    }
+
+    if (!any) {
+        first_rpr = xd_kid(d, p, "endParaRPr");
+    }
+
+    /* a line of its text, in twips: PowerPoint's 1.2 times its size */
+    line = (rpr_attr(T, d, first_rpr, "sz", v, sizeof(v)) ? atof(v) : 1800) * T->scale * 1.2 / 5;
     pb_puts(o, "<w:p><w:pPr>");
-    /* line spacing and the space around */
+    /* line spacing and the space around (a percentage: of a line); autofit's line spacing reduction takes from
+       the space around too */
     pb_puts(o, "<w:spacing");
     sp = spacing_of(ppr_kid(T, d, ppr, "spcBef"), &pct);
 
-    if (sp >= 0 && !pct) {
-        pb_printf(o, " w:before=\"%d\"", sp);
+    if (sp >= 0) {
+        pb_printf(o, " w:before=\"%d\"", (int)((pct ? sp * line / 240 : sp) * T->spacing + 0.5));
     }
 
     sp = spacing_of(ppr_kid(T, d, ppr, "spcAft"), &pct);
-    pb_printf(o, " w:after=\"%d\"", sp >= 0 && !pct ? sp : 0);
+    pb_printf(o, " w:after=\"%d\"", sp >= 0 ? (int)((pct ? sp * line / 240 : sp) * T->spacing + 0.5) : 0);
     sp = spacing_of(ppr_kid(T, d, ppr, "lnSpc"), &pct);
 
     if (sp >= 0 && pct) {
@@ -847,17 +1023,6 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
     }
 
     /* the paragraph mark's size: an empty line as tall as its text would be */
-    for (k = d->v[p].kid; k >= 0; k = d->v[k].next) {
-        if (!strcmp(d->v[k].name, "r") && first_rpr < 0) {
-            first_rpr = xd_kid(d, k, "rPr");
-            any = 1;
-        }
-    }
-
-    if (!any) {
-        first_rpr = xd_kid(d, p, "endParaRPr");
-    }
-
     put_rpr(o, T, d, first_rpr);
     pb_puts(o, "</w:pPr>");
 
@@ -870,12 +1035,19 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
         if (a.n >= 0) {
             snprintf(bu, sizeof(bu), "%d.", ++*autonum);
         } else if (c.n >= 0) {
-            xd_attr(c.d, c.n, "char", v, sizeof(v));
-            snprintf(bu, sizeof(bu), "%s", strcmp(v, "") ? v : "\xE2\x80\xA2");
+            xref f = ppr_kid(T, d, ppr, "buFont");
+            char face[64] = "";
 
-            if ((unsigned char)bu[0] < 0x80 && strchr("\xA7lnqvu\xD8\xFC", bu[0])) {
-                snprintf(bu, sizeof(bu), "\xE2\x80\xA2");   /* a Wingdings or Symbol one: a plain bullet */
-            }
+            xd_attr(c.d, c.n, "char", v, sizeof(v));
+            xd_attr(f.d, f.n, "typeface", face, sizeof(face));
+            snprintf(bu, sizeof(bu), "%s", symbol_bullet(v, face));
+        }
+
+        if (bu[0]) {
+            xref k2 = ppr_kid(T, d, ppr, "buClr"), z = ppr_kid(T, d, ppr, "buSzPct");
+
+            bu_colour = k2.n >= 0 && k2.d->v[k2.n].kid >= 0 ? colour_of(T->P, k2.d, k2.d->v[k2.n].kid) : -1;
+            bu_scale = z.n >= 0 ? xd_int(z.d, z.n, "val", 100000) / 100000.0 : 0;
         }
     }
 
@@ -884,8 +1056,13 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
     }
 
     if (bu[0]) {
+        tctx B = *T;
+
+        B.bullet = 1;
+        B.bu_colour = bu_colour;
+        B.bu_scale = bu_scale;
         pb_puts(o, "<w:r>");
-        put_rpr(o, T, d, first_rpr);
+        put_rpr(o, &B, d, first_rpr);
         pb_puts(o, "<w:t xml:space=\"preserve\">");
         put_esc(o, bu);
         pb_puts(o, "</w:t></w:r><w:r>");
@@ -930,11 +1107,34 @@ typedef struct {
     const xdoc* pres;           /* presentation.xml: its default text style */
     int pres_style;
     int id_base;                /* the part's shape ids made apart from the other parts' */
+    const xdoc* dm;             /* a SmartArt's data model, while its drawing is put */
     pd_buf* o;
 } conv;
 
-/* an element under another name: its attributes and inside kept */
-static void put_renamed(pd_buf* o, const xdoc* d, int n, const char* name) {
+/* a SmartArt drawing shape's text in the data model (its drawing a copy PowerPoint may not have redrawn): the
+   point its presentation point (the shape's modelId) presents */
+static int dm_text(const xdoc* m, const char* model) {
+    char v[64], src[64] = "";
+    int k;
+
+    for (k = 0; k < m->nv && !src[0]; k++) {
+        if (!strcmp(m->v[k].name, "cxn") && xd_attr(m, k, "type", v, sizeof(v)) && !strcmp(v, "presOf") &&
+                xd_attr(m, k, "destId", v, sizeof(v)) && !strcmp(v, model)) {
+            xd_attr(m, k, "srcId", src, sizeof(src));
+        }
+    }
+
+    for (k = 0; src[0] && k < m->nv; k++) {
+        if (!strcmp(m->v[k].name, "pt") && xd_attr(m, k, "modelId", v, sizeof(v)) && !strcmp(v, src)) {
+            return xd_kid(m, k, "t");
+        }
+    }
+
+    return -1;
+}
+
+/* an element under another name: its attributes and inside kept, its colours the slide's */
+static void put_renamed(const pptx* P, pd_buf* o, const xdoc* d, int n, const char* name) {
     pb_printf(o, "<%s", name);
 
     if (d->v[n].alen) {
@@ -944,7 +1144,7 @@ static void put_renamed(pd_buf* o, const xdoc* d, int n, const char* name) {
 
     if (d->v[n].ib > d->v[n].ia) {
         pb_putc(o, '>');
-        xd_inner(o, d, n);
+        put_mapped(P, o, d->s + d->v[n].ia, d->v[n].ib - d->v[n].ia);
         pb_printf(o, "</%s>", name);
     } else {
         pb_puts(o, "/>");
@@ -1026,7 +1226,7 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
 
     ts = C->master ? xd_find(&C->master->x, "txStyles") : -1;
 
-    if (ts >= 0) {
+    if (ts >= 0 && (kind != 0 || lsp >= 0 || msp >= 0)) {  /* a text box not a placeholder: the presentation's */
         ds[nn] = &C->master->x;
         ns[nn++] = xd_kid(&C->master->x, ts, kind == 1 ? "titleStyle" : kind == 2 ? "bodyStyle" : "otherStyle");
     }
@@ -1034,6 +1234,16 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
     if (C->pres && C->pres_style >= 0) {
         ds[nn] = C->pres;
         ns[nn++] = C->pres_style;
+    }
+
+    if (C->dm) {
+        char id[64];
+        int t;
+
+        if (xd_attr(d, sp, "modelId", id, sizeof(id)) && (t = dm_text(C->dm, id)) >= 0) {
+            d = C->dm;      /* the text it has now */
+            tx = t;
+        }
     }
 
     pb_puts(C->o, "<wps:txbx><w:txbxContent>");
@@ -1086,7 +1296,7 @@ static int has_text(const xdoc* d, int tx) {
 }
 
 /* a shape's spPr: its own, with where it is and its geometry from its placeholders when it has not its own */
-static int put_sppr(conv* C, ppart* pt, int sp, int lsp, int msp, const char* el) {
+static int put_sppr(conv* C, ppart* pt, int sp, int lsp, int msp, const char* el, int widen) {
     const xdoc* d = &pt->x;
     int spr = xd_kid(d, sp, "spPr"), xf = xd_kid(d, spr, "xfrm"), k, geom = 0;
     xref pxf = { d, xf };
@@ -1104,7 +1314,24 @@ static int put_sppr(conv* C, ppart* pt, int sp, int lsp, int msp, const char* el
     }
 
     pb_printf(C->o, "<%s>", el);
-    xd_raw(C->o, pxf.d, pxf.n);
+
+    if (widen) {    /* text that is not to wrap: a box wide enough, on the side its alignment keeps it */
+        int off = xd_kid(pxf.d, pxf.n, "off"), ext = xd_kid(pxf.d, pxf.n, "ext");
+        long long x = xd_int(pxf.d, off, "x", 0), y = xd_int(pxf.d, off, "y", 0), cx = xd_int(pxf.d, ext, "cx", 0);
+        long long cy = xd_int(pxf.d, ext, "cy", 0), more = C->P->sw;
+
+        pb_puts(C->o, "<a:xfrm");
+
+        if (pxf.d->v[pxf.n].alen) {
+            pb_putc(C->o, ' ');
+            pb_put(C->o, pxf.d->v[pxf.n].attrs, pxf.d->v[pxf.n].alen);
+        }
+
+        pb_printf(C->o, "><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>",
+                  widen == 2 ? x - more / 2 : widen == 3 ? x - more : x, y, cx + more, cy);
+    } else {
+        xd_raw(C->o, pxf.d, pxf.n);
+    }
 
     for (k = spr >= 0 ? d->v[spr].kid : -1; k >= 0; k = d->v[k].next) {
         if (!strcmp(d->v[k].name, "xfrm")) {
@@ -1125,7 +1352,7 @@ static int put_sppr(conv* C, ppart* pt, int sp, int lsp, int msp, const char* el
             put_with_media(C->o, C, pt, d->s + d->v[k].ia, d->v[k].ib - d->v[k].ia);
             pb_puts(C->o, "</a:blipFill>");
         } else {
-            xd_raw(C->o, d, k);
+            xd_raw_mapped(C->P, C->o, d, k);
         }
     }
 
@@ -1147,18 +1374,96 @@ static void put_nvpr(conv* C, const xdoc* d, int sp, const char* nv, const char*
     pb_puts(C->o, "\"/>");
 }
 
+/* a table style's part (wholeTbl, band1H, firstRow, ...): the fill its cells take, their text's colour and whether it
+   is bold (-1, -1, -1: what it does not say) */
+static void tstyle_part(const pptx* P, int style, const char* part, long* fill, long* text, int* bold) {
+    const xdoc* d = P->tstyles;
+    int pn = style >= 0 ? xd_kid(d, style, part) : -1, k, tx, f;
+    char v[16];
+
+    if (pn < 0) {
+        return;
+    }
+
+    f = xd_path(d, pn, "tcStyle/fill");
+
+    if (f >= 0 && fill_colour(P, d, f) >= 0) {
+        *fill = fill_colour(P, d, f);
+    }
+
+    tx = xd_kid(d, pn, "tcTxStyle");
+
+    if (tx >= 0) {
+        if (xd_attr(d, tx, "b", v, sizeof(v))) {
+            *bold = !strcmp(v, "on");
+        }
+
+        for (k = d->v[tx].kid; k >= 0; k = d->v[k].next) {     /* its colour; a font reference's, else */
+            long c = !strcmp(d->v[k].name, "fontRef") ? (d->v[k].kid >= 0 ? colour_of(P, d, d->v[k].kid) : -1) :
+                     colour_of(P, d, k);
+
+            if (c >= 0) {
+                *text = c;
+            }
+        }
+    }
+}
+
+/* the table style a table names (tableStyleId), or the presentation's default one; -1 if the file has neither */
+static int tstyle_of(const pptx* P, const xdoc* d, int tbl) {
+    const xdoc* t = P->tstyles;
+    int id = xd_path(d, tbl, "tblPr/tableStyleId"), lst, k;
+    char want[64] = "", v[64];
+
+    if (!t || (lst = xd_find(t, "tblStyleLst")) < 0) {
+        return -1;
+    }
+
+    if (id >= 0) {
+        snprintf(want, sizeof(want), "%.*s", (int)(d->v[id].ib - d->v[id].ia), d->s + d->v[id].ia);
+    } else {
+        xd_attr(t, lst, "def", want, sizeof(want));
+    }
+
+    for (k = t->v[lst].kid; k >= 0; k = t->v[k].next) {
+        if (xd_attr(t, k, "styleId", v, sizeof(v)) && !strcmp(v, want)) {
+            return k;
+        }
+    }
+
+    return -1;
+}
+
+
 /* a table (a:tbl) as a text box holding a Word table, drawn with a plain style: a header row in the theme's
    first accent, banded rows */
 static void put_table(conv* C, ppart* pt, int gf, int tbl) {
     const xdoc* d = &pt->x;
     int grid = xd_kid(d, tbl, "tblGrid"), tp = xd_kid(d, tbl, "tblPr"), k, r, row = 0;
     int first = (int)xd_int(d, tp, "firstRow", 0), band = (int)xd_int(d, tp, "bandRow", 0);
-    int xf = xd_kid(d, gf, "xfrm");
-    long long total = 0;
+    int last = (int)xd_int(d, tp, "lastRow", 0), nrows = 0, style = tstyle_of(C->P, d, tbl), rr;
+    int xf = xd_kid(d, gf, "xfrm"), col;
+    long long total = 0, colx[65], x0, y0, rowy = 0;
     uint32_t acc = C->P->theme[4];
+    pd_buf fills, tb, *out = C->o;
 
     if (xf < 0) {
         return;
+    }
+
+    /* the cells' fills drawn as rectangles where the table is among the slide's shapes (a table's own shading would
+       be drawn over every shape of the slide, those on the table too); the table, unshaded, over them */
+    memset(&fills, 0, sizeof(fills));
+    memset(&tb, 0, sizeof(tb));
+    C->o = &tb;
+    x0 = xd_int(d, xd_kid(d, xf, "off"), "x", 0);
+    y0 = xd_int(d, xd_kid(d, xf, "off"), "y", 0);
+    colx[0] = 0;
+    col = 0;
+
+    for (k = grid >= 0 ? d->v[grid].kid : -1; k >= 0 && col < 64; k = d->v[k].next) {
+        colx[col + 1] = colx[col] + xd_int(d, k, "w", 0);
+        col++;
     }
 
     pb_puts(C->o, "<wps:wsp>");
@@ -1167,10 +1472,8 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
     xd_inner(C->o, d, xf);
     pb_puts(C->o, "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr>"
             "<wps:txbx><w:txbxContent><w:tbl><w:tblPr><w:tblLayout w:type=\"fixed\"/><w:tblBorders>"
-            "<w:top w:val=\"single\" w:sz=\"4\" w:color=\"FFFFFF\"/><w:left w:val=\"single\" w:sz=\"4\" w:color=\"FFFFFF\"/>"
-            "<w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"FFFFFF\"/><w:right w:val=\"single\" w:sz=\"4\" w:color=\"FFFFFF\"/>"
-            "<w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"FFFFFF\"/><w:insideV w:val=\"single\" w:sz=\"4\" "
-            "w:color=\"FFFFFF\"/></w:tblBorders><w:tblCellMar><w:left w:w=\"144\" w:type=\"dxa\"/><w:right w:w=\"144\" "
+            "<w:top w:val=\"nil\"/><w:left w:val=\"nil\"/><w:bottom w:val=\"nil\"/><w:right w:val=\"nil\"/>"
+            "<w:insideH w:val=\"nil\"/><w:insideV w:val=\"nil\"/></w:tblBorders><w:tblCellMar><w:left w:w=\"144\" w:type=\"dxa\"/><w:right w:w=\"144\" "
             "w:type=\"dxa\"/></w:tblCellMar></w:tblPr><w:tblGrid>");
 
     for (k = grid >= 0 ? d->v[grid].kid : -1; k >= 0; k = d->v[k].next) {
@@ -1180,6 +1483,10 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
 
     pb_puts(C->o, "</w:tblGrid>");
 
+    for (rr = d->v[tbl].kid; rr >= 0; rr = d->v[rr].next) {
+        nrows += !strcmp(d->v[rr].name, "tr");
+    }
+
     for (r = d->v[tbl].kid; r >= 0; r = d->v[r].next) {
         int c;
 
@@ -1188,6 +1495,7 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
         }
 
         pb_printf(C->o, "<w:tr><w:trPr><w:trHeight w:val=\"%lld\"/></w:trPr>", xd_int(d, r, "h", 0) / 635);
+        col = 0;
 
         for (c = d->v[r].kid; c >= 0; c = d->v[c].next) {
             int tc = xd_kid(d, c, "tcPr"), tx = xd_kid(d, c, "txBody"), p, autonum = 0;
@@ -1195,11 +1503,39 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
             long long span = xd_int(d, c, "gridSpan", 1);
             tctx T;
 
-            if (strcmp(d->v[c].name, "tc") || xd_int(d, c, "hMerge", 0)) {
+            if (strcmp(d->v[c].name, "tc")) {
                 continue;
             }
 
-            if (fill < 0 && first && row == 0) {
+            if (xd_int(d, c, "hMerge", 0)) {
+                col++;
+                continue;
+            }
+
+            long sfill = -1, stext = -1;
+            int sbold = -1;
+
+            if (style >= 0) {   /* the table's style: the whole table's, the bands', the first and last rows' */
+                tstyle_part(C->P, style, "wholeTbl", &sfill, &stext, &sbold);
+
+                if (band && (row - first) % 2 == 0 && !(first && row == 0)) {
+                    tstyle_part(C->P, style, "band1H", &sfill, &stext, &sbold);
+                } else if (band && !(first && row == 0)) {
+                    tstyle_part(C->P, style, "band2H", &sfill, &stext, &sbold);
+                }
+
+                if (first && row == 0) {
+                    tstyle_part(C->P, style, "firstRow", &sfill, &stext, &sbold);
+                }
+
+                if (last && row == nrows - 1) {
+                    tstyle_part(C->P, style, "lastRow", &sfill, &stext, &sbold);
+                }
+
+                if (fill < 0) {
+                    fill = sfill;
+                }
+            } else if (fill < 0 && first && row == 0) {     /* none the file has: a plain one */
                 fill = (long)acc;
             } else if (fill < 0 && band) {
                 double h, s, l;
@@ -1220,15 +1556,33 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
                 pb_puts(C->o, "<w:vMerge w:val=\"restart\"/>");
             }
 
-            if (fill >= 0) {
-                pb_printf(C->o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06lX\"/>", (unsigned long)fill);
+            if (fill >= 0 && col < 64 && !xd_int(d, c, "vMerge", 0)) {   /* its fill: a rectangle under the table */
+                long long cw = colx[col + span < 64 ? col + span : 64] - colx[col], ch = 0;
+                int rs = (int)xd_int(d, c, "rowSpan", 1), q2;
+                int rn;
+
+                for (rn = r, q2 = 0; rn >= 0 && q2 < rs; rn = d->v[rn].next) {
+                    if (!strcmp(d->v[rn].name, "tr")) {
+                        ch += xd_int(d, rn, "h", 0);
+                        q2++;
+                    }
+                }
+
+                pb_printf(&fills, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Cell\"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off "
+                          "x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\">"
+                          "<a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val=\"%06lX\"/></a:solidFill><a:ln><a:noFill/>"
+                          "</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>", 3000000 + C->P->cells++, x0 + colx[col] + 6350,
+                          y0 + rowy + 6350, cw > 12700 ? cw - 12700 : cw, ch > 12700 ? ch - 12700 : ch, (unsigned long)fill);
             }
+
+            col += (int)span;
 
             pb_puts(C->o, "</w:tcPr>");
             memset(&T, 0, sizeof(T));
             T.P = C->P;
             T.scale = T.spacing = 1;
-            T.font_colour = first && row == 0 ? 0xFFFFFF : -1;
+            T.font_colour = style >= 0 ? stext : first && row == 0 ? 0xFFFFFF : -1;
+            T.force_bold = style >= 0 && sbold == 1;
 
             for (p = tx >= 0 ? d->v[tx].kid : -1; p >= 0; p = d->v[p].next) {
                 if (!strcmp(d->v[p].name, "p")) {
@@ -1250,18 +1604,24 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
         }
 
         pb_puts(C->o, "</w:tr>");
+        rowy += xd_int(d, r, "h", 0);
         row++;
     }
 
     (void)total;
     pb_puts(C->o, "</w:tbl><w:p/></w:txbxContent></wps:txbx><wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/>"
             "</wps:wsp>");
+    C->o = out;
+    pb_put(C->o, fills.p, fills.n);
+    pb_put(C->o, tb.p, tb.n);
+    pb_free(&fills);
+    pb_free(&tb);
 }
 
 /* SmartArt: the drawing PowerPoint keeps of it (its shapes, as it last laid them out), in a group at the frame */
 static void put_smartart(conv* C, ppart* pt, int gf) {
     const xdoc* d = &pt->x;
-    int ri = xd_find(d, "relIds"), xf = xd_kid(d, gf, "xfrm"), off, ext, k;
+    int ri = xd_path(d, gf, "graphic/graphicData/relIds"), xf = xd_kid(d, gf, "xfrm"), off, ext, k;   /* (its own) */
     char dm[64];
     const char* dmpath, *drawpath = NULL;
     ppart dmp, dr;
@@ -1292,7 +1652,9 @@ static void put_smartart(conv* C, ppart* pt, int gf) {
                       "cx=\"%lld\" cy=\"%lld\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
                       "</wpg:grpSpPr>", xd_int(d, off, "x", 0), xd_int(d, off, "y", 0), xd_int(d, ext, "cx", 0),
                       xd_int(d, ext, "cy", 0), xd_int(d, ext, "cx", 0), xd_int(d, ext, "cy", 0));
+            C->dm = &dmp.x;
             put_tree(C, &dr, tree, 0);
+            C->dm = NULL;
             pb_puts(C->o, "</wpg:grpSp>");
         }
 
@@ -1383,19 +1745,31 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
     } else if (!strcmp(el, "sp")) {
         int tx = xd_kid(d, n, "txBody"), st = xd_kid(d, n, "style"), cn = xd_path(d, n, "nvSpPr/cNvSpPr");
         size_t mark = C->o->n;
+        int widen = 0, spr = xd_kid(d, n, "spPr");
+        char wr[16] = "", al[16] = "";
+
+        /* text not to wrap (wrap="none"), in a box with no fill or outline of its own: the box made wide */
+        if (tx >= 0 && (xd_attr(d, xd_kid(d, tx, "bodyPr"), "wrap", wr, sizeof(wr)) ||
+                        (lsp >= 0 && xd_attr(&C->layout->x, xd_path(&C->layout->x, lsp, "txBody/bodyPr"), "wrap", wr,
+                                             sizeof(wr)))) && !strcmp(wr, "none") && st < 0 &&
+                xd_kid(d, spr, "solidFill") < 0 && xd_kid(d, spr, "gradFill") < 0 && xd_kid(d, spr, "blipFill") < 0 &&
+                (xd_kid(d, spr, "ln") < 0 || xd_path(d, spr, "ln/noFill") >= 0)) {
+            xd_attr(d, xd_path(d, tx, "p/pPr"), "algn", al, sizeof(al));
+            widen = !strcmp(al, "ctr") ? 2 : !strcmp(al, "r") ? 3 : 1;
+        }
 
         pb_puts(C->o, "<wps:wsp>");
         put_nvpr(C, d, n, "nvSpPr/cNvPr", "wps:cNvPr");
         pb_puts(C->o, xd_attr(d, cn, "txBox", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true")) ?
                 "<wps:cNvSpPr txBox=\"1\"/>" : "<wps:cNvSpPr/>");
 
-        if (!put_sppr(C, pt, n, lsp, msp, "wps:spPr")) {
+        if (!put_sppr(C, pt, n, lsp, msp, "wps:spPr", widen)) {
             C->o->n = mark;     /* nowhere to put it */
             return;
         }
 
         if (st >= 0) {
-            put_renamed(C->o, d, st, "wps:style");
+            put_renamed(C->P, C->o, d, st, "wps:style");
         }
 
         if (tx >= 0 && has_text(d, tx)) {
@@ -1421,13 +1795,13 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
 
         pb_puts(C->o, "</wps:cNvCnPr>");
 
-        if (!put_sppr(C, pt, n, -1, -1, "wps:spPr")) {
+        if (!put_sppr(C, pt, n, -1, -1, "wps:spPr", 0)) {
             C->o->n = mark;
             return;
         }
 
         if (st >= 0) {
-            put_renamed(C->o, d, st, "wps:style");
+            put_renamed(C->P, C->o, d, st, "wps:style");
         }
 
         pb_puts(C->o, "<wps:bodyPr/></wps:wsp>");
@@ -1445,7 +1819,7 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
         put_with_media(C->o, C, pt, d->s + d->v[bf].ia, d->v[bf].ib - d->v[bf].ia);
         pb_puts(C->o, "</pic:blipFill>");
 
-        if (!put_sppr(C, pt, n, lsp, msp, "pic:spPr")) {
+        if (!put_sppr(C, pt, n, lsp, msp, "pic:spPr", 0)) {
             C->o->n = mark;
             return;
         }
@@ -1457,7 +1831,7 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
         pb_puts(C->o, "<wpg:grpSp><wpg:cNvGrpSpPr/>");
 
         if (gp >= 0) {
-            put_renamed(C->o, d, gp, "wpg:grpSpPr");
+            put_renamed(C->P, C->o, d, gp, "wpg:grpSpPr");
         } else {
             pb_puts(C->o, "<wpg:grpSpPr/>");
         }
@@ -1543,6 +1917,25 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
         }
     }
 
+    /* its master's theme, and the colour map the master, then the layout, then the slide give */
+    P->alias[0] = 1;
+    P->alias[1] = 0;
+    P->alias[2] = 3;
+    P->alias[3] = 2;
+
+    if (have_m) {
+        theme_load(P, rel_like(&master, "theme/"));
+        clrmap_load(P, &master.x);
+    }
+
+    if (have_l && xd_find(&layout.x, "overrideClrMapping") >= 0) {
+        clrmap_load(P, &layout.x);
+    }
+
+    if (xd_find(&slide.x, "overrideClrMapping") >= 0) {
+        clrmap_load(P, &slide.x);
+    }
+
     memset(&C, 0, sizeof(C));
     C.P = P;
     C.slide_no = no;
@@ -1623,7 +2016,8 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
 
 pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     pptx P;
-    ppart pres;
+    ppart pres, ts;
+    int have_ts = 0;
     pd_buf zip;
     int lst, k, nslides = 0, idx = 0, ds;
     const char* paths[1024];
@@ -1633,6 +2027,10 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     memset(&P, 0, sizeof(P));
     P.zip = s;
     P.zn = n;
+    P.alias[0] = 1;
+    P.alias[1] = 0;
+    P.alias[2] = 3;
+    P.alias[3] = 2;
 
     if (!part_load(&P, &pres, "ppt/presentation.xml")) {
         return PD_ERR_FORMAT;
@@ -1661,6 +2059,11 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
         }
     }
 
+    if (part_load(&P, &ts, "ppt/tableStyles.xml")) {   /* the table styles the tables name */
+        P.tstyles = &ts.x;
+        have_ts = 1;
+    }
+
     lst = xd_find(&pres.x, "sldIdLst");
 
     for (k = lst >= 0 ? pres.x.v[lst].kid : -1; k >= 0 && nslides < 1024; k = pres.x.v[k].next) {
@@ -1673,6 +2076,10 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     P.zw = pd_zipw_new(&zip);
 
     if (!P.zw) {
+        if (have_ts) {
+            part_free(&ts);
+        }
+
         part_free(&pres);
         return PD_ERR_NOMEM;
     }
@@ -1710,6 +2117,34 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
         pd_zipw_add(P.zw, "[Content_Types].xml", types, sizeof(types) - 1);
     }
     pd_zipw_add(P.zw, "word/document.xml", P.doc.p, P.doc.n);
+
+    {   /* the font table: what kind each face is, so one not here is stood in for by one like it (a sans for a
+           sans: most slides' faces are) */
+        pd_buf ft;
+        int q;
+
+        memset(&ft, 0, sizeof(ft));
+        pb_puts(&ft, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:fonts "
+                "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">");
+
+        for (q = 0; q < P.nfonts; q++) {
+            const char* f = P.fonts[q];
+            int serif = (strstr(f, "Times") || strstr(f, "Georgia") || strstr(f, "Garamond") || strstr(f, "Cambria") ||
+                         strstr(f, "Palatino") || strstr(f, "Book") || strstr(f, "Roman") || strstr(f, "Minion") ||
+                         strstr(f, "Baskerville") || strstr(f, "Caslon") || strstr(f, "Didot") || strstr(f, "Bodoni") ||
+                         strstr(f, "Song") || strstr(f, "Ming") || (strstr(f, "Serif") && !strstr(f, "Sans")));
+            int mono = strstr(f, "Mono") || strstr(f, "Courier") || strstr(f, "Consol") || strstr(f, "Code");
+
+            pb_puts(&ft, "<w:font w:name=\"");
+            put_esc(&ft, f);
+            pb_printf(&ft, "\"><w:family w:val=\"%s\"/><w:pitch w:val=\"%s\"/></w:font>",
+                      mono ? "modern" : serif ? "roman" : "swiss", mono ? "fixed" : "variable");
+        }
+
+        pb_puts(&ft, "</w:fonts>");
+        pd_zipw_add(P.zw, "word/fontTable.xml", ft.p, ft.n);
+        pb_free(&ft);
+    }
     pd_zipw_add(P.zw, "word/_rels/document.xml.rels", P.rels.p, P.rels.n);
 
     {   /* the theme, for the colours shapes name by their place in it */
@@ -1738,6 +2173,11 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     pd_zipw_finish(P.zw);
     pb_free(&P.doc);
     pb_free(&P.rels);
+
+    if (have_ts) {
+        part_free(&ts);
+    }
+
     part_free(&pres);
     if (getenv("PD_PPTX_DOCX")) {   /* for a look at what the slides were made into */
         FILE* f = fopen(getenv("PD_PPTX_DOCX"), "wb");

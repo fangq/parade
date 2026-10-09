@@ -136,6 +136,9 @@ void bld_end_para(pd_bld* b);
 void bld_text(pd_bld* b, const char* s, size_t n);
 void bld_inline(pd_bld* b, const pd_inline* o);
 void bld_set_format(pd_bld* b, const pd_char_props* cp);
+/* the format set last as the current paragraph's, when it has no text: its empty line's size */
+void bld_mark_format(pd_bld* b);
+void pd_doc_set_mark_format(pd_doc* d, pd_block_id para, pd_format_id fmt);
 /* containers */
 void bld_table_begin(pd_bld* b);
 void bld_row_begin(pd_bld* b, int header);

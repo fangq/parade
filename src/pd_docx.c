@@ -28,6 +28,17 @@
 #define SCALE(v, m, d) ((int64_t)(v) * (m) >= 0 ? ((int64_t)(v) * (m) + (d) / 2) / (d) : \
                         ((int64_t)(v) * (m) - (d) / 2) / (d))
 #define TW(sp) ((int)SCALE(sp, 20, 65536))          /* sp -> twips */
+
+/* a file name's extension, in any case */
+static int ext_is(const char* ext, const char* want) {
+    for (; *ext && *want; ext++, want++) {
+        if (tolower((unsigned char)*ext) != *want) {
+            return 0;
+        }
+    }
+
+    return !*ext && !*want;
+}
 #define EMU(sp) ((long long)SCALE(sp, 12700, 65536)) /* sp -> EMU */
 #define ZIP_MAX_ENTRY ((size_t)256 << 20)
 
@@ -5310,6 +5321,9 @@ typedef struct {
     /* run */
     pd_char_props rcp;          /* the run's own w:rPr */
     char rstyle[64];
+    pd_char_props mcp;          /* the paragraph mark's w:rPr (in w:pPr) */
+    char mstyle[64];
+    int in_mrpr;
     int in_t, in_instr, in_drawing;
     /* fields and links */
     int fld;                    /* 0 none, 1 instruction, 2 result */
@@ -6169,10 +6183,14 @@ static pd_res_id dw_resource(dxi* X, const char* rid) {
     if ((data = zip_read(&X->z, path, &len)) != NULL) {
         const char* ext = strrchr(path, '.');
         int meta = pd_metafile_kind(data, len);
+        const unsigned char* u = (const unsigned char*)data;
+        /* its type from its first bytes, else from its name (in any case: image36.GIF) */
         const char* mime = meta == 1 ? "image/x-emf" : meta == 2 ? "image/x-wmf" :
-                           ext && (strcmp(ext, ".png") == 0 || strcmp(ext, ".PNG") == 0) ? "image/png" :
-                           ext && (strcmp(ext, ".gif") == 0) ? "image/gif" : ext && (strcmp(ext, ".jpg") == 0 ||
-                                   strcmp(ext, ".jpeg") == 0 || strcmp(ext, ".JPG") == 0) ? "image/jpeg" : "application/octet-stream";
+                           len >= 8 && !memcmp(u, "\x89PNG\r\n\x1a\n", 8) ? "image/png" :
+                           len >= 6 && (!memcmp(u, "GIF87a", 6) || !memcmp(u, "GIF89a", 6)) ? "image/gif" :
+                           len >= 3 && u[0] == 0xFF && u[1] == 0xD8 && u[2] == 0xFF ? "image/jpeg" :
+                           ext && ext_is(ext, ".png") ? "image/png" : ext && ext_is(ext, ".gif") ? "image/gif" :
+                           ext && (ext_is(ext, ".jpg") || ext_is(ext, ".jpeg")) ? "image/jpeg" : "application/octet-stream";
 
         if (pd_doc_add_resource(X->b->d, mime, data, len, &res) != PD_OK) {
             res = 0;
@@ -7388,7 +7406,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                              (int)emu_sp(shd_dist * sin(shd_dir * 3.14159265358979 / 180) * FR->sy), (unsigned)shd_clr);
                 }
                 int isline = !strcmp(geom, "line"), k;
-                double lwd = lw * (FR->sx + FR->sy) / 2;
+                double lwd = lw;    /* a line as wide as it says: a group's scale is not its own (Office does not scale it) */
                 pd_preset_flat* pf = NULL;
 
                 if (prst[0] && dw_generic_preset(prst) && bw > 0) {
@@ -7873,9 +7891,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (!strcmp(t, "ln") && in_sppr) {
             in_ln = g.type == MT_OPEN;
 
-            if (open) {
-                have_line = 1;      /* said here: no colour inside means none */
-                line = 0;
+            if (open) {     /* its colour, if it says one (else the style's, lnRef); its width */
                 lw = mu_attr(&g, "w", v, sizeof(v)) ? atoll(v) : 9525;
             }
         } else if (!strcmp(t, "txbxContent")) {
@@ -8114,6 +8130,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 cur_clr = &shd_clr;
             } else if (in_ln) {
                 line = c;
+                have_line = 1;
                 cur_clr = &line;
             } else if (in_sppr && in_grad && in_gs && have_fill) {
                 fill2 = c;      /* a later stop: the last one, in the end */
@@ -8154,6 +8171,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             if (mu_attr(&g, "len", v, sizeof(v))) {
                 arrow_len[e] = !strcmp(v, "sm") ? 2 : !strcmp(v, "lg") ? 5 : 3;
             }
+        } else if (in_ln && !strcmp(t, "noFill")) {
+            have_line = 1;  /* no line */
+            line = 0;
         } else if (in_sppr && !in_ln && !strcmp(t, "noFill")) {
             have_fill = 1;
             fill = 0;
@@ -9201,10 +9221,23 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         if (open) {
             /* elements whose content is ignored */
             if (strcmp(t, "txbxContent") == 0 || strcmp(t, "Fallback") == 0 ||
-                    (w->in_ppr && strcmp(t, "rPr") == 0) || strcmp(t, "rPrChange") == 0 ||
+                    strcmp(t, "rPrChange") == 0 ||
                     strcmp(t, "pPrChange") == 0) {
                 if (m.type == MT_OPEN) {
                     w->skip = 1;
+                }
+
+                continue;
+            }
+
+            if (w->in_ppr && strcmp(t, "rPr") == 0) {  /* the paragraph mark's: an empty paragraph's size */
+                w->in_mrpr = m.type == MT_OPEN;
+                continue;
+            }
+
+            if (w->in_mrpr) {
+                if (strcmp(t, "ins") && strcmp(t, "del") && strcmp(t, "moveTo") && strcmp(t, "moveFrom")) {
+                    rpr_elem(X, &m, t, &w->mcp, w->mstyle, sizeof(w->mstyle));
                 }
 
                 continue;
@@ -9241,6 +9274,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->num_id = 0;
                 w->ilvl = 0;
                 memset(&w->ppr, 0, sizeof(w->ppr));
+                memset(&w->mcp, 0, sizeof(w->mcp));
+                w->mstyle[0] = '\0';
+                w->in_mrpr = 0;
                 w->outline = -1;
                 w->sect_here = 0;
 
@@ -9688,6 +9724,20 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         /* closing tags */
         if (strcmp(t, "p") == 0 && w->in_p) {
             dw_begin_para(w);   /* an empty paragraph is still one */
+
+            if (w->mcp.mask || w->mstyle[0]) {  /* sized by its mark */
+                pd_char_props keep = w->rcp;
+                char ks[64];
+
+                memcpy(ks, w->rstyle, sizeof(ks));
+                w->rcp = w->mcp;
+                memcpy(w->rstyle, w->mstyle, sizeof(ks));
+                dw_apply_run(w);
+                bld_mark_format(X->b);
+                w->rcp = keep;
+                memcpy(w->rstyle, ks, sizeof(ks));
+            }
+
             bld_end_para(X->b);
 
             if (w->npend_fl) {
@@ -9720,6 +9770,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             }
         } else if (strcmp(t, "rPr") == 0) {
             w->in_rpr = 0;
+            w->in_mrpr = 0;
+        } else if (w->in_mrpr) {
+            /* inside the mark's properties */
         } else if (strcmp(t, "t") == 0 || strcmp(t, "delText") == 0) {
             w->in_t = 0;
         } else if (strcmp(t, "instrText") == 0 || strcmp(t, "delInstrText") == 0) {

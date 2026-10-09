@@ -3482,6 +3482,7 @@ static void test_pptx(void) {
 
                 CHECK(js && strstr(js, "\"crop\":[25000,0,25000,0]") && strstr(js, "\"story\":"));
                 CHECK(js && strstr(js, "\"rot\":2700000,\"fh\":1") && strstr(js, "\"clip\":["));
+                CHECK(js && strstr(js, "\"fill\":4282675908"));   /* the header row's fill: a rectangle under it */
                 free(js);
             } else {    /* a gradient, from red to blue across; a shadow down */
                 char* js = drawing_json(d, o.resource);
@@ -3505,7 +3506,7 @@ static void test_pptx(void) {
                 pd_block_id c = pd_doc_child(d, pd_doc_child(d, p, 0), 0);
                 pd_cell_props cp;
 
-                CHECK(pd_doc_cell_props(d, c, &cp) == PD_OK && (cp.background & 0xFFFFFFu) == 0x4472C4u);
+                CHECK(pd_doc_cell_props(d, c, &cp) == PD_OK);
                 CHECK(text_is(d, pd_doc_child(d, c, 0), "Name"));
             }
 

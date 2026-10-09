@@ -12,9 +12,11 @@
  * when installed).
  */
 
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "parade_convert.h"
 #include "parade_layout.h"
 
@@ -78,6 +80,58 @@ static int named(const pd_doc* d, const char* family, const char* name) {
     return 0;
 }
 
+/* a font installed on the system, of that family and face, as fontconfig finds it (only that family: none when it
+   would stand another in); loaded once */
+static struct {
+    char key[96];
+    pd_font* font;
+} sysfonts[128];
+static int nsysfonts;
+
+static pd_font* system_font(const char* family, int bold, int italic) {
+    char key[96], cmd[300], out[1200], *bar;
+    FILE* p;
+    size_t n;
+    int i;
+    pd_font* f = NULL;
+
+    if (!family || !family[0] || strpbrk(family, "\"'`$\\;&|<>")) {
+        return NULL;
+    }
+
+    snprintf(key, sizeof(key), "%s|%d|%d", family, bold, italic);
+
+    for (i = 0; i < nsysfonts; i++) {
+        if (!strcmp(sysfonts[i].key, key)) {
+            return sysfonts[i].font;
+        }
+    }
+
+    snprintf(cmd, sizeof(cmd), "fc-match -f '%%{family[0]}|%%{file}' '%s:weight=%d:slant=%d' 2>/dev/null", family,
+             bold ? 200 : 80, italic ? 100 : 0);
+
+    if ((p = popen(cmd, "r")) != NULL) {
+        n = fread(out, 1, sizeof(out) - 1, p);
+        out[n] = '\0';
+        pclose(p);
+
+        if ((bar = strchr(out, '|')) != NULL) {
+            *bar = '\0';
+
+            if (!strcasecmp(out, family) && pd_font_load_file(bar + 1, 0, &f) != PD_OK) {
+                f = NULL;
+            }
+        }
+    }
+
+    if (nsysfonts < 128) {
+        snprintf(sysfonts[nsysfonts].key, sizeof(sysfonts[0].key), "%s", key);
+        sysfonts[nsysfonts++].font = f;
+    }
+
+    return f;
+}
+
 static const pd_font* resolve(void* user, const char* family, int32_t weight, int32_t italic) {
     const pd_doc* d = (const pd_doc*)user;
     int32_t cls = pd_doc_font_class(d, family);
@@ -103,12 +157,21 @@ static const pd_font* resolve(void* user, const char* family, int32_t weight, in
     }
 
     /* Calibri and Cambria: the faces with their metrics, so lines break where they did in Word */
-    if (family && !strncmp(family, "Calibri", 7) && fonts[14 + face]) {
+    if (family && (!strncmp(family, "Calibri", 7) || !strcmp(family, "Carlito")) && fonts[14 + face]) {
         return fonts[14 + face];
     }
 
-    if (family && !strncmp(family, "Cambria", 7) && strcmp(family, "Cambria Math") && fonts[18 + face]) {
+    if (family && ((!strncmp(family, "Cambria", 7) && strcmp(family, "Cambria Math")) || !strcmp(family, "Caladea")) &&
+            fonts[18 + face]) {
         return fonts[18 + face];
+    }
+
+    {   /* the family itself, when the system has it */
+        const pd_font* sf = system_font(family, weight >= 600, italic);
+
+        if (sf) {
+            return sf;
+        }
     }
 
     if (cls == PD_FAMILY_SANS && family && (strstr(family, "Narrow") || strstr(family, "Condensed")) &&

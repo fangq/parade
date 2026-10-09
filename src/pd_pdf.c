@@ -10,8 +10,9 @@
  *    16 MB CJK font costs only the glyphs a document uses;
  *  - ToUnicode maps come from the document text at each glyph's cluster,
  *    so text copied from the PDF is the document's text;
- *  - JPEG passes through; PNG (gray/RGB/palette/alpha, interlaced or not) is
- *    decoded and re-encoded with a soft mask where needed;
+ *  - JPEG passes through; PNG (gray/RGB/palette/alpha, interlaced or not) and
+ *    a GIF's first frame are decoded and re-encoded with a soft mask where
+ *    needed;
  *  - headings become the outline (bookmarks);
  *  - output is deterministic: integer coordinates printed exactly, no
  *    timestamps, the file id derived from the content.
@@ -770,6 +771,229 @@ static void png_unfilter(unsigned char* raw, uint32_t rows, uint32_t stride, uin
             }
         }
     }
+}
+
+/* a GIF's first frame on its logical screen, transparent where the frame leaves it or marks it so */
+static int gif_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
+                      unsigned char** alpha) {
+    size_t i = 13, npix;
+    const unsigned char* gct = NULL, *ct;
+    int W, H, ngct = 0, trans = -1;
+
+    if (n < 13 || (memcmp(p, "GIF87a", 6) && memcmp(p, "GIF89a", 6))) {
+        return -1;
+    }
+
+    W = p[6] | (p[7] << 8);
+    H = p[8] | (p[9] << 8);
+
+    if (W <= 0 || H <= 0 || (int64_t)W * H > 64 * 1024 * 1024) {
+        return -1;
+    }
+
+    if (p[10] & 0x80) {
+        ngct = 2 << (p[10] & 7);
+        gct = p + 13;
+        i += (size_t)ngct * 3;
+    }
+
+    while (i < n) {
+        if (p[i] == 0x21 && i + 1 < n) {    /* an extension: a graphic control one says which index is clear */
+            size_t k = i + 2;
+
+            if (p[i + 1] == 0xF9 && k + 4 < n && p[k] >= 4 && (p[k + 1] & 1)) {
+                trans = p[k + 4];
+            }
+
+            while (k < n && p[k]) {
+                k += (size_t)p[k] + 1;
+            }
+
+            i = k + 1;
+        } else if (p[i] == 0x2C && i + 10 < n) {
+            int fx = p[i + 1] | (p[i + 2] << 8), fy = p[i + 3] | (p[i + 4] << 8);
+            int fw = p[i + 5] | (p[i + 6] << 8), fh = p[i + 7] | (p[i + 8] << 8), fl = p[i + 9];
+            int nct = ngct, minc, clear, codesz, avail, old = -1, first = 0, pass = 0, row = 0, col = 0;
+            static const int pstart[4] = { 0, 4, 2, 1 }, pstep[4] = { 8, 8, 4, 2 };
+            uint16_t* prefix;
+            unsigned char* suffix, *stack, *idx;
+            uint32_t bits = 0;
+            int nbits = 0, sub = 0;
+            size_t k, done = 0, fpix = (size_t)fw * fh;
+
+            i += 10;
+            ct = gct;
+
+            if (fl & 0x80) {
+                nct = 2 << (fl & 7);
+                ct = p + i;
+                i += (size_t)nct * 3;
+            }
+
+            if (!ct || i >= n || (minc = p[i++]) < 2 || minc > 11) {
+                return -1;
+            }
+
+            npix = (size_t)W * H;
+            prefix = (uint16_t*)malloc(4096 * sizeof(uint16_t));
+            suffix = (unsigned char*)malloc(4096);
+            stack = (unsigned char*)malloc(4097);
+            idx = (unsigned char*)malloc(fpix ? fpix : 1);
+            *rgb = (unsigned char*)calloc(npix, 3);
+            *alpha = (unsigned char*)calloc(npix, 1);
+
+            if (!prefix || !suffix || !stack || !idx || !*rgb || !*alpha) {
+                free(prefix);
+                free(suffix);
+                free(stack);
+                free(idx);
+                free(*rgb);
+                free(*alpha);
+                *rgb = *alpha = NULL;
+                return -1;
+            }
+
+            clear = 1 << minc;
+            codesz = minc + 1;
+            avail = clear + 2;
+
+            for (k = 0; k < (size_t)clear; k++) {
+                prefix[k] = 0xFFFF;
+                suffix[k] = (unsigned char)k;
+            }
+
+            /* LZW codes, least significant bit first, packed in sub-blocks */
+            while (done < fpix) {
+                int code, in, sp = 0;
+
+                while (nbits < codesz) {
+                    if (!sub) {
+                        if (i >= n || !p[i]) {
+                            goto out;
+                        }
+
+                        sub = p[i++];
+                    }
+
+                    if (i >= n) {
+                        goto out;
+                    }
+
+                    bits |= (uint32_t)p[i++] << nbits;
+                    nbits += 8;
+                    sub--;
+                }
+
+                code = (int)(bits & ((1u << codesz) - 1));
+                bits >>= codesz;
+                nbits -= codesz;
+
+                if (code == clear) {
+                    codesz = minc + 1;
+                    avail = clear + 2;
+                    old = -1;
+                    continue;
+                }
+
+                if (code == clear + 1) {
+                    break;
+                }
+
+                if (old < 0) {
+                    if (code >= clear) {
+                        break;
+                    }
+
+                    idx[done++] = (unsigned char)code;
+                    old = first = code;
+                    continue;
+                }
+
+                in = code;
+
+                if (code > avail || code >= 4096) {
+                    break;
+                }
+
+                if (code == avail) {    /* the code being defined: the previous string and its first byte */
+                    stack[sp++] = (unsigned char)first;
+                    code = old;
+                }
+
+                while (code >= clear && sp < 4096) {
+                    stack[sp++] = suffix[code];
+                    code = prefix[code];
+                }
+
+                first = suffix[code];
+                stack[sp++] = (unsigned char)first;
+
+                while (sp > 0 && done < fpix) {
+                    idx[done++] = stack[--sp];
+                }
+
+                if (avail < 4096) {
+                    prefix[avail] = (uint16_t)old;
+                    suffix[avail] = (unsigned char)first;
+                    avail++;
+
+                    if (avail == (1 << codesz) && codesz < 12) {
+                        codesz++;
+                    }
+                }
+
+                old = in;
+            }
+
+out:
+            /* the indices onto the screen, row by row (interlaced: in its four passes) */
+            for (k = 0; k < done; k++) {
+                int x = fx + col, y = fy + row, c = idx[k];
+
+                if (x < W && y < H && c != trans && c < nct) {
+                    size_t o = (size_t)y * W + x;
+
+                    memcpy(*rgb + o * 3, ct + c * 3, 3);
+                    (*alpha)[o] = 255;
+                }
+
+                if (++col == fw) {
+                    col = 0;
+
+                    if (fl & 0x40) {
+                        row += pstep[pass];
+
+                        while (row >= fh && pass < 3) {
+                            row = pstart[++pass];
+                        }
+                    } else {
+                        row++;
+                    }
+                }
+            }
+
+            free(prefix);
+            free(suffix);
+            free(stack);
+            free(idx);
+
+            for (k = 0; k < npix && (*alpha)[k] == 255; k++) {
+            }
+
+            if (k == npix) {    /* every pixel opaque: no mask */
+                free(*alpha);
+                *alpha = NULL;
+            }
+
+            *w = W;
+            *h = H;
+            return 0;
+        } else {
+            break;
+        }
+    }
+
+    return -1;
 }
 
 static int png_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
@@ -1737,7 +1961,8 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
             unsigned char* rgb = NULL, *alpha = NULL;
             char dict[200];
 
-            if (png_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &alpha) == 0) {
+            if (png_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &alpha) == 0 ||
+                    gif_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &alpha) == 0) {
                 int32_t sm = alpha ? new_obj(&w) : 0;
 
                 snprintf(dict, sizeof(dict), "/Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB "
