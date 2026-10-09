@@ -7266,6 +7266,30 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             x = mx - cw / 2;
             y = my - ch / 2;
 
+            if (tx_a && kind == 2 && prst[0] && bw > 0 && bh > 0) {
+                /* text in a shape: in Office's text rectangle of it (an ellipse's, a callout's body) */
+                char adjs[512];
+                size_t an = 0;
+                double tl, tt, tr, tb;
+                int q;
+
+                adjs[0] = '\0';
+
+                for (q = 0; q < gds.n && an < sizeof(adjs) - 64; q++) {
+                    if (!strncmp(gds.name[q], "adj", 3)) {
+                        an += (size_t)snprintf(adjs + an, sizeof(adjs) - an, "%s%s=%.0f", an ? " " : "", gds.name[q],
+                                               gds.val[q]);
+                    }
+                }
+
+                if (pd_preset_text_rect(prst, bw, bh, adjs, &tl, &tt, &tr, &tb)) {
+                    x += FR->sx * (xf.fliph ? bw - tr : tl);
+                    y += FR->sy * (xf.flipv ? bh - tb : tt);
+                    cw = FR->sx * (tr - tl);
+                    ch = FR->sy * (tb - tt);
+                }
+            }
+
             if (para_open) {
                 pb_puts(&text, "]}");
                 para_open = 0;

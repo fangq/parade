@@ -465,6 +465,9 @@ type
       False for a picture, a text box, or a geometry of guides }
     function EditShapePoints: Boolean;
     property EditingPoints: Boolean read FNodeOn;
+    { the selected shape given text to type (Word's Add Text: in its middle, white on a dark fill), the caret put
+      in it; a shape with text already: the caret in that. False for a line, a picture; one step of undo }
+    function AddShapeText: Boolean;
     { a handle of the selected shape in the control's pixels: Kind 's' a sizing one (0..7), 'r' the turning one,
       'a' an adjustment's, 'n' a point's (Edit Points) }
     function ShapeHandlePoint(Kind: Char; Index: Integer; out P: TPoint): Boolean;
@@ -5784,7 +5787,18 @@ begin
   if (Length(UTF8Key) > 0) and (Ord(UTF8Key[1]) >= 32) and (UTF8Key <> #127) then
   begin
     if FShapeOn and (FShapeSid >= 0) and (Length(FShapeMore) = 0) then
-      EnterTextBox(FShapeSid, CaretPos, False, True);    { a text box selected: typed at the end of its text }
+    begin   { a text box selected: typed at the end of its text; another shape: given text, typed in }
+      if not EnterTextBox(FShapeSid, CaretPos, False, True) and not AddShapeText then
+      begin
+        UTF8Key := '';
+        Exit;
+      end;
+    end
+    else if FShapeOn and (FShapeSid >= 0) then
+    begin
+      UTF8Key := '';
+      Exit;
+    end;
     InsertText(UTF8Key);
   end;
   UTF8Key := '';
@@ -9442,6 +9456,63 @@ begin
   PX := C[Ci].X[Ki];
   PY := C[Ci].Y[Ki];
   Result := True;
+end;
+
+function TParadeEdit.AddShapeText: Boolean;
+var
+  Xml, Sh, Fill: string;
+  Els: TXmlEls;
+  E, A, B, P, L, Sid: Integer;
+  RGB: LongInt;
+begin
+  OnlyShape;
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) or (Length(FShapeMore) > 0) then
+    Exit;
+  Sid := FShapeSid;
+  if EnterTextBox(Sid, CaretPos, False, True) then
+    Exit(True);
+  if not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, Sid);
+  if (E < 0) or (Els[E].Name <> 'wps:wsp') then
+    Exit;     { a picture }
+  Sh := Copy(Xml, Els[E].A, Els[E].B - Els[E].A);
+  if (Pos('<wps:cNvCnPr', Sh) > 0) or (Pos('prst="line"', Sh) > 0) or (Pos('Connector', Sh) > 0) or
+     (Pos('<wps:txbx', Sh) > 0) then
+    Exit;     { a line takes no text }
+  B := Pos('<wps:bodyPr', Sh);
+  if B > 0 then
+  begin   { in the middle of it, as Word puts a shape's text }
+    L := PosEx('>', Sh, B);
+    if (L > 0) and (Pos(' anchor="', Copy(Sh, B, L - B)) = 0) then
+      Insert(' anchor="ctr"', Sh, B + 11);
+  end
+  else
+  begin
+    B := Length(Sh) - Length('</wps:wsp>') + 1;
+    Insert('<wps:bodyPr anchor="ctr"/>', Sh, B);
+  end;
+  Insert('<wps:txbx><w:txbxContent><w:p><w:pPr><w:jc w:val="center"/></w:pPr></w:p></w:txbxContent></wps:txbx>',
+    Sh, B);
+  A := Els[E].A;
+  Delete(Xml, A, Els[E].B - A);
+  Insert(Sh, Xml, A);
+  if not ApplyKeptXml(Xml, 'Add text', Sid) then
+    Exit;
+  Result := EnterTextBox(Sid, CaretPos, False, True);
+  { white letters, as Word's shapes have them, unless the fill is light }
+  Fill := '';
+  P := Pos('<a:solidFill><a:srgbClr val="', Sh);
+  if (P > 0) and (P < Pos('<a:ln', Sh + '<a:ln')) then
+    Fill := Copy(Sh, P + 29, 6);
+  if Result and (Length(Fill) = 6) then
+  begin
+    RGB := StrToIntDef('$' + Fill, -1);
+    if (RGB >= 0) and (0.299 * ((RGB shr 16) and 255) + 0.587 * ((RGB shr 8) and 255) + 0.114 * (RGB and 255) < 186) then
+      SetTextColor($FFFFFF);
+  end;
 end;
 
 function TParadeEdit.SetShapeStyle(AFill, ALine: TColor): Boolean;

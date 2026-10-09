@@ -9,6 +9,7 @@ Each shape is one string of statements separated by ';':
     hx GD MIN MAX X Y            a handle moving GD across (ahXY gdRefX); hy the same up and down (gdRefY);
     hxy GX MINX MAXX GY MINY MAXY X Y   one moving both
     hp GR MINR MAXR GA MINA MAXA X Y    a polar one (ahPolar); '-' for what a handle does not give
+    r L T R B                    where its text goes (rect)
     p W H FILL STROKE            a path: its units (0: the shape's), fill (norm, none, darken, ...), outlined (1/0)
     m X Y | l X Y | q X1 Y1 X2 Y2 | c X1 Y1 X2 Y2 X3 Y3 | A WR HR ST SW | z
 """
@@ -45,6 +46,8 @@ def shape(sh):
                     out.append('hp %s %s %s %s %s %s %s' % (h.get('gdRefR', '-'), h.get('minR', '-'),
                                                             h.get('maxR', '-'), h.get('gdRefAng', '-'),
                                                             h.get('minAng', '-'), h.get('maxAng', '-'), xy))
+        elif t == 'rect':
+            out.append('r %s %s %s %s' % (part.get('l'), part.get('t'), part.get('r'), part.get('b')))
         elif t == 'pathLst':
             for p in part:
                 stroke = '0' if p.get('stroke') in ('false', '0') else '1'

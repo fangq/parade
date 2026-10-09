@@ -24,4 +24,8 @@ int pd_preset_known(const char* name);
    none */
 int pd_preset_flatten(const char* name, double w, double h, const char* adj, pd_preset_flat* out);
 
+/* where the preset's text goes in its box (Office's text rectangle); 0 for none */
+int pd_preset_text_rect(const char* name, double w, double h, const char* adj, double* l, double* t, double* r,
+                        double* b);
+
 #endif

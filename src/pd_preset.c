@@ -441,6 +441,36 @@ int pd_preset_flatten(const char* name, double w, double h, const char* adj, pd_
     return F->npath > 0;
 }
 
+int pd_preset_text_rect(const char* name, double w, double h, const char* adj, double* l, double* t, double* r,
+                        double* b) {
+    const char* def = pv_def(name), *d;
+    pv_env* E;
+    char s[256], a[4][40];
+    int ok = 0;
+
+    if (!def || !(E = (pv_env*)malloc(sizeof(pv_env)))) {
+        return 0;
+    }
+
+    d = pv_env_make(E, def, w, h, adj, NULL, 0);
+
+    while (*d && !ok) {
+        d = pv_next(d, s, sizeof(s));
+
+        if (s[0] == 'r' && s[1] == ' ' && sscanf(s + 2, "%39s %39s %39s %39s", a[0], a[1], a[2], a[3]) == 4) {
+            *l = pv_arg(E, a[0]);
+            *t = pv_arg(E, a[1]);
+            *r = pv_arg(E, a[2]);
+            *b = pv_arg(E, a[3]);
+            ok = *r > *l && *b > *t;
+        }
+    }
+
+    free(E);
+    return ok;
+}
+
+
 /* ---- the API: a preset as JSON, a handle dragged ---- */
 
 typedef struct {

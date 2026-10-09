@@ -6,7 +6,7 @@ program edit_test;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, parade, paradeedit,
+  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, ctypes, parade, paradeedit,
   paradefonts;
 
 type
@@ -369,6 +369,19 @@ begin
   Check(Pos('Typed', Xml) > 0, 'saved and read back: the text box''s text');
 end;
 
+{ the description of the drawing at P, as the document has it }
+function DrawingText(E: TParadeEdit; const P: pd_pos): string;
+var
+  O: pd_inline;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+begin
+  Result := '';
+  if (pd_doc_inline_at(E.Doc, P, O) = PD_OK) and (pd_doc_resource(E.Doc, O.resource, @Mime, @Data, @Len) = PD_OK) then
+    SetString(Result, PAnsiChar(Data), Len);
+end;
+
 function StoryText(E: TParadeEdit; St: pd_block_id): string;
 begin
   Result := E.ParaText(pd_doc_child(E.Doc, St, 0));
@@ -387,6 +400,9 @@ var
   Xml: string;
   Pg: Int32;
   PX0, PY0, PX1, PY1: Double;
+  Ch: TUTF8Char;
+  A: TPoint;
+  W: Double;
 
   function Pt(U, V: Double): TPoint;     { a point of the canvas (points from its corner) in the control }
   begin
@@ -505,6 +521,35 @@ begin
   Check((Length(E.DrawingShapes(CP)) = 0) and (pd_doc_story_count(E.Doc) = S0), 'the canvas deleted: no stories left');
   E.Undo;
   Check((Length(E.DrawingShapes(CP)) = 4) and (pd_doc_story_count(E.Doc) = N0), 'undone: all back');
+  { text typed into a shape that has none: in the middle of it, within its text rectangle }
+  A := Pt(280, 180);
+  TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], A.X, A.Y);
+  E.AddShape('ellipse', 160 * K, 120 * K, 260 * K, 190 * K);
+  Ch := 'H';
+  TParadeWheel(E).UTF8KeyPress(Ch);
+  Ch := 'i';
+  TParadeWheel(E).UTF8KeyPress(Ch);
+  St := StoryTopOfTest(E, E.CaretPos.block);
+  Check((St <> 0) and (StoryText(E, St) = 'Hi'), 'typed with an ellipse selected: its text (' + StoryText(E, St) + ')');
+  Check(E.PropsAt(PdPos(pd_doc_child(E.Doc, St, 0), 0)).color and $FFFFFF = $FFFFFF, 'white, on its fill');
+  Xml := DrawingText(E, CP);
+  I := Pos('"story":' + IntToStr(St) + ',', Xml);
+  if I > 0 then
+    I := PosEx('"w":', Xml, I);
+  if I > 0 then
+    W := StrToIntDef(Copy(Xml, I + 4, PosEx(',', Xml, I) - I - 4), 0) / K
+  else
+    W := 0;
+  Check((W < 90) and (W > 60), Format('in the ellipse''s text rectangle (%.1f wide)', [W]));
+  for I := 1 to 5 do     { the typing, then the text given to it }
+    if StrPas(pd_doc_undo_label(E.Doc)) <> 'Add text' then
+      E.Undo;
+  E.Undo;
+  Check(E.SelectedShape(D, Sid) and (Sid >= 0) and (StoryTopOfTest(E, E.CaretPos.block) = 0),
+    'undone: the ellipse selected again');
+  E.AddShape('line', 20 * K, 180 * K, 120 * K, 190 * K);
+  Check(not E.AddShapeText, 'a line takes no text');
   { pasted where no canvas is: a new one at the caret, around them }
   E.ClearShapeSelection;
   E.ProcessKey(VK_END, [ssCtrl]);
