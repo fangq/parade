@@ -780,6 +780,15 @@ typedef struct {
  */
 PD_API pd_status pd_doc_adopt(pd_doc* doc, const pd_doc* from, uint32_t what);
 
+/**
+ * Table styles after Word's gallery (Table Grid, Plain Table 1, Plain Table 2,
+ * Grid Table 4, List Table 3), their colours linked to the theme: how many,
+ * and one by its index in an accent (0 = the text colour, 1-6 = accent 1-6),
+ * its name ("Grid Table 4 - Accent 2") into name; 1, 0 past the last.
+ */
+PD_API int32_t   pd_table_style_preset_count(void);
+PD_API int32_t   pd_table_style_preset(int32_t index, int32_t accent, char* name, size_t cap, pd_table_style* out);
+
 /** an empty table style: no part given, padding unsaid */
 PD_API void      pd_table_style_init(pd_table_style* ts);
 /**

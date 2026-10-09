@@ -1561,6 +1561,27 @@ static void test_table_styles(void) {
         free(a.p);
     }
 
+    {   /* the gallery: each preset defined and applied, the header in the accent */
+        char nm[64];
+        pd_style_id ps;
+        int i;
+
+        for (i = 0; i < pd_table_style_preset_count(); i++) {
+            CHECK(pd_table_style_preset(i, 2, nm, sizeof(nm), ts) == 1);
+            CHECK(pd_doc_table_style_define(d, nm, 0, ts, &ps) == PD_OK);
+        }
+
+        CHECK(!pd_table_style_preset(i, 2, nm, sizeof(nm), ts));
+        pd_table_style_preset(3, 2, nm, sizeof(nm), ts);
+        CHECK(!strcmp(nm, "Grid Table 4 - Accent 2"));
+        ps = pd_doc_style_find(d, nm);
+        pd_doc_table_props(d, t, &tp);
+        tp.style = ps;
+        CHECK(pd_doc_set_table_props(d, t, &tp) == PD_OK);
+        pd_doc_theme(d, &th);
+        CHECK(tcell(d, t, 0, 1).background == th.color[PD_THEME_ACCENT2] && tchars(d, t, 0, 1).color == 0xFFFFFFFFu);
+    }
+
     pd_doc_free(d);
     free(ts);
 }

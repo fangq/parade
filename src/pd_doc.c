@@ -5580,3 +5580,134 @@ pd_status pd_doc_adopt(pd_doc* d, const pd_doc* from, uint32_t what) {
     pd_doc_end_group(d);
     return st;
 }
+
+/* ------------------------------------------------------------------ */
+/* table style presets                                                */
+/* ------------------------------------------------------------------ */
+
+static void tp_shade(pd_table_style_part* p, const pd_theme* t, uint32_t ref) {
+    p->given = 1;
+    p->has_shading = 1;
+    p->shading_theme = ref;
+    p->shading = pd_theme_color_resolve(t, ref, 0);
+}
+
+static void tp_rules(pd_table_style_part* p, const pd_theme* t, int set, int on, pd_sp w, uint32_t ref) {
+    p->given = 1;
+    p->border_set = set;
+    p->border_on = on;
+    p->border_width = w;
+    p->border_theme = ref;
+    p->border_color = pd_theme_color_resolve(t, ref, 0xFF000000u);
+}
+
+static void tp_text(pd_table_style_part* p, int bold, uint32_t color_ref, const pd_theme* t) {
+    p->given = 1;
+
+    if (bold) {
+        p->chr.mask |= PD_CP_WEIGHT;
+        p->chr.weight = 700;
+    }
+
+    if (color_ref) {
+        p->chr.mask |= PD_CP_COLOR;
+        p->chr.color_theme = color_ref;
+        p->chr.color = pd_theme_color_resolve(t, color_ref, 0xFF000000u);
+    }
+}
+
+int32_t pd_table_style_preset_count(void) {
+    return 5;
+}
+
+int32_t pd_table_style_preset(int32_t i, int32_t accent, char* name, size_t cap, pd_table_style* ts) {
+    static const char* const names[] = { "Table Grid", "Plain Table 1", "Plain Table 2", "Grid Table 4", "List Table 3" };
+    int32_t slot = accent >= 1 && accent <= 6 ? PD_THEME_ACCENT1 + accent - 1 : PD_THEME_DK1;
+    uint32_t full = pd_theme_color(slot, 100000, 0), light = pd_theme_color(slot, 60000, 40000);
+    uint32_t pale = pd_theme_color(slot, 20000, 80000), white = pd_theme_color(PD_THEME_LT1, 100000, 0);
+    uint32_t grey = pd_theme_color(PD_THEME_LT1, 75000, 0), faint = pd_theme_color(PD_THEME_LT1, 95000, 0);
+    pd_theme t;
+    pd_sp hair = PD_PT(0.5);
+
+    if (!ts || i < 0 || i >= pd_table_style_preset_count()) {
+        return 0;
+    }
+
+    pd_theme_init(&t);
+    pd_table_style_init(ts);
+    ts->part[PD_TPART_WHOLE].given = 1;
+    ts->part[PD_TPART_WHOLE].para.mask = PD_PP_SPACE_AFTER | PD_PP_LINE_SPACING;
+    ts->part[PD_TPART_WHOLE].para.space_after = 0;
+    ts->part[PD_TPART_WHOLE].para.line_spacing = 1000;
+    ts->row_band = ts->col_band = 1;
+    ts->cell_padding = PD_PT(5.4);
+    ts->cell_padding_v = 0;
+
+    if (name && cap) {
+        if (i >= 3 && accent >= 1 && accent <= 6) {
+            snprintf(name, cap, "%s - Accent %d", names[i], (int)accent);
+        } else {
+            snprintf(name, cap, "%s", names[i]);
+        }
+    }
+
+    switch (i) {
+        case 0:     /* every rule, in the text's colour */
+            ts->border_set = ts->border_on = 63;
+            ts->border_width = hair;
+            ts->border_theme = pd_theme_color(PD_THEME_DK1, 100000, 0);
+            ts->border_color = 0xFF000000u;
+            break;
+
+        case 1:     /* light grey rules, the header and first column bold, the rows banded */
+            ts->border_set = ts->border_on = 63;
+            ts->border_width = hair;
+            ts->border_theme = grey;
+            ts->border_color = pd_theme_color_resolve(&t, grey, 0);
+            tp_text(&ts->part[PD_TPART_FIRST_ROW], 1, 0, &t);
+            tp_text(&ts->part[PD_TPART_FIRST_COL], 1, 0, &t);
+            tp_text(&ts->part[PD_TPART_LAST_ROW], 1, 0, &t);
+            tp_shade(&ts->part[PD_TPART_BAND1_H], &t, faint);
+            tp_shade(&ts->part[PD_TPART_BAND1_V], &t, faint);
+            break;
+
+        case 2:     /* a rule above and below, and under the header; the header bold */
+            ts->border_set = ts->border_on = PD_TBORDER_TOP | PD_TBORDER_BOTTOM;
+            ts->border_width = hair;
+            ts->border_theme = pd_theme_color(PD_THEME_DK1, 50000, 50000);
+            ts->border_color = pd_theme_color_resolve(&t, ts->border_theme, 0);
+            tp_text(&ts->part[PD_TPART_FIRST_ROW], 1, 0, &t);
+            tp_rules(&ts->part[PD_TPART_FIRST_ROW], &t, PD_BORDER_BOTTOM, PD_BORDER_BOTTOM, hair, ts->border_theme);
+            tp_text(&ts->part[PD_TPART_FIRST_COL], 1, 0, &t);
+            break;
+
+        case 3:     /* the accent's tint for the rules and the bands, the header in the accent with white text */
+            ts->border_set = ts->border_on = 63;
+            ts->border_width = hair;
+            ts->border_theme = light;
+            ts->border_color = pd_theme_color_resolve(&t, light, 0);
+            tp_shade(&ts->part[PD_TPART_FIRST_ROW], &t, full);
+            tp_text(&ts->part[PD_TPART_FIRST_ROW], 1, white, &t);
+            tp_rules(&ts->part[PD_TPART_FIRST_ROW], &t, 15, 15, hair, full);
+            tp_text(&ts->part[PD_TPART_FIRST_COL], 1, 0, &t);
+            tp_text(&ts->part[PD_TPART_LAST_ROW], 1, 0, &t);
+            tp_rules(&ts->part[PD_TPART_LAST_ROW], &t, PD_BORDER_TOP, PD_BORDER_TOP, PD_PT(1.5), full);
+            tp_shade(&ts->part[PD_TPART_BAND1_H], &t, pale);
+            tp_shade(&ts->part[PD_TPART_BAND1_V], &t, pale);
+            break;
+
+        default:    /* a box in the accent, the header filled with it; the rest open */
+            ts->border_set = ts->border_on = PD_TBORDER_TOP | PD_TBORDER_BOTTOM | PD_TBORDER_LEFT | PD_TBORDER_RIGHT;
+            ts->border_width = hair;
+            ts->border_theme = full;
+            ts->border_color = pd_theme_color_resolve(&t, full, 0);
+            tp_shade(&ts->part[PD_TPART_FIRST_ROW], &t, full);
+            tp_text(&ts->part[PD_TPART_FIRST_ROW], 1, white, &t);
+            tp_text(&ts->part[PD_TPART_FIRST_COL], 1, 0, &t);
+            tp_rules(&ts->part[PD_TPART_BAND1_H], &t, PD_BORDER_TOP | PD_BORDER_BOTTOM, PD_BORDER_TOP | PD_BORDER_BOTTOM,
+                     hair, full);
+            break;
+    }
+
+    return 1;
+}
