@@ -36,7 +36,7 @@ STRUCTS = {
                  "alt alt_len",
     "pd_para_attrs": "quote_depth task loose lang cont div_class",
     "pd_font_info": "alt generic pitch panose charset",
-    "pd_float_props": "placement wrap width width_fraction span_columns gap sequence offset_x offset_y",
+    "pd_float_props": "placement wrap width width_fraction span_columns gap sequence offset_x offset_y offset_from",
     "pd_section_props": "page_width page_height margin_top margin_bottom margin_left margin_right header_distance "
                         "footer_distance columns column_gap first_page_number page_number_format title_page "
                         "facing_pages header header_first header_even footer footer_first footer_even continuous page_breaking "

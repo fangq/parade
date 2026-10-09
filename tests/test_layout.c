@@ -381,6 +381,32 @@ static void test_float_offset_y(void) {
 
     CHECK(nl > 2 && line_y[0] < img_top && above_full);
     CHECK(beside > 0);
+
+    /* in front of the text: from the page's top, its margin, the text taking no notice; above its anchor */
+    pd_layout_caret(L, at(p[3], 0), &pg, &x, &base, &a, &de);
+    y0 = base;
+    fp.wrap = PD_WRAP_FRONT;
+    fp.offset_from = PD_FROM_PAGE;
+    fp.offset_y = PD_PT(300);
+    pd_doc_set_float_props(d, fl, &fp);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    CHECK(float_page(L, fl, d, &y1) == 0 && y1 > PD_PT(299) && y1 < PD_PT(301));
+    pd_layout_caret(L, at(p[3], 0), &pg, &x, &base, &a, &de);
+    CHECK(base < y0 && x < sp.margin_left + PD_PT(20));    /* the text where it would be without it */
+    fp.offset_from = PD_FROM_MARGIN;
+    fp.offset_y = PD_PT(100);
+    pd_doc_set_float_props(d, fl, &fp);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    CHECK(float_page(L, fl, d, &y1) == 0 && y1 > sp.margin_top + PD_PT(99) && y1 < sp.margin_top + PD_PT(101));
+    fp.wrap = PD_WRAP_LEFT;
+    fp.offset_from = PD_FROM_PARAGRAPH;
+    fp.offset_y = 0;
+    pd_doc_set_float_props(d, fl, &fp);
+    CHECK(pd_layout_update(L, &info) == PD_OK && float_page(L, fl, d, &y0) == 0);
+    fp.offset_y = -PD_PT(20);
+    pd_doc_set_float_props(d, fl, &fp);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    CHECK(float_page(L, fl, d, &y1) == 0 && y0 - y1 > PD_PT(19) && y0 - y1 < PD_PT(21));
     pd_layout_free(L);
     pd_doc_free(d);
 }

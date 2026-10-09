@@ -3322,6 +3322,50 @@ static void test_docx_header_logo(void) {
     pd_doc_free(d);
 }
 
+/* a drawing placed from the page's top: so when read, and written back so */
+static void test_docx_float_from_page(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:r><w:t>Some text.</w:t></w:r>"
+        DRAWING("anchor", "<wp:positionH relativeFrom=\"column\"><wp:posOffset>0</wp:posOffset></wp:positionH>"
+                "<wp:positionV relativeFrom=\"page\"><wp:posOffset>3810000</wp:posOffset></wp:positionV>"
+                "<wp:wrapSquare wrapText=\"right\"/>")
+        "</w:p></w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec, fl = 0;
+        pd_block_info bi;
+        pd_float_props fp;
+        int i;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+
+        for (i = 0; pd_doc_block_info(d, pd_doc_child(d, sec, i), &bi) == PD_OK; i++) {
+            if (bi.kind == PD_BLOCK_FLOAT) {
+                fl = bi.id;
+            }
+        }
+
+        CHECK(fl && pd_doc_float_props(d, fl, &fp) == PD_OK && fp.offset_from == PD_FROM_PAGE &&
+              fp.offset_y == PD_PT(300));
+    }
+
+    pd_doc_free(d);
+}
+
 /* a drawing Word moved down the paragraph it is anchored in: as far down when read, and written back so */
 static void test_docx_float_offset_y(void) {
     pd_doc* d = docx_doc(
@@ -4659,6 +4703,7 @@ int main(void) {
     printf("docx header logo\n");
     test_docx_header_logo();
     test_docx_float_offset_y();
+    test_docx_float_from_page();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();
     printf("EMF pictures\n");

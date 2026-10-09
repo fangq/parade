@@ -265,6 +265,7 @@ begin
   WriteLn('pd_float_props.sequence ', PtrUInt(@v_pd_float_props.sequence) - PtrUInt(@v_pd_float_props));
   WriteLn('pd_float_props.offset_x ', PtrUInt(@v_pd_float_props.offset_x) - PtrUInt(@v_pd_float_props));
   WriteLn('pd_float_props.offset_y ', PtrUInt(@v_pd_float_props.offset_y) - PtrUInt(@v_pd_float_props));
+  WriteLn('pd_float_props.offset_from ', PtrUInt(@v_pd_float_props.offset_from) - PtrUInt(@v_pd_float_props));
   WriteLn('pd_section_props ', SizeOf(pd_section_props));
   WriteLn('pd_section_props.page_width ', PtrUInt(@v_pd_section_props.page_width) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.page_height ', PtrUInt(@v_pd_section_props.page_height) - PtrUInt(@v_pd_section_props));

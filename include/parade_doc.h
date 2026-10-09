@@ -510,7 +510,9 @@ PD_API pd_status pd_doc_resource(const pd_doc* doc, pd_res_id res, const char** 
 typedef enum {
     PD_WRAP_NONE = 0,           /**< full width; text above and below */
     PD_WRAP_LEFT = 1,           /**< float on the left, text flows on the right */
-    PD_WRAP_RIGHT = 2
+    PD_WRAP_RIGHT = 2,
+    PD_WRAP_FRONT = 3,          /**< over the text, which takes no notice of it (Word's In Front of Text) */
+    PD_WRAP_BEHIND = 4          /**< under the text, the same (Behind Text) */
 } pd_wrap;
 
 typedef struct {
@@ -524,8 +526,14 @@ typedef struct {
     pd_sp offset_x;             /**< with PD_PLACE_OFFSET: its left edge from the column's (negative: in the
                                      margin); the text gives way only where it reaches into the column */
     pd_sp offset_y;             /**< its top below its anchor's (0: at it), as Word has a drawing moved down the
-                                     paragraph it is anchored in; the text beside it from there */
+                                     paragraph it is anchored in; the text beside it from there. Negative: above
+                                     it. With offset_from, from the page's top or its top margin instead */
+    int32_t offset_from;        /**< what offset_y is from: PD_FROM_PARAGRAPH, PD_FROM_PAGE, PD_FROM_MARGIN */
 } pd_float_props;
+
+#define PD_FROM_PARAGRAPH 0     /**< the top of the paragraph after it (its anchor) */
+#define PD_FROM_PAGE 1          /**< the top edge of the page its anchor is on */
+#define PD_FROM_MARGIN 2        /**< the top margin of that page (where its text starts) */
 
 typedef struct {
     pd_sp page_width, page_height;

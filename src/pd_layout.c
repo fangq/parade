@@ -194,6 +194,11 @@ struct pd_layout {
     char (*prev_labels)[16];
     int32_t prev_npages;
     int want_rerun;
+    struct {                    /* where floats placed from the page's top were anchored, the last time */
+        pd_block_id b;
+        pd_sp y;
+    } *fly;
+    int32_t nfly, capfly;
     int32_t stable;             /* hybrid line breaking: -1 as the document says, 0 off, 1 on */
     int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
 };
@@ -222,6 +227,7 @@ typedef struct {
     int32_t ntb, captb;
     pd_sp wrap_rem, wrap_w;     /* building: height still beside a wrapping float */
     pd_sp wrap_skip;            /* and before that, the height of text above it (a float lower down) */
+    pd_sp gap_skip, gap_h;      /* a float across the column lower down: the text before it, then its room */
     int32_t wrap_side;
     int32_t floor_page;         /* continuous section: page shared with the previous section */
     pd_sp floor_y;              /* and the height its content takes there */
@@ -1172,14 +1178,51 @@ static pd_status attach_notes(filler* F, const blk* b, uint32_t from, uint32_t t
     return PD_OK;
 }
 
+/* where a float was anchored on its page when last placed (1), or not known (0) */
+static int fly_get(const pd_layout* L, pd_block_id b, pd_sp* y) {
+    int32_t i;
+
+    for (i = 0; i < L->nfly; i++) {
+        if (L->fly[i].b == b) {
+            *y = L->fly[i].y;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* that remembered; whether it moved (by more than half a point) */
+static int fly_set(pd_layout* L, pd_block_id b, pd_sp y) {
+    int32_t i;
+
+    for (i = 0; i < L->nfly; i++) {
+        if (L->fly[i].b == b) {
+            int moved = L->fly[i].y - y > PD_PT(0.5) || y - L->fly[i].y > PD_PT(0.5);
+
+            L->fly[i].y = y;
+            return moved;
+        }
+    }
+
+    if (grow((void**)&L->fly, &L->capfly, (int64_t)L->nfly + 1, sizeof(L->fly[0]))) {
+        return 0;
+    }
+
+    L->fly[L->nfly].b = b;
+    L->fly[L->nfly++].y = y;
+    return 1;
+}
+
 /* text beside a wrapping float ends: what is left of the float's height becomes space */
 static void clear_wrap(filler* F) {
-    if (F->wrap_rem > 0) {
-        push(F, VI_GLUE, F->wrap_rem + F->wrap_skip, 0, NULL, 0, 0);
+    if (F->wrap_rem > 0 && F->wrap_skip <= 0) {     /* (one still lower down is passed over) */
+        push(F, VI_GLUE, F->wrap_rem, 0, NULL, 0, 0);
     }
 
     F->wrap_rem = 0;
     F->wrap_skip = 0;
+    F->gap_h = 0;
 }
 
 /* narrowest and widest useful width of a cell's content */
@@ -1689,7 +1732,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
         blk* b = d->tab[c->kids[i]];
 
         if (b->kind == PD_BLOCK_PARAGRAPH) {
-            pd_sp gl, rem, skip;
+            pd_sp gl, rem, skip, gs;
             int32_t loose = F->loose ? F->loose[b->id] : 0, kwrap = 0;
             pcache* pc = layout_para_ex(F->L, b->id, F->colw, F->wrap_rem > 0 ? 0 : loose, NULL, &st);
             const pd_para_props* pp;
@@ -1743,9 +1786,15 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             }
 
             push(F, VI_GLUE, gl, 0, NULL, 0, 0);
+            gs = F->gap_skip - gl;
 
             for (k = 0; k < pc->nlines; k++) {
                 pd_line ln;
+
+                if (F->gap_h > 0 && pc->top[k] >= gs) {   /* down to a float across the column: its room */
+                    push(F, VI_GLUE, F->gap_h, 0, NULL, 0, 0);
+                    F->gap_h = 0;
+                }
 
                 if (k > 0) {    /* widows, orphans, keep-lines; never between a float and its text */
                     int ok = !pp->keep_lines && k >= pp->orphans && pc->nlines - k >= pp->widows &&
@@ -1764,6 +1813,8 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                     return st;
                 }
             }
+
+            F->gap_skip = gs - pc->height;
 
             if (F->wrap_rem > 0) {  /* what is left of the float below this paragraph, and of the text above it */
                 F->wrap_rem = skip >= pc->height ? rem : rem - (pc->height - skip);
@@ -1803,24 +1854,49 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
 
             /* text wraps only beside a float that leaves it room: an inch, as Word fills a gap a line of a few
                words fits in (a figure taking four-fifths of the column has text beside it there) */
-            if (f->fp.wrap != PD_WRAP_NONE && F->colw - float_taken(&f->fp, f->w, F->colw, &ox) < PD_PT(72)) {
+            if ((f->fp.wrap == PD_WRAP_LEFT || f->fp.wrap == PD_WRAP_RIGHT) &&
+                    F->colw - float_taken(&f->fp, f->w, F->colw, &ox) < PD_PT(72)) {
                 f->fp.wrap = PD_WRAP_NONE;
             }
 
             f->item = F->n;
 
-            if (f->fp.offset_y < 0) {
-                f->fp.offset_y = 0;     /* above where it is anchored: not where the text has already gone */
+            if (f->fp.offset_from != PD_FROM_PARAGRAPH && f->fp.wrap < PD_WRAP_FRONT) {
+                f->fp.offset_y = 0;     /* text round it: where it is anchored (the page's top is not known here) */
+            } else if (f->fp.offset_from != PD_FROM_PARAGRAPH) {
+                /* from the page's top (or its margin): that far below where it was anchored the last time, a
+                   second pass when that is not known yet */
+                pd_sp ay, abs_y = f->fp.offset_y + (f->fp.offset_from == PD_FROM_MARGIN ? F->sp->margin_top : 0);
+
+                if (fly_get(F->L, b->id, &ay)) {
+                    f->fp.offset_y = abs_y - ay;
+                } else {
+                    f->fp.offset_y = 0;
+                    F->L->want_rerun = 1;
+                }
             }
 
-            if (f->fp.wrap != PD_WRAP_NONE) {
+            if (f->fp.wrap >= PD_WRAP_FRONT) {
+                push(F, VI_FLOAT, 0, 0, NULL, 0, b->id);     /* over or under the text: no room of its own */
+            } else if (f->fp.wrap != PD_WRAP_NONE) {
+                /* lower down: the text beside it from there; higher (over the text before it): the text after its
+                   anchor beside what is left of it */
+                pd_sp rem = f->h + f->fp.gap + (f->fp.offset_y < 0 ? f->fp.offset_y : 0);
+
                 push(F, VI_FLOAT, 0, 0, NULL, 0, b->id);
-                F->wrap_rem = f->h + f->fp.gap;
-                F->wrap_skip = f->fp.offset_y;  /* lower down: the text beside it from there */
+                F->wrap_rem = rem > 0 ? rem : 0;
+                F->wrap_skip = f->fp.offset_y > 0 ? f->fp.offset_y : 0;
                 F->wrap_w = float_taken(&f->fp, f->w, F->colw, &ox);
                 F->wrap_side = f->fp.wrap;
+            } else if (f->fp.offset_y > 0) {
+                /* lower down: the text before it runs on, then its room */
+                push(F, VI_FLOAT, 0, 0, NULL, 0, b->id);
+                F->gap_skip = f->fp.offset_y;
+                F->gap_h = f->h + 2 * f->fp.gap;
             } else {
-                push(F, VI_FLOAT, f->fp.offset_y + f->h + 2 * f->fp.gap, 0, NULL, 0, b->id);
+                pd_sp hh = f->fp.offset_y + f->h + 2 * f->fp.gap;
+
+                push(F, VI_FLOAT, hh > 0 ? hh : 0, 0, NULL, 0, b->id);
             }
 
             F->it[F->n - 1].line = F->nfl - 1;  /* float index */
@@ -1864,6 +1940,7 @@ static pd_status rebuild_flow(filler* F) {
     F->n = F->nfl = F->nnotes = F->ntb = 0;
     F->wrap_rem = 0;
     F->wrap_skip = 0;
+    F->gap_h = 0;
     F->prev_para = 0;
     st = build_flow(F, F->sec->id, &prev_after, &prev_keep, &first);
 
@@ -2274,7 +2351,28 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
         } else if (v->kind == VI_FLOAT) {
             pfloat* f = &F->fl[v->line];
 
-            if (f->fp.wrap != PD_WRAP_NONE) {   /* at the anchor, against the column edge */
+            if (fly_set(F->L, f->block, y0 + r[i].y) && f->fp.offset_from != PD_FROM_PARAGRAPH) {
+                F->L->want_rerun = 1;   /* its anchor elsewhere than it was taken to be */
+            }
+
+            if (f->fp.wrap >= PD_WRAP_FRONT) {  /* over or under the text: where it is put, across or in the middle */
+                pd_sp ox = (f->fp.placement & PD_PLACE_OFFSET) ? f->fp.offset_x : (F->colw - f->w) / 2;
+                ppage* pg = &F->L->pages[F->page];
+                int32_t n0 = pg->n;
+
+                place_stack(F->L, f->block, f->w, F->page, x + ox, y0 + r[i].y + f->fp.offset_y, 3);
+
+                if (f->fp.wrap == PD_WRAP_BEHIND && pg->n > n0 && n0 > 0) {     /* under: drawn first */
+                    pline* tmp = (pline*)malloc(sizeof(pline) * (size_t)(pg->n - n0));
+
+                    if (tmp) {
+                        memcpy(tmp, pg->lines + n0, sizeof(pline) * (size_t)(pg->n - n0));
+                        memmove(pg->lines + (pg->n - n0), pg->lines, sizeof(pline) * (size_t)n0);
+                        memcpy(pg->lines, tmp, sizeof(pline) * (size_t)(pg->n - n0));
+                        free(tmp);
+                    }
+                }
+            } else if (f->fp.wrap != PD_WRAP_NONE) {   /* at the anchor, against the column edge */
                 pd_sp ox;
 
                 float_taken(&f->fp, f->w, F->colw, &ox);
@@ -2445,7 +2543,7 @@ static pd_status fill(filler* F, int32_t start) {
                 }
 
                 if (f->fp.wrap != PD_WRAP_NONE) {   /* at its anchor, with the text beside it */
-                    if (used + f->h + f->fp.gap + fn_area(F, fn) > avail && !empty) {
+                    if (f->fp.wrap < PD_WRAP_FRONT && used + f->h + f->fp.gap + fn_area(F, fn) > avail && !empty) {
                         cut = 1;
                         at = i;
                         break;
@@ -3281,6 +3379,7 @@ void pd_layout_free(pd_layout* L) {
     free(L->first_page);
     free(L->prev_first_page);
     free(L->prev_labels);
+    free(L->fly);
     pd_para_free(L->scratch);
     free(L);
 }

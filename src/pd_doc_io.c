@@ -43,7 +43,7 @@ static const char* const field_names[] = { "page", "pages", "sectionpage", "refn
 static const char* const num_names[] = { "bullet", "decimal", "loweralpha", "upperalpha", "lowerroman",
                                          "upperroman", "none"
                                        };
-static const char* const wrap_names[] = { "none", "left", "right" };
+static const char* const wrap_names[] = { "none", "left", "right", "front", "behind" };
 static const char* const break_names[] = { "page", "column", "oddpage", "evenpage", "rule" };
 static const char* const shift_names[] = { "none", "super", "sub" };
 static const char* const mode_names[] = { "optimal", "greedy" };
@@ -667,6 +667,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
             if (p->offset_y) {
                 put_int(w, "OffsetY", p->offset_y);
+            }
+
+            if (p->offset_from) {
+                put_int(w, "OffsetFrom", p->offset_from);
             }
 
             pj_obj_end(w);
@@ -1579,6 +1583,7 @@ static void load_float(loader* L, const pj_node* o, pd_float_props* p) {
     REQUIRE(p->placement & 31);
     p->offset_x = (pd_sp)int_or(pj_get(x, "OffsetX"), 0, -PD_PT(10000), PD_PT(10000), L);
     p->offset_y = (pd_sp)int_or(pj_get(x, "OffsetY"), 0, -PD_PT(10000), PD_PT(10000), L);
+    p->offset_from = (int32_t)int_or(pj_get(x, "OffsetFrom"), 0, 0, 2, L);
     p->wrap = pj_get(x, "Wrap") ? enum_of(pj_get(x, "Wrap"), NAMES(wrap_names)) : 0;
     REQUIRE(p->wrap >= 0);
     p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);

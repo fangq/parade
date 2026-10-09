@@ -47,6 +47,9 @@ type
   Ppd_layout = Pointer;
 
 const
+  PD_FROM_PARAGRAPH = 0;
+  PD_FROM_PAGE = 1;
+  PD_FROM_MARGIN = 2;
   PD_SP_PER_PT = 65536;
 
   PD_OK = 0;
@@ -221,6 +224,8 @@ const
   PD_WRAP_NONE = 0;
   PD_WRAP_LEFT = 1;
   PD_WRAP_RIGHT = 2;
+  PD_WRAP_FRONT = 3;
+  PD_WRAP_BEHIND = 4;
   PD_PAGES_GREEDY = 0;
   PD_PAGES_OPTIMAL = 1;
   PD_TABLE_MAX_COLS = 32;
@@ -505,6 +510,7 @@ type
     sequence: array[0..31] of AnsiChar;
     offset_x: pd_sp;
     offset_y: pd_sp;
+    offset_from: Int32;     { PD_FROM_* }
   end;
   Ppd_float_props = ^pd_float_props;
 
