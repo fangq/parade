@@ -6348,10 +6348,11 @@ static void xfrm_attr(const pd_markup* m, const char* t, dxfrm_in* f) {
 
         d[0] = mu_attr(m, "x", v, sizeof(v)) ? atoll(v) : 0;
         d[1] = mu_attr(m, "y", v, sizeof(v)) ? atoll(v) : 0;
-    } else if (!strcmp(t, "ext") || !strcmp(t, "chExt")) {
+    } else if ((!strcmp(t, "ext") || !strcmp(t, "chExt")) && mu_attr(m, "cx", v, sizeof(v))) {
+        /* (an a:ext of an extension list, a:ext uri="...", is no size) */
         long long* d = !strcmp(t, "ext") ? f->ext : f->chext;
 
-        d[0] = mu_attr(m, "cx", v, sizeof(v)) ? atoll(v) : 0;
+        d[0] = atoll(v);
         d[1] = mu_attr(m, "cy", v, sizeof(v)) ? atoll(v) : 0;
     }
 }
@@ -6972,6 +6973,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int cg_n = 0, cg_npt = 0, cg_closed = 0, cg_new_ring = 1, k2;
     char cg_cmd = 'm';
     char blip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
+    int crop[4] = { 0, 0, 0, 0 };   /* a picture's srcRect: its sides cut off, in 100000ths */
     uint32_t fill = 0, line = 0, sfill = 0, sline = 0, *cur_clr = NULL;
     char cam_prst[48] = "";         /* the shape's 3-D camera (scene3d), seen in parallel */
     int cam_has_rot = 0, in_camera = 0;
@@ -7215,6 +7217,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             cam_prst[0] = '\0';
             cam_has_rot = in_camera = 0;
             blip[0] = '\0';
+            memset(crop, 0, sizeof(crop));
             strcpy(geom, "rect");
             have_fill = have_line = style_fill = style_line = 0;
             head_arrow = tail_arrow = 0;
@@ -7316,8 +7319,14 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
                 if (r) {
                     ITEM_SEP();
-                    pb_printf(&o, "{\"img\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}", (int)r, (int)emu_sp(x), (int)emu_sp(y),
+                    pb_printf(&o, "{\"img\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d", (int)r, (int)emu_sp(x), (int)emu_sp(y),
                               (int)emu_sp(cw), (int)emu_sp(ch));
+
+                    if (crop[0] || crop[1] || crop[2] || crop[3]) {
+                        pb_printf(&o, ",\"crop\":[%d,%d,%d,%d]", crop[0], crop[1], crop[2], crop[3]);
+                    }
+
+                    pb_putc(&o, '}');
                 }
             } else if (kind == 2) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
@@ -8059,6 +8068,13 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (in_sppr && !in_ln && !strcmp(t, "noFill")) {
             have_fill = 1;
             fill = 0;
+        } else if (kind == 1 && !strcmp(t, "srcRect")) {    /* cropped: by how much of each side */
+            static const char* sides[4] = { "l", "t", "r", "b" };
+            int q;
+
+            for (q = 0; q < 4; q++) {
+                crop[q] = mu_attr(&g, sides[q], v, sizeof(v)) ? atoi(v) : 0;
+            }
         } else if (kind == 1 && !strcmp(t, "blip")) {
             mu_attr(&g, "r:embed", blip, sizeof(blip));
         } else if (!strcmp(t, "bodyPr")) {
@@ -10233,4 +10249,40 @@ pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xm
     free(X);
     pj_free(jd);
     return st;
+}
+
+/* ------------------------------------------------------------------ */
+/* the zip reader and writer, for the other OOXML packages (pd_pptx.c) */
+/* ------------------------------------------------------------------ */
+
+unsigned char* pd_zip_get(const unsigned char* zip, size_t n, const char* name, size_t* len) {
+    zipr z;
+    unsigned char* out;
+
+    if (zip_open(&z, zip, n) != 0) {
+        return NULL;
+    }
+
+    out = zip_read(&z, name, len);
+    free(z.e);
+    return out;
+}
+
+void* pd_zipw_new(pd_buf* o) {
+    zipw* z = (zipw*)calloc(1, sizeof(zipw));
+
+    if (z) {
+        z->o = o;
+    }
+
+    return z;
+}
+
+int pd_zipw_add(void* z, const char* name, const void* data, size_t len) {
+    return zip_add((zipw*)z, name, data, len);
+}
+
+void pd_zipw_finish(void* z) {
+    zip_finish((zipw*)z);
+    free(z);
 }

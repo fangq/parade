@@ -1587,12 +1587,12 @@ pd_status pd_doc_import(const void* data, size_t len, pd_conv_format fmt, pd_doc
         return pd_doc_load(data, len, PD_JDATA_AUTO, out);
     }
 
-    if (fmt == PD_CONV_LATEX || (int)fmt < 0 || fmt > PD_CONV_JDATA) {
+    if (fmt == PD_CONV_LATEX || (int)fmt < 0 || fmt > PD_CONV_PPTX) {
         return PD_ERR_ARG;
     }
 
     /* text formats: UTF-8, or Windows-1252 when it is not valid UTF-8 (RTF does its own decoding) */
-    if (fmt != PD_CONV_DOCX && fmt != PD_CONV_RTF && !utf8_ok(s, len)) {
+    if (fmt != PD_CONV_DOCX && fmt != PD_CONV_PPTX && fmt != PD_CONV_RTF && !utf8_ok(s, len)) {
         if ((conv = to_utf8(s, len, &len)) == NULL) {
             return PD_ERR_NOMEM;
         }
@@ -1626,6 +1626,10 @@ pd_status pd_doc_import(const void* data, size_t len, pd_conv_format fmt, pd_doc
             st = pd_docx_import(d, (const unsigned char*)s, len);
             break;
 
+        case PD_CONV_PPTX:
+            st = pd_pptx_import(d, (const unsigned char*)s, len);
+            break;
+
         default:
             st = PD_ERR_ARG;
     }
@@ -1649,7 +1653,13 @@ pd_conv_format pd_conv_detect(const void* data, size_t len) {
         return PD_CONV_TEXT;
     }
 
-    if (len >= 4 && memcmp(s, "PK\x03\x04", 4) == 0) {
+    if (len >= 4 && memcmp(s, "PK\x03\x04", 4) == 0) {   /* a package: a presentation, or a Word document */
+        for (k = 0; k + 20 <= len && k < ((size_t)8 << 20); k++) {
+            if (s[k] == 'p' && memcmp(s + k, "ppt/presentation.xml", 20) == 0) {
+                return PD_CONV_PPTX;
+            }
+        }
+
         return PD_CONV_DOCX;
     }
 

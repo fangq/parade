@@ -333,6 +333,10 @@ int main(void) {
     printf("pd_draw.path_flags %zu\n", offsetof(pd_draw, path_flags));
     printf("pd_draw.line_width %zu\n", offsetof(pd_draw, line_width));
     printf("pd_draw.fill %zu\n", offsetof(pd_draw, fill));
+    printf("pd_draw.clip_x %zu\n", offsetof(pd_draw, clip_x));
+    printf("pd_draw.clip_y %zu\n", offsetof(pd_draw, clip_y));
+    printf("pd_draw.clip_w %zu\n", offsetof(pd_draw, clip_w));
+    printf("pd_draw.clip_h %zu\n", offsetof(pd_draw, clip_h));
     printf("pd_markup_item %zu\n", sizeof(pd_markup_item));
     printf("pd_markup_item.kind %zu\n", offsetof(pd_markup_item, kind));
     printf("pd_markup_item.id %zu\n", offsetof(pd_markup_item, id));

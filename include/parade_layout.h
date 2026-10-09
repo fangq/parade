@@ -102,6 +102,7 @@ typedef struct {
     int32_t path_flags;         /**< paths: PD_PATH_* */
     pd_sp line_width;           /**< paths: stroke width, 0 = no stroke */
     uint32_t fill;              /**< paths: fill colour 0xAARRGGBB, 0 = not filled */
+    pd_sp clip_x, clip_y, clip_w, clip_h;   /**< images: shown only within this (a cropped picture); clip_w 0: all */
 } pd_draw;
 
 /** the display list of a page; same size-query convention as pd_para_get_glyphs */

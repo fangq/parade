@@ -1,7 +1,7 @@
 /*
  * pd_conv: convert between document formats with Parade
  *
- *   pd_conv in.{pdoc,jdoc,html,md,rtf,docx,txt} out.{pdoc,jdoc,html,md,tex,rtf,docx,txt,pdf}
+ *   pd_conv in.{pdoc,jdoc,html,md,rtf,docx,pptx,txt} out.{pdoc,jdoc,html,md,tex,rtf,docx,txt,pdf}
  *   (.pdoc: the native document in BJData; .jdoc: the same in JSON text)
  *
  * Formats come from the file extensions (or, for input, the content).
@@ -175,6 +175,10 @@ static int fmt_of(const char* ext, int* jdata_binary) {
 
     if (!strcmp(ext, "docx")) {
         return PD_CONV_DOCX;
+    }
+
+    if (!strcmp(ext, "pptx")) {
+        return PD_CONV_PPTX;
     }
 
     if (!strcmp(ext, "txt")) {

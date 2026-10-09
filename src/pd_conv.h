@@ -171,6 +171,13 @@ pd_status pd_rtf_export(const pd_doc* d, pd_buf* out);
 pd_status pd_rtf_import(pd_doc* d, const char* s, size_t n);
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out);
 pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n);
+/* PowerPoint: each slide a page that is a canvas, read as a .docx made of them (pd_pptx.c) */
+pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n);
+/* an entry of a zip (caller frees), NULL if none; a zip written into o, an entry at a time */
+unsigned char* pd_zip_get(const unsigned char* zip, size_t n, const char* name, size_t* len);
+void* pd_zipw_new(pd_buf* o);
+int pd_zipw_add(void* z, const char* name, const void* data, size_t len);
+void pd_zipw_finish(void* z);
 
 /* ------------------------------------------------------------------ */
 /* markup tokenizer (HTML and XML)                                    */

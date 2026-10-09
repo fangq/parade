@@ -365,6 +365,10 @@ begin
   WriteLn('pd_draw.path_flags ', PtrUInt(@v_pd_draw.path_flags) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.line_width ', PtrUInt(@v_pd_draw.line_width) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.fill ', PtrUInt(@v_pd_draw.fill) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.clip_x ', PtrUInt(@v_pd_draw.clip_x) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.clip_y ', PtrUInt(@v_pd_draw.clip_y) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.clip_w ', PtrUInt(@v_pd_draw.clip_w) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.clip_h ', PtrUInt(@v_pd_draw.clip_h) - PtrUInt(@v_pd_draw));
   WriteLn('pd_markup_item ', SizeOf(pd_markup_item));
   WriteLn('pd_markup_item.kind ', PtrUInt(@v_pd_markup_item.kind) - PtrUInt(@v_pd_markup_item));
   WriteLn('pd_markup_item.id ', PtrUInt(@v_pd_markup_item.id) - PtrUInt(@v_pd_markup_item));

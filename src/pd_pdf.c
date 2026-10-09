@@ -10,7 +10,7 @@
  *    16 MB CJK font costs only the glyphs a document uses;
  *  - ToUnicode maps come from the document text at each glyph's cluster,
  *    so text copied from the PDF is the document's text;
- *  - JPEG passes through; PNG (gray/RGB/palette/alpha, not interlaced) is
+ *  - JPEG passes through; PNG (gray/RGB/palette/alpha, interlaced or not) is
  *    decoded and re-encoded with a soft mask where needed;
  *  - headings become the outline (bookmarks);
  *  - output is deterministic: integer coordinates printed exactly, no
@@ -628,6 +628,48 @@ typedef struct {
     int ok;
 } pimage;
 
+/* rows of a PNG (each a filter byte, then stride bytes) unfiltered in place */
+static void png_unfilter(unsigned char* raw, uint32_t rows, uint32_t stride, uint32_t bpp) {
+    uint32_t y, x;
+
+    for (y = 0; y < rows; y++) {
+        unsigned char* row = raw + (size_t)y * (stride + 1) + 1, *up = y ? row - (stride + 1) : NULL;
+        unsigned ft = row[-1];
+
+        row[-1] = 0;
+
+        for (x = 0; x < stride; x++) {
+            int a = x >= bpp ? row[x - bpp] : 0, b = up ? up[x] : 0, c = (up && x >= bpp) ? up[x - bpp] : 0;
+            int pr, pa, pb, pc;
+
+            switch (ft) {
+                case 1:
+                    row[x] = (unsigned char)(row[x] + a);
+                    break;
+
+                case 2:
+                    row[x] = (unsigned char)(row[x] + b);
+                    break;
+
+                case 3:
+                    row[x] = (unsigned char)(row[x] + ((a + b) >> 1));
+                    break;
+
+                case 4:
+                    pr = a + b - c;
+                    pa = abs(pr - a);
+                    pb = abs(pr - b);
+                    pc = abs(pr - c);
+                    row[x] = (unsigned char)(row[x] + ((pa <= pb && pa <= pc) ? a : pb <= pc ? b : c));
+                    break;
+
+                default:
+                    break;
+            }
+        }
+    }
+}
+
 static int png_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
                       unsigned char** alpha) {
     size_t i = 8, idn = 0;
@@ -683,7 +725,7 @@ static int png_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, 
 
     (void)ntrns;
 
-    if (!W || !H || W > 20000 || H > 20000 || depth != 8 || inter || !idat ||
+    if (!W || !H || W > 20000 || H > 20000 || depth != 8 || inter > 1 || !idat ||
             !(ctype == 0 || ctype == 2 || ctype == 3 || ctype == 4 || ctype == 6) || (ctype == 3 && !npal)) {
         free(idat);
         return -1;
@@ -692,51 +734,57 @@ static int png_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, 
     bpp = ctype == 2 ? 3 : ctype == 4 ? 2 : ctype == 6 ? 4 : 1;
     stride = W * bpp;
 
-    if (pd_inflate(idat, idn, 1, (size_t)(stride + 1) * H, &raw, &rawn) || rawn != (size_t)(stride + 1) * H) {
-        free(idat);
-        free(raw);
-        return -1;
-    }
+    if (inter) {    /* Adam7: seven passes, each a smaller image, put together into rows as if not interlaced */
+        static const uint32_t x0[7] = { 0, 4, 0, 2, 0, 1, 0 }, y0[7] = { 0, 0, 4, 0, 2, 0, 1 };
+        static const uint32_t dx[7] = { 8, 8, 4, 4, 2, 2, 1 }, dy[7] = { 8, 8, 8, 4, 4, 2, 2 };
+        size_t need = 0, at = 0;
+        unsigned char* pass;
+        int k;
 
-    free(idat);
+        for (k = 0; k < 7; k++) {
+            uint32_t pw = W > x0[k] ? (W - x0[k] + dx[k] - 1) / dx[k] : 0, ph = H > y0[k] ? (H - y0[k] + dy[k] - 1) / dy[k] : 0;
 
-    /* undo the per-row filters in place */
-    for (y = 0; y < H; y++) {
-        unsigned char* row = raw + (size_t)y * (stride + 1) + 1, *up = y ? row - (stride + 1) : NULL;
-        unsigned ft = row[-1];
-
-        for (x = 0; x < stride; x++) {
-            int a = x >= bpp ? row[x - bpp] : 0, b = up ? up[x] : 0, c = (up && x >= bpp) ? up[x - bpp] : 0;
-            int pr;
-
-            switch (ft) {
-                case 1:
-                    row[x] = (unsigned char)(row[x] + a);
-                    break;
-
-                case 2:
-                    row[x] = (unsigned char)(row[x] + b);
-                    break;
-
-                case 3:
-                    row[x] = (unsigned char)(row[x] + ((a + b) >> 1));
-                    break;
-
-                case 4: {
-                    int pa, pb, pc;
-
-                    pr = a + b - c;
-                    pa = abs(pr - a);
-                    pb = abs(pr - b);
-                    pc = abs(pr - c);
-                    row[x] = (unsigned char)(row[x] + ((pa <= pb && pa <= pc) ? a : pb <= pc ? b : c));
-                    break;
-                }
-
-                default:
-                    break;
-            }
+            need += pw && ph ? (size_t)(pw * bpp + 1) * ph : 0;
         }
+
+        if (pd_inflate(idat, idn, 1, need, &pass, &rawn) || rawn != need ||
+                (raw = (unsigned char*)calloc((size_t)(stride + 1) * H, 1)) == NULL) {
+            free(idat);
+            free(pass);
+            return -1;
+        }
+
+        for (k = 0; k < 7; k++) {
+            uint32_t pw = W > x0[k] ? (W - x0[k] + dx[k] - 1) / dx[k] : 0, ph = H > y0[k] ? (H - y0[k] + dy[k] - 1) / dy[k] : 0;
+            uint32_t px, py;
+
+            if (!pw || !ph) {
+                continue;
+            }
+
+            png_unfilter(pass + at, ph, pw * bpp, bpp);
+
+            for (py = 0; py < ph; py++) {
+                for (px = 0; px < pw; px++) {
+                    memcpy(raw + (size_t)(y0[k] + py * dy[k]) * (stride + 1) + 1 + (size_t)(x0[k] + px * dx[k]) * bpp,
+                           pass + at + (size_t)py * (pw * bpp + 1) + 1 + (size_t)px * bpp, bpp);
+                }
+            }
+
+            at += (size_t)(pw * bpp + 1) * ph;
+        }
+
+        free(pass);
+        free(idat);
+    } else {
+        if (pd_inflate(idat, idn, 1, (size_t)(stride + 1) * H, &raw, &rawn) || rawn != (size_t)(stride + 1) * H) {
+            free(idat);
+            free(raw);
+            return -1;
+        }
+
+        free(idat);
+        png_unfilter(raw, H, stride, bpp);
     }
 
     *rgb = (unsigned char*)malloc((size_t)W * H * 3);
@@ -1232,6 +1280,15 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
 
                     if (a->kind == PD_DRAW_IMAGE && k < nimages) {
                         sb_fmt(&c, "q ");
+
+                        if (a->clip_w > 0 && a->clip_h > 0) {   /* cropped: shown only in its frame */
+                            sb_num(&c, a->clip_x);
+                            sb_num(&c, (int64_t)pi.height - a->clip_y - a->clip_h);
+                            sb_num(&c, a->clip_w);
+                            sb_num(&c, a->clip_h);
+                            sb_fmt(&c, "re W n ");
+                        }
+
                         sb_num(&c, a->w);
                         sb_fmt(&c, "0 0 ");
                         sb_num(&c, a->h);

@@ -50,7 +50,7 @@ STRUCTS = {
     "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull variants",
     "pd_page_info": "width height section number label float_page first last",
     "pd_draw": "kind x y w h glyph font size color resource block offset region text scale points npoints path_flags "
-               "line_width fill",
+               "line_width fill clip_x clip_y clip_w clip_h",
     "pd_markup_item": "kind id range x y top bottom color",
     "pd_pdf_options": "compress outlines title author",
 }

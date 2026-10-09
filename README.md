@@ -375,6 +375,9 @@ pd_para_break(p, &prm, NULL);
     src/pd_conv.c        converters: dispatch, builder, clipboard copy/paste, text
     src/pd_markup.c      HTML/XML tokenizer
     src/pd_html.c src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c
+    src/pd_pptx.c        PowerPoint read: each slide a page that is a canvas (placeholders from the layout
+                         and master, theme colours and fonts, pictures, tables, SmartArt drawings), made a
+                         .docx in memory and read as one
     src/pd_preset.c      Office's preset shapes worked out (guides, arcs, handles); pd_presets.inc is
                          generated from ECMA-376 presetShapeDefinitions.xml by tools/presets.py
     tests/               unit tests, Unicode conformance

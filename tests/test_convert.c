@@ -3421,6 +3421,116 @@ static char* drawing_json(const pd_doc* d, pd_res_id res) {
     return out;
 }
 
+/* PowerPoint: each slide a page as big, its canvas in front of the text from the page's corner; placeholders where
+   the master has them, their text styled as its text styles say; a shape's text, a connector, the slide number, a
+   cropped picture, a table */
+static void test_pptx(void) {
+    FILE* f = fopen("tests/data/slides.pptx", "rb");
+    unsigned char* data = NULL;
+    long sz = 0;
+    pd_doc* d = NULL;
+    int i, found_title = 0, found_bullet = 0, found_sub = 0, found_box = 0, found_num = 0, title_big = 0;
+    int32_t ns;
+
+    if (f && fseek(f, 0, SEEK_END) == 0 && (sz = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+            (data = (unsigned char*)malloc((size_t)sz)) != NULL) {
+        if (fread(data, 1, (size_t)sz, f) != (size_t)sz) {
+            sz = 0;
+        }
+    }
+
+    if (f) {
+        fclose(f);
+    }
+
+    CHECK(data && sz > 0);
+
+    if (!data || sz <= 0) {
+        free(data);
+        return;
+    }
+
+    CHECK(pd_conv_detect(data, (size_t)sz) == PD_CONV_PPTX);
+    CHECK(pd_doc_import(data, (size_t)sz, PD_CONV_PPTX, &d) == PD_OK && d);
+    free(data);
+
+    if (!d) {
+        return;
+    }
+
+    {   /* two slides: two pages, each as big as a slide (10 by 5.625 inches), no margins, a canvas over it */
+        pd_block_info ri, bi;
+        int k;
+
+        CHECK(pd_doc_block_info(d, pd_doc_root(d), &ri) == PD_OK && ri.child_count == 2);
+
+        for (k = 0; k < ri.child_count; k++) {
+            pd_block_id sec = pd_doc_child(d, pd_doc_root(d), k), fl = pd_doc_child(d, sec, 0);
+            pd_section_props sp;
+            pd_float_props fp;
+            pd_inline o;
+
+            CHECK(pd_doc_section_props(d, sec, &sp) == PD_OK && sp.page_width == PD_PT(720) &&
+                  sp.page_height == PD_PT(405) && sp.margin_left == 0 && sp.margin_top == 0);
+            CHECK(pd_doc_block_info(d, fl, &bi) == PD_OK && bi.kind == PD_BLOCK_FLOAT &&
+                  pd_doc_float_props(d, fl, &fp) == PD_OK && fp.wrap == PD_WRAP_FRONT && fp.offset_from == PD_FROM_PAGE);
+            CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, fl, 0), 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE &&
+                  o.width == PD_PT(720));
+
+            if (k == 1) {   /* the picture cropped, the table */
+                char* js = drawing_json(d, o.resource);
+
+                CHECK(js && strstr(js, "\"crop\":[25000,0,25000,0]") && strstr(js, "\"story\":"));
+                free(js);
+            }
+        }
+    }
+
+    ns = pd_doc_story_count(d);
+
+    for (i = 0; i < ns; i++) {     /* the text boxes' text */
+        pd_block_id st = pd_doc_story_at(d, i), p = pd_doc_child(d, st, 0);
+        pd_block_info bi;
+        uint32_t n;
+        const char* t;
+
+        if (pd_doc_block_info(d, p, &bi) != PD_OK || bi.kind != PD_BLOCK_PARAGRAPH) {
+            if (bi.kind == PD_BLOCK_TABLE) {
+                pd_block_id c = pd_doc_child(d, pd_doc_child(d, p, 0), 0);
+                pd_cell_props cp;
+
+                CHECK(pd_doc_cell_props(d, c, &cp) == PD_OK && (cp.background & 0xFFFFFFu) == 0x4472C4u);
+                CHECK(text_is(d, pd_doc_child(d, c, 0), "Name"));
+            }
+
+            continue;
+        }
+
+        t = para_text(d, p, &n);
+        found_title |= text_is(d, p, "Hello Slides");
+        found_bullet |= n > 4 && !memcmp(t, "\xE2\x80\xA2\t", 4) && strstr(t, "First point") != NULL;
+        found_sub |= pd_doc_child(d, st, 1) && text_is(d, pd_doc_child(d, st, 1), "\xE2\x80\x93\tA detail");
+        found_box |= text_is(d, p, "Box & text");
+        found_num |= text_is(d, p, "1");
+
+        if (text_is(d, p, "Hello Slides")) {    /* the master's title style: 44 points, bold, its colour */
+            pd_run r;
+            int32_t nr = 0;
+            pd_char_props cp;
+
+            if (pd_doc_para_runs(d, p, &r, 1, &nr) == PD_OK && nr >= 1 &&
+                    pd_doc_format_resolve(d, p, r.format, &cp) == PD_OK) {
+                title_big = cp.size == PD_PT(44) && cp.weight >= 700 && (cp.color & 0xFFFFFFu) == 0x1F3864u;
+            }
+        }
+    }
+
+    CHECK(found_title && title_big);
+    CHECK(found_bullet && found_sub);
+    CHECK(found_box && found_num);
+    pd_doc_free(d);
+}
+
 /* A Word drawing canvas with pictures, a group inside it (whose own
    coordinates scale its picture), a filled box and a text box: one picture
    of the whole, every part where the canvas has it. And a floating text box
@@ -4704,6 +4814,7 @@ int main(void) {
     test_docx_header_logo();
     test_docx_float_offset_y();
     test_docx_float_from_page();
+    test_pptx();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();
     printf("EMF pictures\n");

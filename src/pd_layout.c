@@ -4682,6 +4682,24 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
             a.y = iy;
             a.w = iw;
             a.h = ih;
+
+            if (pj_get(it, "crop")) {   /* cropped: the whole picture, larger, shown only in its frame */
+                const pj_node* cp = pj_get(it, "crop");
+                double cl = pj_int_or(pj_at(cp, 0), 0) / 100000.0, ct = pj_int_or(pj_at(cp, 1), 0) / 100000.0;
+                double cr2 = pj_int_or(pj_at(cp, 2), 0) / 100000.0, cb = pj_int_or(pj_at(cp, 3), 0) / 100000.0;
+
+                if (cl + cr2 < 0.999 && ct + cb < 0.999) {
+                    a.clip_x = ix;
+                    a.clip_y = iy;
+                    a.clip_w = iw;
+                    a.clip_h = ih;
+                    a.w = (pd_sp)(iw / (1 - cl - cr2));
+                    a.h = (pd_sp)(ih / (1 - ct - cb));
+                    a.x = ix - (pd_sp)(cl * a.w);
+                    a.y = iy - (pd_sp)(ct * a.h);
+                }
+            }
+
             a.block = block;
             a.offset = off;
             a.region = region;
@@ -5205,10 +5223,37 @@ static void emit_line_numbers(const pd_layout* L, dlist_t* D, const ppage* p) {
     }
 }
 
+/* a page's rules from..to as drawn rectangles: those of a drawing's text boxes alone (only 5), all but those (0),
+   or all (-1) */
+static void emit_rules(dlist_t* D, const ppage* pg, int32_t from, int32_t to, int only) {
+    int32_t i;
+
+    for (i = from; i < to; i++) {
+        const prule* r = &pg->rules[i];
+        pd_draw a;
+
+        if ((only == 5 && r->region != 5) || (only == 0 && r->region == 5)) {
+            continue;
+        }
+
+        memset(&a, 0, sizeof(a));
+        a.kind = PD_DRAW_RULE;
+        a.x = r->x;
+        a.y = r->y;
+        a.w = r->w;
+        a.h = r->h;
+        a.color = r->color;
+        a.region = r->region;
+        a.block = r->block;
+        emit(D, &a);
+    }
+}
+
 pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, int32_t cap, int32_t* count) {
     ppage* pg;
     dlist_t D;
-    int32_t i;
+    int32_t i, k;
+    int boxed;
 
     if (!L || !count || cap < 0) {
         return PD_ERR_ARG;
@@ -5228,26 +5273,23 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
     if (!pg->items_ok) {
         memset(&D, 0, sizeof(D));
 
-        for (i = 0; i < pg->nrules; i++) {  /* rules first: backgrounds sit under the text */
-            const prule* r = &pg->rules[i];
-            pd_draw a;
-
-            memset(&a, 0, sizeof(a));
-            a.kind = PD_DRAW_RULE;
-            a.x = r->x;
-            a.y = r->y;
-            a.w = r->w;
-            a.h = r->h;
-            a.color = r->color;
-            a.region = r->region;
-            a.block = r->block;
-            emit(&D, &a);
-        }
-
+        emit_rules(&D, pg, 0, pg->nrules, 0);  /* rules first: backgrounds sit under the text */
         emit_para_boxes(&D, pg);
+        k = pg->nrules;
+        boxed = 0;
 
         for (i = 0; i < pg->n; i++) {
+            if (pg->lines[i].region == 5 && !boxed) {
+                emit_rules(&D, pg, 0, k, 5);    /* a drawing's text boxes' tables: over the drawing, under their text */
+                boxed = 1;
+            }
+
             emit_line(L, &D, pg, &pg->lines[i]);
+
+            if (pg->nrules > k) {   /* a drawing's text boxes laid out with it: their tables' rules over it */
+                emit_rules(&D, pg, k, pg->nrules, -1);
+                k = pg->nrules;
+            }
         }
 
         emit_line_numbers(L, &D, pg);

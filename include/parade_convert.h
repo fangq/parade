@@ -55,7 +55,8 @@ typedef enum {
     PD_CONV_LATEX = 3,          /**< export only */
     PD_CONV_RTF = 4,
     PD_CONV_DOCX = 5,
-    PD_CONV_JDATA = 6           /**< the native format (JData text), for clipboards */
+    PD_CONV_JDATA = 6,          /**< the native format (JData text), for clipboards */
+    PD_CONV_PPTX = 7            /**< PowerPoint, import only: each slide a page that is a canvas */
 } pd_conv_format;
 
 /** the whole document */

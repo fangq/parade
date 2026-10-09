@@ -608,6 +608,7 @@ type
     npoints, path_flags: Int32;
     line_width: pd_sp;
     fill: UInt32;
+    clip_x, clip_y, clip_w, clip_h: pd_sp;   { images: shown only within this (clip_w 0: all) }
   end;
   Ppd_draw = ^pd_draw;
 
@@ -826,6 +827,7 @@ const
   PD_CONV_RTF = 4;
   PD_CONV_DOCX = 5;
   PD_CONV_JDATA = 6;
+  PD_CONV_PPTX = 7;     { import only: each slide a page that is a canvas }
 
 function pd_doc_export(doc: Ppd_doc; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 function pd_doc_export_range(doc: Ppd_doc; range: pd_range; format: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
