@@ -47,6 +47,8 @@ type
   Ppd_layout = Pointer;
 
 const
+  PD_FLIP_H = 1;
+  PD_FLIP_V = 2;
   PD_FROM_PARAGRAPH = 0;
   PD_FROM_PAGE = 1;
   PD_FROM_MARGIN = 2;
@@ -609,6 +611,11 @@ type
     line_width: pd_sp;
     fill: UInt32;
     clip_x, clip_y, clip_w, clip_h: pd_sp;   { images: shown only within this (clip_w 0: all) }
+    fill2: UInt32;           { paths: a gradient's other colour }
+    grad, grad_angle: Int32; { paths: 0 flat, 1 linear (60000ths of a degree), 2 radial }
+    rotation, flip: Int32;   { images: turned (60000ths of a degree, clockwise), PD_FLIP_* }
+    clip_points: Ppd_sp;     { images: shown only inside this polygon }
+    clip_npoints: Int32;
   end;
   Ppd_draw = ^pd_draw;
 

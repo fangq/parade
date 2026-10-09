@@ -18,6 +18,7 @@
  */
 
 #include <stdarg.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -627,6 +628,107 @@ typedef struct {
     int32_t obj, smask;
     int ok;
 } pimage;
+
+/* a path's rings (m, l, h) in PDF's coordinates, the page H high */
+static void sb_rings(sbuf* c, const pd_sp* pts, int32_t n, int closed, int64_t H) {
+    int32_t q, first;
+
+    for (q = 0, first = 1; q < n; q++) {    /* first: the next point starts a ring */
+        if (pts[2 * q] == PD_PATH_BREAK) {
+            if (closed && !first) {
+                sb_fmt(c, "h ");
+            }
+
+            first = 1;
+            continue;
+        }
+
+        sb_num(c, pts[2 * q]);
+        sb_num(c, H - pts[2 * q + 1]);
+        sb_fmt(c, first ? "m " : "l ");
+        first = 0;
+    }
+
+    if (closed && !first) {
+        sb_fmt(c, "h ");
+    }
+}
+
+static uint32_t mix_rgb(uint32_t a, uint32_t b, double t) {
+    int k;
+    uint32_t o = 0;
+
+    for (k = 0; k < 24; k += 8) {
+        double v = ((a >> k) & 255) * (1 - t) + ((b >> k) & 255) * t;
+
+        o |= (uint32_t)(v + 0.5) << k;
+    }
+
+    return o;
+}
+
+/* a gradient over a path, inside it (its rings the clip): bands across a linear one, rings out from the middle of
+   a radial one, each its colour of the way from fill to fill2 */
+static void sb_gradient(sbuf* c, const pd_draw* a, int64_t H) {
+    const int N = 48;
+    double cx = a->x + a->w / 2.0, cy = a->y + a->h / 2.0, half = sqrt((double)a->w * a->w + (double)a->h * a->h) / 2;
+    int i, k;
+
+    sb_fmt(c, "q ");
+    sb_rings(c, a->points, a->npoints, 1, H);
+    sb_fmt(c, "W n ");
+
+    if (a->grad == 2) {     /* from the outside in: fill2 there, fill at the middle */
+        for (i = 0; i < N; i++) {
+            double r = half * (1 - (double)i / N);
+
+            sb_rgb(c, mix_rgb(a->fill2, a->fill, (double)i / (N - 1)), "rg");
+
+            for (k = 0; k < 32; k++) {
+                double t = k * 6.283185307179586 / 32;
+
+                sb_num(c, (int64_t)(cx + r * cos(t)));
+                sb_num(c, H - (int64_t)(cy + r * sin(t)));
+                sb_fmt(c, k ? "l " : "m ");
+            }
+
+            sb_fmt(c, "h f ");
+        }
+    } else {                /* across its direction: N bands, each wide enough to cover the path */
+        double th = a->grad_angle / 60000.0 * 3.14159265358979 / 180, ux = cos(th), uy = sin(th), lo = 1e300, hi = -1e300;
+        double corners[4][2] = { { (double)a->x, (double)a->y }, { (double)a->x + a->w, (double)a->y },
+            { (double)a->x, (double)a->y + a->h }, { (double)a->x + a->w, (double)a->y + a->h }
+        };
+
+        for (k = 0; k < 4; k++) {
+            double t = (corners[k][0] - cx) * ux + (corners[k][1] - cy) * uy;
+
+            lo = t < lo ? t : lo;
+            hi = t > hi ? t : hi;
+        }
+
+        for (i = 0; i < N; i++) {
+            double t0 = lo + (hi - lo) * i / N - 1, t1 = lo + (hi - lo) * (i + 1) / N + 1;
+            double p[4][2] = { { cx + ux * t0 - uy * half, cy + uy * t0 + ux * half },
+                { cx + ux * t1 - uy * half, cy + uy * t1 + ux * half },
+                { cx + ux * t1 + uy * half, cy + uy * t1 - ux * half },
+                { cx + ux * t0 + uy * half, cy + uy * t0 - ux * half }
+            };
+
+            sb_rgb(c, mix_rgb(a->fill, a->fill2, (i + 0.5) / N), "rg");
+
+            for (k = 0; k < 4; k++) {
+                sb_num(c, (int64_t)p[k][0]);
+                sb_num(c, H - (int64_t)p[k][1]);
+                sb_fmt(c, k ? "l " : "m ");
+            }
+
+            sb_fmt(c, "h f ");
+        }
+    }
+
+    sb_fmt(c, "Q\n");
+}
 
 /* rows of a PNG (each a filter byte, then stride bytes) unfiltered in place */
 static void png_unfilter(unsigned char* raw, uint32_t rows, uint32_t stride, uint32_t bpp) {
@@ -1239,6 +1341,19 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                         sb_fmt(&c, "q /GA%d gs ", ga);
                     }
 
+                    if (fill && a->grad && a->fill2) {     /* a gradient: drawn on its own, then the outline */
+                        sb_gradient(&c, a, (int64_t)pi.height);
+                        fill = 0;
+
+                        if (!stroke) {
+                            if (ga >= 0) {
+                                sb_fmt(&c, "Q\n");
+                            }
+
+                            continue;
+                        }
+                    }
+
                     if (fill) {
                         sb_rgb(&c, a->fill, "rg");
                     }
@@ -1249,26 +1364,9 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                         sb_fmt(&c, "w 1 j ");
                     }
 
-                    for (q = 0, first = 1; q < a->npoints; q++) {   /* first: the next point starts a ring */
-                        if (a->points[2 * q] == PD_PATH_BREAK) {
-                            if ((a->path_flags & PD_PATH_CLOSED) && !first) {
-                                sb_fmt(&c, "h ");
-                            }
-
-                            first = 1;
-                            continue;
-                        }
-
-                        sb_num(&c, a->points[2 * q]);
-                        sb_num(&c, (int64_t)pi.height - a->points[2 * q + 1]);
-                        sb_fmt(&c, first ? "m " : "l ");
-                        first = 0;
-                    }
-
-                    if ((a->path_flags & PD_PATH_CLOSED) && !first) {
-                        sb_fmt(&c, "h ");
-                    }
-
+                    (void)q;
+                    (void)first;
+                    sb_rings(&c, a->points, a->npoints, (a->path_flags & PD_PATH_CLOSED) != 0, (int64_t)pi.height);
                     sb_fmt(&c, fill && stroke ? "B\n" : fill ? "f\n" : "S\n");
 
                     if (ga >= 0) {
@@ -1280,6 +1378,22 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
 
                     if (a->kind == PD_DRAW_IMAGE && k < nimages) {
                         sb_fmt(&c, "q ");
+
+                        if (a->clip_points && a->clip_npoints >= 3) {   /* cut to its shape */
+                            sb_rings(&c, a->clip_points, a->clip_npoints, 1, (int64_t)pi.height);
+                            sb_fmt(&c, "W n ");
+                        }
+
+                        if (a->rotation || a->flip) {   /* turned and flipped about its middle */
+                            double cx = (a->clip_w > 0 ? a->clip_x + a->clip_w / 2.0 : a->x + a->w / 2.0) / 65536.0;
+                            double cy = ((double)pi.height - (a->clip_w > 0 ? a->clip_y + a->clip_h / 2.0 :
+                                                              a->y + a->h / 2.0)) / 65536.0;
+                            double th = a->rotation / 60000.0 * 3.14159265358979 / 180;
+
+                            sb_fmt(&c, "1 0 0 1 %.4f %.4f cm %.6f %.6f %.6f %.6f 0 0 cm %d 0 0 %d 0 0 cm 1 0 0 1 %.4f %.4f cm ",
+                                   cx, cy, cos(th), -sin(th), sin(th), cos(th), a->flip & PD_FLIP_H ? -1 : 1,
+                                   a->flip & PD_FLIP_V ? -1 : 1, -cx, -cy);
+                        }
 
                         if (a->clip_w > 0 && a->clip_h > 0) {   /* cropped: shown only in its frame */
                             sb_num(&c, a->clip_x);

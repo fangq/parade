@@ -4639,6 +4639,46 @@ static void emit_label(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp 
     }
 }
 
+/* an item's gradient ("f2": its other colour, "gk": 1 linear, 2 radial, "ga": its angle) on the path just made */
+static void item_grad(dlist_t* D, int32_t n0, const pj_node* it) {
+    if (D->n > n0 && pj_get(it, "gk") && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].fill) {
+        pd_draw* a = &D->d[D->n - 1];
+
+        a->grad = (int32_t)pj_int_or(pj_get(it, "gk"), 0);
+        a->fill2 = (uint32_t)pj_int_or(pj_get(it, "f2"), 0);
+        a->grad_angle = (int32_t)pj_int_or(pj_get(it, "ga"), 0);
+    }
+}
+
+/* an item's shadow ("shd": [dx, dy, colour], the drawing's units): its outline, filled, that far off */
+static void item_shadow(dlist_t* D, const pj_node* it, const pd_sp* xy, int32_t n, double sx, double sy,
+                        pd_block_id block, int32_t region) {
+    const pj_node* sh = pj_get(it, "shd");
+    pd_sp dx, dy, *q;
+    uint32_t c;
+    int32_t k;
+
+    if (!sh || !xy || n < 3) {
+        return;
+    }
+
+    dx = (pd_sp)(pj_int_or(pj_at(sh, 0), 0) * sx);
+    dy = (pd_sp)(pj_int_or(pj_at(sh, 1), 0) * sy);
+    c = (uint32_t)pj_int_or(pj_at(sh, 2), 0);
+
+    if ((q = (pd_sp*)malloc((size_t)n * 2 * sizeof(pd_sp))) == NULL) {
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        q[2 * k] = xy[2 * k] == PD_PATH_BREAK ? PD_PATH_BREAK : xy[2 * k] + dx;
+        q[2 * k + 1] = xy[2 * k] == PD_PATH_BREAK ? PD_PATH_BREAK : xy[2 * k + 1] + dy;
+    }
+
+    emit_path(D, q, n, 1, c, 0, 0, block, region);
+    free(q);
+}
+
 /* A drawing resource in the box (x, y, w, h): its pictures, its shapes'
    fills and straight edges, its text boxes. Returns 0 if res is no drawing. */
 static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
@@ -4700,6 +4740,24 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                 }
             }
 
+            a.rotation = (int32_t)pj_int_or(pj_get(it, "rot"), 0);
+            a.flip = (pj_int_or(pj_get(it, "fh"), 0) ? PD_FLIP_H : 0) | (pj_int_or(pj_get(it, "fv"), 0) ? PD_FLIP_V : 0);
+
+            if (pj_get(it, "clip") && pj_get(it, "clip")->n >= 6 &&
+                    !grow((void**)&D->pts, &D->cappts, (int64_t)D->npts + pj_get(it, "clip")->n, sizeof(pd_sp))) {
+                /* shown only inside its shape (a picture in an ellipse): the outline's points kept as paths' are */
+                const pj_node* cp = pj_get(it, "clip"), *q;
+                int32_t k = 0;
+
+                for (q = cp->child; q && k < cp->n; q = q->next, k++) {
+                    D->pts[D->npts + k] = (k & 1) ? y + (pd_sp)(pj_int_or(q, 0) * sy) : x + (pd_sp)(pj_int_or(q, 0) * sx);
+                }
+
+                a.clip_points = (const pd_sp*)(intptr_t)D->npts;
+                a.clip_npoints = k / 2;
+                D->npts += k;
+            }
+
             a.block = block;
             a.offset = off;
             a.region = region;
@@ -4722,6 +4780,7 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
             } else if (ell) {   /* an ellipse: a polygon of 64 sides */
                 pd_sp xy[128];
                 int k;
+                int32_t n0;
 
                 for (k = 0; k < 64; k++) {
                     double t = k * 6.283185307179586 / 64;
@@ -4730,7 +4789,18 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                     xy[2 * k + 1] = iy + (pd_sp)(ih / 2.0 * (1 + sin(t)));
                 }
 
+                item_shadow(D, it, xy, 64, sx, sy, block, region);
+                n0 = D->n;
                 emit_path(D, xy, 64, 1, fill, line, lw, block, region);
+                item_grad(D, n0, it);
+            } else if (pj_get(it, "gk") || pj_get(it, "shd")) {   /* a box with a gradient or a shadow: as a path */
+                pd_sp xy[8] = { ix, iy, ix + iw, iy, ix + iw, iy + ih, ix, iy + ih };
+                int32_t n0;
+
+                item_shadow(D, it, xy, 4, sx, sy, block, region);
+                n0 = D->n;
+                emit_path(D, xy, 4, 1, fill, line, lw, block, region);
+                item_grad(D, n0, it);
             } else {            /* a box: its fill, then its edges */
                 if (fill) {
                     emit_rect(D, ix, iy, iw, ih, fill, block, region);
@@ -4760,9 +4830,17 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
             }
 
             if (xy) {
+                int32_t n0;
+
+                if (pj_int_or(pj_get(it, "fill"), 0)) {
+                    item_shadow(D, it, xy, n, sx, sy, block, region);
+                }
+
+                n0 = D->n;
                 emit_path(D, xy, n, (int)pj_int_or(pj_get(it, "closed"), 0), (uint32_t)pj_int_or(pj_get(it, "fill"), 0),
                           (uint32_t)pj_int_or(pj_get(it, "line"), 0), lw > PD_SP_PER_PT / 8 ? lw : PD_SP_PER_PT / 8, block,
                           region);
+                item_grad(D, n0, it);
                 free(xy);
             }
         }
@@ -5307,6 +5385,8 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
         for (i = 0; i < D.n; i++) {
             if (D.d[i].kind == PD_DRAW_PATH) {
                 D.d[i].points = D.pts + (intptr_t)D.d[i].points;
+            } else if (D.d[i].kind == PD_DRAW_IMAGE && D.d[i].clip_npoints) {
+                D.d[i].clip_points = D.pts + (intptr_t)D.d[i].clip_points;
             }
         }
 

@@ -2,7 +2,8 @@
 """tests/data/slides.pptx: a small presentation for the PowerPoint reader's tests -- a master with placeholders,
 text styles and a picture on every slide, a layout taking where its placeholders are from the master, a theme;
 slide 1 a title and bulleted body text in the placeholders, a filled shape with text, a connector joining it to
-an ellipse; slide 2 a cropped picture, a table.
+an ellipse, a box with a gradient and a shadow; slide 2 a cropped picture, a picture turned, flipped and cut to an
+ellipse, a table.
 
     python3 tools/make_test_pptx.py tests/data/slides.pptx
 """
@@ -74,6 +75,12 @@ slide1 = ('<p:sld %s><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:
           xfrm(6500000, 3400000, 1000000, 1) + '<a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom><a:ln '
           'w="19050"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:tailEnd type="triangle"/></a:ln>'
           '</p:spPr></p:cxnSp>'
+          '<p:sp><p:nvSpPr><p:cNvPr id="8" name="Gradient"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>' +
+          xfrm(500000, 3000000, 1500000, 800000) + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:gradFill>'
+          '<a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>'
+          '</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill><a:effectLst><a:outerShdw blurRad="40000" dist="38100" '
+          'dir="2700000"><a:srgbClr val="000000"><a:alpha val="40000"/></a:srgbClr></a:outerShdw></a:effectLst>'
+          '</p:spPr></p:sp>'
           '<p:sp><p:nvSpPr><p:cNvPr id="7" name="Number"/><p:cNvSpPr/><p:nvPr><p:ph type="sldNum" idx="12"/></p:nvPr>'
           '</p:nvSpPr><p:spPr>' + xfrm(8500000, 4700000, 500000, 300000) + '</p:spPr><p:txBody><a:bodyPr/>'
           '<a:lstStyle/><a:p><a:fld id="{1}" type="slidenum"><a:rPr lang="en-US"/><a:t>&#8249;#&#8250;</a:t></a:fld>'
@@ -84,6 +91,10 @@ slide2 = ('<p:sld %s><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:
           '<a:blip r:embed="rId2"/><a:srcRect l="25000" r="25000"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>'
           '<p:spPr>' + xfrm(500000, 500000, 2000000, 2000000) + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
           '</p:spPr></p:pic>'
+          '<p:pic><p:nvPicPr><p:cNvPr id="4" name="Turned"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill>'
+          '<a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm rot="2700000" '
+          'flipH="1"><a:off x="500000" y="3000000"/><a:ext cx="1200000" cy="900000"/></a:xfrm><a:prstGeom '
+          'prst="ellipse"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
           '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="3" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/>'
           '</p:nvGraphicFramePr><p:xfrm><a:off x="3500000" y="500000"/><a:ext cx="4000000" cy="740000"/></p:xfrm>'
           '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr '

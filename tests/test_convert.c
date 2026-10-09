@@ -3481,6 +3481,12 @@ static void test_pptx(void) {
                 char* js = drawing_json(d, o.resource);
 
                 CHECK(js && strstr(js, "\"crop\":[25000,0,25000,0]") && strstr(js, "\"story\":"));
+                CHECK(js && strstr(js, "\"rot\":2700000,\"fh\":1") && strstr(js, "\"clip\":["));
+                free(js);
+            } else {    /* a gradient, from red to blue across; a shadow down */
+                char* js = drawing_json(d, o.resource);
+
+                CHECK(js && strstr(js, "\"gk\":1,\"f2\":4278190335,\"ga\":0") && strstr(js, "\"shd\":[139022,139022,"));
                 free(js);
             }
         }

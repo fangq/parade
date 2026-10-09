@@ -369,6 +369,13 @@ begin
   WriteLn('pd_draw.clip_y ', PtrUInt(@v_pd_draw.clip_y) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.clip_w ', PtrUInt(@v_pd_draw.clip_w) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.clip_h ', PtrUInt(@v_pd_draw.clip_h) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.fill2 ', PtrUInt(@v_pd_draw.fill2) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.grad ', PtrUInt(@v_pd_draw.grad) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.grad_angle ', PtrUInt(@v_pd_draw.grad_angle) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.rotation ', PtrUInt(@v_pd_draw.rotation) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.flip ', PtrUInt(@v_pd_draw.flip) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.clip_points ', PtrUInt(@v_pd_draw.clip_points) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.clip_npoints ', PtrUInt(@v_pd_draw.clip_npoints) - PtrUInt(@v_pd_draw));
   WriteLn('pd_markup_item ', SizeOf(pd_markup_item));
   WriteLn('pd_markup_item.kind ', PtrUInt(@v_pd_markup_item.kind) - PtrUInt(@v_pd_markup_item));
   WriteLn('pd_markup_item.id ', PtrUInt(@v_pd_markup_item.id) - PtrUInt(@v_pd_markup_item));

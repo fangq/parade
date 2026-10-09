@@ -103,7 +103,18 @@ typedef struct {
     pd_sp line_width;           /**< paths: stroke width, 0 = no stroke */
     uint32_t fill;              /**< paths: fill colour 0xAARRGGBB, 0 = not filled */
     pd_sp clip_x, clip_y, clip_w, clip_h;   /**< images: shown only within this (a cropped picture); clip_w 0: all */
+    uint32_t fill2;             /**< paths: a gradient: the colour it goes to from fill (0xAARRGGBB) */
+    int32_t grad;               /**< paths: 0 one colour, 1 a linear gradient (grad_angle), 2 a radial one, out from
+                                     the middle */
+    int32_t grad_angle;         /**< paths: the way a linear gradient runs, 60000ths of a degree clockwise from right */
+    int32_t rotation;           /**< images: turned about their middle, 60000ths of a degree clockwise */
+    int32_t flip;               /**< images: PD_FLIP_H, PD_FLIP_V */
+    const pd_sp* clip_points;   /**< images: shown only inside this polygon (x, y pairs on the page, as paths' are) */
+    int32_t clip_npoints;
 } pd_draw;
+
+#define PD_FLIP_H 1             /**< mirrored left to right */
+#define PD_FLIP_V 2             /**< upside down */
 
 /** the display list of a page; same size-query convention as pd_para_get_glyphs */
 PD_API pd_status pd_layout_page_items(const pd_layout* layout, int32_t page, pd_draw* buf, int32_t cap,

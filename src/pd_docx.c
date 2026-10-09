@@ -6974,6 +6974,10 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     char cg_cmd = 'm';
     char blip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
     int crop[4] = { 0, 0, 0, 0 };   /* a picture's srcRect: its sides cut off, in 100000ths */
+    uint32_t fill2 = 0, shd_clr = 0;    /* a gradient's last stop; a shadow's colour */
+    int grad_kind = 0, grad_ang = 0, in_grad = 0, in_shd = 0, has_shd = 0;
+    double shd_dist = 0, shd_dir = 0;
+    char gprst[32] = "";            /* a picture's geometry, when it is not a rectangle (it is cut to that shape) */
     uint32_t fill = 0, line = 0, sfill = 0, sline = 0, *cur_clr = NULL;
     char cam_prst[48] = "";         /* the shape's 3-D camera (scene3d), seen in parallel */
     int cam_has_rot = 0, in_camera = 0;
@@ -7218,6 +7222,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             cam_has_rot = in_camera = 0;
             blip[0] = '\0';
             memset(crop, 0, sizeof(crop));
+            fill2 = shd_clr = 0;
+            grad_kind = grad_ang = in_grad = in_shd = has_shd = 0;
+            gprst[0] = '\0';
             strcpy(geom, "rect");
             have_fill = have_line = style_fill = style_line = 0;
             head_arrow = tail_arrow = 0;
@@ -7310,10 +7317,16 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             if (kind == 1 && blip[0]) {
                 pd_res_id r = dw_resource(X, blip);
 
-                    if (r && nrel < 64) {   /* by its id: the XML kept names it so */
+                    int seen = 0, q;
+
+                    for (q = 0; q < nrel; q++) {    /* a picture used twice: its id once */
+                        seen |= !strcmp(rel_id[q], blip);
+                    }
+
+                    if (r && !seen && nrel < 64) {   /* by its id: the XML kept names it so */
                         snprintf(rel_id[nrel], sizeof(rel_id[0]), "%.23s", blip);
                         rel_res[nrel++] = r;
-                    } else if (r) {
+                    } else if (r && !seen) {
                         rel_ok = 0;
                     }
 
@@ -7326,10 +7339,54 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         pb_printf(&o, ",\"crop\":[%d,%d,%d,%d]", crop[0], crop[1], crop[2], crop[3]);
                     }
 
+                    if (xf.rot || xf.fliph || xf.flipv) {   /* turned, flipped about its middle */
+                        pb_printf(&o, ",\"rot\":%d,\"fh\":%d,\"fv\":%d", xf.rot, xf.fliph, xf.flipv);
+                    }
+
+                    if (gprst[0] && bw > 0 && bh > 0) {     /* cut to its shape (a photo in a circle) */
+                        pd_preset_flat* cf = (pd_preset_flat*)malloc(sizeof(pd_preset_flat));
+
+                        if (cf && pd_preset_flatten(gprst, bw, bh, "", cf) && cf->path[0].n >= 3) {
+                            int cq;
+
+                            pb_puts(&o, ",\"clip\":[");
+
+                            for (cq = 0; cq < cf->path[0].n; cq++) {
+                                const double* cxy = &cf->xy[2 * (cf->path[0].start + cq)];
+                                double qx, qy;
+
+                                if (isnan(cxy[0])) {
+                                    break;
+                                }
+
+                                fr_pt(&sm, bx0 + cxy[0], by0 + cxy[1], &qx, &qy);
+                                pb_printf(&o, "%s%d,%d", cq ? "," : "", (int)emu_sp(qx), (int)emu_sp(qy));
+                            }
+
+                            pb_putc(&o, ']');
+                        }
+
+                        free(cf);
+                    }
+
                     pb_putc(&o, '}');
                 }
             } else if (kind == 2) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
+                char fx[160] = "";  /* the fill's gradient and shadow, for the items that fill */
+
+                if (grad_kind && fill2 && have_fill) {
+                    snprintf(fx, sizeof(fx), ",\"gk\":%d,\"f2\":%u,\"ga\":%d", grad_kind, (unsigned)fill2,
+                             grad_ang + xf.rot);
+                }
+
+                if (has_shd && shd_dist > 0) {
+                    size_t fl = strlen(fx);
+
+                    snprintf(fx + fl, sizeof(fx) - fl, ",\"shd\":[%d,%d,%u]",
+                             (int)emu_sp(shd_dist * cos(shd_dir * 3.14159265358979 / 180) * FR->sx),
+                             (int)emu_sp(shd_dist * sin(shd_dir * 3.14159265358979 / 180) * FR->sy), (unsigned)shd_clr);
+                }
                 int isline = !strcmp(geom, "line"), k;
                 double lwd = lw * (FR->sx + FR->sy) / 2;
                 pd_preset_flat* pf = NULL;
@@ -7448,8 +7505,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                             }
                         }
 
-                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", pf->path[i].closed && pfl,
-                                  (unsigned)pfl, (unsigned)pln, (int)emu_sp(lwd));
+                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", pf->path[i].closed && pfl,
+                                  (unsigned)pfl, (unsigned)pln, (int)emu_sp(lwd),
+                                  pfl && !strcmp(pf->path[i].fill, "norm") ? fx : "");
                     }
 
                     f = l = 0;
@@ -7473,8 +7531,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         }
                     }
 
-                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", cg_closed, (unsigned)f, (unsigned)l,
-                              (int)emu_sp(lwd));
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", cg_closed, (unsigned)f, (unsigned)l,
+                              (int)emu_sp(lwd), f && cg_closed ? fx : "");
                     f = l = 0;
                 }
 
@@ -7597,8 +7655,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(px[k]), (int)emu_sp(py[k]));
                     }
 
-                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", isline ? 0 : 1,
-                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd));
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", isline ? 0 : 1,
+                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd), isline ? "" : fx);
                     f = l = 0;  /* drawn */
                 }
 
@@ -7608,9 +7666,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     fr_pt(&sm, bx0, by0, &x0, &y0);
                     fr_pt(&sm, bx0 + bw, by0 + bh, &x1, &y1);
                     ITEM_SEP();
-                    pb_printf(&o, "{\"shape\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", geom,
-                              (int)emu_sp(x0), (int)emu_sp(y0), (int)emu_sp(x1 - x0), (int)emu_sp(y1 - y0), (unsigned)f,
-                              (unsigned)l, (int)emu_sp(lwd));
+                    pb_printf(&o, "{\"shape\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}",
+                              geom, (int)emu_sp(x0), (int)emu_sp(y0), (int)emu_sp(x1 - x0), (int)emu_sp(y1 - y0), (unsigned)f,
+                              (unsigned)l, (int)emu_sp(lwd), f ? fx : "");
                 }
 
                 if (tx_a && tx_b > tx_a && X->depth < 3) {
@@ -7783,6 +7841,31 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             have_fill = 1;      /* the enclosing group's */
             fill = gfill[nfr - 1];
             continue;
+        }
+
+        if (in_sppr && !in_ln && !strcmp(t, "gradFill")) {     /* a gradient: from its first stop to its last */
+            in_grad = g.type == MT_OPEN;
+
+            if (open && !have_fill) {
+                grad_kind = 1;
+                grad_ang = 0;
+            }
+        } else if (in_grad && !strcmp(t, "lin") && open) {
+            grad_ang = mu_attr(&g, "ang", v, sizeof(v)) ? atoi(v) : 0;
+        } else if (in_grad && !strcmp(t, "path") && open) {
+            grad_kind = 2;
+        } else if (in_sppr && !strcmp(t, "outerShdw")) {    /* a shadow cast down and across */
+            in_shd = g.type == MT_OPEN;
+
+            if (open) {
+                shd_dist = mu_attr(&g, "dist", v, sizeof(v)) ? atof(v) : 38100;
+                shd_dir = mu_attr(&g, "dir", v, sizeof(v)) ? atof(v) / 60000.0 : 45;
+                shd_clr = 0x66000000u;
+                has_shd = 1;
+            }
+        } else if (kind == 1 && in_sppr && !strcmp(t, "prstGeom") && open && mu_attr(&g, "prst", v, sizeof(v)) &&
+                   strcmp(v, "rect")) {
+            snprintf(gprst, sizeof(gprst), "%.31s", v);
         }
 
         if (!strcmp(t, "spPr")) {
@@ -8026,9 +8109,15 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
             cur_clr = NULL;
 
-            if (in_ln) {
+            if (in_shd) {
+                shd_clr = (c & 0xFFFFFFu) | 0x66000000u;    /* see-through unless its alpha says */
+                cur_clr = &shd_clr;
+            } else if (in_ln) {
                 line = c;
                 cur_clr = &line;
+            } else if (in_sppr && in_grad && in_gs && have_fill) {
+                fill2 = c;      /* a later stop: the last one, in the end */
+                cur_clr = &fill2;
             } else if (in_sppr && (!in_gs || in_gs == 1) && !have_fill) {
                 fill = c;   /* a gradient: its first stop */
                 have_fill = 1;

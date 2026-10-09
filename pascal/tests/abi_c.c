@@ -337,6 +337,13 @@ int main(void) {
     printf("pd_draw.clip_y %zu\n", offsetof(pd_draw, clip_y));
     printf("pd_draw.clip_w %zu\n", offsetof(pd_draw, clip_w));
     printf("pd_draw.clip_h %zu\n", offsetof(pd_draw, clip_h));
+    printf("pd_draw.fill2 %zu\n", offsetof(pd_draw, fill2));
+    printf("pd_draw.grad %zu\n", offsetof(pd_draw, grad));
+    printf("pd_draw.grad_angle %zu\n", offsetof(pd_draw, grad_angle));
+    printf("pd_draw.rotation %zu\n", offsetof(pd_draw, rotation));
+    printf("pd_draw.flip %zu\n", offsetof(pd_draw, flip));
+    printf("pd_draw.clip_points %zu\n", offsetof(pd_draw, clip_points));
+    printf("pd_draw.clip_npoints %zu\n", offsetof(pd_draw, clip_npoints));
     printf("pd_markup_item %zu\n", sizeof(pd_markup_item));
     printf("pd_markup_item.kind %zu\n", offsetof(pd_markup_item, kind));
     printf("pd_markup_item.id %zu\n", offsetof(pd_markup_item, id));
