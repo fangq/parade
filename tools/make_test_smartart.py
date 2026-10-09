@@ -10,8 +10,9 @@ colour the colour definition gives text (not the drawing's fontRef).
 Slides 5 to 8 are a cycle of four with arrows round it (cycle), a radial of a hub and five round it joined by lines
 (cycle, ctrShpMap="fNode"), a pyramid of three and an inverted pyramid of two (pyra); slide 9 an organization
 chart whose branches hang: both ways, to the right, and (as at first) the last level under the top's children;
-slide 10 a list of two with picture placeholders, a picture (tests/data/rgba.png) in the first. The .docx has that
-list too. tests/data/smartart.docx has
+slide 10 a list of two with picture placeholders, a picture (tests/data/rgba.png) in the first; slide 11 a process
+with curved arrows; slide 12 labels turned a quarter, their text reading up; slide 13 a process in a quick style
+with depth (the theme's gradient and shadow, a bevel). The .docx has the pictures' list too. tests/data/smartart.docx has
 a cycle with no drawing and the diagram with the older drawing, inline in a Word document's paragraphs.
 
     python3 tools/make_test_smartart.py tests/data/smartart.pptx [tests/data/smartart.docx]
@@ -216,6 +217,26 @@ pics = ('<dgm:layoutDef %s uniqueId="test/pictures"><dgm:layoutNode name="diagra
         '</dgm:layoutNode></dgm:layoutNode></dgm:forEach></dgm:layoutNode></dgm:layoutDef>') % DGM
 
 
+# a process with curved arrows between its steps (connRout="curve")
+curves = process.replace('uniqueId="test/process"', 'uniqueId="test/curves"').replace(
+    '<dgm:layoutNode name="arrow"><dgm:alg type="conn"/>',
+    '<dgm:layoutNode name="arrow"><dgm:alg type="conn"><dgm:param type="connRout" val="curve"/></dgm:alg>')
+
+# labels turned a quarter (shape rot="270"), their text as gravity has it (reading up), centred across (txAnchorHorz)
+turned = ('<dgm:layoutDef %s uniqueId="test/turned"><dgm:layoutNode name="diagram"><dgm:alg type="lin"/><dgm:shape/>'
+          '<dgm:presOf/><dgm:constrLst><dgm:constr type="w" for="ch" forName="label" refType="h"/>'
+          '<dgm:constr type="h" for="ch" forName="label" refType="h" fact="0.25"/>'
+          '<dgm:constr type="w" for="ch" forName="gap" refType="h" refFor="ch" refForName="label" fact="2"/>'
+          '<dgm:constr type="primFontSz" for="ch" forName="label" op="equ" val="65"/></dgm:constrLst>'
+          '<dgm:forEach name="labels" axis="ch" ptType="node"><dgm:layoutNode name="label"><dgm:alg type="tx">'
+          '<dgm:param type="autoTxRot" val="grav"/><dgm:param type="txAnchorHorz" val="ctr"/>'
+          '<dgm:param type="parTxLTRAlign" val="l"/></dgm:alg><dgm:shape type="rect" rot="270"/>'
+          '<dgm:presOf axis="desOrSelf" ptType="node"/><dgm:constrLst>' + MARGINS + '</dgm:constrLst>' + SHRINK +
+          '</dgm:layoutNode><dgm:forEach name="gaps" axis="followSib" ptType="sibTrans" cnt="1">'
+          '<dgm:layoutNode name="gap"><dgm:alg type="sp"/><dgm:shape/><dgm:presOf/></dgm:layoutNode></dgm:forEach>'
+          '</dgm:forEach></dgm:layoutNode></dgm:layoutDef>') % DGM
+
+
 def pyramid(rot):
     """the nodes as a pyramid's levels, the first at its top (turned round: an inverted pyramid)"""
     return ('<dgm:layoutDef %s uniqueId="test/pyramid"><dgm:layoutNode name="diagram"><dgm:alg type="pyra">'
@@ -248,6 +269,17 @@ style = ('<dgm:styleDef %s uniqueId="test/style">'
          '<a:scrgbClr r="0" g="0" b="0"/></a:effectRef><a:fontRef idx="minor"/></dgm:style></dgm:styleLbl>'
          '</dgm:styleDef>') % DGM
 
+
+# a quick style of the kind with depth: its nodes the theme's second fill (a gradient) and second effect (a
+# shadow), a scene and a bevel of its own
+style3d = style.replace('uniqueId="test/style"', 'uniqueId="test/style3d"').replace(
+    '<dgm:styleLbl name="node1"><dgm:style><a:lnRef idx="2"><a:scrgbClr r="0" g="0" b="0"/></a:lnRef>'
+    '<a:fillRef idx="1"><a:scrgbClr r="0" g="0" b="0"/></a:fillRef><a:effectRef idx="0">',
+    '<dgm:styleLbl name="node1"><dgm:scene3d><a:camera prst="orthographicFront"/><a:lightRig rig="threePt" '
+    'dir="t"/></dgm:scene3d><dgm:sp3d><a:bevelT w="63500" h="25400"/></dgm:sp3d><dgm:style><a:lnRef idx="0">'
+    '<a:scrgbClr r="0" g="0" b="0"/></a:lnRef><a:fillRef idx="2"><a:scrgbClr r="0" g="0" b="0"/></a:fillRef>'
+    '<a:effectRef idx="2">')
+assert style3d != style
 
 def data(tree, layout, vars=None, pictures=None):
     """a data model of a tree: [(text, [children])]; VARS: a node's text to its hierBranch (on its presentation
@@ -320,7 +352,11 @@ DIAGRAMS = [
                           ('Both', [('b1', []), ('b2', []), ('b3', []), ('b4', [])]),
                           ('Right', [('r1', []), ('r2', [])])])], 'test/org', {'Both': 'hang', 'Right': 'r'})),
     (pics, data([('Pictured', []), ('Placeholder', [])], 'test/pictures', pictures={'Pictured': 'rId1'})),
+    (curves, data([(t, []) for t in ('Plan', 'Build', 'Ship')], 'test/curves')),
+    (turned, data([(t, []) for t in ('Up', 'Turned')], 'test/turned')),
+    (process, data([(t, []) for t in ('Depth', 'Shadow')], 'test/process')),
 ]
+STYLES = {len(DIAGRAMS): style3d}  # slide 13's quick style
 PICTURE = open('tests/data/rgba.png', 'rb').read()
 
 
@@ -343,8 +379,16 @@ theme = ('<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/mai
          'val="5B9BD5"/></a:accent5><a:accent6><a:srgbClr val="70AD47"/></a:accent6><a:hlink><a:srgbClr '
          'val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme '
          'name="T"><a:majorFont><a:latin typeface="Carlito"/></a:majorFont><a:minorFont><a:latin typeface="Carlito"/>'
-         '</a:minorFont></a:fontScheme><a:fmtScheme name="T"><a:fillStyleLst/><a:lnStyleLst><a:ln w="9525"/>'
-         '<a:ln w="25400"/><a:ln w="38100"/></a:lnStyleLst></a:fmtScheme></a:themeElements></a:theme>')
+         '</a:minorFont></a:fontScheme><a:fmtScheme name="T"><a:fillStyleLst><a:solidFill><a:schemeClr '
+         'val="phClr"/></a:solidFill><a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr">'
+         '<a:tint val="50000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:shade '
+         'val="80000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill><a:solidFill>'
+         '<a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="9525"/>'
+         '<a:ln w="25400"/><a:ln w="38100"/></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/>'
+         '</a:effectStyle><a:effectStyle><a:effectLst><a:outerShdw blurRad="40000" dist="38100" dir="5400000" '
+         'rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="40000"/></a:srgbClr></a:outerShdw></a:effectLst>'
+         '</a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst></a:fmtScheme>'
+         '</a:themeElements></a:theme>')
 master = ('<p:sldMaster %s><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/>'
           '</p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" '
           'accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" '
@@ -383,7 +427,7 @@ with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr('ppt/diagrams/_rels/data%d.xml.rels' % k, rels(('rId1', 'image', '../media/image1.png')))
             z.writestr('ppt/media/image1.png', PICTURE)
         z.writestr('ppt/diagrams/layout%d.xml' % k, lo)
-        z.writestr('ppt/diagrams/quickStyle%d.xml' % k, style)
+        z.writestr('ppt/diagrams/quickStyle%d.xml' % k, STYLES.get(k, style))
         z.writestr('ppt/diagrams/colors%d.xml' % k, saved_colors if dm is saved_data else colors)
 
         if dm is saved_data:

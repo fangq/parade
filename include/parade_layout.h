@@ -107,7 +107,8 @@ typedef struct {
     int32_t grad;               /**< paths: 0 one colour, 1 a linear gradient (grad_angle), 2 a radial one, out from
                                      the middle */
     int32_t grad_angle;         /**< paths: the way a linear gradient runs, 60000ths of a degree clockwise from right */
-    int32_t rotation;           /**< images: turned about their middle, 60000ths of a degree clockwise */
+    int32_t rotation;           /**< images: turned about their middle, 60000ths of a degree clockwise; glyphs (a
+                                     turned shape's text): turned about the pen position */
     int32_t flip;               /**< images: PD_FLIP_H, PD_FLIP_V */
     const pd_sp* clip_points;   /**< images: shown only inside this polygon (x, y pairs on the page, as paths' are) */
     int32_t clip_npoints;

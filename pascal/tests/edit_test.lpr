@@ -1016,6 +1016,58 @@ begin
 end;
 
 { a PowerPoint file opened: each slide a canvas page, its shapes there to edit; the slides sized together }
+{ SmartArt labels turned a quarter (tests/data/smartart.pptx, slide 12): their text painted turned, a column of
+  white glyphs in each blue box taller than it is wide }
+procedure TestTurnedText(E: TParadeEdit);
+var
+  Bmp: TBitmap;
+  Img: TLazIntfImage;
+  X, Y, BX0, BY0, BX1, BY1, TX0, TY0, TX1, TY1: Integer;
+  C: TFPColor;
+begin
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/smartart.pptx');
+  Bmp := TBitmap.Create;
+  try
+    E.RenderPage(11, Bmp, 1.0 * 96 / 72 / PD_SP_PER_PT);
+    Img := Bmp.CreateIntfImage;
+    try
+      BX0 := MaxInt; BY0 := MaxInt; BX1 := -1; BY1 := -1;
+      for Y := 0 to Img.Height - 1 do     { the right box: blue }
+        for X := Img.Width div 2 to Img.Width - 1 do
+        begin
+          C := Img.Colors[X, Y];
+          if (C.blue > $A000) and (C.red < $8000) then
+          begin
+            if X < BX0 then BX0 := X;
+            if X > BX1 then BX1 := X;
+            if Y < BY0 then BY0 := Y;
+            if Y > BY1 then BY1 := Y;
+          end;
+        end;
+      TX0 := MaxInt; TY0 := MaxInt; TX1 := -1; TY1 := -1;
+      for Y := BY0 + 2 to BY1 - 2 do      { its text: white in it }
+        for X := BX0 + 2 to BX1 - 2 do
+        begin
+          C := Img.Colors[X, Y];
+          if (C.red > $E000) and (C.green > $E000) then
+          begin
+            if X < TX0 then TX0 := X;
+            if X > TX1 then TX1 := X;
+            if Y < TY0 then TY0 := Y;
+            if Y > TY1 then TY1 := Y;
+          end;
+        end;
+      Check((BX1 > BX0) and (BY1 - BY0 > BX1 - BX0) and (TX1 > TX0) and (TY1 - TY0 > 2 * (TX1 - TX0)),
+        Format('turned text painted turned (box %dx%d, text %dx%d)', [BX1 - BX0, BY1 - BY0, TX1 - TX0, TY1 - TY0]));
+    finally
+      Img.Free;
+    end;
+    SavePage(E, 11, ExtractFilePath(ParamStr(0)) + 'edit_turned.png', 1.0 * 96 / 72 / PD_SP_PER_PT);
+  finally
+    Bmp.Free;
+  end;
+end;
+
 procedure TestSlides(E: TParadeEdit);
 const
   K = PD_SP_PER_PT;
@@ -2358,6 +2410,7 @@ begin
   TestWrap(E);
   TestCanvasPage(E);
   TestSlides(E);
+  TestTurnedText(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

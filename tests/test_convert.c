@@ -2877,6 +2877,72 @@ static int count_draws(pd_doc* d, int32_t kind, uint32_t color) {
     return c;
 }
 
+/* A text box in a shape turned a quarter: its text laid out across the shape's own width and drawn turned with it
+   (each glyph turned, the line running down the page); one whose bodyPr keeps it upright: drawn as it is */
+static void test_docx_turned_text(void) {
+    pd_doc* d;
+    pd_layout* L = NULL;
+    pd_draw* it;
+    int32_t n = 0, k, turned = 0, upright = 0;
+    pd_sp x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+
+    if (!have_layout_font()) {
+        return;
+    }
+
+    d = docx_doc("word/document.xml",
+                 "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wps=\"wps\" xmlns:wpg=\"wpg\">"
+                 "<w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"2540000\"/><a:graphic>"
+                 "<a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" "
+                 "cy=\"2540000\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"2540000\" cy=\"2540000\"/></a:xfrm>"
+                 "</wpg:grpSpPr><wps:wsp><wps:spPr><a:xfrm rot=\"5400000\"><a:off x=\"0\" y=\"1016000\"/><a:ext "
+                 "cx=\"2540000\" cy=\"508000\"/></a:xfrm><a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx>"
+                 "<w:txbxContent><w:p><w:r><w:t>Turn</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/>"
+                 "</wps:wsp><wps:wsp><wps:spPr><a:xfrm rot=\"5400000\"><a:off x=\"0\" y=\"0\"/><a:ext "
+                 "cx=\"2540000\" cy=\"508000\"/></a:xfrm><a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx>"
+                 "<w:txbxContent><w:p><w:r><w:t>Up</w:t></w:r></w:p></w:txbxContent></wps:txbx>"
+                 "<wps:bodyPr upright=\"1\"/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"
+                 "</w:r></w:p></w:body></w:document>", NULL);
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &n) == PD_OK && (it = (pd_draw*)malloc(((size_t)n + 1) *
+                    sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, n, &n);
+
+        for (k = 0; k < n; k++) {
+            if (it[k].kind != PD_DRAW_GLYPH) {
+                continue;
+            }
+
+            if (it[k].rotation == 5400000) {
+                if (!turned++) {
+                    x0 = it[k].x;
+                    y0 = it[k].y;
+                }
+
+                x1 = it[k].x;
+                y1 = it[k].y;
+            } else if (it[k].rotation == 0 && it[k].region == 5) {
+                upright++;
+            }
+        }
+
+        free(it);
+    }
+
+    CHECK(turned == 4 && upright == 2);
+    CHECK(y1 - y0 > PD_PT(10) && x1 - x0 < PD_PT(1) && x0 - x1 < PD_PT(1));     /* down the page */
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 /* A text box in a group holding a table (a spanned head row, a shaded cell), a paragraph in a style of its own
    with a superscript, and a picture in its line: the drawing has them all, laid out as a table, and keeps them
    through DOCX. */
@@ -3564,7 +3630,7 @@ static void test_pptx_smartart(void) {
         return;
     }
 
-    for (k = 0; k < 10; k++) {
+    for (k = 0; k < 13; k++) {
         pd_block_id fl = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), k), 0);
         pd_inline o;
         char* js = NULL;
@@ -3619,6 +3685,14 @@ static void test_pptx_smartart(void) {
         } else if (k == 9) {    /* the picture in its round placeholder; the other placeholder its style's fill */
             CHECK(count_of(js, "<pic:pic>") == 1 && count_of(js, "prst=\\\"ellipse\\\"") == 2);
             CHECK(strstr(js, "<a:off x=\\\"1600200\\\" y=\\\"640080\\\"/><a:ext cx=\\\"4495800\\\" cy=\\\"800100\\\"/>") != NULL);
+        } else if (k == 10) {   /* the arrows curved: bands of their own shape, not straight arrows */
+            CHECK(count_of(js, "prst=\\\"roundRect\\\"") == 3 && count_of(js, "<a:custGeom>") == 2 &&
+                  count_of(js, "Arrow") == 0);
+        } else if (k == 11) {   /* turned a quarter, and so their text (gravity: reading up), centred across */
+            CHECK(count_of(js, "\"story\":") == 2 && count_of(js, ",\"rot\":16200000,\"actr\":1}") == 2);
+        } else if (k == 12) {   /* the theme's gradient and shadow for the style's fillRef and effectRef, its bevel */
+            CHECK(count_of(js, "<a:gradFill") == 2 && count_of(js, "<a:outerShdw") == 2 &&
+                  count_of(js, "<a:bevelT") == 2 && count_of(js, "\"gk\":") == 2 && count_of(js, "\"shd\":") == 2);
         }
 
         free(js);
@@ -4990,6 +5064,7 @@ int main(void) {
     test_pptx();
     test_pptx_smartart();
     test_docx_smartart();
+    test_docx_turned_text();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();
     printf("EMF pictures\n");

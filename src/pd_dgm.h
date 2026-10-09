@@ -12,6 +12,7 @@ typedef struct {
     const xdoc* colors;         /* its colours (dgm:colorsDef), NULL for none */
     double cx, cy;              /* the frame it is in (EMU) */
     double line_w[3];           /* the theme's line widths, lnRef 1 to 3 (EMU) */
+    const xdoc* theme;          /* the theme (its fill and effect styles, for fillRef and effectRef), NULL none */
     const char* font;           /* the face its text is in (the theme's minor font), for measuring it */
 } pd_dgm_in;
 

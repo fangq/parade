@@ -1506,7 +1506,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
         uint32_t cur_color = 0;
         int have_color = 0;         /* the text colour is set (white is one: no colour value can say "unset") */
         int32_t cur_scale = 65536;  /* Tz, per page content stream */
-        int in_text = 0, in_tj = 0;
+        int in_text = 0, in_tj = 0, run_rot = 0;  /* (run_rot: the run is of a turned glyph) */
 
         memset(&c, 0, sizeof(c));
         pd_layout_page_info(L, pg, &pi);
@@ -1667,7 +1667,8 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                                     a->font->m.units_per_em);
 
                 if (in_tj && (pf != cur_font || chunk != cur_chunk || a->size != cur_size || a->y != run_y ||
-                              !have_color || a->color != cur_color || (a->scale ? a->scale : 65536) != cur_scale)) {
+                              !have_color || a->color != cur_color || (a->scale ? a->scale : 65536) != cur_scale ||
+                              a->rotation || run_rot)) {
                     sb_fmt(&c, "] TJ\n");
                     in_tj = 0;
                 }
@@ -1703,12 +1704,24 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                            (long long)((int64_t)cur_scale * 100000 / 65536 % 1000));
                 }
 
-                if (!in_tj) {
+                if (!in_tj && a->rotation) {   /* turned (clockwise on the page): a run of its own */
+                    double th = a->rotation / 60000.0 * 3.14159265358979323846 / 180;
+
+                    sb_fmt(&c, "%.6f %.6f %.6f %.6f ", cos(th), -sin(th), sin(th), cos(th));
+                    sb_num(&c, a->x);
+                    sb_num(&c, (int64_t)pi.height - a->y);
+                    sb_fmt(&c, "Tm [");
+                    in_tj = 1;
+                    run_rot = 1;
+                    run_y = a->y;
+                    pen = a->x;
+                } else if (!in_tj) {
                     sb_fmt(&c, "1 0 0 1 ");
                     sb_num(&c, a->x);
                     sb_num(&c, (int64_t)pi.height - a->y);
                     sb_fmt(&c, "Tm [");
                     in_tj = 1;
+                    run_rot = 0;
                     run_y = a->y;
                     pen = a->x;
                 } else if (a->x != pen) {

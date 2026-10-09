@@ -2917,6 +2917,159 @@ static int kid_of(const xdoc* d, int n, const char* names) {
     return -1;
 }
 
+/* the theme's IDX-th style (from 1) of a list of them (fillStyleLst, bgFillStyleLst, effectStyleLst), -1 none */
+static int theme_style(const dgm* D, const char* list, int idx) {
+    const xdoc* t = D->in->theme;
+    int l, k, i = 0;
+
+    if (!t || idx < 1 || (l = xd_find(t, list)) < 0) {
+        return -1;
+    }
+
+    for (k = t->v[l].kid; k >= 0; k = t->v[k].next) {
+        if (++i == idx) {
+            return k;
+        }
+    }
+
+    return -1;
+}
+
+/* markup of the theme's (from S, N bytes) with its placeholder colour (phClr) a colour CF (its own modifiers, then
+   the placeholder's) */
+static void put_with_ph(pd_buf* o, const char* s, size_t n, cref cf, const char* dflt) {
+    static const char key[] = "<a:schemeClr val=\"phClr\"";
+    size_t i = 0;
+
+    while (i < n) {
+        const char* k = NULL, *e;
+        size_t j;
+
+        for (j = i; j + sizeof(key) - 1 <= n; j++) {
+            if (!memcmp(s + j, key, sizeof(key) - 1)) {
+                k = s + j;
+                break;
+            }
+        }
+
+        if (!k) {
+            pb_put(o, s + i, n - i);
+            break;
+        }
+
+        pb_put(o, s + i, (size_t)(k - s) - i);
+        e = memchr(k, '>', n - (size_t)(k - s));
+
+        if (!e) {
+            break;
+        }
+
+        {
+            const char* in = e + 1, *end = in;
+            int self = e[-1] == '/';
+
+            if (!self) {    /* its modifiers: to its end */
+                const char* close = NULL;
+
+                for (j = (size_t)(in - s); j + 14 <= n; j++) {
+                    if (!memcmp(s + j, "</a:schemeClr>", 14)) {
+                        close = s + j;
+                        break;
+                    }
+                }
+
+                if (!close) {
+                    break;
+                }
+
+                end = close;
+            }
+
+            if (cf.n >= 0) {
+                const xnode* c = &cf.d->v[cf.n];
+
+                pb_printf(o, "<a:%s", c->name);
+
+                if (c->alen) {
+                    if (c->attrs[0] != ' ') {
+                        pb_putc(o, ' ');
+                    }
+
+                    pb_put(o, c->attrs, c->alen);
+                }
+
+                pb_putc(o, '>');
+
+                if (c->ib > c->ia) {
+                    pb_put(o, cf.d->s + c->ia, c->ib - c->ia);
+                }
+
+                pb_put(o, in, (size_t)(end - in));
+                pb_printf(o, "</a:%s>", c->name);
+            } else {
+                pb_printf(o, "<a:schemeClr val=\"%s\">", dflt);
+                pb_put(o, in, (size_t)(end - in));
+                pb_puts(o, "</a:schemeClr>");
+            }
+
+            i = (size_t)(end - s) + (self ? 0 : 14);
+
+            if (self) {
+                i = (size_t)(e + 1 - s);
+            }
+        }
+    }
+}
+
+/* a node's effects and 3-D: its own, else its style label's effectRef's (the theme's effect style: shadows,
+   glows, a bevel), with the quick style's own scene and shape 3-D over that */
+static void put_effects(pd_buf* o, const dgm* D, const pnode* N, int osp, int ost) {
+    const xdoc* m = D->dm, *t = D->in->theme, *q = D->in->style;
+    int ei = style_ref(D, N, "effectRef", NULL), es, k, sl = style_lbl(q, N->lbl), qs, i;
+    static const char* const parts[3] = { "effectLst", "scene3d", "sp3d" };
+    cref ec;
+
+    ec.d = q;
+    style_ref(D, N, "effectRef", &ec.n);
+
+    if ((k = xd_kid(m, ost, "effectRef")) >= 0) {
+        ei = (int)xd_int(m, k, "idx", ei);
+
+        if (m->v[k].kid >= 0) {
+            ec.d = m;
+            ec.n = m->v[k].kid;
+        }
+    }
+
+    es = theme_style(D, "effectStyleLst", ei);
+
+    for (i = 0; i < 3; i++) {
+        if ((k = xd_kid(m, osp, parts[i])) >= 0) {   /* its own */
+            xd_raw(o, m, k);
+        } else if (i > 0 && sl >= 0 && (qs = xd_kid(q, sl, parts[i])) >= 0) {   /* the quick style's (dgm:) */
+            pb_printf(o, "<a:%s", parts[i]);
+
+            if (q->v[qs].alen) {
+                if (q->v[qs].attrs[0] != ' ') {
+                    pb_putc(o, ' ');
+                }
+
+                pb_put(o, q->v[qs].attrs, q->v[qs].alen);
+            }
+
+            if (q->v[qs].ib > q->v[qs].ia) {
+                pb_putc(o, '>');
+                pb_put(o, q->s + q->v[qs].ia, q->v[qs].ib - q->v[qs].ia);
+                pb_printf(o, "</a:%s>", parts[i]);
+            } else {
+                pb_puts(o, "/>");
+            }
+        } else if (es >= 0 && (k = xd_kid(t, es, parts[i])) >= 0) {    /* the theme's */
+            put_with_ph(o, t->s + t->v[k].a, t->v[k].b - t->v[k].a, ec, "accent1");
+        }
+    }
+}
+
 /* a node's fill and outline: its own (spPr, its point's style), else its style label's; its text colour into *TX */
 static void put_fill_line(pd_buf* o, const dgm* D, const pnode* N, int geom, cref* tx) {
     const xdoc* c = D->in->colors, *m = D->dm;
@@ -2968,6 +3121,11 @@ static void put_fill_line(pd_buf* o, const dgm* D, const pnode* N, int geom, cre
 
     if ((k = kid_of(m, osp, "noFill solidFill gradFill pattFill blipFill")) >= 0) {    /* (a picture's: the user's) */
         xd_raw(o, m, k);
+    } else if (fi != 0 && (fc.n >= 0 || !c) &&
+               (k = theme_style(D, fi > 1000 ? "bgFillStyleLst" : "fillStyleLst", fi > 1000 ? fi - 1000 : fi)) >= 0) {
+        const xdoc* t = D->in->theme;   /* the theme's fill, its colour the style's */
+
+        put_with_ph(o, t->s + t->v[k].a, t->v[k].b - t->v[k].a, fc, "accent1");
     } else if (fi != 0 && (fc.n >= 0 || !c)) {
         pb_puts(o, "<a:solidFill>");
         put_colour(o, fc.d, fc.n, "accent1");
@@ -2987,6 +3145,8 @@ static void put_fill_line(pd_buf* o, const dgm* D, const pnode* N, int geom, cre
     } else {
         pb_puts(o, "<a:ln><a:noFill/></a:ln>");
     }
+
+    put_effects(o, D, N, osp, ost);
 }
 
 static void put_style(pd_buf* o, cref tx) {
@@ -3064,15 +3224,21 @@ static void put_rpr(pd_buf* o, const xdoc* m, int rpr, const char* el, double f,
     }
 }
 
-static void put_text(pd_buf* o, dgm* D, int n, const char* anchor) {
+/* a node's text: ANCHOR its anchor, ACTR the lines' block centred across, TROT degrees turned beyond its shape */
+static void put_text(pd_buf* o, dgm* D, int n, const char* anchor, int actr, double trot) {
     const xdoc* m = D->dm;
     pnode* N = &D->n[n];
-    char be[8], stb[8], algn[16];
+    char be[8], stb[8], algn[16], calgn[16], rotattr[32] = "";
     int i, base = 99, bullets, st, any = 0;
     double f = N->font > 0 ? N->font : 18, mg[4];
 
     var_of(D, n, "bulletEnabled", be, sizeof(be));
     param(D, n, "stBulletLvl", stb, sizeof(stb), "");
+    param(D, n, "shpTxLTRAlignCh", calgn, sizeof(calgn), "l");     /* its children's text */
+
+    if (fabs(trot) > 1e-6) {
+        snprintf(rotattr, sizeof(rotattr), " rot=\"%.0f\"", fmod(trot + 360, 360) * 60000);
+    }
     param(D, n, "parTxLTRAlign", algn, sizeof(algn), "ctr");
     bullets = !strcmp(be, "1") || !strcmp(be, "true");
     st = stb[0] ? atoi(stb) : 1;
@@ -3095,9 +3261,9 @@ static void put_text(pd_buf* o, dgm* D, int n, const char* anchor) {
         }
     }
 
-    pb_printf(o, "<dsp:txBody><a:bodyPr spcFirstLastPara=\"0\" vert=\"horz\" wrap=\"square\" lIns=\"%.0f\" "
-              "tIns=\"%.0f\" rIns=\"%.0f\" bIns=\"%.0f\" numCol=\"1\" spcCol=\"1270\" anchor=\"%s\" anchorCtr=\"0\">"
-              "<a:noAutofit/></a:bodyPr><a:lstStyle/>", mg[2], mg[0], mg[3], mg[1], anchor);
+    pb_printf(o, "<dsp:txBody><a:bodyPr%s spcFirstLastPara=\"0\" vert=\"horz\" wrap=\"square\" lIns=\"%.0f\" "
+              "tIns=\"%.0f\" rIns=\"%.0f\" bIns=\"%.0f\" numCol=\"1\" spcCol=\"1270\" anchor=\"%s\" anchorCtr=\"%d\">"
+              "<a:noAutofit/></a:bodyPr><a:lstStyle/>", rotattr, mg[2], mg[0], mg[3], mg[1], anchor, actr ? 1 : 0);
 
     for (i = 0; i < N->nof; i++) {
         int d = D->p[D->ofs[N->of + i]].depth - D->p[N->pt].depth;
@@ -3121,14 +3287,14 @@ static void put_text(pd_buf* o, dgm* D, int n, const char* anchor) {
             any = 1;
 
             if (bul) {
-                pb_printf(o, "<a:p><a:pPr marL=\"%.0f\" lvl=\"%d\" indent=\"%.0f\" algn=\"l\" defTabSz=\"%.0f\">"
+                pb_printf(o, "<a:p><a:pPr marL=\"%.0f\" lvl=\"%d\" indent=\"%.0f\" algn=\"%s\" defTabSz=\"%.0f\">"
                           "<a:lnSpc><a:spcPct val=\"90000\"/></a:lnSpc><a:spcBef><a:spcPct val=\"0\"/></a:spcBef>"
                           "<a:spcAft><a:spcPct val=\"15000\"/></a:spcAft><a:buChar char=\"&#8226;\"/></a:pPr>",
-                          f * 0.9 * EMU_PT * (lvl > 0 ? lvl : 1), lvl, -f * 0.9 * EMU_PT, f * 4 * EMU_PT);
+                          f * 0.9 * EMU_PT * (lvl > 0 ? lvl : 1), lvl, -f * 0.9 * EMU_PT, calgn, f * 4 * EMU_PT);
             } else {
                 pb_printf(o, "<a:p><a:pPr lvl=\"%d\" algn=\"%s\" defTabSz=\"%.0f\"><a:lnSpc><a:spcPct val=\"90000\"/>"
                           "</a:lnSpc><a:spcBef><a:spcPct val=\"0\"/></a:spcBef><a:spcAft><a:spcPct val=\"35000\"/>"
-                          "</a:spcAft><a:buNone/></a:pPr>", lvl, algn, f * 4 * EMU_PT);
+                          "</a:spcAft><a:buNone/></a:pPr>", lvl, lvl > 0 ? calgn : algn, f * 4 * EMU_PT);
             }
 
             for (r = m->v[p].kid; r >= 0; r = m->v[r].next) {
@@ -3338,6 +3504,175 @@ static void put_arc(pd_buf* o, dgm* D, int n, int s, int d, int cyc) {
     pb_puts(o, "</dsp:sp>");
 }
 
+/* the way out of a box at a point of it (its side's outward normal; from its middle, toward (tx, ty)) */
+static void out_dir(const pnode* B, double x, double y, double tx, double ty, double* ux, double* uy) {
+    double l;
+
+    *ux = *uy = 0;
+
+    if (fabs(y - (B->y + B->h)) < 1) {
+        *uy = 1;
+    } else if (fabs(y - B->y) < 1) {
+        *uy = -1;
+    } else if (fabs(x - B->x) < 1) {
+        *ux = -1;
+    } else if (fabs(x - (B->x + B->w)) < 1) {
+        *ux = 1;
+    } else {
+        *ux = tx - x;
+        *uy = ty - y;
+        l = sqrt(*ux * *ux + *uy * *uy);
+
+        if (l > 0) {
+            *ux /= l;
+            *uy /= l;
+        }
+    }
+}
+
+/* a curved connector's way (connRout="curve"): a cubic from (x0, y0) out of S to (x1, y1) into E, as P[8] */
+static void curve_of(const pnode* S, const pnode* E, double x0, double y0, double x1, double y1, double* p) {
+    double d = sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)) * 0.5, ax, ay, bx, by;
+
+    out_dir(S, x0, y0, x1, y1, &ax, &ay);
+    out_dir(E, x1, y1, x0, y0, &bx, &by);
+    p[0] = x0;
+    p[1] = y0;
+    p[2] = x0 + ax * d;
+    p[3] = y0 + ay * d;
+    p[4] = x1 + bx * d;
+    p[5] = y1 + by * d;
+    p[6] = x1;
+    p[7] = y1;
+}
+
+static void bez_at(const double* p, double t, double* x, double* y) {
+    double u = 1 - t;
+
+    *x = u * u * u * p[0] + 3 * u * u * t * p[2] + 3 * u * t * t * p[4] + t * t * t * p[6];
+    *y = u * u * u * p[1] + 3 * u * u * t * p[3] + 3 * u * t * t * p[5] + t * t * t * p[7];
+}
+
+/* a 2D connector routed curved: a band along a cubic from the one shape's edge to the other's (its pads off its
+   ends), as thick as the connector, an arrowhead at its end (or its start, or both, as its styles say) */
+static void put_curved_arrow(pd_buf* o, dgm* D, int n, int s, int d) {
+    pnode* N = &D->n[n];
+    const pnode* S = &D->n[s], *E = &D->n[d];
+    char bs[16], es[16];
+    double sx = S->x + S->w / 2, sy = S->y + S->h / 2, ex = E->x + E->w / 2, ey = E->y + E->h / 2, c[8], dx, dy, len;
+    double th = N->h > 1 ? N->h : N->w, a0, a1, gap, avail, head, minx = HUGE_VAL, miny = HUGE_VAL, maxx = -HUGE_VAL;
+    double maxy = -HUGE_VAL;
+    double pts[2 * 48 + 12];
+    int np = 0, i, k, ha, ta;
+    cref tx;
+
+    param(D, n, "begSty", bs, sizeof(bs), "noArr");
+    param(D, n, "endSty", es, sizeof(es), "arr");
+    ha = strcmp(bs, "noArr") != 0;
+    ta = strcmp(es, "noArr") != 0;
+    dx = ex - sx;
+    dy = ey - sy;
+    len = sqrt(dx * dx + dy * dy);
+
+    if (len < 1 || th <= 1) {
+        return;
+    }
+
+    {   /* from edge to edge, less its pads */
+        double ux = dx / len, uy = dy / len, e0 = shape_edge(D, s, ux, uy), e1 = shape_edge(D, d, -ux, -uy), p0, p1;
+
+        gap = len - e0 - e1;
+        p0 = (N->padm & 1) ? N->padf[0] * gap : has(N, C_BEGPAD) ? N->v[C_BEGPAD] * N->scl : 0;
+        p1 = (N->padm & 2) ? N->padf[1] * gap : has(N, C_ENDPAD) ? N->v[C_ENDPAD] * N->scl : 0;
+
+        if ((avail = gap - p0 - p1) <= 1) {
+            return;
+        }
+
+        sx += ux * (e0 + p0);
+        sy += uy * (e0 + p0);
+        ex -= ux * (e1 + p1);
+        ey -= uy * (e1 + p1);
+    }
+
+    {   /* bowed off the straight way, to the left of it going from the one to the other (over it, going right) */
+        double mx = (sx + ex) / 2, my = (sy + ey) / 2, nx = ey - sy, ny = -(ex - sx), k2 = 0.3;
+
+        c[0] = sx;
+        c[1] = sy;
+        c[2] = (sx + mx) / 2 + nx * k2;
+        c[3] = (sy + my) / 2 + ny * k2;
+        c[4] = (ex + mx) / 2 + nx * k2;
+        c[5] = (ey + my) / 2 + ny * k2;
+        c[6] = ex;
+        c[7] = ey;
+    }
+
+    head = fmin(th * 1.2, avail * (ha && ta ? 0.45 : 0.6));    /* the band between its arrowheads (parts of */
+    a0 = ha ? head / avail : 0;                                     /* the way, roughly) */
+    a1 = ta ? 1 - head / avail : 1;
+    th = fmin(th, avail * 0.35);
+
+    for (k = 0; k < 2; k++) {   /* one side out, the other back */
+        for (i = 0; i <= 20; i++) {
+            double t = k ? a1 - (a1 - a0) * i / 20 : a0 + (a1 - a0) * i / 20, x, y, x2, y2, tx2, ty2, l;
+
+            bez_at(c, t, &x, &y);
+            bez_at(c, fmin(t + 0.01, 1), &x2, &y2);
+            bez_at(c, fmax(t - 0.01, 0), &tx2, &ty2);
+            tx2 = x2 - tx2;
+            ty2 = y2 - ty2;
+            l = sqrt(tx2 * tx2 + ty2 * ty2);
+
+            if (l <= 0) {
+                continue;
+            }
+
+            pts[np++] = x + (k ? 1 : -1) * -ty2 / l * th / 2;
+            pts[np++] = y + (k ? 1 : -1) * tx2 / l * th / 2;
+
+            if (i == 20 && ((k == 0 && ta) || (k == 1 && ha))) {    /* the arrowhead there: out, to its tip, in */
+                double px, py;
+
+                bez_at(c, k ? 0 : 1, &px, &py);
+                pts[np++] = x + (k ? 1 : -1) * -ty2 / l * th;
+                pts[np++] = y + (k ? 1 : -1) * tx2 / l * th;
+                pts[np++] = px;
+                pts[np++] = py;
+                pts[np++] = x - (k ? 1 : -1) * -ty2 / l * th;
+                pts[np++] = y - (k ? 1 : -1) * tx2 / l * th;
+            }
+        }
+    }
+
+    for (i = 0; i < np; i += 2) {
+        minx = fmin(minx, pts[i]);
+        maxx = fmax(maxx, pts[i]);
+        miny = fmin(miny, pts[i + 1]);
+        maxy = fmax(maxy, pts[i + 1]);
+    }
+
+    if (np < 6) {
+        return;
+    }
+
+    put_id(o, D, n);
+    put_xfrm(o, minx, miny, fmax(maxx - minx, 1), fmax(maxy - miny, 1), 0);
+    pb_printf(o, "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>"
+              "<a:pathLst><a:path w=\"%.0f\" h=\"%.0f\">", fmax(maxx - minx, 1), fmax(maxy - miny, 1));
+
+    for (i = 0; i < np; i += 2) {
+        pb_printf(o, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>", i ? "lnTo" : "moveTo", pts[i] - minx, pts[i + 1] - miny,
+                  i ? "lnTo" : "moveTo");
+    }
+
+    pb_puts(o, "<a:close/></a:path></a:pathLst></a:custGeom>");
+    put_fill_line(o, D, N, 1, &tx);
+    pb_puts(o, "</dsp:spPr>");
+    put_style(o, tx);
+    pb_puts(o, "</dsp:sp>");
+}
+
 /* a connector: an arrow between the shapes of the points it is between, or a line (bent, as its routing says) */
 static void put_conn(pd_buf* o, dgm* D, int n) {
     pnode* N = &D->n[n];
@@ -3410,10 +3745,40 @@ static void put_conn(pd_buf* o, dgm* D, int n) {
 
         vb = fabs(y0 - S->y) < 1 || fabs(y0 - S->y - S->h) < 1;
         ve = fabs(y1 - E->y) < 1 || fabs(y1 - E->y - E->h) < 1;
-        pts[np++] = x0;
-        pts[np++] = y0;
+        if ((!strcmp(rout, "curve") || !strcmp(rout, "longCurve")) && (fabs(x1 - x0) > 1 || fabs(y1 - y0) > 1)) {
+            double c[8], bx0, by0, bx1, by1;    /* curved: a cubic, its box its points' */
 
-        if (strcmp(rout, "stra") && fabs(x1 - x0) > 1 && fabs(y1 - y0) > 1) {
+            curve_of(S, E, x0, y0, x1, y1, c);
+            bx0 = bx1 = c[0];
+            by0 = by1 = c[1];
+
+            for (i = 1; i <= 16; i++) {
+                double qx, qy;
+
+                bez_at(c, i / 16.0, &qx, &qy);
+                bx0 = fmin(bx0, qx);
+                by0 = fmin(by0, qy);
+                bx1 = fmax(bx1, qx);
+                by1 = fmax(by1, qy);
+            }
+
+            put_id(o, D, n);
+            put_xfrm(o, bx0, by0, fmax(bx1 - bx0, 1), fmax(by1 - by0, 1), 0);
+            pb_printf(o, "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>"
+                      "<a:pathLst><a:path w=\"%.0f\" h=\"%.0f\" fill=\"none\"><a:moveTo><a:pt x=\"%.0f\" y=\"%.0f\"/>"
+                      "</a:moveTo><a:cubicBezTo><a:pt x=\"%.0f\" y=\"%.0f\"/><a:pt x=\"%.0f\" y=\"%.0f\"/><a:pt x=\"%.0f\" "
+                      "y=\"%.0f\"/></a:cubicBezTo></a:path></a:pathLst></a:custGeom><a:noFill/>", fmax(bx1 - bx0, 1),
+                      fmax(by1 - by0, 1), c[0] - bx0, c[1] - by0, c[2] - bx0, c[3] - by0, c[4] - bx0, c[5] - by0,
+                      c[6] - bx0, c[7] - by0);
+            np = -1;
+        } else {
+            pts[np++] = x0;
+            pts[np++] = y0;
+        }
+
+        if (np < 0) {
+            /* (the curve written) */
+        } else if (strcmp(rout, "stra") && fabs(x1 - x0) > 1 && fabs(y1 - y0) > 1) {
             if (vb && ve) {     /* down, across, down: the bend where it is asked for */
                 bd = has(N, C_BENDDIST) ? N->v[C_BENDDIST] * N->scl : (y1 - y0) / 2;
 
@@ -3440,29 +3805,32 @@ static void put_conn(pd_buf* o, dgm* D, int n) {
             }
         }
 
-        pts[np++] = x1;
-        pts[np++] = y1;
-        minx = maxx = pts[0];
-        miny = maxy = pts[1];
+        if (np >= 0) {
+            pts[np++] = x1;
+            pts[np++] = y1;
+            minx = maxx = pts[0];
+            miny = maxy = pts[1];
 
-        for (i = 2; i < np; i += 2) {
-            minx = fmin(minx, pts[i]);
-            maxx = fmax(maxx, pts[i]);
-            miny = fmin(miny, pts[i + 1]);
-            maxy = fmax(maxy, pts[i + 1]);
+            for (i = 2; i < np; i += 2) {
+                minx = fmin(minx, pts[i]);
+                maxx = fmax(maxx, pts[i]);
+                miny = fmin(miny, pts[i + 1]);
+                maxy = fmax(maxy, pts[i + 1]);
+            }
+
+            put_id(o, D, n);
+            put_xfrm(o, minx, miny, fmax(maxx - minx, 1), fmax(maxy - miny, 1), 0);
+            pb_printf(o, "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"0\" t=\"0\" r=\"0\" "
+                      "b=\"0\"/><a:pathLst><a:path w=\"%.0f\" h=\"%.0f\" fill=\"none\">", fmax(maxx - minx, 1),
+                      fmax(maxy - miny, 1));
+
+            for (i = 0; i < np; i += 2) {
+                pb_printf(o, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>", i ? "lnTo" : "moveTo", pts[i] - minx,
+                          pts[i + 1] - miny, i ? "lnTo" : "moveTo");
+            }
+
+            pb_puts(o, "</a:path></a:pathLst></a:custGeom><a:noFill/>");
         }
-
-        put_id(o, D, n);
-        put_xfrm(o, minx, miny, fmax(maxx - minx, 1), fmax(maxy - miny, 1), 0);
-        pb_printf(o, "<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>"
-                  "<a:pathLst><a:path w=\"%.0f\" h=\"%.0f\" fill=\"none\">", fmax(maxx - minx, 1), fmax(maxy - miny, 1));
-
-        for (i = 0; i < np; i += 2) {
-            pb_printf(o, "<a:%s><a:pt x=\"%.0f\" y=\"%.0f\"/></a:%s>", i ? "lnTo" : "moveTo", pts[i] - minx,
-                      pts[i + 1] - miny, i ? "lnTo" : "moveTo");
-        }
-
-        pb_puts(o, "</a:path></a:pathLst></a:custGeom><a:noFill/>");
         {
             int li = style_ref(D, N, "lnRef", NULL), lc = colour_pick(D, N, "linClrLst");
 
@@ -3510,6 +3878,11 @@ static void put_conn(pd_buf* o, dgm* D, int n) {
             return;
         }
 
+        if (!strcmp(rout, "curve") || !strcmp(rout, "longCurve")) {
+            put_curved_arrow(o, D, n, s, d);
+            return;
+        }
+
         ux = dx / len;
         uy = dy / len;
         es0 = !strcmp(bp, "ctr") ? 0 : shape_edge(D, s, ux, uy);     /* from their edges, or their middles */
@@ -3554,8 +3927,10 @@ static void put_conn(pd_buf* o, dgm* D, int n) {
 
 static void put_node(pd_buf* o, dgm* D, int n) {
     pnode* N = &D->n[n];
-    char type[48], rot[32], adj[160], anchor[8] = "ctr";
-    int text = N->nof && is_alg(D, n, "tx") && has_text(D, n), i;
+    char type[48], rot[32], adj[160], anchor[8] = "ctr", hz[8];
+    int text = N->nof && is_alg(D, n, "tx") && has_text(D, n), i, ch = 0;
+    double turn = N->rot + (N->shape >= 0 && at(D->lo, N->shape, "rot", rot, sizeof(rot)) ? strtod(rot, NULL) : 0);
+    double trot = 0;
     cref tx;
 
     if (is_alg(D, n, "conn")) {
@@ -3629,13 +4004,19 @@ static void put_node(pd_buf* o, dgm* D, int n) {
         memset(&b, 0, sizeof(b));
         np = paras_of(D, n, &b, ps, 64);
 
-        for (j = 0; j < np; j++) {
-            if (ps[j].bullet) {
-                snprintf(anchor, sizeof(anchor), "t");
-            }
+        for (j = 0; j < np; j++) {  /* text of its point's children (bullets): the anchors for that */
+            ch |= ps[j].bullet || ps[j].lvl > 0;
         }
 
-        param(D, n, "txAnchorVert", rot, sizeof(rot), "");
+        if (ch) {
+            snprintf(anchor, sizeof(anchor), "t");
+        }
+
+        param(D, n, ch ? "txAnchorVertCh" : "txAnchorVert", rot, sizeof(rot), "");
+
+        if (ch && !rot[0]) {
+            param(D, n, "txAnchorVert", rot, sizeof(rot), "");
+        }
 
         if (!strcmp(rot, "t") || !strcmp(rot, "b")) {
             anchor[0] = rot[0];
@@ -3644,8 +4025,19 @@ static void put_node(pd_buf* o, dgm* D, int n) {
             snprintf(anchor, sizeof(anchor), "ctr");
         }
 
+        param(D, n, ch ? "txAnchorHorzCh" : "txAnchorHorz", hz, sizeof(hz), "none");
+        param(D, n, "autoTxRot", rot, sizeof(rot), "upr");
+
+        if (!strcmp(rot, "upr")) {  /* upright: turned back by quarters, as near upright as that gets */
+            trot = -floor(turn / 90 + 0.5) * 90;
+        } else if (!strcmp(rot, "grav")) {  /* as its shape is turned, but never upside down */
+            double a = fmod(fmod(turn, 360) + 360, 360);
+
+            trot = a > 90 + 1e-6 && a < 270 - 1e-6 ? 180 : 0;
+        }
+
         pb_free(&b);
-        put_text(o, D, n, anchor);
+        put_text(o, D, n, anchor, !strcmp(hz, "ctr"), N->inv ? 0 : trot);
     }
 
     pb_puts(o, "</dsp:sp>");

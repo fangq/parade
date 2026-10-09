@@ -92,6 +92,8 @@ typedef struct {                /* a line (or a whole paragraph region) on a pag
     pd_sp ox, oy;               /* paragraph origin in page coordinates */
     pd_sp top, bottom;          /* band on the page */
     int32_t region;
+    int32_t rot;                /* a turned text box's line: how far (60000ths of a degree, clockwise), */
+    pd_sp rx, ry;               /* about where; drawn turned, found by a click turned back */
 } pline;
 
 typedef struct {
@@ -201,6 +203,8 @@ struct pd_layout {
     int32_t nfly, capfly;
     int32_t stable;             /* hybrid line breaking: -1 as the document says, 0 off, 1 on */
     int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
+    int32_t dtext_rot;          /* the one being placed: how far it is turned (60000ths of a degree, clockwise), */
+    pd_sp dtext_rx, dtext_ry;   /* about its middle */
 };
 
 /* filler state for one section */
@@ -611,6 +615,9 @@ static int add_line(pd_layout* L, int32_t page, pcache* pc, int32_t line, pd_sp 
     l->top = oy + pc->top[line];
     l->bottom = oy + pc->top[line + 1];
     l->region = region;
+    l->rot = region == 5 && L->dtext_depth > 0 ? L->dtext_rot : 0;
+    l->rx = L->dtext_rx;
+    l->ry = L->dtext_ry;
 
     if (region == 0 || region == 3 || region == 4) {
         blk* b = pd_doc_blk(L->doc, pc->block);
@@ -707,9 +714,42 @@ static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int
                 top = an->s[0] == 'c' ? by + (bh - h) / 2 : by + bh - ib - h;
             }
 
-            L->dtext_depth++;
-            place_stack(L, story, width, page, bx + il, top, 5);
-            L->dtext_depth--;
+            {   /* turned as its shape is, about the box's middle */
+                int32_t rot0 = L->dtext_rot, rot = (int32_t)(pj_int_or(pj_get(it, "rot"), 0) % 21600000);
+                pd_sp rx0 = L->dtext_rx, ry0 = L->dtext_ry;
+
+                L->dtext_rot = rot < 0 ? rot + 21600000 : rot;
+                L->dtext_rx = bx + bw / 2;
+                L->dtext_ry = by + bh / 2;
+                int32_t n0 = L->pages[page].n, j;
+
+                L->dtext_depth++;
+                place_stack(L, story, width, page, bx + il, top, 5);
+                L->dtext_depth--;
+
+                if (pj_int_or(pj_get(it, "actr"), 0) && L->pages[page].n > n0) {     /* the lines' block centred */
+                    pd_sp lo = INT32_MAX, hi = INT32_MIN, dx;
+
+                    for (j = n0; j < L->pages[page].n; j++) {
+                        pline* pl = &L->pages[page].lines[j];
+                        pd_line ln;
+
+                        if (pd_para_get_line(pl->pc->para, pl->line, &ln) == PD_OK && ln.width > 0) {
+                            lo = pl->ox + ln.x < lo ? pl->ox + ln.x : lo;
+                            hi = pl->ox + ln.x + ln.width > hi ? pl->ox + ln.x + ln.width : hi;
+                        }
+                    }
+
+                    dx = lo <= hi ? bx + il + (width - (hi - lo)) / 2 - lo : 0;
+
+                    for (j = n0; dx && j < L->pages[page].n; j++) {
+                        L->pages[page].lines[j].ox += dx;
+                    }
+                }
+                L->dtext_rot = rot0;
+                L->dtext_rx = rx0;
+                L->dtext_ry = ry0;
+            }
         }
 
         pj_free(jd);
@@ -5327,6 +5367,76 @@ static void emit_rules(dlist_t* D, const ppage* pg, int32_t from, int32_t to, in
     }
 }
 
+/* a point turned ROT (60000ths of a degree, clockwise on the page) about (rx, ry) */
+static void turn_pt(int32_t rot, pd_sp rx, pd_sp ry, pd_sp* x, pd_sp* y) {
+    double th = rot / 60000.0 * 3.14159265358979323846 / 180, dx = *x - rx, dy = *y - ry;
+
+    *x = rx + (pd_sp)lround(dx * cos(th) - dy * sin(th));
+    *y = ry + (pd_sp)lround(dx * sin(th) + dy * cos(th));
+}
+
+/* the items a turned text box's line was drawn with, from N0: turned about its middle (glyphs turned at their
+   pens, pictures about theirs; rules made paths) */
+static void turn_items(dlist_t* D, int32_t n0, const pline* l) {
+    int32_t i, k, n = D->n;
+
+    for (i = n0; i < n; i++) {
+        pd_draw a = D->d[i];
+
+        if (a.kind == PD_DRAW_GLYPH) {
+            turn_pt(l->rot, l->rx, l->ry, &a.x, &a.y);
+            a.rotation = l->rot;
+        } else if (a.kind == PD_DRAW_IMAGE || a.kind == PD_DRAW_BOX || a.kind == PD_DRAW_LINK) {
+            pd_sp cx = a.x + a.w / 2, cy = a.y + a.h / 2, ox = cx, oy = cy;
+
+            turn_pt(l->rot, l->rx, l->ry, &cx, &cy);
+            a.x += cx - ox;
+            a.y += cy - oy;
+            a.clip_x += cx - ox;
+            a.clip_y += cy - oy;
+
+            if (a.kind == PD_DRAW_IMAGE) {
+                a.rotation = (a.rotation + l->rot) % 21600000;
+            }
+        } else if (a.kind == PD_DRAW_RULE && a.w > 0 && a.h > 0) {
+            pd_sp q[8] = { a.x, a.y, a.x + a.w, a.y, a.x + a.w, a.y + a.h, a.x, a.y + a.h };
+
+            for (k = 0; k < 4; k++) {
+                turn_pt(l->rot, l->rx, l->ry, &q[2 * k], &q[2 * k + 1]);
+            }
+
+            emit_path(D, q, 4, 1, a.color, 0, 0, a.block, a.region);
+            a.w = a.h = 0;
+        } else if (a.kind == PD_DRAW_PATH) {
+            intptr_t at = (intptr_t)a.points;
+            pd_sp x0 = INT32_MAX, y0 = INT32_MAX, x1 = INT32_MIN, y1 = INT32_MIN;
+
+            for (k = 0; k < a.npoints; k++) {
+                pd_sp* p = D->pts + at + 2 * k;
+
+                if (p[0] == PD_PATH_BREAK) {
+                    continue;
+                }
+
+                turn_pt(l->rot, l->rx, l->ry, &p[0], &p[1]);
+                x0 = p[0] < x0 ? p[0] : x0;
+                y0 = p[1] < y0 ? p[1] : y0;
+                x1 = p[0] > x1 ? p[0] : x1;
+                y1 = p[1] > y1 ? p[1] : y1;
+            }
+
+            if (x0 <= x1) {
+                a.x = x0;
+                a.y = y0;
+                a.w = x1 - x0;
+                a.h = y1 - y0;
+            }
+        }
+
+        D->d[i] = a;
+    }
+}
+
 pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, int32_t cap, int32_t* count) {
     ppage* pg;
     dlist_t D;
@@ -5362,7 +5472,15 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
                 boxed = 1;
             }
 
-            emit_line(L, &D, pg, &pg->lines[i]);
+            {
+                int32_t n0 = D.n;
+
+                emit_line(L, &D, pg, &pg->lines[i]);
+
+                if (pg->lines[i].rot) {
+                    turn_items(&D, n0, &pg->lines[i]);
+                }
+            }
 
             if (pg->nrules > k) {   /* a drawing's text boxes laid out with it: their tables' rules over it */
                 emit_rules(&D, pg, k, pg->nrules, -1);
@@ -5436,13 +5554,20 @@ pd_status pd_layout_hit_test(const pd_layout* L, int32_t page, pd_sp x, pd_sp y,
     /* the nearest line: vertical distance first, then horizontal */
     for (i = 0; i < p->n; i++) {
         const pline* l = &p->lines[i];
-        int64_t dy = y < l->top ? l->top - y : (y >= l->bottom ? y - l->bottom + 1 : 0), dx, dist;
+        pd_sp lx = x, ly = y;   /* (on a turned line: turned back) */
+        int64_t dy, dx, dist;
         pd_sp left, right;
+
+        if (l->rot) {
+            turn_pt(21600000 - l->rot, l->rx, l->ry, &lx, &ly);
+        }
+
+        dy = ly < l->top ? l->top - ly : (ly >= l->bottom ? ly - l->bottom + 1 : 0);
 
         pd_para_get_line(l->pc->para, l->line, &ln);
         left = l->ox + ln.x;
         right = left + ln.width;
-        dx = x < left ? left - x : (x > right ? x - right : 0);
+        dx = lx < left ? left - lx : (lx > right ? lx - right : 0);
         dist = dy * 4 + dx;
 
         /* a text box's line wins a tie with the line its drawing sits in, which a click inside the drawing also
@@ -5458,6 +5583,10 @@ pd_status pd_layout_hit_test(const pd_layout* L, int32_t page, pd_sp x, pd_sp y,
     }
 
     pd_para_get_line(best->pc->para, best->line, &ln);
+
+    if (best->rot) {
+        turn_pt(21600000 - best->rot, best->rx, best->ry, &x, &y);
+    }
 
     if (pd_para_hit_test(best->pc->para, x - best->ox, ln.baseline, &off, NULL) != PD_OK) {
         return PD_ERR_STATE;
@@ -5504,12 +5633,20 @@ pd_status pd_layout_caret(const pd_layout* L, pd_pos pos, int32_t* page, pd_sp* 
                     *page = pg;
                 }
 
-                if (x) {
-                    *x = l->ox + cx;
-                }
+                {
+                    pd_sp px = l->ox + cx, py = l->oy + cb;
 
-                if (baseline) {
-                    *baseline = l->oy + cb;
+                    if (l->rot) {   /* on a turned line: where it is drawn */
+                        turn_pt(l->rot, l->rx, l->ry, &px, &py);
+                    }
+
+                    if (x) {
+                        *x = px;
+                    }
+
+                    if (baseline) {
+                        *baseline = py;
+                    }
                 }
 
                 if (ascent) {

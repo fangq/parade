@@ -1139,6 +1139,112 @@ begin
   end;
 end;
 
+type
+  { a glyph's outline as rings on the image: scaled from font units (26.6, y up), turned, at the pen }
+  TGlyphRings = record
+    Rings: TRings;
+    Sc, CosT, SinT, PX, PY, LX, LY: Double;
+  end;
+  PGlyphRings = ^TGlyphRings;
+
+procedure GRPoint(G: PGlyphRings; FX, FY: Double);
+var
+  U, V: Double;
+  R, K: Integer;
+begin
+  U := FX * G^.Sc;
+  V := -FY * G^.Sc;
+  R := High(G^.Rings);
+  if R < 0 then
+    Exit;
+  K := Length(G^.Rings[R]);
+  SetLength(G^.Rings[R], K + 1);
+  G^.Rings[R][K].X := G^.PX + U * G^.CosT - V * G^.SinT;
+  G^.Rings[R][K].Y := G^.PY + U * G^.SinT + V * G^.CosT;
+  G^.LX := FX;
+  G^.LY := FY;
+end;
+
+procedure GRMove(user: Pointer; x, y: Int32); cdecl;
+var
+  G: PGlyphRings;
+begin
+  G := PGlyphRings(user);
+  SetLength(G^.Rings, Length(G^.Rings) + 1);
+  GRPoint(G, x, y);
+end;
+
+procedure GRLine(user: Pointer; x, y: Int32); cdecl;
+begin
+  GRPoint(PGlyphRings(user), x, y);
+end;
+
+procedure GRQuad(user: Pointer; cx, cy, x, y: Int32); cdecl;
+var
+  G: PGlyphRings;
+  X0, Y0, T: Double;
+  I: Integer;
+begin
+  G := PGlyphRings(user);
+  X0 := G^.LX;
+  Y0 := G^.LY;
+  for I := 1 to 8 do
+  begin
+    T := I / 8;
+    GRPoint(G, (1 - T) * (1 - T) * X0 + 2 * (1 - T) * T * cx + T * T * x,
+      (1 - T) * (1 - T) * Y0 + 2 * (1 - T) * T * cy + T * T * y);
+  end;
+end;
+
+procedure GRCubic(user: Pointer; c1x, c1y, c2x, c2y, x, y: Int32); cdecl;
+var
+  G: PGlyphRings;
+  X0, Y0, T, U: Double;
+  I: Integer;
+begin
+  G := PGlyphRings(user);
+  X0 := G^.LX;
+  Y0 := G^.LY;
+  for I := 1 to 10 do
+  begin
+    T := I / 10;
+    U := 1 - T;
+    GRPoint(G, U * U * U * X0 + 3 * U * U * T * c1x + 3 * U * T * T * c2x + T * T * T * x,
+      U * U * U * Y0 + 3 * U * U * T * c1y + 3 * U * T * T * c2y + T * T * T * y);
+  end;
+end;
+
+procedure GRClose(user: Pointer); cdecl;
+begin
+end;
+
+{ a glyph turned (Angle degrees clockwise) about its pen at (PX, PY), SizePx pixels to the em: its outline filled }
+procedure DrawGlyphTurned(Img: TLazIntfImage; AFont: Ppd_font; Glyph: UInt32; PX, PY, SizePx, Angle: Double;
+  Col: UInt32);
+var
+  M: pd_font_metrics;
+  G: TGlyphRings;
+  S: pd_outline_sink;
+begin
+  if (pd_font_get_metrics(AFont, M) <> PD_OK) or (M.units_per_em <= 0) then
+    Exit;
+  G.Rings := nil;
+  G.Sc := SizePx / M.units_per_em / 64;
+  G.CosT := Cos(Angle * Pi / 180);
+  G.SinT := Sin(Angle * Pi / 180);
+  G.PX := PX;
+  G.PY := PY;
+  G.LX := 0;
+  G.LY := 0;
+  S.move_to := @GRMove;
+  S.line_to := @GRLine;
+  S.quad_to := @GRQuad;
+  S.cubic_to := @GRCubic;
+  S.close := @GRClose;
+  if (pd_font_glyph_outline(AFont, Glyph, S, @G) = PD_OK) and (Length(G.Rings) > 0) then
+    FillRingsImg(Img, G.Rings, (Col and $FFFFFF) or $FF000000);
+end;
+
 { whether a point is inside a polygon (even-odd) }
 function InPolygon(const P: TPtDArray; X, Y: Double): Boolean;
 var
@@ -12630,7 +12736,10 @@ begin
                   color);
           end;
         PD_DRAW_GLYPH:
-          if font <> nil then
+          if (font <> nil) and (rotation <> 0) then     { turned with its text box's shape }
+            DrawGlyphTurned(Img, font, glyph, OX + x * PxScale, OY + y * PxScale, size * PxScale, rotation / 60000,
+              color)
+          else if font <> nil then
           begin
             PX := OX + x * PxScale;
             IX := Floor0(PX);

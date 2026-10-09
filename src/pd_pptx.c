@@ -39,6 +39,7 @@ typedef struct {
     uint32_t theme[12];         /* dk1 lt1 dk2 lt2 accent1-6 hlink folHlink */
     char major[64], minor[64];  /* the theme's fonts: headings, body */
     double line_w[3];           /* the theme's line widths (EMU) */
+    char theme_path[256];       /* the theme's part, "" none */
     int docpr;
     long long sw, sh;           /* the slide size (EMU) */
     int alias[4];               /* bg1, tx1, bg2, tx2: the theme's colours they are (the master's clrMap) */
@@ -343,10 +344,13 @@ static void theme_load(pptx* P, const char* path) {
     P->line_w[2] = 19050;
     snprintf(P->major, sizeof(P->major), "Calibri Light");
     snprintf(P->minor, sizeof(P->minor), "Calibri");
+    P->theme_path[0] = '\0';
 
     if (!path || !part_load(P, &t, path)) {
         return;
     }
+
+    snprintf(P->theme_path, sizeof(P->theme_path), "%s", path);
 
     s = xd_find(&t.x, "clrScheme");
 
@@ -1191,7 +1195,9 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
 
 /* a text body's bodyPr: its own attributes, else its placeholders' */
 static void put_bodypr(conv* C, const xdoc* d, int tx, int lsp, int msp) {
-    static const char* names[] = { "lIns", "tIns", "rIns", "bIns", "anchor", "wrap", "vert", "anchorCtr" };
+    static const char* names[] = { "lIns", "tIns", "rIns", "bIns", "anchor", "wrap", "vert", "anchorCtr", "rot",
+                                   "upright"
+                                 };
     int k, bp = tx >= 0 ? xd_kid(d, tx, "bodyPr") : -1;
     int lb = lsp >= 0 ? xd_path(&C->layout->x, lsp, "txBody/bodyPr") : -1;
     int mb = msp >= 0 ? xd_path(&C->master->x, msp, "txBody/bodyPr") : -1;
@@ -1552,8 +1558,8 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
 static int smartart_layout(conv* C, ppart* pt, int ri, const ppart* dmp, long long cx, long long cy, ppart* out) {
     const xdoc* d = &pt->x;
     static const char* names[3] = { "r:lo", "r:qs", "r:cs" };
-    ppart parts[3];
-    int have[3], k, ok = 0;
+    ppart parts[3], theme;
+    int have[3], k, ok = 0, have_t = C->P->theme_path[0] && part_load(C->P, &theme, C->P->theme_path);
     pd_dgm_in in;
     pd_buf b;
 
@@ -1576,6 +1582,7 @@ static int smartart_layout(conv* C, ppart* pt, int ri, const ppart* dmp, long lo
         in.cx = (double)cx;
         in.cy = (double)cy;
         memcpy(in.line_w, C->P->line_w, sizeof(in.line_w));
+        in.theme = have_t ? &theme.x : NULL;
         in.font = C->P->minor;
 
         if (pd_dgm_layout(&in, &b) && !b.err) {
@@ -1610,6 +1617,10 @@ static int smartart_layout(conv* C, ppart* pt, int ri, const ppart* dmp, long lo
         if (have[k]) {
             part_free(&parts[k]);
         }
+    }
+
+    if (have_t) {
+        part_free(&theme);
     }
 
     return ok;

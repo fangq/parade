@@ -7001,6 +7001,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int cam_has_rot = 0, in_camera = 0;
     double cam_lat = 0, cam_lon = 0, cam_rev = 0;
     long long lw = 9525, ins[4] = { 91440, 45720, 91440, 45720 };
+    int tx_rot = 0, tx_upright = 0, tx_vert = 0;   /* its text's bodyPr: turned further, kept upright, vertical, */
+    int tx_actr = 0;                                /* its lines' block centred across */
     pd_char_props base, pbase, rcp;     /* the text boxes' Normal, the paragraph's style's, the run's own */
     pd_buf text;
     int jc = PD_ALIGN_LEFT, def_jc = PD_ALIGN_LEFT;
@@ -7259,6 +7261,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             cg_w = cg_h = 0;
             cg_new_ring = 1;
             fill = line = sfill = sline = 0;
+            tx_rot = tx_upright = tx_vert = tx_actr = 0;
             lw = 9525;
             ins[0] = ins[2] = 91440;
             ins[1] = ins[3] = 45720;
@@ -7716,11 +7719,35 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     }
 
                     if (story) {
+                        /* turned as its shape is (and as its bodyPr says), unless it is to stay upright; text
+                           flipped upside down turned round */
+                        long long trot = (tx_upright ? 0 : (long long)xf.rot + (xf.flipv ? 10800000 : 0)) + tx_rot +
+                                         tx_vert;
+                        double tx = x, ty = y, tw = cw, th = ch;
+
+                        if (tx_vert) {  /* vertical: laid out across the box's height */
+                            tx = x + cw / 2 - ch / 2;
+                            ty = y + ch / 2 - cw / 2;
+                            tw = ch;
+                            th = cw;
+                        }
+
+                        trot %= 21600000;
                         ITEM_SEP();
                         pb_printf(&o, "{\"story\":%d,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"ins\":[%d,%d,%d,%d],"
-                                  "\"anchor\":\"%s\"}", (int)story, (int)emu_sp(x), (int)emu_sp(y), (int)emu_sp(cw),
-                                  (int)emu_sp(ch), (int)emu_sp((double)ins[0]), (int)emu_sp((double)ins[1]),
+                                  "\"anchor\":\"%s\"", (int)story, (int)emu_sp(tx), (int)emu_sp(ty), (int)emu_sp(tw),
+                                  (int)emu_sp(th), (int)emu_sp((double)ins[0]), (int)emu_sp((double)ins[1]),
                                   (int)emu_sp((double)ins[2]), (int)emu_sp((double)ins[3]), anchor);
+
+                        if (trot) {
+                            pb_printf(&o, ",\"rot\":%lld", trot < 0 ? trot + 21600000 : trot);
+                        }
+
+                        if (tx_actr) {
+                            pb_puts(&o, ",\"actr\":1");
+                        }
+
+                        pb_putc(&o, '}');
                         nopara = 1;     /* not also drawn from the copy read above */
                     }
 
@@ -8199,6 +8226,12 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             if (mu_attr(&g, "anchor", v, sizeof(v))) {
                 snprintf(anchor, sizeof(anchor), "%.3s", v);
             }
+
+            tx_actr = mu_attr(&g, "anchorCtr", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
+            tx_rot = mu_attr(&g, "rot", v, sizeof(v)) ? atoi(v) : 0;
+            tx_upright = mu_attr(&g, "upright", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
+            tx_vert = !mu_attr(&g, "vert", v, sizeof(v)) || !strcmp(v, "horz") ? 0 : !strcmp(v, "vert270") ?
+                      16200000 : 5400000;   /* (vertical text: the box turned a quarter, its text across it) */
         } else if (in_txbx) {
             if (!strcmp(t, "p") && tb_depth == 1 && tb_grid == 2 && g.type == MT_OPEN && !tb_head) {   /* a cell without tcPr */
                 pb_printf(&text, "%s{\"span\":%d,\"bg\":%u,\"paras\":[", tb_cell0 ? "" : ",", tb_span,
@@ -9298,18 +9331,18 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
             } else if (w->in_sect) {
                 if (strcmp(t, "pgSz") == 0) {
-                    w->sp.page_width = attr_int(&m, "w:w", 11906) * 65536 / 20;
-                    w->sp.page_height = attr_int(&m, "w:h", 16838) * 65536 / 20;
+                    w->sp.page_width = twips(attr_int(&m, "w:w", 11906));   /* (a poster's: past 2^31 / 65536) */
+                    w->sp.page_height = twips(attr_int(&m, "w:h", 16838));
                 } else if (strcmp(t, "pgMar") == 0) {
-                    w->sp.margin_top = abs(attr_int(&m, "w:top", 1440)) * 65536 / 20;
-                    w->sp.margin_bottom = abs(attr_int(&m, "w:bottom", 1440)) * 65536 / 20;
-                    w->sp.margin_left = attr_int(&m, "w:left", 1440) * 65536 / 20;
+                    w->sp.margin_top = twips(abs(attr_int(&m, "w:top", 1440)));
+                    w->sp.margin_bottom = twips(abs(attr_int(&m, "w:bottom", 1440)));
+                    w->sp.margin_left = twips(attr_int(&m, "w:left", 1440));
                     w->sp.gutter = twips(attr_int(&m, "w:gutter", 0));
                     w->sp.gutter = w->sp.gutter < 0 ? 0 : w->sp.gutter;
                     w->X->margin_left = w->sp.margin_left;  /* for the pictures of its headers, read next */
-                    w->sp.margin_right = attr_int(&m, "w:right", 1440) * 65536 / 20;
-                    w->sp.header_distance = attr_int(&m, "w:header", 720) * 65536 / 20;
-                    w->sp.footer_distance = attr_int(&m, "w:footer", 720) * 65536 / 20;
+                    w->sp.margin_right = twips(attr_int(&m, "w:right", 1440));
+                    w->sp.header_distance = twips(attr_int(&m, "w:header", 720));
+                    w->sp.footer_distance = twips(attr_int(&m, "w:footer", 720));
                 } else if (strcmp(t, "headerReference") == 0 || strcmp(t, "footerReference") == 0) {
                     char ty[16] = "default";
                     int k = (t[0] == 'f' ? 3 : 0);
