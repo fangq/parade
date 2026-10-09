@@ -2045,6 +2045,39 @@ static long background_of(const pptx* P, const ppart* pt) {
     return -1;
 }
 
+/* a part's background fill when it is a picture or a gradient (bgPr/blipFill, bgPr/gradFill): -1 none */
+static int background_fill(const ppart* pt) {
+    const xdoc* d = &pt->x;
+    int bg = xd_find(d, "bg"), pr = bg >= 0 ? xd_kid(d, bg, "bgPr") : -1, k;
+
+    if (pr < 0) {
+        return -1;
+    }
+
+    k = xd_kid(d, pr, "blipFill");
+    return k >= 0 ? k : xd_kid(d, pr, "gradFill");
+}
+
+/* a picture or a gradient over the whole slide, under everything on it */
+static void put_background_fill(conv* C, const ppart* pt, int f) {
+    const xdoc* d = &pt->x;
+
+    if (!strcmp(d->v[f].name, "blipFill")) {
+        pb_printf(C->o, "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"Background\"/><pic:cNvPicPr/></pic:nvPicPr>"
+                  "<pic:blipFill>", 3900000 + C->slide_no);
+        put_with_media(C->o, C, pt, d->s + d->v[f].ia, d->v[f].ib - d->v[f].ia);
+        pb_printf(C->o, "</pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
+                  "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>", C->P->sw, C->P->sh);
+        return;
+    }
+
+    pb_printf(C->o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Background\"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x=\"0\" "
+              "y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>",
+              3900000 + C->slide_no, C->P->sw, C->P->sh);
+    put_mapped(C->P, C->o, d->s + d->v[f].ia, d->v[f].ib - d->v[f].ia);
+    pb_puts(C->o, "<a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>");
+}
+
 static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* path, int no, int last) {
     ppart slide, layout, master;
     int have_l = 0, have_m = 0, tree, show = 1;
@@ -2097,19 +2130,31 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
     C.pres_style = pres_style;
     C.o = &cv;
 
-    /* the background: the slide's, else its layout's, else its master's; white */
-    bg = background_of(P, &slide);
+    /* the background: the slide's, else its layout's, else its master's; white. A picture or a gradient is a
+       shape of its own over the whole slide (the canvas's own background its colour, where the picture is not) */
+    {
+        const ppart* from = NULL;
 
-    if (bg < 0 && have_l) {
-        bg = background_of(P, &layout);
+        bg = background_of(P, &slide);
+        from = bg >= 0 || xd_find(&slide.x, "bg") >= 0 ? &slide : NULL;
+
+        if (bg < 0 && !from && have_l) {
+            bg = background_of(P, &layout);
+            from = bg >= 0 || xd_find(&layout.x, "bg") >= 0 ? &layout : NULL;
+        }
+
+        if (bg < 0 && !from && have_m) {
+            bg = background_of(P, &master);
+            from = &master;
+        }
+
+        pb_printf(&cv, "<wpc:bg><a:solidFill><a:srgbClr val=\"%06lX\"/></a:solidFill></wpc:bg><wpc:whole/>",
+                  (unsigned long)(bg >= 0 ? bg : 0xFFFFFF));
+
+        if (from && background_fill(from) >= 0) {
+            put_background_fill(&C, from, background_fill(from));
+        }
     }
-
-    if (bg < 0 && have_m) {
-        bg = background_of(P, &master);
-    }
-
-    pb_printf(&cv, "<wpc:bg><a:solidFill><a:srgbClr val=\"%06lX\"/></a:solidFill></wpc:bg><wpc:whole/>",
-              (unsigned long)(bg >= 0 ? bg : 0xFFFFFF));
 
     /* what the master and the layout draw on every slide (unless the slide or the layout says not), behind it */
     if (xd_attr(&slide.x, 0, "showMasterSp", v, sizeof(v)) && (!strcmp(v, "0") || !strcmp(v, "false"))) {
