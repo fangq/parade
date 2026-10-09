@@ -18,7 +18,7 @@ interface
 uses
   Classes, SysUtils, Controls, Graphics, LCLType, LCLIntf, ExtCtrls, StdCtrls, Forms, Clipbrd,
   IntfGraphics, GraphType, FPImage, LazFileUtils, LazUTF8, Math, ctypes, Menus, ExtDlgs, fpjson, jsonparser, parade,
-  paradefonts, StrUtils;
+  paradefonts, StrUtils, base64;
 
 type
   TParadeFontEntry = record
@@ -462,6 +462,9 @@ type
     function CutShapes: Boolean;
     function PasteShapes: Boolean;
     function DuplicateShapes: Boolean;
+    { a picture (a resource of the document, W by H sp) put into the selected canvas, in its middle and no bigger
+      than it; selected, one step of undo (InsertPicture does this with a canvas selected) }
+    function AddPictureShape(Res: pd_res_id; W, H: pd_sp): Boolean;
     { the selected shapes taken out of their drawing at once: one step of undo }
     function DeleteShapes: Boolean;
     { whether the clipboard has shapes copied from a drawing }
@@ -3226,6 +3229,11 @@ begin
   O.alt_len := Length(Alt);
   { its own size, 96 dpi; no wider than the text }
   pd_doc_image_display_size(FDoc, O, W, H);
+  if FShapeOn and CanvasSelected then
+  begin   { a canvas selected: a picture of the canvas, in its middle, no bigger than it }
+    Result := AddPictureShape(Res, W, H);
+    Exit;
+  end;
   Room := TextWidthAt(CaretPos.block);
   if (Room > 0) and (W > Room) then
   begin
@@ -7885,6 +7893,76 @@ begin
   end;
 end;
 
+{ a point of a shape's parent (a group's child space) in the drawing's top's units: through each group it is in,
+  up to the canvas (or the group the drawing is); SX, SY multiplied by the groups' scales }
+procedure MapUp(const Xml: string; const Els: TXmlEls; E: Integer; var X, Y, SX, SY: Double);
+var
+  P, Pr, Xf, Off, Ext, COff, CExt: Integer;
+  OX, OY, CX, CY, CHX, CHY, CHW, CHH, KX, KY: Double;
+begin
+  P := Els[E].Parent;
+  while (P >= 0) and (Els[P].Parent >= 0) do
+  begin
+    if (Els[P].Name = 'wpg:grpSp') or (Els[P].Name = 'wpg:wgp') then
+    begin
+      Pr := ChildNamed(Els, P, 'wpg:grpSpPr');
+      Xf := -1;
+      if Pr >= 0 then
+        Xf := ChildNamed(Els, Pr, 'a:xfrm');
+      if Xf >= 0 then
+      begin
+        Off := ChildNamed(Els, Xf, 'a:off');
+        Ext := ChildNamed(Els, Xf, 'a:ext');
+        COff := ChildNamed(Els, Xf, 'a:chOff');
+        CExt := ChildNamed(Els, Xf, 'a:chExt');
+        if (Off >= 0) and (Ext >= 0) then
+        begin
+          OX := StrToFloatDef(AttrOf(Xml, Els[Off].A, 'x'), 0);
+          OY := StrToFloatDef(AttrOf(Xml, Els[Off].A, 'y'), 0);
+          CX := StrToFloatDef(AttrOf(Xml, Els[Ext].A, 'cx'), 0);
+          CY := StrToFloatDef(AttrOf(Xml, Els[Ext].A, 'cy'), 0);
+          CHX := OX; CHY := OY; CHW := CX; CHH := CY;
+          if COff >= 0 then
+          begin
+            CHX := StrToFloatDef(AttrOf(Xml, Els[COff].A, 'x'), OX);
+            CHY := StrToFloatDef(AttrOf(Xml, Els[COff].A, 'y'), OY);
+          end;
+          if CExt >= 0 then
+          begin
+            CHW := StrToFloatDef(AttrOf(Xml, Els[CExt].A, 'cx'), CX);
+            CHH := StrToFloatDef(AttrOf(Xml, Els[CExt].A, 'cy'), CY);
+          end;
+          if CHW > 0 then KX := CX / CHW else KX := 1;
+          if CHH > 0 then KY := CY / CHH else KY := 1;
+          X := OX + (X - CHX) * KX;
+          Y := OY + (Y - CHY) * KY;
+          SX := SX * KX;
+          SY := SY * KY;
+        end;
+      end;
+    end;
+    P := Els[P].Parent;
+  end;
+end;
+
+{ a shape's element with its box in the drawing's top's units, as it would be out of the groups it is in }
+function ElAtTop(const Xml: string; const Els: TXmlEls; E: Integer): string;
+var
+  X, Y, CX, CY: Int64;
+  FX, FY, SX, SY: Double;
+begin
+  Result := Copy(Xml, Els[E].A, Els[E].B - Els[E].A);
+  if (Els[E].Parent < 0) or (Els[Els[E].Parent].Parent < 0) or not XfrmOf(Result, X, Y, CX, CY) then
+    Exit;
+  FX := X;
+  FY := Y;
+  SX := 1;
+  SY := 1;
+  MapUp(Xml, Els, E, FX, FY, SX, SY);
+  if (SX <> 1) or (SY <> 1) or (FX <> X) or (FY <> Y) then
+    SetXfrm(Result, Round(FX), Round(FY), Round(CX * SX), Round(CY * SY));
+end;
+
 { the top elements of the drawing's XML the selected shapes are (Whole: the group a shape is in, the group's), in
   the XML's order }
 function TopShapeEls(const Els: TXmlEls; const Sids: TIntegerArray; Whole: Boolean): TIntegerArray;
@@ -7928,11 +8006,18 @@ var
   Tops: TIntegerArray;
   Stories: TParadeBlockArray;
   XA, SA: TJSONArray;
+  PA, Rels: TJSONObject;
   I, K, P, L, N, Id, K0, NT: Integer;
   Ids: TStringList;
+  Rid: string;
+  Bytes: RawByteString;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
 begin
   Result := False;
   S := '';
+  Rels := nil;
   if not FShapeOn or (FShapeSid < 0) then
     Exit;
   J := DrawingJson(FDoc, FShapeAt);
@@ -7951,11 +8036,20 @@ begin
           SetLength(Stories, Length(Stories) + 1);
           Stories[High(Stories)] := TJSONObject(Items[I]).Integers['story'];
         end;
+    if J.Find('rels') is TJSONObject then
+      Rels := TJSONObject(J.Find('rels').Clone);
   finally
     J.Free;
   end;
   Els := XmlElements(Xml);
-  Tops := TopShapeEls(Els, SelectedShapes, True);
+  Tops := TopShapeEls(Els, SelectedShapes, False);
+  for I := High(Tops) downto 0 do   { a shape whose group is selected too: with the group }
+    for K := 0 to High(Tops) do
+      if (K <> I) and (Els[Tops[I]].A > Els[Tops[K]].A) and (Els[Tops[I]].B <= Els[Tops[K]].B) then
+      begin
+        Delete(Tops, I, 1);
+        Break;
+      end;
   if Length(Tops) = 0 then
     Exit;
   Out := TJSONObject.Create;
@@ -7963,13 +8057,26 @@ begin
   try
     XA := TJSONArray.Create;
     SA := TJSONArray.Create;
+    PA := TJSONObject.Create;
     Out.Add('xml', XA);
     Out.Add('stories', SA);
+    Out.Add('pics', PA);
     for I := 0 to High(Tops) do
     begin
-      Part := Copy(Xml, Els[Tops[I]].A, Els[Tops[I]].B - Els[Tops[I]].A);
-      if Pos('r:embed="', Part) > 0 then
-        Continue;     { a picture: its file is the drawing's own }
+      Part := ElAtTop(Xml, Els, Tops[I]);    { out of the groups it is in }
+      K := Pos('r:embed="', Part);
+      while K > 0 do
+      begin   { a picture: its file with it, for wherever it is pasted }
+        L := PosEx('"', Part, K + 9);
+        Rid := Copy(Part, K + 9, L - K - 9);
+        if (PA.Find(Rid) = nil) and (Rels <> nil) and (Rels.Find(Rid) <> nil) and
+           (pd_doc_resource(FDoc, Rels.Integers[Rid], @Mime, @Data, @Len) = PD_OK) then
+        begin
+          SetString(Bytes, PAnsiChar(Data), Len);
+          PA.Add(Rid, TJSONObject.Create(['mime', StrPas(Mime), 'data', EncodeStringBase64(Bytes)]));
+        end;
+        K := PosEx('r:embed="', Part, L);
+      end;
       Sh := '';       { its ids made new ones where it is pasted (a connector's ends: the same new ones) }
       P := 1;
       K := Pos(' id="', Part);
@@ -8002,6 +8109,7 @@ begin
   finally
     Out.Free;
     Ids.Free;
+    Rels.Free;
   end;
 end;
 
@@ -8010,6 +8118,10 @@ const
   Gap = 114300;   { an eighth of an inch (EMU): a copy beside the shape it is of }
   Margin = 114300;
 var
+  PA: TJSONObject;
+  Rid: string;
+  Bytes: RawByteString;
+  R: pd_res_id;
   D: TJSONData;
   XA, SA: TJSONArray;
   Parts: array of string;
@@ -8076,6 +8188,37 @@ begin
             Break;
           DX := DX + Gap;
           DY := DY + Gap;
+        end;
+      end;
+      PA := nil;
+      if TJSONObject(D).Find('pics') is TJSONObject then
+        PA := TJSONObject(TJSONObject(D).Find('pics'));
+      if (PA <> nil) and (PA.Count > 0) then
+      begin   { the pictures' files, the canvas's own now, by ids of its own }
+        J := DrawingJson(FDoc, FShapeAt);
+        if J = nil then
+          Exit;
+        try
+          if not (J.Find('rels') is TJSONObject) then
+            J.Add('rels', TJSONObject.Create);
+          for I := 0 to PA.Count - 1 do
+            if PA.Items[I] is TJSONObject then
+            begin
+              Bytes := DecodeStringBase64(TJSONObject(PA.Items[I]).Get('data', ''));
+              if (Bytes = '') or (pd_doc_add_resource(FDoc, PAnsiChar(TJSONObject(PA.Items[I]).Get('mime', '')),
+                 PAnsiChar(Bytes), Length(Bytes), R) <> PD_OK) then
+                Continue;
+              Rid := 'rIdPd' + IntToStr(R);
+              TJSONObject(J.Find('rels')).Delete(Rid);
+              TJSONObject(J.Find('rels')).Add(Rid, Integer(R));
+              for K := 0 to High(Parts) do
+                Parts[K] := StringReplace(Parts[K], 'r:embed="' + PA.Names[I] + '"', 'r:embed="' + Rid + '"',
+                  [rfReplaceAll]);
+            end;
+          if not ReplaceDrawing(FShapeAt, J.AsJSON, Lbl) then
+            Exit;
+        finally
+          J.Free;
         end;
       end;
       Sh := '';
@@ -8177,7 +8320,7 @@ end;
 
 function TParadeEdit.CutShapes: Boolean;
 begin
-  Result := not FReadOnly and CopyShapes and RemoveShapes(True, 'Cut');
+  Result := not FReadOnly and CopyShapes and RemoveShapes(False, 'Cut');
 end;
 
 function TParadeEdit.PasteShapes: Boolean;
@@ -8604,6 +8747,9 @@ begin
     end;
     Result[I].X := OX + CX / 2 + U * C - V * S;
     Result[I].Y := OY + CY / 2 + U * S + V * C;
+    U := 1;
+    V := 1;
+    MapUp(Xml, Els, E, Result[I].X, Result[I].Y, U, V);    { in a group: in the canvas's units }
     Result[I].Ang := Result[I].Ang + Rot;
     Result[I].Ang := Result[I].Ang - 360 * Floor(Result[I].Ang / 360);
   end;
@@ -8699,7 +8845,7 @@ var
   Sites: TParadeSites;
   Done: array of Boolean;
   Upright: Boolean;
-  SAng, EAng: Double;
+  SAng, EAng, AX, AY, BX, BY: Double;
 
   function Find(const Id: string): Integer;
   var
@@ -8709,7 +8855,7 @@ var
     if Id = '' then
       Exit;
     for Q := 0 to High(Els) do
-      if (Els[Q].Parent = Root) and IsShapeEl(Els[Q].Name) and (ElId(Xml, Els, Q) = Id) then
+      if IsShapeEl(Els[Q].Name) and (ElId(Xml, Els, Q) = Id) then
         Exit(Q);
   end;
 
@@ -8725,7 +8871,7 @@ begin
     E := -1;
     K := 0;
     for I := 0 to High(Els) do
-      if (Els[I].Parent = Root) and (Els[I].Name = 'wps:wsp') and (ChildNamed(Els, I, 'wps:cNvCnPr') >= 0) then
+      if (Root >= 0) and (Els[I].Name = 'wps:wsp') and (ChildNamed(Els, I, 'wps:cNvCnPr') >= 0) then
       begin
         if (K < Length(Done)) and not Done[K] then
         begin
@@ -8741,6 +8887,11 @@ begin
     EId := CxnOf(Xml, Els, E, 'a:endCxn', EIdx);
     if ((SId = '') and (EId = '')) or not ConnectorEnds(Xml, Els, E, X1, Y1, X2, Y2) then
       Continue;
+    { a connector in a group: its group's units to the canvas's and back (X = AX * x + BX) }
+    BX := 0; BY := 0; AX := 1; AY := 1;
+    MapUp(Xml, Els, E, BX, BY, AX, AY);
+    X1 := AX * X1 + BX; Y1 := AY * Y1 + BY;
+    X2 := AX * X2 + BX; Y2 := AY * Y2 + BY;
     SAng := -1;
     EAng := -1;
     K := Find(SId);
@@ -8771,7 +8922,9 @@ begin
     Upright := (Pos('bent', Prst) = 1) or (Pos('curved', Prst) = 1);
     Upright := Upright and ((SAng < 0) or (Abs(Sin(SAng * Pi / 180)) > 0.7)) and
       ((EAng < 0) or (Abs(Sin(EAng * Pi / 180)) > 0.7)) and ((SAng >= 0) or (EAng >= 0));
-    NewXf := ConnectorXfrm(X1, Y1, X2, Y2, Upright);
+    if (AX <= 0) or (AY <= 0) then
+      Continue;
+    NewXf := ConnectorXfrm((X1 - BX) / AX, (Y1 - BY) / AY, (X2 - BX) / AX, (Y2 - BY) / AY, Upright);
     if Copy(Xml, Els[Xf].A, Els[Xf].B - Els[Xf].A) <> NewXf then
     begin
       Xml := Copy(Xml, 1, Els[Xf].A - 1) + NewXf + Copy(Xml, Els[Xf].B, MaxInt);
@@ -8807,7 +8960,7 @@ begin
     Exit;
   Els := XmlElements(Xml);
   E := SidElement(Els, Sid);
-  if (E < 0) or (Els[E].Parent <> TopOfDrawing(Els)) or (ChildNamed(Els, E, 'wps:cNvCnPr') >= 0) then
+  if (E < 0) or (ChildNamed(Els, E, 'wps:cNvCnPr') >= 0) then
     Exit;
   S := ElSites(Xml, Els, E);
   SetLength(Result, Length(S));
@@ -8843,7 +8996,7 @@ begin
   begin
     if (Els[E].Name = 'wps:wsp') or (Els[E].Name = 'pic:pic') then
       Inc(K);
-    if (Els[E].Parent <> Root) or not ((Els[E].Name = 'wps:wsp') or (Els[E].Name = 'pic:pic')) or (K = Skip) or
+    if (Root < 0) or not ((Els[E].Name = 'wps:wsp') or (Els[E].Name = 'pic:pic')) or (K = Skip) or
        (ChildNamed(Els, E, 'wps:cNvCnPr') >= 0) then
       Continue;
     S := ElSites(Xml, Els, E);
@@ -8861,6 +9014,48 @@ begin
         Result := True;
       end;
     end;
+  end;
+end;
+
+function TParadeEdit.AddPictureShape(Res: pd_res_id; W, H: pd_sp): Boolean;
+var
+  J: TJSONObject;
+  Pg: Int32;
+  PX, PY, DW, DH, JW, JH, K: Double;
+  Rid: string;
+begin
+  Result := False;
+  if FReadOnly or not FShapeOn or not CanvasSelected or (W <= 0) or (H <= 0) or
+     not DrawingPlace(FShapeAt, Pg, PX, PY, DW, DH, JW, JH) then
+    Exit;
+  K := Min(1, Min(JW * 0.9 / W, JH * 0.9 / H));
+  Rid := 'rIdPd' + IntToStr(Res);
+  PushShapeStep('Insert picture', FShapeAt);
+  Inc(FStepDepth);
+  pd_doc_begin_group(FDoc, 'Insert picture');
+  try
+    J := DrawingJson(FDoc, FShapeAt);     { the picture's file, the canvas's own by an id of its own }
+    if J = nil then
+      Exit;
+    try
+      if not (J.Find('rels') is TJSONObject) then
+        J.Add('rels', TJSONObject.Create);
+      TJSONObject(J.Find('rels')).Delete(Rid);
+      TJSONObject(J.Find('rels')).Add(Rid, Integer(Res));
+      if not ReplaceDrawing(FShapeAt, J.AsJSON, 'Insert picture') then
+        Exit;
+    finally
+      J.Free;
+    end;
+    Result := PutShapeXml('<pic:pic><pic:nvPicPr><pic:cNvPr id="%ID%" name="Picture %ID%"/><pic:cNvPicPr/>' +
+      '</pic:nvPicPr><pic:blipFill><a:blip r:embed="' + Rid + '"/><a:stretch><a:fillRect/></a:stretch>' +
+      '</pic:blipFill><pic:spPr><a:xfrm><a:off x="' + IntToStr(Round((JW - W * K) / 2 / EmuD)) + '" y="' +
+      IntToStr(Round((JH - H * K) / 2 / EmuD)) + '"/><a:ext cx="' + IntToStr(Round(W * K / EmuD)) + '" cy="' +
+      IntToStr(Round(H * K / EmuD)) + '"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
+      '</pic:pic>', 'Insert picture');
+  finally
+    pd_doc_end_group(FDoc);
+    Dec(FStepDepth);
   end;
 end;
 
@@ -8897,6 +9092,7 @@ var
   Xml, Id: string;
   Els: TXmlEls;
   E, I, K, Idx: Integer;
+  AX, AY, BX, BY: Double;
 begin
   Result := False;
   X1 := 0; Y1 := 0; X2 := 0; Y2 := 0;
@@ -8908,7 +9104,10 @@ begin
   E := SidElement(Els, FShapeSid);
   if (E < 0) or (ChildNamed(Els, E, 'wps:cNvCnPr') < 0) or not ConnectorEnds(Xml, Els, E, X1, Y1, X2, Y2) then
     Exit;
-  X1 := X1 * EmuD; Y1 := Y1 * EmuD; X2 := X2 * EmuD; Y2 := Y2 * EmuD;
+  BX := 0; BY := 0; AX := 1; AY := 1;
+  MapUp(Xml, Els, E, BX, BY, AX, AY);    { in a group: in the canvas's units }
+  X1 := (AX * X1 + BX) * EmuD; Y1 := (AY * Y1 + BY) * EmuD;
+  X2 := (AX * X2 + BX) * EmuD; Y2 := (AY * Y2 + BY) * EmuD;
   for K := 0 to 1 do
   begin
     if K = 0 then
@@ -8936,7 +9135,7 @@ var
   Xml, Nv, Keep, Id: string;
   Els: TXmlEls;
   E, Pr, Xf, NvE, I, Idx: Integer;
-  X1, Y1, X2, Y2: Double;
+  X1, Y1, X2, Y2, AX, AY, BX, BY: Double;
   SId_, EId_: string;
   SIdx, EIdx: Integer;
 begin
@@ -8955,13 +9154,15 @@ begin
   Id := '';
   if (Sid >= 0) and (Site >= 0) then
     Id := SidId(Xml, Sid);
+  BX := 0; BY := 0; AX := 1; AY := 1;
+  MapUp(Xml, Els, E, BX, BY, AX, AY);    { the canvas's units into its group's }
   if End_ then
   begin
-    X2 := X / EmuD; Y2 := Y / EmuD; EId_ := Id; EIdx := Site;
+    X2 := (X / EmuD - BX) / AX; Y2 := (Y / EmuD - BY) / AY; EId_ := Id; EIdx := Site;
   end
   else
   begin
-    X1 := X / EmuD; Y1 := Y / EmuD; SId_ := Id; SIdx := Site;
+    X1 := (X / EmuD - BX) / AX; Y1 := (Y / EmuD - BY) / AY; SId_ := Id; SIdx := Site;
   end;
   { what the connector's own properties keep (its locks), and its ends' joins as they are now }
   Keep := '';
@@ -10159,7 +10360,7 @@ begin
   Canvas.Brush.Style := bsSolid;
   Canvas.Brush.Color := clWhite;
   for E := 0 to High(Els) do
-    if (Els[E].Parent = Root) and ((Els[E].Name = 'wps:wsp') or (Els[E].Name = 'pic:pic')) and
+    if (Root >= 0) and ((Els[E].Name = 'wps:wsp') or (Els[E].Name = 'pic:pic')) and
        (ChildNamed(Els, E, 'wps:cNvCnPr') < 0) then
     begin
       S := ElSites(Xml, Els, E);

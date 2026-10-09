@@ -721,6 +721,8 @@ var
   PX0, PY0, PX1, PY1, X1, Y1, X2, Y2: Double;
   S: TParadeDrawPoints;
   Xml: string;
+  N0, LineSid: Integer;
+  Bx: TParadeShapeBoxes;
 
   function Pt(U, V: Double): TPoint;
   begin
@@ -799,6 +801,45 @@ begin
   E.AddConnector('elbow', 60 * K, 80 * K, 300 * K, 100 * K, 0, 2, 1, 0);
   Check(E.KeptXml(Xml) and (Pos('rot="5400000"', Xml) > 0), 'an elbow from a bottom to a top: turned to go down');
   SavePage(E, 0, ExtractFilePath(ParamStr(0)) + 'edit_connectors.png', 1.5 * 96 / 72 / PD_SP_PER_PT);
+  { a shape in a group: joined, and copied out of it alone }
+  SelectSid(0);
+  E.ToggleShape(1);
+  Check(E.GroupShapes, 'the two rectangles grouped');
+  SelectSid(1);
+  Check(E.AddConnector('line', 100 * K, 50 * K, 380 * K, 20 * K, 1, 3), 'a line from the grouped second rectangle');
+  Check(E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and (SS = 1) and Near(X1, 360 * K) and Near(Y1, 130 * K),
+    Format('on its right side (%.1f, %.1f)', [X1 / K, Y1 / K]));
+  E.SelectedShape(D, LineSid);
+  SelectSid(1);
+  E.ProcessKey(VK_DOWN, [ssShift]);
+  SelectSid(LineSid);
+  Check(E.ConnectorInfo(X1, Y1, X2, Y2, SS, ES) and Near(Y1, 140 * K), Format('the grouped rectangle nudged: ' +
+    'the line with it (%.1f)', [Y1 / K]));
+  SelectSid(1);
+  E.ProcessKey(VK_C, [ssCtrl]);
+  N0 := Length(E.DrawingShapes(CP));
+  E.ProcessKey(VK_V, [ssCtrl]);
+  Bx := E.DrawingShapes(CP);
+  Check((Length(Bx) = N0 + 1) and E.SelectedShape(D, Sid) and (Abs(Bx[Sid].X0 - 269 * K) < 1.5 * K) and
+    (Abs(Bx[Sid].Y0 - 119 * K) < 1.5 * K), Format('copied out of its group: a shape of its own beside it (%.1f, %.1f)',
+    [Bx[Sid].X0 / K, Bx[Sid].Y0 / K]));
+  { a picture in the canvas, copied into a canvas of its own }
+  E.ProcessKey(VK_ESCAPE, []);
+  N0 := Length(E.DrawingShapes(CP));
+  Check(E.InsertPicture(ExtractFilePath(ParamStr(0)) + '../../tests/data/rgba.png') and
+    (Length(E.DrawingShapes(CP)) = N0 + 1) and E.SelectedShape(D, Sid) and (Sid = N0) and
+    (Pos('"img":', DrawingText(E, CP)) > 0), 'a picture put in the canvas selected');
+  E.ProcessKey(VK_C, [ssCtrl]);
+  E.ClearShapeSelection;
+  E.ProcessKey(VK_END, [ssCtrl]);
+  Check(E.PasteShapes and E.SelectedShape(D, Sid) and (D.offset > CP.offset) and
+    (Pos('"img":', DrawingText(E, D)) > 0), 'copied into the text: a canvas of its own, the picture in it');
+  E.SaveToFile(ExtractFilePath(ParamStr(0)) + 'edit_pictures.docx');
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + 'edit_pictures.docx');
+  E.GoToPos(PdPos(pd_doc_next_paragraph(E.Doc, pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0)), 0));
+  Xml := DrawingText(E, E.CaretPos);
+  Check((Pos('"img":', Xml) > 0) and (Pos('stCxn', Xml) > 0), 'saved and read back: the picture, the joins');
+  SelectSid(SS);
   E.SaveToFile(ExtractFilePath(ParamStr(0)) + 'edit_connectors.docx');
   E.LoadFromFile(ExtractFilePath(ParamStr(0)) + 'edit_connectors.docx');
   E.GoToPos(PdPos(pd_doc_next_paragraph(E.Doc, pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0)), 0));
