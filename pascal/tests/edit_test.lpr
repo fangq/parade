@@ -369,6 +369,19 @@ begin
   Check(Pos('Typed', Xml) > 0, 'saved and read back: the text box''s text');
 end;
 
+procedure SortBoxesX(var B: TParadeShapeBoxes);
+var
+  I, K: Integer;
+  T: TParadeShapeBox;
+begin
+  for I := 0 to High(B) do
+    for K := I + 1 to High(B) do
+      if B[K].X0 < B[I].X0 then
+      begin
+        T := B[I]; B[I] := B[K]; B[K] := T;
+      end;
+end;
+
 { the description of the drawing at P, as the document has it }
 function DrawingText(E: TParadeEdit; const P: pd_pos): string;
 var
@@ -403,6 +416,7 @@ var
   Ch: TUTF8Char;
   A: TPoint;
   W: Double;
+  LDash, LHead, LTail: string;
 
   function Pt(U, V: Double): TPoint;     { a point of the canvas (points from its corner) in the control }
   begin
@@ -487,6 +501,30 @@ begin
   E.Undo;
   B := E.DrawingShapes(CP);
   Check((Abs(B[0].X0 - 20 * K) < K) and (Length(E.SelectedShapes) = 2), 'undone: back, both still selected');
+  { lined up, spread out }
+  Drag(Pt(5, 5), Pt(290, 190));
+  Check(E.AlignShapes(3), 'both lined up along their tops');
+  B := E.DrawingShapes(CP);
+  Check((Abs(B[0].Y0 - B[1].Y0) < 0.5 * K) and (Abs(B[0].Y0 - 20 * K) < K) and (Length(E.SelectedShapes) = 2),
+    Format('their tops the higher one''s (%.1f, %.1f)', [B[0].Y0 / K, B[1].Y0 / K]));
+  E.Undo;
+  B := E.DrawingShapes(CP);
+  Check(Abs(B[1].Y0 - 30 * K) < K, 'undone');
+  E.ToggleShape(1);
+  E.ProcessKey(VK_D, [ssCtrl]);
+  Drag(Pt(5, 5), Pt(298, 198));
+  B := E.DrawingShapes(CP);
+  Check((Length(E.SelectedShapes) = 3) and E.DistributeShapes(True), 'three spread across');
+  B := E.DrawingShapes(CP);
+  if Length(B) = 3 then
+  begin
+    SortBoxesX(B);
+    Check(Abs((B[1].X0 - B[0].X1) - (B[2].X0 - B[1].X1)) < 0.5 * K,
+      Format('the same gap between each (%.1f, %.1f)', [(B[1].X0 - B[0].X1) / K, (B[2].X0 - B[1].X1) / K]));
+  end;
+  E.Undo;
+  E.Undo;
+  Check(Length(E.DrawingShapes(CP)) = 2, 'undone, and the copy');
   { a text box: its text with it }
   S0 := pd_doc_story_count(E.Doc);
   E.AddShape('textbox', 30 * K, 120 * K, 130 * K, 170 * K);
@@ -550,6 +588,14 @@ begin
     'undone: the ellipse selected again');
   E.AddShape('line', 20 * K, 180 * K, 120 * K, 190 * K);
   Check(not E.AddShapeText, 'a line takes no text');
+  Check(E.SetShapeLineStyle('dash', '', 'triangle') and E.ShapeLineStyle(LDash, LHead, LTail) and (LDash = 'dash') and
+    (LHead = '') and (LTail = 'triangle'), 'the line dashed, an arrowhead at its end');
+  Check(E.KeptXml(Xml) and (Pos('<a:prstDash val="dash"/><a:tailEnd type="triangle"/></a:ln>', Xml) > 0),
+    'in the order Word has them');
+  Check(E.SetShapeLineStyle('solid', 'oval', 'none') and E.ShapeLineStyle(LDash, LHead, LTail) and (LDash = '') and
+    (LHead = 'oval') and (LTail = ''), 'solid again, a dot at its start instead');
+  E.Undo;
+  Check(E.ShapeLineStyle(LDash, LHead, LTail) and (LDash = 'dash') and (LTail = 'triangle'), 'undone: as it was');
   { pasted where no canvas is: a new one at the caret, around them }
   E.ClearShapeSelection;
   E.ProcessKey(VK_END, [ssCtrl]);

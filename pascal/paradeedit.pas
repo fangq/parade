@@ -334,6 +334,8 @@ type
     function OnDrawingBody(X, Y: Integer): Boolean;
     { the selected shapes moved by DX, DY (the drawing's units): one step of undo }
     function MoveShapes(DX, DY: Double): Boolean;
+    { the selected shapes given boxes (the drawing's units), in the order SelectedShapes has them: one step }
+    function PlaceShapes(const Lbl: string; const Sids: TIntegerArray; const Boxes: array of Double): Boolean;
     function ShapeGeom(Sid: Integer; out G: TParadeShapeGeom): Boolean;
     function DrawMap(out M: TParadeDrawMap): Boolean;
     function MapToClient(const M: TParadeDrawMap; DX, DY: Double): TPoint;
@@ -425,6 +427,17 @@ type
     function SetShapeFill(AColor: TColor; None: Boolean): Boolean;
     function SetShapeLine(AColor: TColor; WidthPt: Double; None: Boolean): Boolean;
     function ShapeOrder(Mode: Integer): Boolean;
+    { the selected shapes lined up (Mode: 0 left, 1 centre, 2 right, 3 top, 4 middle, 5 bottom) along the box
+      round them all -- one shape alone, along its canvas; spread out evenly (Horizontal: across, else down),
+      three or more, the outermost where they are. One step of undo each }
+    function AlignShapes(Mode: Integer): Boolean;
+    function DistributeShapes(Horizontal: Boolean): Boolean;
+    { the selected shapes' outline dashed (Dash: solid, dash, sysDash, sysDot, dashDot, lgDash, lgDashDot,
+      lgDashDotDot, sysDashDot, sysDashDotDot) and given arrowheads at its start (Head) and end (Tail): none,
+      triangle, stealth, diamond, oval, arrow; '' leaves one as it is. One step of undo }
+    function SetShapeLineStyle(const Dash, Head, Tail: string): Boolean;
+    { the selected shape's outline: its dash and its arrowheads, as Word has them ('' none given) }
+    function ShapeLineStyle(out Dash, Head, Tail: string): Boolean;
     function GroupShapes: Boolean;
     function UngroupShape: Boolean;
     { the selected shapes (each with its group, when it is in one) on the clipboard, with their text boxes' text;
@@ -6985,6 +6998,137 @@ begin
   Result := ApplyKeptXml(Xml, 'Line', FShapeSid);
 end;
 
+{ an a:ln with a part of it replaced (Name: a:prstDash, a:headEnd, a:tailEnd; Part '' takes it out), its parts in
+  the order DrawingML has them }
+function LnWithPart(const Ln, Name, Part: string): string;
+const
+  Order: array[0..11] of string = ('a:noFill', 'a:solidFill', 'a:gradFill', 'a:pattFill', 'a:prstDash',
+    'a:custDash', 'a:round', 'a:bevel', 'a:miter', 'a:headEnd', 'a:tailEnd', 'a:extLst');
+var
+  Els: TXmlEls;
+  L, Rank, R, I, K: Integer;
+  Open: string;
+  Kids: array[0..11] of string;
+begin
+  L := Length(Ln);
+  if Copy(Ln, L - 1, 2) = '/>' then
+    Exit(LnWithPart(Copy(Ln, 1, L - 2) + '></a:ln>', Name, Part));
+  Els := XmlElements(Ln);
+  K := PosEx('>', Ln, 1);
+  Open := Copy(Ln, 1, K);
+  for I := 0 to 11 do
+    Kids[I] := '';
+  Rank := 0;
+  for I := 0 to 11 do
+    if Order[I] = Name then
+      Rank := I;
+  for I := 1 to High(Els) do
+    if Els[I].Parent = 0 then
+    begin
+      R := -1;
+      for K := 0 to 11 do
+        if Order[K] = Els[I].Name then
+          R := K;
+      if (R >= 0) and not ((R = Rank) or ((Name = 'a:prstDash') and (R = 5))) then   { a custom dash goes too }
+        Kids[R] := Copy(Ln, Els[I].A, Els[I].B - Els[I].A);
+    end;
+  Kids[Rank] := Part;
+  Result := Open;
+  for I := 0 to 11 do
+    Result := Result + Kids[I];
+  Result := Result + '</a:ln>';
+end;
+
+function TParadeEdit.SetShapeLineStyle(const Dash, Head, Tail: string): Boolean;
+var
+  Xml, Ln: string;
+  Els: TXmlEls;
+  Sids: TIntegerArray;
+  I, E, Pr, L: Integer;
+begin
+  OnlyShape;
+  Result := False;
+  Sids := SelectedShapes;
+  if FReadOnly or (Length(Sids) = 0) or not KeptXml(Xml) then
+    Exit;
+  for I := 0 to High(Sids) do
+  begin   { each in the XML as it is now: the XML before it is no longer where it was }
+    Els := XmlElements(Xml);
+    E := SidElement(Els, Sids[I]);
+    Pr := PropsOf(Els, E);
+    if (E < 0) or (Pr < 0) then
+      Continue;
+    L := ChildNamed(Els, Pr, 'a:ln');
+    if L < 0 then
+    begin
+      Xml := PutIntoProps(Xml, Els, Pr, [], ['a:effectLst', 'a:effectDag', 'a:scene3d', 'a:sp3d', 'a:extLst'],
+        '<a:ln></a:ln>');
+      Els := XmlElements(Xml);
+      E := SidElement(Els, Sids[I]);
+      Pr := PropsOf(Els, E);
+      L := ChildNamed(Els, Pr, 'a:ln');
+      if L < 0 then
+        Continue;
+    end;
+    Ln := Copy(Xml, Els[L].A, Els[L].B - Els[L].A);
+    if Dash <> '' then
+      Ln := LnWithPart(Ln, 'a:prstDash', IfThen(Dash = 'solid', '', '<a:prstDash val="' + Dash + '"/>'));
+    if Head <> '' then
+      Ln := LnWithPart(Ln, 'a:headEnd', IfThen(Head = 'none', '', '<a:headEnd type="' + Head + '"/>'));
+    if Tail <> '' then
+      Ln := LnWithPart(Ln, 'a:tailEnd', IfThen(Tail = 'none', '', '<a:tailEnd type="' + Tail + '"/>'));
+    Xml := Copy(Xml, 1, Els[L].A - 1) + Ln + Copy(Xml, Els[L].B, MaxInt);
+  end;
+  Result := ApplyKeptXml(Xml, 'Line style', Sids[0]);
+  if Result then
+  begin
+    SetLength(FShapeMore, Length(Sids) - 1);
+    for I := 1 to High(Sids) do
+      FShapeMore[I - 1] := Sids[I];
+  end;
+end;
+
+function TParadeEdit.ShapeLineStyle(out Dash, Head, Tail: string): Boolean;
+var
+  Xml, Ln: string;
+  Els: TXmlEls;
+  E, Pr, L, P, N: Integer;
+
+  function Val(const Tag, Attr: string): string;
+  begin
+    Result := '';
+    P := Pos('<' + Tag + ' ', Ln);
+    if P > 0 then
+    begin
+      P := AttrSpan(Ln, P, Attr, N);
+      if P > 0 then
+        Result := Copy(Ln, P, N);
+    end;
+  end;
+
+begin
+  Dash := '';
+  Head := '';
+  Tail := '';
+  Result := FShapeOn and (FShapeSid >= 0) and KeptXml(Xml);
+  if not Result then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  Pr := PropsOf(Els, E);
+  L := -1;
+  if Pr >= 0 then
+    L := ChildNamed(Els, Pr, 'a:ln');
+  if L < 0 then
+    Exit;
+  Ln := Copy(Xml, Els[L].A, Els[L].B - Els[L].A);
+  Dash := Val('a:prstDash', 'val');
+  Head := Val('a:headEnd', 'type');
+  Tail := Val('a:tailEnd', 'type');
+  if Head = 'none' then Head := '';
+  if Tail = 'none' then Tail := '';
+end;
+
 { the shape's element among its parent's shapes, moved: 0 one forward, 1 one back, 2 to the front, 3 to the back }
 function TParadeEdit.ShapeOrder(Mode: Integer): Boolean;
 var
@@ -9989,6 +10133,125 @@ begin
   for I := 1 to High(Sids) do
     FShapeMore[I - 1] := Sids[I];
   Invalidate;
+end;
+
+function TParadeEdit.PlaceShapes(const Lbl: string; const Sids: TIntegerArray; const Boxes: array of Double): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if FReadOnly or (Length(Sids) = 0) then
+    Exit;
+  PushShapeStep(Lbl, FShapeAt);
+  Inc(FStepDepth);
+  pd_doc_begin_group(FDoc, PAnsiChar(Lbl));
+  try
+    for I := 0 to High(Sids) do
+      Result := SetShapeBox(Sids[I], Boxes[4 * I], Boxes[4 * I + 1], Boxes[4 * I + 2], Boxes[4 * I + 3]) or Result;
+  finally
+    pd_doc_end_group(FDoc);
+    Dec(FStepDepth);
+  end;
+  FShapeOn := True;
+  FShapeSid := Sids[0];
+  SetLength(FShapeMore, Length(Sids) - 1);
+  for I := 1 to High(Sids) do
+    FShapeMore[I - 1] := Sids[I];
+  Invalidate;
+end;
+
+function TParadeEdit.AlignShapes(Mode: Integer): Boolean;
+var
+  Sids: TIntegerArray;
+  B: array of Double;
+  I: Integer;
+  X0, Y0, X1, Y1, D: Double;
+  Pg: Int32;
+  PX, PY, W, H: Double;
+begin
+  OnlyShape;
+  Result := False;
+  Sids := SelectedShapes;
+  if Length(Sids) = 0 then
+    Exit;
+  SetLength(B, 4 * Length(Sids));
+  X0 := 1e300; Y0 := 1e300; X1 := -1e300; Y1 := -1e300;
+  for I := 0 to High(Sids) do
+  begin
+    if not ShapeBox(Sids[I], B[4 * I], B[4 * I + 1], B[4 * I + 2], B[4 * I + 3]) then
+      Exit;
+    X0 := Min(X0, B[4 * I]); Y0 := Min(Y0, B[4 * I + 1]);
+    X1 := Max(X1, B[4 * I + 2]); Y1 := Max(Y1, B[4 * I + 3]);
+  end;
+  if (Length(Sids) = 1) and DrawingPlace(FShapeAt, Pg, PX, PY, W, H, X1, Y1) then
+  begin   { one: along the canvas }
+    X0 := 0;
+    Y0 := 0;
+  end;
+  for I := 0 to High(Sids) do
+  begin
+    case Mode of
+      0: D := X0 - B[4 * I];
+      1: D := (X0 + X1) / 2 - (B[4 * I] + B[4 * I + 2]) / 2;
+      2: D := X1 - B[4 * I + 2];
+      3: D := Y0 - B[4 * I + 1];
+      4: D := (Y0 + Y1) / 2 - (B[4 * I + 1] + B[4 * I + 3]) / 2;
+    else
+      D := Y1 - B[4 * I + 3];
+    end;
+    if Mode <= 2 then
+    begin
+      B[4 * I] := B[4 * I] + D;
+      B[4 * I + 2] := B[4 * I + 2] + D;
+    end
+    else
+    begin
+      B[4 * I + 1] := B[4 * I + 1] + D;
+      B[4 * I + 3] := B[4 * I + 3] + D;
+    end;
+  end;
+  Result := PlaceShapes('Align', Sids, B);
+end;
+
+function TParadeEdit.DistributeShapes(Horizontal: Boolean): Boolean;
+var
+  Sids, Ord_: TIntegerArray;
+  B: array of Double;
+  I, K, T, A: Integer;
+  Total, Gap, At: Double;
+begin
+  Result := False;
+  Sids := SelectedShapes;
+  if Length(Sids) < 3 then
+    Exit;
+  SetLength(B, 4 * Length(Sids));
+  for I := 0 to High(Sids) do
+    if not ShapeBox(Sids[I], B[4 * I], B[4 * I + 1], B[4 * I + 2], B[4 * I + 3]) then
+      Exit;
+  A := Ord(not Horizontal);    { 0: across (x), 1: down (y) }
+  SetLength(Ord_, Length(Sids));
+  for I := 0 to High(Sids) do
+    Ord_[I] := I;
+  for I := 0 to High(Ord_) do   { by where they start }
+    for K := I + 1 to High(Ord_) do
+      if B[4 * Ord_[K] + A] < B[4 * Ord_[I] + A] then
+      begin
+        T := Ord_[I]; Ord_[I] := Ord_[K]; Ord_[K] := T;
+      end;
+  Total := 0;
+  for I := 0 to High(Ord_) do
+    Total := Total + B[4 * Ord_[I] + A + 2] - B[4 * Ord_[I] + A];
+  Gap := (B[4 * Ord_[High(Ord_)] + A + 2] - B[4 * Ord_[0] + A] - Total) / (Length(Ord_) - 1);
+  At := B[4 * Ord_[0] + A];
+  for I := 0 to High(Ord_) do
+  begin   { each after the one before, the same gap between }
+    K := Ord_[I];
+    Total := B[4 * K + A + 2] - B[4 * K + A];
+    B[4 * K + A] := At;
+    B[4 * K + A + 2] := At + Total;
+    At := At + Total + Gap;
+  end;
+  Result := PlaceShapes('Distribute', Sids, B);
 end;
 
 function TParadeEdit.SelectShapesIn(X0, Y0, X1, Y1: Double; Add: Boolean): Integer;
