@@ -4,6 +4,7 @@
  * figure and a footnote; clipboard ranges and paste; malformed input.
  */
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3321,6 +3322,44 @@ static void test_docx_header_logo(void) {
     pd_doc_free(d);
 }
 
+/* a drawing Word moved down the paragraph it is anchored in: as far down when read, and written back so */
+static void test_docx_float_offset_y(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:r><w:t>Above.</w:t></w:r></w:p><w:p>"
+        DRAWING("anchor", "<wp:positionH relativeFrom=\"column\"><wp:posOffset>0</wp:posOffset></wp:positionH>"
+                "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>457200</wp:posOffset></wp:positionV>"
+                "<wp:wrapSquare wrapText=\"right\"/>")
+        "<w:r><w:t>Beside.</w:t></w:r></w:p></w:body></w:document>",
+        NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id sec, fl;
+        pd_block_info bi;
+        pd_float_props fp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        fl = pd_doc_child(d, sec, 1);
+        CHECK(pd_doc_block_info(d, fl, &bi) == PD_OK && bi.kind == PD_BLOCK_FLOAT);
+        CHECK(pd_doc_float_props(d, fl, &fp) == PD_OK && fp.offset_y == PD_PT(36) && fp.wrap == PD_WRAP_LEFT);
+        CHECK(text_is(d, pd_doc_child(d, sec, 2), "Beside."));
+    }
+
+    pd_doc_free(d);
+}
+
 /* the items of a drawing resource, as text (caller frees) */
 static char* drawing_json(const pd_doc* d, pd_res_id res) {
     const char* mime = NULL;
@@ -4619,6 +4658,7 @@ int main(void) {
     test_docx_line_numbers();
     printf("docx header logo\n");
     test_docx_header_logo();
+    test_docx_float_offset_y();
     printf("docx drawings and text boxes\n");
     test_docx_drawings();
     printf("EMF pictures\n");

@@ -523,6 +523,8 @@ typedef struct {
     char sequence[32];          /**< numbering sequence of its caption ("Figure", "Table") */
     pd_sp offset_x;             /**< with PD_PLACE_OFFSET: its left edge from the column's (negative: in the
                                      margin); the text gives way only where it reaches into the column */
+    pd_sp offset_y;             /**< its top below its anchor's (0: at it), as Word has a drawing moved down the
+                                     paragraph it is anchored in; the text beside it from there */
 } pd_float_props;
 
 typedef struct {

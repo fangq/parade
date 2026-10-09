@@ -232,6 +232,7 @@ int main(void) {
     printf("pd_float_props.gap %zu\n", offsetof(pd_float_props, gap));
     printf("pd_float_props.sequence %zu\n", offsetof(pd_float_props, sequence));
     printf("pd_float_props.offset_x %zu\n", offsetof(pd_float_props, offset_x));
+    printf("pd_float_props.offset_y %zu\n", offsetof(pd_float_props, offset_y));
     printf("pd_section_props %zu\n", sizeof(pd_section_props));
     printf("pd_section_props.page_width %zu\n", offsetof(pd_section_props, page_width));
     printf("pd_section_props.page_height %zu\n", offsetof(pd_section_props, page_height));

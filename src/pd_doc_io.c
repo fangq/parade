@@ -665,6 +665,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "OffsetX", p->offset_x);
             }
 
+            if (p->offset_y) {
+                put_int(w, "OffsetY", p->offset_y);
+            }
+
             pj_obj_end(w);
             break;
         }
@@ -1574,6 +1578,7 @@ static void load_float(loader* L, const pj_node* o, pd_float_props* p) {
     p->placement = (uint32_t)int_or(pj_get(x, "Placement"), p->placement, 1, 63, L);
     REQUIRE(p->placement & 31);
     p->offset_x = (pd_sp)int_or(pj_get(x, "OffsetX"), 0, -PD_PT(10000), PD_PT(10000), L);
+    p->offset_y = (pd_sp)int_or(pj_get(x, "OffsetY"), 0, -PD_PT(10000), PD_PT(10000), L);
     p->wrap = pj_get(x, "Wrap") ? enum_of(pj_get(x, "Wrap"), NAMES(wrap_names)) : 0;
     REQUIRE(p->wrap >= 0);
     p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);

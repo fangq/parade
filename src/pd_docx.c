@@ -684,9 +684,9 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
         }
 
         /* at an offset, which side the text is on says which side the picture is */
-        pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset>"
+        pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>%lld</wp:posOffset>"
                   "</wp:positionV><wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s",
-                  cx, cy, fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : !off ?
+                  EMU(fp->offset_y), cx, cy, fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : !off ?
                   "<wp:wrapSquare wrapText=\"bothSides\"/>" : fp->wrap == PD_WRAP_LEFT ?
                   "<wp:wrapSquare wrapText=\"right\"/>" : "<wp:wrapSquare wrapText=\"left\"/>");
     }
@@ -1150,6 +1150,10 @@ static void dx_vml_fallback(dxo* x, const void* data, size_t len, long long cx, 
                       "right" : "center");
         }
 
+        if (fp->offset_y) {
+            pb_printf(o, "margin-top:%.2fpt;", (double)fp->offset_y / 65536);
+        }
+
         pb_printf(o, "margin-top:0;width:%.2fpt;height:%.2fpt;z-index:%d;mso-position-horizontal-relative:text;"
                   "mso-position-vertical-relative:paragraph\">", cx / 12700.0, cy / 12700.0, x->docpr);
         pb_puts(o, fp->wrap == PD_WRAP_NONE ? "<w10:wrap type=\"topAndBottom\"/>" : "<w10:wrap type=\"square\"/>");
@@ -1541,12 +1545,13 @@ static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp) {
                   "center");
     }
 
-    pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset></wp:positionV>"
+    pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>%lld</wp:posOffset></wp:positionV>"
               "<wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s"
               "<wp:docPr id=\"%d\" name=\"Text Box %d\"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData "
               "uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\"><wps:wsp><wps:cNvSpPr txBox=\"1\"/>"
               "<wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\">"
-              "<a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>", cx, cy,
+              "<a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>",
+              EMU(fp->offset_y), cx, cy,
               fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : !off ? "<wp:wrapSquare wrapText=\"bothSides\"/>" :
               fp->wrap == PD_WRAP_LEFT ? "<wp:wrapSquare wrapText=\"right\"/>" : "<wp:wrapSquare wrapText=\"left\"/>",
               x->docpr, x->docpr, cx, cy);
@@ -5310,6 +5315,8 @@ typedef struct {
     long long cx, cy;
     int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
     int posh_page, posh_has_off;    /* its offset is from the page's edge; it has one */
+    int in_posv, in_voffset, posv_para;     /* its offset down: from its paragraph (or line), not the page */
+    long long posv_off;
     pd_res_id drawing_res;      /* a group or canvas made into a drawing resource */
     int in_vml;                 /* inside w:object or w:pict: a VML picture */
     int math_para;              /* the paragraph opens with display math (m:oMathPara) */
@@ -5318,7 +5325,7 @@ typedef struct {
     long long posh_off, dist;
     struct {
         pd_res_id res;
-        pd_sp w, h, gap, off_x;
+        pd_sp w, h, gap, off_x, off_y;
         int wrap, has_off;
         const char* tbx;        /* a text box: its w:txbxContent, read into the float */
         size_t tbn;
@@ -6075,6 +6082,8 @@ static void dw_floats(dw* w) {
                 fp.placement |= PD_PLACE_OFFSET;
                 fp.offset_x = w->pend_fl[k].off_x;
             }
+
+            fp.offset_y = w->pend_fl[k].off_y;     /* down the paragraph it is anchored in */
 
             pd_doc_set_float_props(b->d, fl, &fp);
         }
@@ -8167,6 +8176,8 @@ static void dw_image(dw* w) {
         w->pend_fl[k].rev = deleted_rev(X, w->rev);
         w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
         w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
+        w->pend_fl[k].off_y = !w->started && w->posv_para && w->posv_off > 0 ?   /* from the top of the paragraph after it */
+            (pd_sp)(w->posv_off * 65536 / 12700) : 0;
 
         if (!w->started) {  /* anchored before any text: the float goes first */
             dw_floats(w);
@@ -8793,6 +8804,16 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
+        if (m.type == MT_TEXT && w->in_voffset) {
+            char tv[32];
+            size_t tn = m.tlen < sizeof(tv) - 1 ? m.tlen : sizeof(tv) - 1;
+
+            memcpy(tv, m.text, tn);
+            tv[tn] = '\0';
+            w->posv_off = atoll(tv);
+            continue;
+        }
+
         if (m.type == MT_TEXT && (w->in_align || w->in_offset)) {
             char tv[32];
             size_t tn = m.tlen < sizeof(tv) - 1 ? m.tlen : sizeof(tv) - 1;
@@ -9229,6 +9250,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->posh_align = -1;
                 w->posh_off = 0;
                 w->posh_page = w->posh_has_off = 0;
+                w->in_posv = w->in_voffset = w->posv_para = 0;
+                w->posv_off = 0;
                 w->drawing_res = 0;
                 w->tbx = NULL;
                 w->tbn = 0;
@@ -9268,6 +9291,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->in_posh = m.type == MT_OPEN;
                 w->posh_page = mu_attr(&m, "relativeFrom", v, sizeof(v)) && (strcmp(v, "page") == 0 ||
                                strcmp(v, "leftMargin") == 0);
+            } else if (w->in_drawing && strcmp(t, "positionV") == 0) {
+                w->in_posv = m.type == MT_OPEN;
+                w->posv_para = mu_attr(&m, "relativeFrom", v, sizeof(v)) && (strcmp(v, "paragraph") == 0 ||
+                               strcmp(v, "line") == 0);
+            } else if (w->in_posv && strcmp(t, "posOffset") == 0) {
+                w->in_voffset = m.type == MT_OPEN;
             } else if (w->in_posh && strcmp(t, "align") == 0) {
                 w->in_align = m.type == MT_OPEN;
             } else if (w->in_posh && strcmp(t, "posOffset") == 0) {
@@ -9554,10 +9583,14 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             w->rev = 0;
         } else if (strcmp(t, "positionH") == 0) {
             w->in_posh = 0;
+        } else if (strcmp(t, "positionV") == 0) {
+            w->in_posv = 0;
+            w->in_voffset = 0;
         } else if (strcmp(t, "align") == 0) {
             w->in_align = 0;
         } else if (strcmp(t, "posOffset") == 0) {
             w->in_offset = 0;
+            w->in_voffset = 0;
         } else if ((strcmp(t, "object") == 0 || strcmp(t, "pict") == 0) && w->in_vml) {
             if (w->blip[0] && w->cx > 0 && w->cy > 0) {
                 w->anchor = 0;      /* in the line, as Word shows an object */
@@ -9584,6 +9617,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->pend_fl[k].rev = deleted_rev(X, w->rev);
                 w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
                 w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
+                w->pend_fl[k].off_y = !w->started && w->posv_para && w->posv_off > 0 ?   /* from the top of the paragraph after it */
+                    (pd_sp)(w->posv_off * 65536 / 12700) : 0;
                 w->pend_fl[k].tbx = w->tbx;
                 w->pend_fl[k].tbn = w->tbn;
 

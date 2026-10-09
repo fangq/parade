@@ -504,6 +504,7 @@ type
     gap: pd_sp;
     sequence: array[0..31] of AnsiChar;
     offset_x: pd_sp;
+    offset_y: pd_sp;
   end;
   Ppd_float_props = ^pd_float_props;
 

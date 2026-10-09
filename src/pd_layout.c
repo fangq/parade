@@ -67,15 +67,16 @@ typedef struct pcache {         /* one paragraph laid out at one width */
     int used;
     int note;                   /* label is a footnote mark (set before the text) */
     int32_t loose;              /* \looseness of this variant */
-    pd_sp ws_w;                 /* wrap shape: the first ws_k lines are ws_w narrower */
-    int32_t ws_side, ws_k;
+    pd_sp ws_w;                 /* wrap shape: lines ws_k0 to ws_k (not that one) are ws_w narrower */
+    int32_t ws_side, ws_k, ws_k0;
     struct pcache* next;        /* other layouts (variants, shapes) of the same paragraph */
 } pcache;
 
 typedef struct {                /* lines narrowed beside a wrapping float */
     pd_sp w;
     int32_t side;               /* PD_WRAP_LEFT: the float is on the left */
-    int32_t k;
+    int32_t k;                  /* the lines before this one ... */
+    int32_t k0;                 /* ... from this one (the float lower down the paragraph) */
 } wrapshape;
 
 typedef struct {                /* a filled rectangle: rules, borders, cell backgrounds */
@@ -220,6 +221,7 @@ typedef struct {
     ptable* tb;
     int32_t ntb, captb;
     pd_sp wrap_rem, wrap_w;     /* building: height still beside a wrapping float */
+    pd_sp wrap_skip;            /* and before that, the height of text above it (a float lower down) */
     int32_t wrap_side;
     int32_t floor_page;         /* continuous section: page shared with the previous section */
     pd_sp floor_y;              /* and the height its content takes there */
@@ -367,16 +369,17 @@ static pd_status build_into(pd_layout* L, pcache* c, pd_block_id id, pd_sp width
     pd_doc_effective_pp(d, b, &c->pp, &c->label_x);
     st = pd_doc_para_build_ex(d, id, width, c->para, &prm, fn, user);
 
-    if (st == PD_OK && c->ws_k > 0) {   /* the first lines run beside a float */
+    if (st == PD_OK && c->ws_k > 0) {   /* lines beside a float: the first ones, or from ws_k0 */
         pd_sp ind[65], wid[65], w = width - c->pp.indent_left - c->pp.indent_right;
         int32_t k = c->ws_k < 64 ? c->ws_k : 64;
 
         for (i = 0; i <= k; i++) {
             pd_sp bi0 = i == 0 ? c->pp.indent_left + c->pp.indent_first : c->pp.indent_left;
             pd_sp bw = i == 0 ? w - c->pp.indent_first : w;
+            int beside = i < k && i >= c->ws_k0;
 
-            ind[i] = bi0 + (i < k && c->ws_side == PD_WRAP_LEFT ? c->ws_w : 0);
-            wid[i] = i < k ? bw - c->ws_w : bw;
+            ind[i] = bi0 + (beside && c->ws_side == PD_WRAP_LEFT ? c->ws_w : 0);
+            wid[i] = beside ? bw - c->ws_w : bw;
             wid[i] = wid[i] < PD_PT(12) ? PD_PT(12) : wid[i];
         }
 
@@ -437,7 +440,7 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
     blk* b = pd_doc_blk(d, id);
     pcache* c;
     uint64_t sig;
-    wrapshape none = { 0, 0, 0 };
+    wrapshape none = { 0, 0, 0, 0 };
 
     if (!ws || ws->k <= 0) {
         ws = &none;
@@ -463,7 +466,7 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
     }
 
     for (c = L->cache[id]; c && !(c->loose == loose && c->ws_k == ws->k && c->ws_w == ws->w &&
-                                  c->ws_side == ws->side); c = c->next) {
+                                  c->ws_side == ws->side && c->ws_k0 == ws->k0); c = c->next) {
     }
 
     sig = field_signature(L, b);
@@ -490,6 +493,7 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
         c->ws_w = ws->w;
         c->ws_side = ws->side;
         c->ws_k = ws->k;
+        c->ws_k0 = ws->k0;
 
         for (tail = &L->cache[id]; *tail; tail = &(*tail)->next) {
         }
@@ -1171,10 +1175,11 @@ static pd_status attach_notes(filler* F, const blk* b, uint32_t from, uint32_t t
 /* text beside a wrapping float ends: what is left of the float's height becomes space */
 static void clear_wrap(filler* F) {
     if (F->wrap_rem > 0) {
-        push(F, VI_GLUE, F->wrap_rem, 0, NULL, 0, 0);
+        push(F, VI_GLUE, F->wrap_rem + F->wrap_skip, 0, NULL, 0, 0);
     }
 
     F->wrap_rem = 0;
+    F->wrap_skip = 0;
 }
 
 /* narrowest and widest useful width of a cell's content */
@@ -1684,7 +1689,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
         blk* b = d->tab[c->kids[i]];
 
         if (b->kind == PD_BLOCK_PARAGRAPH) {
-            pd_sp gl, rem;
+            pd_sp gl, rem, skip;
             int32_t loose = F->loose ? F->loose[b->id] : 0, kwrap = 0;
             pcache* pc = layout_para_ex(F->L, b->id, F->colw, F->wrap_rem > 0 ? 0 : loose, NULL, &st);
             const pd_para_props* pp;
@@ -1695,7 +1700,9 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
 
             pp = &pc->pp;
             gl = *first ? 0 : para_gap(d, F->prev_para, *prev_after, b->id, pp);
-            rem = F->wrap_rem - gl;
+            skip = F->wrap_skip - gl;   /* the gap before it: out of the text above the float, then the float's */
+            rem = skip >= 0 ? F->wrap_rem : F->wrap_rem + skip;
+            skip = skip < 0 ? 0 : skip;
 
             if (F->wrap_rem > 0 && rem > 0) {   /* beside a float: narrower lines while it lasts */
                 wrapshape ws;
@@ -1705,10 +1712,13 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 ws.side = F->wrap_side;
 
                 for (pass = 0; pass < 3; pass++) {
-                    for (ws.k = 0; ws.k < pc->nlines && pc->top[ws.k] < rem; ws.k++) {
+                    for (ws.k0 = 0; ws.k0 < pc->nlines && pc->top[ws.k0 + 1] <= skip; ws.k0++) {
                     }
 
-                    if (ws.k == pc->ws_k || ws.k == 0) {
+                    for (ws.k = ws.k0; ws.k < pc->nlines && pc->top[ws.k] < skip + rem; ws.k++) {
+                    }
+
+                    if ((ws.k == pc->ws_k && ws.k0 == pc->ws_k0) || ws.k <= ws.k0) {
                         break;
                     }
 
@@ -1721,6 +1731,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 pp = &pc->pp;
             } else if (F->wrap_rem > 0) {
                 F->wrap_rem = 0;
+                F->wrap_skip = 0;
             }
 
             if (pp->page_break_before && !*first) {
@@ -1754,9 +1765,10 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 }
             }
 
-            if (F->wrap_rem > 0) {
-                F->wrap_rem = rem - pc->height;
+            if (F->wrap_rem > 0) {  /* what is left of the float below this paragraph, and of the text above it */
+                F->wrap_rem = skip >= pc->height ? rem : rem - (pc->height - skip);
                 F->wrap_rem = F->wrap_rem < 0 ? 0 : F->wrap_rem;
+                F->wrap_skip = skip > pc->height ? skip - pc->height : 0;
             }
 
             *prev_after = pp->space_after;
@@ -1797,13 +1809,18 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
 
             f->item = F->n;
 
+            if (f->fp.offset_y < 0) {
+                f->fp.offset_y = 0;     /* above where it is anchored: not where the text has already gone */
+            }
+
             if (f->fp.wrap != PD_WRAP_NONE) {
                 push(F, VI_FLOAT, 0, 0, NULL, 0, b->id);
                 F->wrap_rem = f->h + f->fp.gap;
+                F->wrap_skip = f->fp.offset_y;  /* lower down: the text beside it from there */
                 F->wrap_w = float_taken(&f->fp, f->w, F->colw, &ox);
                 F->wrap_side = f->fp.wrap;
             } else {
-                push(F, VI_FLOAT, f->h + 2 * f->fp.gap, 0, NULL, 0, b->id);
+                push(F, VI_FLOAT, f->fp.offset_y + f->h + 2 * f->fp.gap, 0, NULL, 0, b->id);
             }
 
             F->it[F->n - 1].line = F->nfl - 1;  /* float index */
@@ -1846,6 +1863,7 @@ static pd_status rebuild_flow(filler* F) {
 
     F->n = F->nfl = F->nnotes = F->ntb = 0;
     F->wrap_rem = 0;
+    F->wrap_skip = 0;
     F->prev_para = 0;
     st = build_flow(F, F->sec->id, &prev_after, &prev_keep, &first);
 
@@ -2261,9 +2279,10 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
 
                 float_taken(&f->fp, f->w, F->colw, &ox);
                 place_stack(F->L, f->block, f->w, F->page, x + ox,
-                            y0 + r[i].y, 3);
+                            y0 + r[i].y + f->fp.offset_y, 3);
             } else {
-                place_stack(F->L, f->block, f->w, F->page, x + (F->colw - f->w) / 2, y0 + r[i].y + f->fp.gap, 3);
+                place_stack(F->L, f->block, f->w, F->page, x + (F->colw - f->w) / 2,
+                            y0 + r[i].y + f->fp.offset_y + f->fp.gap, 3);
             }
 
             f->state = FL_PLACED;

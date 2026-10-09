@@ -324,6 +324,67 @@ static void test_floats(void) {
     pd_doc_free(d);
 }
 
+/* a wrapped float moved down the paragraph it is anchored in (Word's vertical offset): drawn that far down, the
+   text above it the column's whole width, the text beside it narrower */
+static void test_float_offset_y(void) {
+    pd_block_id sec, p[8], fl;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_section_props sp;
+    pd_float_props fp;
+    pd_sp y0 = 0, y1 = 0, x, base, a, de, img_top, line_x[64], line_y[64];
+    int32_t pg, i, nl = 0, above_full = 1, beside = 0;
+    size_t off, len;
+
+    p[0] = pd_doc_child(d, sec, 0);
+    pd_doc_insert_text(d, at(p[0], 0), frog, strlen(frog), PD_FORMAT_INHERIT, NULL);
+
+    for (i = 1; i < 8; i++) {
+        p[i] = add_para(d, sec, frog);
+    }
+
+    fl = add_float(d, sec, 2, PD_PT(150), PD_PT(60), PD_PLACE_HERE | PD_PLACE_FORCE);
+    pd_doc_float_props(d, fl, &fp);
+    fp.wrap = PD_WRAP_LEFT;
+    fp.width = PD_PT(150);
+    pd_doc_set_float_props(d, fl, &fp);
+    pd_doc_section_props(d, sec, &sp);
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    CHECK(float_page(L, fl, d, &y0) == 0);
+    pd_layout_caret(L, at(p[2], 0), &pg, &x, &base, &a, &de);
+    CHECK(x > sp.margin_left + PD_PT(150));     /* beside it from the paragraph's first line */
+
+    fp.offset_y = PD_PT(24);
+    pd_doc_set_float_props(d, fl, &fp);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    CHECK(float_page(L, fl, d, &y1) == 0 && y1 - y0 > PD_PT(23) && y1 - y0 < PD_PT(25));
+    img_top = y1;
+    len = strlen(frog);
+
+    for (off = 0; off < len && nl < 64; off++) {    /* where each line of the paragraph starts */
+        if (pd_layout_caret(L, at(p[2], (uint32_t)off), &pg, &x, &base, &a, &de) == PD_OK &&
+                (nl == 0 || base > line_y[nl - 1])) {
+            line_x[nl] = x;
+            line_y[nl++] = base;
+        }
+    }
+
+    for (i = 0; i < nl; i++) {
+        if (line_y[i] + PD_PT(3) < img_top) {
+            above_full &= line_x[i] < sp.margin_left + PD_PT(20);
+        } else if (line_y[i] - PD_PT(9) > img_top && line_y[i] - PD_PT(9) < img_top + PD_PT(60)) {
+            beside += line_x[i] > sp.margin_left + PD_PT(150);
+        }
+    }
+
+    CHECK(nl > 2 && line_y[0] < img_top && above_full);
+    CHECK(beside > 0);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static void test_headers_fields_columns(void) {
     pd_block_id sec, story, fp_, p, fl, cap, ref;
     pd_doc* d = new_doc(&sec);
@@ -2253,6 +2314,7 @@ int main(void) {
     test_flow_rules();
     printf("floats\n");
     test_floats();
+    test_float_offset_y();
     printf("headers, fields, columns\n");
     test_headers_fields_columns();
     printf("caret and hit testing\n");
