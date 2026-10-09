@@ -369,6 +369,256 @@ begin
   Check(Pos('Typed', Xml) > 0, 'saved and read back: the text box''s text');
 end;
 
+function StoryText(E: TParadeEdit; St: pd_block_id): string;
+begin
+  Result := E.ParaText(pd_doc_child(E.Doc, St, 0));
+end;
+
+{ shapes undone with their selection, copied, cut, pasted and duplicated (text boxes with their text), and a text
+  box's story going with it when it is deleted }
+procedure TestShapeEditing(E: TParadeEdit);
+const
+  K = PD_SP_PER_PT;
+var
+  CP, D: pd_pos;
+  Sid, I, N0, S0: Integer;
+  B: TParadeShapeBoxes;
+  St, St2: pd_block_id;
+  Xml: string;
+  Pg: Int32;
+  PX0, PY0, PX1, PY1: Double;
+
+  function Pt(U, V: Double): TPoint;     { a point of the canvas (points from its corner) in the control }
+  begin
+    Result := E.PageToClient(Pg, PX0 / K + U, PY0 / K + V);
+  end;
+
+  procedure Drag(A, B: TPoint);
+  begin
+    TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+    TParadeWheel(E).MouseMove([ssLeft], (A.X + B.X) div 2, (A.Y + B.Y) div 2);
+    TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y);
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertText('Shapes');
+  E.ProcessKey(VK_RETURN, []);
+  CP := E.CaretPos;
+  Check(E.InsertCanvas(300, 200), 'a canvas for the shapes');
+  CP := PdPos(CP.block, 0);
+  E.AddShape('rect', 20 * K, 20 * K, 100 * K, 80 * K);
+  E.AddShape('ellipse', 150 * K, 30 * K, 250 * K, 120 * K);
+  Check(E.SelectedShape(D, Sid) and (Sid = 1) and (Length(E.DrawingShapes(CP)) = 2), 'two shapes, the second selected');
+  E.SetShapeFill($000000FF, False);
+  E.ProcessKey(VK_Z, [ssCtrl]);
+  Check(E.SelectedShape(D, Sid) and (Sid = 1), 'its fill undone: still selected');
+  E.ProcessKey(VK_Y, [ssCtrl]);
+  Check(E.SelectedShape(D, Sid) and (Sid = 1) and E.KeptXml(Xml) and (Pos('FF0000', Xml) > 0),
+    'redone: selected');
+  E.ProcessKey(VK_TAB, []);
+  Check(E.SelectedShape(D, Sid) and (Sid = 0), 'Tab: the first');
+  E.ProcessKey(VK_DELETE, []);
+  Check((Length(E.DrawingShapes(CP)) = 1) and E.SelectedShape(D, Sid) and (Sid = -1), 'deleted: the canvas selected');
+  E.Undo;
+  Check((Length(E.DrawingShapes(CP)) = 2) and E.SelectedShape(D, Sid) and (Sid = 0),
+    'undone: the shape back, and selected');
+  E.Redo;
+  Check((Length(E.DrawingShapes(CP)) = 1) and E.SelectedShape(D, Sid) and (Sid = -1), 'redone: the canvas selected');
+  E.Undo;
+  { copied and pasted: beside the shape it is a copy of }
+  E.ProcessKey(VK_C, [ssCtrl]);
+  Check(E.CanPasteShapes, 'copied: on the clipboard');
+  E.ProcessKey(VK_V, [ssCtrl]);
+  B := E.DrawingShapes(CP);
+  Check((Length(B) = 3) and E.SelectedShape(D, Sid) and (Sid = 2), 'pasted: a third shape, selected');
+  if Length(B) = 3 then
+    Check((Abs(B[2].X0 - B[0].X0 - 9 * K) < K) and (Abs(B[2].Y0 - B[0].Y0 - 9 * K) < K),
+      Format('beside the first (%.1f, %.1f)', [(B[2].X0 - B[0].X0) / K, (B[2].Y0 - B[0].Y0) / K]));
+  E.ProcessKey(VK_V, [ssCtrl]);
+  B := E.DrawingShapes(CP);
+  Check((Length(B) = 4) and (Abs(B[3].X0 - B[0].X0 - 18 * K) < K), 'pasted again: further along');
+  E.ProcessKey(VK_Z, [ssCtrl]);
+  E.ProcessKey(VK_Z, [ssCtrl]);
+  Check((Length(E.DrawingShapes(CP)) = 2) and E.SelectedShape(D, Sid) and (Sid = 0), 'both undone');
+  E.ProcessKey(VK_D, [ssCtrl]);
+  Check((Length(E.DrawingShapes(CP)) = 3) and E.SelectedShape(D, Sid) and (Sid = 2), 'Ctrl+D: duplicated');
+  E.Undo;
+  E.ProcessKey(VK_TAB, []);
+  Check(E.SelectedShape(D, Sid) and (Sid = 1) and E.ToggleShape(0) and (Length(E.SelectedShapes) = 2),
+    'both shapes selected');
+  E.ProcessKey(VK_X, [ssCtrl]);
+  Check((Length(E.DrawingShapes(CP)) = 0) and E.SelectedShape(D, Sid) and (Sid = -1), 'cut: the canvas empty');
+  E.ProcessKey(VK_V, [ssCtrl]);
+  B := E.DrawingShapes(CP);
+  Check((Length(B) = 2) and (Length(E.SelectedShapes) = 2) and (Abs(B[0].X0 - 20 * K) < K),
+    'pasted back where they were, both selected');
+  { a rubber band round shapes: those wholly in it selected; dragged, all of them moved }
+  Check(E.ShapePageBox(CP, -1, Pg, PX0, PY0, PX1, PY1), 'where the canvas is');
+  Drag(Pt(10, 10), Pt(110, 90));
+  Check((Length(E.SelectedShapes) = 1) and (E.SelectedShapes[0] = 0), 'a rubber band round the rectangle: it');
+  Drag(Pt(5, 5), Pt(290, 190));
+  Check(Length(E.SelectedShapes) = 2, 'round both: both');
+  Drag(Pt(60, 50), Pt(90, 50));
+  B := E.DrawingShapes(CP);
+  Check((Length(B) = 2) and (Abs(B[0].X0 - 50 * K) < K) and (Abs(B[1].X0 - 180 * K) < K) and
+    (Length(E.SelectedShapes) = 2), Format('dragged: both moved (%.1f, %.1f)', [B[0].X0 / K, B[1].X0 / K]));
+  E.ProcessKey(VK_RIGHT, []);
+  B := E.DrawingShapes(CP);
+  Check((Abs(B[0].X0 - 51 * K) < 0.5 * K) and (Abs(B[1].X0 - 181 * K) < 0.5 * K), 'an arrow key: both a point on');
+  E.Undo;
+  E.Undo;
+  B := E.DrawingShapes(CP);
+  Check((Abs(B[0].X0 - 20 * K) < K) and (Length(E.SelectedShapes) = 2), 'undone: back, both still selected');
+  { a text box: its text with it }
+  S0 := pd_doc_story_count(E.Doc);
+  E.AddShape('textbox', 30 * K, 120 * K, 130 * K, 170 * K);
+  B := E.DrawingShapes(CP);
+  St := 0;
+  for I := 0 to High(B) do
+    if B[I].Story <> 0 then
+      St := B[I].Story;
+  Check((St <> 0) and (pd_doc_story_count(E.Doc) = S0 + 1), 'a text box, its story');
+  if St = 0 then
+    Exit;
+  pd_doc_insert_text(E.Doc, PdPos(pd_doc_child(E.Doc, St, 0), 0), 'Boxed', 5, PD_FORMAT_INHERIT, nil);
+  E.ProcessKey(VK_C, [ssCtrl]);
+  E.ProcessKey(VK_V, [ssCtrl]);
+  B := E.DrawingShapes(CP);
+  St2 := 0;
+  if E.SelectedShape(D, Sid) then
+    for I := 0 to High(B) do
+      if B[I].Sid = Sid then
+        St2 := B[I].Story;
+  Check((St2 <> 0) and (St2 <> St) and (StoryText(E, St2) = 'Boxed') and (ChildCountOf(E.Doc, St2) = 1),
+    'pasted: a text box of its own, with the text (' + StoryText(E, St2) + ')');
+  N0 := pd_doc_story_count(E.Doc);
+  E.ProcessKey(VK_DELETE, []);
+  Check(pd_doc_story_count(E.Doc) = N0 - 1, 'deleted: its story gone too');
+  E.Undo;
+  Check((pd_doc_story_count(E.Doc) = N0) and (StoryText(E, St2) = 'Boxed'), 'undone: back, with its text');
+  { the whole drawing deleted as text: its text boxes' stories too }
+  E.ProcessKey(VK_ESCAPE, []);
+  Check(E.SelectedShape(D, Sid) and (Sid = -1), 'Escape: the canvas');
+  E.ProcessKey(VK_DELETE, []);
+  Check((Length(E.DrawingShapes(CP)) = 0) and (pd_doc_story_count(E.Doc) = S0), 'the canvas deleted: no stories left');
+  E.Undo;
+  Check((Length(E.DrawingShapes(CP)) = 4) and (pd_doc_story_count(E.Doc) = N0), 'undone: all back');
+  { pasted where no canvas is: a new one at the caret, around them }
+  E.ClearShapeSelection;
+  E.ProcessKey(VK_END, [ssCtrl]);
+  Check(E.PasteShapes and E.SelectedShape(D, Sid) and (D.offset > CP.offset) and (Length(E.DrawingShapes(D)) = 1),
+    'pasted in the text: a canvas of its own');
+  B := E.DrawingShapes(D);
+  if Length(B) = 1 then
+    Check((Abs(B[0].X0 - 9 * K) < K) and (B[0].Story <> 0) and (StoryText(E, B[0].Story) = 'Boxed'),
+      'its text box at the canvas''s corner, with the text');
+  E.Undo;
+  Check(not E.SelectedShape(D, Sid) and (pd_doc_story_count(E.Doc) = N0), 'undone: gone');
+end;
+
+{ a drawing moved: in the text, dragged by its edge to where the text is dropped at; floating, down its paragraph
+  and on to another, and so saved }
+procedure TestDrawingMove(E: TParadeEdit);
+const
+  K = PD_SP_PER_PT;
+  Long = 'In olden times when wishing still helped one, there lived a king whose daughters were all beautiful, ' +
+    'but the youngest was so beautiful that the sun itself, which has seen so much, was astonished whenever ' +
+    'it shone in her face. Close by the king''s castle lay a great dark forest.';
+var
+  P1, P2, D: pd_pos;
+  Sid, I: Integer;
+  Pg, CPage: Int32;
+  X0, Y0, X1, Y1, NX0, NY0, NX1, NY1: Double;
+  CX, Base, Asc, Desc: pd_sp;
+  A, B: TPoint;
+  Sec, Fl, Para: pd_block_id;
+  Fp, Fp2: pd_float_props;
+  Info: pd_block_info;
+  O: pd_inline;
+  R: pd_res_id;
+  Png: RawByteString;
+  Dir: string;
+begin
+  Dir := ExtractFilePath(ParamStr(0));
+  E.NewDocument;
+  E.InsertText('One two three');
+  P1 := PdPos(E.CaretPos.block, 0);
+  E.ProcessKey(VK_RETURN, []);
+  Check(E.InsertCanvas(200, 100), 'a canvas in the text');
+  P2 := PdPos(E.CaretPos.block, 0);
+  E.AddShape('rect', 20 * K, 20 * K, 80 * K, 60 * K);
+  E.ProcessKey(VK_ESCAPE, []);
+  Check(E.SelectedShape(D, Sid) and (Sid = -1), 'the canvas selected');
+  Check(E.ShapePageBox(D, -1, Pg, X0, Y0, X1, Y1), 'where it is');
+  A := E.PageToClient(Pg, X0 / K + 1, (Y0 + (Y1 - Y0) / 4) / K);   { not its handle at the middle }
+  pd_layout_caret(E.Layout, PdPos(P1.block, 4), CPage, CX, Base, Asc, Desc);
+  B := E.PageToClient(CPage, CX / K, (Base - Asc / 2) / K);
+  TParadeWheel(E).MouseMove([], A.X, A.Y);
+  Check(E.Cursor = crSizeAll, 'over its edge: the move cursor');
+  TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+  TParadeWheel(E).MouseMove([ssLeft], (A.X + B.X) div 2, (A.Y + B.Y) div 2);
+  TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y);
+  Check((Pos(#$EF#$BF#$BC, E.ParaText(P1.block)) = 5) and (Pos(#$EF#$BF#$BC, E.ParaText(P2.block)) = 0) and
+    E.SelectedShape(D, Sid) and (D.block = P1.block) and (D.offset = 4),
+    'dragged by its edge into the line above: there (' + E.ParaText(P1.block) + ')');
+  Check(Length(E.DrawingShapes(D)) = 1, 'with its shape');
+  E.Undo;
+  Check((Pos(#$EF#$BF#$BC, E.ParaText(P2.block)) = 1) and E.SelectedShape(D, Sid) and (D.block = P2.block),
+    'undone: back, selected');
+  { a floating picture, beside the text }
+  E.NewDocument;
+  for I := 0 to 5 do
+  begin
+    E.InsertText(Long);
+    if I < 5 then
+      E.ProcessKey(VK_RETURN, []);
+  end;
+  Png := FileText(Dir + '../../tests/data/rgba.png');
+  Sec := pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0);
+  Check((Png <> '') and (pd_doc_add_resource(E.Doc, 'image/png', PAnsiChar(Png), Length(Png), R) = PD_OK) and
+    (pd_doc_insert_block(E.Doc, Sec, 1, PD_BLOCK_FLOAT, Fl) = PD_OK), 'a float');
+  pd_doc_float_props(E.Doc, Fl, Fp);
+  Fp.placement := PD_PLACE_HERE or PD_PLACE_FORCE;
+  Fp.wrap := PD_WRAP_LEFT;
+  Fp.width := 100 * K;
+  pd_doc_set_float_props(E.Doc, Fl, Fp);
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_IMAGE;
+  O.resource := R;
+  O.width := 100 * K;
+  O.height := 60 * K;
+  Para := pd_doc_child(E.Doc, Fl, 0);
+  pd_doc_insert_inline(E.Doc, PdPos(Para, 0), O, nil);
+  E.ExternalChange;
+  Check(E.ShapePageBox(PdPos(Para, 0), -1, Pg, X0, Y0, X1, Y1), 'where the picture is');
+  A := E.PageToClient(Pg, (X0 + X1) / 2 / K, (Y0 + Y1) / 2 / K);
+  TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+  TParadeWheel(E).MouseMove([ssLeft], A.X, A.Y + Round(30 * E.Zoom * 96 / 72));
+  TParadeWheel(E).MouseUp(mbLeft, [], A.X, A.Y + Round(30 * E.Zoom * 96 / 72));
+  Check(E.SelectedShape(D, Sid) and (E.SelectedFloat = Fl) and E.ShapePageBox(D, -1, Pg, NX0, NY0, NX1, NY1) and
+    (Abs(NY0 - Y0 - 30 * K) < 2 * K) and (pd_doc_float_props(E.Doc, Fl, Fp) = PD_OK) and
+    (Abs(Fp.offset_y - 30 * K) < 2 * K), Format('pressed and dragged down: lower in its paragraph (%.1f, offset %.1f)',
+    [(NY0 - Y0) / K, Fp.offset_y / K]));
+  Check(E.MoveFloatBy(Round(40 * K), Round(150 * K)) and E.ShapePageBox(D, -1, Pg, X1, Y1, X0, Y0) and
+    (Abs(Y1 - NY0 - 150 * K) < 2 * K) and (Abs(X1 - NX0 - 40 * K) < 2 * K) and
+    (pd_doc_block_info(E.Doc, Fl, Info) = PD_OK) and (Info.index > 1),
+    Format('moved on: anchored further down (by %.1f, %.1f; at %d)', [(X1 - NX0) / K, (Y1 - NY0) / K, Info.index]));
+  pd_doc_float_props(E.Doc, Fl, Fp);
+  E.SaveToFile(Dir + 'edit_float_move.docx');
+  E.LoadFromFile(Dir + 'edit_float_move.docx');
+  Sec := pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0);
+  Fl := 0;
+  for I := 0 to ChildCountOf(E.Doc, Sec) - 1 do
+    if (pd_doc_block_info(E.Doc, pd_doc_child(E.Doc, Sec, I), Info) = PD_OK) and (Info.kind = PD_BLOCK_FLOAT) then
+      Fl := Info.id;
+  Check((Fl <> 0) and (pd_doc_float_props(E.Doc, Fl, Fp2) = PD_OK) and (Abs(Fp2.offset_y - Fp.offset_y) < K) and
+    (Abs(Fp2.offset_x - Fp.offset_x) < K) and (Fp2.offset_y > 0),
+    Format('saved and read back: as far down and across (%.1f, %.1f)', [Fp2.offset_y / K, Fp2.offset_x / K]));
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -1652,6 +1902,8 @@ begin
     E.MarkupMode := PD_MARKUP_BALLOONS;
   end;
   TestShapeHandles(E);
+  TestShapeEditing(E);
+  TestDrawingMove(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;
