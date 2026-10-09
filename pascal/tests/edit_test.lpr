@@ -1045,6 +1045,93 @@ begin
   Check(E.CaretPos.offset = 1, 'Right in a left-to-right paragraph: forward');
 end;
 
+function StreamWriter(user: Pointer; data: Pointer; len: csize_t): cint; cdecl;
+begin
+  TStream(user).WriteBuffer(data^, len);
+  Result := 0;
+end;
+
+{ the theme, a colour linked to it, a template's styles, a table style from the gallery and its options }
+procedure TestThemesAndStyles(E: TParadeEdit);
+var
+  Th: pd_theme;
+  Cp: pd_char_props;
+  Pp: pd_para_props;
+  Cell: pd_cell_props;
+  B: pd_block_id;
+  L: TStringList;
+  Path: string;
+  Ms: TMemoryStream;
+  T: Ppd_doc;
+  C, R, Tb: pd_block_id;
+begin
+  E.NewDocument;
+  E.InsertText('Hello');
+  E.SelectAll;
+  E.SetTextThemeColor(PD_THEME_ACCENT2, 100000, 0);
+  Th := E.CurrentTheme;
+  B := pd_doc_child(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 0);
+  Cp := E.PropsAt(PdPos(B, 1));
+  Check(Cp.color = Th.color[PD_THEME_ACCENT2], 'text in the theme''s second accent');
+  pd_theme_preset(1, @Th);
+  E.SetTheme(Th);
+  Cp := E.PropsAt(PdPos(B, 1));
+  Check(Cp.color = $FF000000 or $C0504D, Format('the theme changed: the text follows (%x)', [Cp.color]));
+  E.Undo;
+  Check(E.CurrentTheme.color[PD_THEME_ACCENT2] <> Th.color[PD_THEME_ACCENT2], 'undone: the theme as it was');
+
+  { a style of the document's own, then given by a template }
+  FillChar(Pp, SizeOf(Pp), 0);
+  FillChar(Cp, SizeOf(Cp), 0);
+  Cp.mask := PD_CP_ITALIC;
+  Cp.italic := 1;
+  Check(E.DefineParagraphStyle('Remark', Pp, Cp), 'a style defined');
+  E.SetParagraphStyle('Remark');
+  Check(E.PropsAt(PdPos(B, 1)).italic = 1, 'the paragraph in it');
+  Path := GetTempDir + 'parade_edit_template.dotx';
+  T := nil;
+  Check(pd_doc_new(T) = PD_OK, 'a template');
+  Cp.italic := 0;
+  Cp.mask := PD_CP_WEIGHT;
+  Cp.weight := 700;
+  pd_doc_style_define(T, 'Remark', PD_STYLE_PARAGRAPH, 0, nil, @Cp, nil);
+  Ms := TMemoryStream.Create;
+  try
+    Check(pd_doc_export(T, PD_CONV_DOTX, @StreamWriter, Ms) = PD_OK, 'written as a template');
+    Ms.SaveToFile(Path);
+  finally
+    Ms.Free;
+    pd_doc_free(T);
+  end;
+  Check(E.ApplyTemplate(Path, PD_ADOPT_STYLES), 'the template applied');
+  Cp := E.PropsAt(PdPos(B, 1));
+  Check((Cp.weight = 700) and (Cp.italic = 0), 'its Remark over the document''s');
+  DeleteFile(Path);
+
+  { a table in a style from the gallery: its header in the accent, then without a header row }
+  E.GoToPos(PdPos(B, 5));
+  E.InsertTable(3, 2);
+  E.ApplyTableStylePreset(3, 1);
+  Check(E.CurrentTableStyle = 'Grid Table 4 - Accent 1', 'the table''s style: ' + E.CurrentTableStyle);
+  L := TStringList.Create;
+  try
+    E.GetTableStyles(L);
+    Check(L.IndexOf('Grid Table 4 - Accent 1') >= 0, 'among the document''s table styles');
+  finally
+    L.Free;
+  end;
+  Th := E.CurrentTheme;
+  if E.CellAt(E.CaretPos, C, R, Tb) then
+  begin
+    pd_doc_cell_resolve(E.Doc, pd_doc_child(E.Doc, pd_doc_child(E.Doc, Tb, 0), 1), @Cell);
+    Check(Cell.background = Th.color[PD_THEME_ACCENT1], 'the header in the accent');
+  end
+  else
+    Check(False, 'the caret in the table');
+  E.SetTableLook(PD_TLOOK_FIRST_COL);
+  Check(E.CurrentTableProps.look = PD_TLOOK_FIRST_COL, 'the header row''s part off');
+end;
+
 { SmartArt labels turned a quarter (tests/data/smartart.pptx, slide 12): their text painted turned, a column of
   white glyphs in each blue box taller than it is wide }
 procedure TestTurnedText(E: TParadeEdit);
@@ -2441,6 +2528,7 @@ begin
   TestSlides(E);
   TestTurnedText(E);
   TestRightToLeft(E);
+  TestThemesAndStyles(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

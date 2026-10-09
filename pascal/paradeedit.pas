@@ -599,6 +599,16 @@ type
     procedure ToggleItalic;
     procedure ToggleUnderline;
     procedure SetParagraphStyle(const StyleName: string);
+    { the document's theme; set as one undoable step }
+    function CurrentTheme: pd_theme;
+    procedure SetTheme(const Theme: pd_theme);
+    { a template's (or any document's) styles, theme and page applied: PD_ADOPT_*; False if it could not be read }
+    function ApplyTemplate(const FileName: string; What: UInt32): Boolean;
+    { the selection's text in a theme colour (PD_THEME_*), lightened or darkened as Word's tints and shades }
+    procedure SetTextThemeColor(Slot, LumMod, LumOff: Integer);
+    { a paragraph style defined (or redefined) with these properties; based on Normal unless BasedOn says }
+    function DefineParagraphStyle(const StyleName: string; const Para: pd_para_props; const Chr: pd_char_props;
+      const BasedOn: string = 'Normal'): Boolean;
 
     { ---- character formatting: the selection, or with none what is typed next at the caret ---- }
     { the masked fields of Props over the selection }
@@ -726,6 +736,13 @@ type
     procedure TableSplitCell;
     { $RRGGBB behind the selected cells (-1: none) }
     procedure SetCellShading(RGB: Integer);
+    { the table's style (a table style of the document's, by name; '' none) and the parts of it it shows }
+    procedure SetTableStyle(const StyleName: string);
+    function CurrentTableStyle: string;
+    procedure SetTableLook(Look: Integer);
+    { one of the gallery's table styles (pd_table_style_preset) in an accent, defined if new, given the table }
+    procedure ApplyTableStylePreset(Index, Accent: Integer);
+    procedure GetTableStyles(List: TStrings);
     { the grid's rules, in points (0: none) }
     procedure SetTableBorders(Points: Double);
     { the first row repeated at the top of every page the table runs onto }
@@ -2905,8 +2922,16 @@ begin
   if B.mask and PD_CP_SIZE <> 0 then A.size := B.size;
   if B.mask and PD_CP_WEIGHT <> 0 then A.weight := B.weight;
   if B.mask and PD_CP_ITALIC <> 0 then A.italic := B.italic;
-  if B.mask and PD_CP_COLOR <> 0 then A.color := B.color;
-  if B.mask and PD_CP_BACKGROUND <> 0 then A.background := B.background;
+  if B.mask and PD_CP_COLOR <> 0 then
+  begin
+    A.color := B.color;
+    A.color_theme := B.color_theme;
+  end;
+  if B.mask and PD_CP_BACKGROUND <> 0 then
+  begin
+    A.background := B.background;
+    A.background_theme := B.background_theme;
+  end;
   if B.mask and PD_CP_UNDERLINE <> 0 then A.underline := B.underline;
   if B.mask and PD_CP_STRIKE <> 0 then A.strike := B.strike;
   if B.mask and PD_CP_SHIFT <> 0 then A.shift := B.shift;
@@ -3367,6 +3392,172 @@ begin
   end;
   pd_doc_end_group(FDoc);
   Changed;
+end;
+
+function TParadeEdit.CurrentTheme: pd_theme;
+begin
+  pd_theme_init(@Result);
+  pd_doc_theme(FDoc, @Result);
+end;
+
+procedure TParadeEdit.SetTheme(const Theme: pd_theme);
+begin
+  if FReadOnly then
+    Exit;
+  if pd_doc_set_theme(FDoc, @Theme) = PD_OK then
+    Changed;
+end;
+
+function TParadeEdit.ApplyTemplate(const FileName: string; What: UInt32): Boolean;
+var
+  Ms: TMemoryStream;
+  T: Ppd_doc;
+  Fmt: Int32;
+begin
+  Result := False;
+  if FReadOnly then
+    Exit;
+  T := nil;
+  Ms := TMemoryStream.Create;
+  try
+    Ms.LoadFromFile(FileName);
+    Fmt := FormatOfFile(FileName);
+    if (Fmt = PD_CONV_DOCX) or (Fmt < 0) then
+      Fmt := PD_CONV_DOTX;      { every style it has, used in it or not }
+    if Fmt = PD_CONV_JDATA then
+      Result := pd_doc_load(Ms.Memory, Ms.Size, PD_JDATA_AUTO, T) = PD_OK
+    else
+      Result := pd_doc_import(Ms.Memory, Ms.Size, Fmt, T) = PD_OK;
+    if Result and (T <> nil) then
+      Result := pd_doc_adopt(FDoc, T, What) = PD_OK;
+  finally
+    Ms.Free;
+    if T <> nil then
+      pd_doc_free(T);
+  end;
+  if Result then
+    Changed;
+end;
+
+procedure TParadeEdit.SetTextThemeColor(Slot, LumMod, LumOff: Integer);
+var
+  P: pd_char_props;
+  Th: pd_theme;
+begin
+  FillChar(P, SizeOf(P), 0);
+  P.mask := PD_CP_COLOR;
+  P.color_theme := pd_theme_color(Slot, LumMod, LumOff);
+  Th := CurrentTheme;
+  P.color := pd_theme_color_resolve(@Th, P.color_theme, $FF000000);
+  ApplyCharProps(P);
+end;
+
+function TParadeEdit.DefineParagraphStyle(const StyleName: string; const Para: pd_para_props;
+  const Chr: pd_char_props; const BasedOn: string): Boolean;
+var
+  Par: pd_style_id;
+begin
+  Result := False;
+  if FReadOnly or (StyleName = '') then
+    Exit;
+  Par := 0;
+  if BasedOn <> '' then
+    Par := pd_doc_style_find(FDoc, PAnsiChar(BasedOn));
+  Result := pd_doc_style_define(FDoc, PAnsiChar(StyleName), PD_STYLE_PARAGRAPH, Par, @Para, @Chr, nil) = PD_OK;
+  if Result then
+    Changed;
+end;
+
+procedure TParadeEdit.SetTableStyle(const StyleName: string);
+var
+  C, R, T: pd_block_id;
+  Tp: pd_table_props;
+  St: pd_style_id;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+    Exit;
+  St := 0;
+  if StyleName <> '' then
+  begin
+    St := pd_doc_style_find(FDoc, PAnsiChar(StyleName));
+    if (St = 0) or (pd_doc_table_style_info(FDoc, St, nil, nil) <> PD_OK) then
+      Exit;
+  end;
+  pd_doc_table_props(FDoc, T, Tp);
+  if (St <> 0) and (Tp.style = 0) then
+  begin   { newly styled: the style's rules in place of the table's own, its usual parts shown }
+    Tp.border_given := 0;
+    Tp.border := 0;
+    Tp.look := PD_TLOOK_FIRST_ROW or PD_TLOOK_FIRST_COL or PD_TLOOK_NO_VBAND;
+  end;
+  Tp.style := St;
+  pd_doc_begin_group(FDoc, 'Table style');
+  pd_doc_set_table_props(FDoc, T, Tp);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+function TParadeEdit.CurrentTableStyle: string;
+var
+  C, R, T: pd_block_id;
+  Tp: pd_table_props;
+begin
+  Result := '';
+  if CellAt(CaretPos, C, R, T) and (pd_doc_table_props(FDoc, T, Tp) = PD_OK) and (Tp.style <> 0) then
+    Result := pd_doc_style_name(FDoc, Tp.style);
+end;
+
+procedure TParadeEdit.SetTableLook(Look: Integer);
+var
+  C, R, T: pd_block_id;
+  Tp: pd_table_props;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+    Exit;
+  pd_doc_table_props(FDoc, T, Tp);
+  Tp.look := Look and 63;
+  pd_doc_begin_group(FDoc, 'Table style options');
+  pd_doc_set_table_props(FDoc, T, Tp);
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.ApplyTableStylePreset(Index, Accent: Integer);
+var
+  Ts: Ppd_table_style;
+  SName: array[0..63] of AnsiChar;
+  St: pd_style_id;
+  C, R, T: pd_block_id;
+begin
+  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+    Exit;
+  New(Ts);
+  try
+    if pd_table_style_preset(Index, Accent, @SName[0], SizeOf(SName), Ts) = 0 then
+      Exit;
+    pd_doc_begin_group(FDoc, 'Table style');
+    St := pd_doc_style_find(FDoc, @SName[0]);
+    if St = 0 then
+      pd_doc_table_style_define(FDoc, @SName[0], 0, Ts, nil);
+    SetTableStyle(string(PAnsiChar(@SName[0])));
+    pd_doc_end_group(FDoc);
+  finally
+    Dispose(Ts);
+  end;
+end;
+
+procedure TParadeEdit.GetTableStyles(List: TStrings);
+var
+  I: Integer;
+  St: pd_style_id;
+begin
+  List.Clear;
+  for I := 0 to pd_doc_style_count(FDoc) - 1 do
+  begin
+    St := pd_doc_style_at(FDoc, I);
+    if pd_doc_table_style_info(FDoc, St, nil, nil) = PD_OK then
+      List.Add(pd_doc_style_name(FDoc, St));
+  end;
 end;
 
 procedure TParadeEdit.GetParagraphStyles(List: TStrings);
@@ -4844,6 +5035,7 @@ begin
   for I := 0 to High(Cells) do
   begin
     pd_doc_cell_props(FDoc, Cells[I], Cp);
+    Cp.background_theme := 0;   { a colour of its own: no longer the theme's }
     if RGB < 0 then
       Cp.background := 0
     else
@@ -4866,6 +5058,7 @@ begin
   if Tp.border_color = 0 then
     Tp.border_color := $FF000000;
   Tp.border_sides := 0;
+  Tp.border_given := 63;    { every rule the table's own, over its style's }
   pd_doc_begin_group(FDoc, 'Borders');
   pd_doc_set_table_props(FDoc, T, Tp);
   pd_doc_end_group(FDoc);
