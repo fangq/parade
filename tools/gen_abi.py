@@ -43,10 +43,14 @@ STRUCTS = {
                         "footnote_skip add_spacing line_numbers line_number_start line_number_distance "
                         "line_number_restart mirror_margins gutter page_valign line_pitch direction",
     "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width indent width_pct "
-                      "border_sides cell_padding_v direction border_theme",
+                      "border_sides cell_padding_v direction border_theme style look border_given",
     "pd_cell_props": "col_span valign background merge_up min_height border_set border_on border_width border_color "
                      "edge_width background_theme border_theme",
     "pd_theme": "name color major minor major_ea minor_ea major_cs minor_cs",
+    "pd_table_style_part": "given has_shading shading shading_theme border_set border_on border_width edge_width "
+                           "border_color border_theme para chr",
+    "pd_table_style": "part row_band col_band cell_padding cell_padding_v border_set border_on border_width "
+                      "border_color border_theme",
     "pd_change": "kind block style revision",
     "pd_layout_info": "pages paragraphs_broken paragraphs_reused float_pages overfull variants",
     "pd_page_info": "width height section number label float_page first last",

@@ -665,6 +665,8 @@ static int dx_media(dxo* x, pd_res_id res, const char** rid_name) {
 static void dx_block(dxo* x, pd_block_id id);
 static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr);
 static void dx_sid(const pd_doc* d, pd_style_id sid, char* out, size_t cap);
+static void dx_rules(pd_buf* o, const char* tag, int set, int on, pd_sp w, const pd_sp* ew, uint32_t c, uint32_t ref,
+                     int table);
 static void dx_ppr_head(pd_buf* o, const pd_para_props* pp, uint32_t m);
 static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto, const pd_para_props* base);
 
@@ -2587,7 +2589,14 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         fixed |= tp.col_width[c] > 0;
     }
 
-    pb_puts(o, "<w:tbl><w:tblPr><w:tblStyle w:val=\"TableGrid\"/>");
+    if (tp.style) {     /* the table's style, the document's: its rules those the table does not give itself */
+        char sid[64];
+
+        dx_sid(x->d, tp.style, sid, sizeof(sid));
+        pb_printf(o, "<w:tbl><w:tblPr><w:tblStyle w:val=\"%s\"/>", sid);
+    } else {
+        pb_puts(o, "<w:tbl><w:tblPr><w:tblStyle w:val=\"TableGrid\"/>");
+    }
 
     if (tp.width_pct > 0) {
         pb_printf(o, "<w:tblW w:w=\"%d\" w:type=\"pct\"/>", (int)tp.width_pct * 5);     /* fiftieths of a percent */
@@ -2607,7 +2616,12 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         pb_printf(o, "<w:tblInd w:w=\"%d\" w:type=\"dxa\"/>", TW(tp.indent));
     }
 
-    if (tp.border) {
+    if (tp.style) {
+        int own = tp.border ? (tp.border_sides ? tp.border_sides : 63) : 0;
+
+        dx_rules(o, "tblBorders", tp.border_given & 63, own & tp.border_given, tp.border, NULL, tp.border_color,
+                 tp.border_theme, 1);
+    } else if (tp.border) {
         static const char* edge[] = { "top", "left", "bottom", "right", "insideH", "insideV" };
         static const int bit[] = { PD_TBORDER_TOP, PD_TBORDER_LEFT, PD_TBORDER_BOTTOM, PD_TBORDER_RIGHT,
                                    PD_TBORDER_INSIDE_H, PD_TBORDER_INSIDE_V
@@ -2644,7 +2658,18 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                   "<w:bottom w:w=\"%d\" w:type=\"dxa\"/><w:right w:w=\"%d\" w:type=\"dxa\"/></w:tblCellMar>", pv, ph, pv, ph);
     }
 
-    pb_puts(o, "<w:tblLook w:val=\"04A0\"/></w:tblPr><w:tblGrid>");
+    if (tp.style) {
+        int lk = tp.look, v = ((lk & PD_TLOOK_FIRST_ROW) ? 0x20 : 0) | ((lk & PD_TLOOK_LAST_ROW) ? 0x40 : 0) |
+                              ((lk & PD_TLOOK_FIRST_COL) ? 0x80 : 0) | ((lk & PD_TLOOK_LAST_COL) ? 0x100 : 0) |
+                              ((lk & PD_TLOOK_NO_HBAND) ? 0x200 : 0) | ((lk & PD_TLOOK_NO_VBAND) ? 0x400 : 0);
+
+        pb_printf(o, "<w:tblLook w:val=\"%04X\" w:firstRow=\"%d\" w:lastRow=\"%d\" w:firstColumn=\"%d\" "
+                  "w:lastColumn=\"%d\" w:noHBand=\"%d\" w:noVBand=\"%d\"/></w:tblPr><w:tblGrid>", v,
+                  !!(lk & PD_TLOOK_FIRST_ROW), !!(lk & PD_TLOOK_LAST_ROW), !!(lk & PD_TLOOK_FIRST_COL),
+                  !!(lk & PD_TLOOK_LAST_COL), !!(lk & PD_TLOOK_NO_HBAND), !!(lk & PD_TLOOK_NO_VBAND));
+    } else {
+        pb_puts(o, "<w:tblLook w:val=\"04A0\"/></w:tblPr><w:tblGrid>");
+    }
 
     for (c = 0; c < ncols; c++) {
         pb_printf(o, "<w:gridCol w:w=\"%d\"/>", c < tp.ncols && tp.col_width[c] > 0 ? TW(tp.col_width[c]) : colw);
@@ -2979,6 +3004,8 @@ static void dx_sid(const pd_doc* d, pd_style_id sid, char* out, size_t cap) {
 
     if (n && same_ci(pd_doc_style_name(d, sid), "footnote text")) {
         snprintf(out, cap, "FootnoteText");     /* Word's, read in: written in place of the writer's own */
+    } else if (n && !strcmp(n, "Table Grid")) {
+        snprintf(out, cap, "TableGrid");        /* the document's own in place of the writer's */
     } else if (!out[0] || !strcmp(out, "FootnoteText") || !strcmp(out, "FootnoteReference") ||
                !strcmp(out, "Hyperlink") || !strcmp(out, "TableGrid")) {
         snprintf(out, cap, "PStyle%u", (unsigned)sid);  /* one of the writer's own, or no name to make one of */
@@ -3478,6 +3505,165 @@ static void dx_theme_patch(pd_buf* o, const char* s, size_t n, const pd_theme* t
     pb_put(o, s + at, n - at);
 }
 
+/* the rules of a cell (w:tcBorders) or a table (w:tblBorders, with inside): the edges said, ruled or nil */
+static void dx_rules(pd_buf* o, const char* tag, int set, int on, pd_sp w, const pd_sp* ew, uint32_t c, uint32_t ref,
+                     int table) {
+    static const char* const edge[] = { "top", "left", "bottom", "right", "insideH", "insideV" };
+    static const int bit[] = { PD_TBORDER_TOP, PD_TBORDER_LEFT, PD_TBORDER_BOTTOM, PD_TBORDER_RIGHT,
+                               PD_TBORDER_INSIDE_H, PD_TBORDER_INSIDE_V
+                             };
+    static const int slot[] = { 0, 3, 2, 1 };  /* edge_width's order: top, right, bottom, left */
+    int k;
+
+    if (!set) {
+        return;
+    }
+
+    pb_printf(o, "<w:%s>", tag);
+
+    for (k = 0; k < (table ? 6 : 4); k++) {
+        if (!(set & bit[k])) {
+            continue;
+        }
+
+        if (on & bit[k]) {
+            pd_sp ww = ew && k < 4 && ew[slot[k]] > 0 ? ew[slot[k]] : w;
+            int sz = (int)SCALE(ww, 8, 65536);
+
+            pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"", edge[k], sz < 2 ? 2 : sz,
+                      (unsigned)(c & 0xFFFFFF));
+            dx_theme_attr(o, ref, 0);
+            pb_puts(o, "/>");
+        } else {
+            pb_printf(o, "<w:%s w:val=\"nil\"/>", edge[k]);
+        }
+    }
+
+    pb_printf(o, "</w:%s>", tag);
+}
+
+/* a part's paragraph, run and cell properties */
+static void dx_tpart_body(dxo* x, pd_buf* o, pd_table_style_part* p) {
+    dx_theme_props(x->d, &p->para, &p->chr);
+
+    if (p->para.mask) {
+        pb_puts(o, "<w:pPr>");
+        dx_ppr_head(o, &p->para, p->para.mask);
+        dx_ppr_tail(o, &p->para, p->para.mask, x->hyph_auto, NULL);
+        pb_puts(o, "</w:pPr>");
+    }
+
+    if (p->chr.mask) {
+        pb_puts(o, "<w:rPr>");
+        dx_rpr_set(o, &p->chr);
+        pb_puts(o, "</w:rPr>");
+    }
+}
+
+static void dx_tpart_cell(dxo* x, pd_buf* o, const pd_table_style_part* p) {
+    pd_theme t;
+
+    if (!p->border_set && !p->has_shading) {
+        return;
+    }
+
+    pd_doc_theme(x->d, &t);
+    pb_puts(o, "<w:tcPr>");
+    dx_rules(o, "tcBorders", p->border_set, p->border_on, p->border_width, p->edge_width,
+             pd_theme_color_resolve(&t, p->border_theme, p->border_color), p->border_theme, 0);
+
+    if (p->has_shading && p->shading) {
+        dx_shd(o, pd_theme_color_resolve(&t, p->shading_theme, p->shading), p->shading_theme);
+    } else if (p->has_shading) {
+        pb_puts(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"auto\"/>");
+    }
+
+    pb_puts(o, "</w:tcPr>");
+}
+
+/* a table style of the document's: the whole table's properties, then each condition it has */
+static void dx_table_style(dxo* x, pd_buf* o, pd_style_id sid, const char* name, pd_style_id parent) {
+    static const char* const names[PD_TPART_COUNT] = { "wholeTable", "band1Vert", "band2Vert", "band1Horz",
+                                                      "band2Horz", "firstCol", "lastCol", "firstRow", "lastRow",
+                                                      "neCell", "nwCell", "seCell", "swCell"
+                                                    };
+    pd_table_style* ts = (pd_table_style*)malloc(sizeof(pd_table_style));
+    char id[64], pid[64];
+    pd_theme t;
+    int k;
+
+    if (!ts || pd_doc_table_style_info(x->d, sid, NULL, ts) != PD_OK) {
+        free(ts);
+        return;
+    }
+
+    pd_doc_theme(x->d, &t);
+    dx_sid(x->d, sid, id, sizeof(id));
+    pb_printf(o, "<w:style w:type=\"table\" w:styleId=\"%s\"><w:name w:val=\"", id);
+    xesc(o, name, strlen(name));
+    pb_puts(o, "\"/>");
+
+    if (parent) {
+        dx_sid(x->d, parent, pid, sizeof(pid));
+        pb_printf(o, "<w:basedOn w:val=\"%s\"/>", pid);
+    }
+
+    pb_puts(o, "<w:uiPriority w:val=\"59\"/>");
+    dx_tpart_body(x, o, &ts->part[PD_TPART_WHOLE]);
+    pb_puts(o, "<w:tblPr>");
+
+    if (ts->row_band > 0) {
+        pb_printf(o, "<w:tblStyleRowBandSize w:val=\"%d\"/>", (int)ts->row_band);
+    }
+
+    if (ts->col_band > 0) {
+        pb_printf(o, "<w:tblStyleColBandSize w:val=\"%d\"/>", (int)ts->col_band);
+    }
+
+    dx_rules(o, "tblBorders", ts->border_set, ts->border_on, ts->border_width, NULL,
+             pd_theme_color_resolve(&t, ts->border_theme, ts->border_color), ts->border_theme, 1);
+
+    if (ts->cell_padding >= 0 || ts->cell_padding_v >= 0) {
+        pb_puts(o, "<w:tblCellMar>");
+
+        if (ts->cell_padding_v >= 0) {
+            pb_printf(o, "<w:top w:w=\"%d\" w:type=\"dxa\"/>", TW(ts->cell_padding_v));
+        }
+
+        if (ts->cell_padding >= 0) {
+            pb_printf(o, "<w:left w:w=\"%d\" w:type=\"dxa\"/>", TW(ts->cell_padding));
+        }
+
+        if (ts->cell_padding_v >= 0) {
+            pb_printf(o, "<w:bottom w:w=\"%d\" w:type=\"dxa\"/>", TW(ts->cell_padding_v));
+        }
+
+        if (ts->cell_padding >= 0) {
+            pb_printf(o, "<w:right w:w=\"%d\" w:type=\"dxa\"/>", TW(ts->cell_padding));
+        }
+
+        pb_puts(o, "</w:tblCellMar>");
+    }
+
+    pb_puts(o, "</w:tblPr>");
+    dx_tpart_cell(x, o, &ts->part[PD_TPART_WHOLE]);
+
+    for (k = 1; k < PD_TPART_COUNT; k++) {
+        if (!ts->part[k].given) {
+            continue;
+        }
+
+        pb_printf(o, "<w:tblStylePr w:type=\"%s\">", names[k]);
+        dx_tpart_body(x, o, &ts->part[k]);
+        pb_puts(o, "<w:tblPr/>");
+        dx_tpart_cell(x, o, &ts->part[k]);
+        pb_puts(o, "</w:tblStylePr>");
+    }
+
+    pb_puts(o, "</w:style>");
+    free(ts);
+}
+
 /* the document's own styles. docDefaults are Parade's defaults, so each style says only what it sets,
    based on its parent, and Word works out what Parade does; then the few the writer uses itself */
 static void dx_styles(dxo* x, pd_buf* o) {
@@ -3509,6 +3695,11 @@ static void dx_styles(dxo* x, pd_buf* o) {
         char id[64], pid[64];
 
         if (!name || pd_doc_style_info(d, sid, &kind, &parent, &pp, &cp) != PD_OK) {
+            continue;
+        }
+
+        if (kind == PD_STYLE_TABLE) {
+            dx_table_style(x, o, sid, name, parent);
             continue;
         }
 
@@ -3571,9 +3762,11 @@ static void dx_styles(dxo* x, pd_buf* o) {
             "<w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr></w:style>");
     pb_puts(o, "<w:style w:type=\"character\" w:styleId=\"Hyperlink\"><w:name w:val=\"Hyperlink\"/>"
             "<w:rPr><w:color w:val=\"0563C1\"/><w:u w:val=\"single\"/></w:rPr></w:style>");
-    pb_puts(o, "<w:style w:type=\"table\" w:styleId=\"TableGrid\"><w:name w:val=\"Table Grid\"/><w:tblPr>"
-            "<w:tblCellMar><w:left w:w=\"108\" w:type=\"dxa\"/><w:right w:w=\"108\" w:type=\"dxa\"/></w:tblCellMar>"
-            "</w:tblPr></w:style>");
+    if (!pd_doc_style_find(d, "Table Grid")) {  /* the writer's own, unless the document has a table style of the name */
+        pb_puts(o, "<w:style w:type=\"table\" w:styleId=\"TableGrid\"><w:name w:val=\"Table Grid\"/><w:tblPr>"
+                "<w:tblCellMar><w:left w:w=\"108\" w:type=\"dxa\"/><w:right w:w=\"108\" w:type=\"dxa\"/>"
+                "</w:tblCellMar></w:tblPr></w:style>");
+    }
     pb_puts(o, "</w:styles>");
 }
 
@@ -4315,7 +4508,7 @@ typedef struct {
 } dtpart;
 
 enum { TP_WHOLE, TP_FIRST_ROW, TP_LAST_ROW, TP_FIRST_COL, TP_LAST_COL, TP_BAND1V, TP_BAND2V, TP_BAND1H, TP_BAND2H,
-       TP_N
+       TP_NE, TP_NW, TP_SE, TP_SW, TP_N
      };
 
 typedef struct {                /* a table style */
@@ -5259,7 +5452,8 @@ static void read_table_styles(dxi* X, const char* xml, size_t n) {
         if (strcmp(t, "tblStylePr") == 0) {
             if (m.type == MT_OPEN) {
                 static const char* names[TP_N] = { "wholeTable", "firstRow", "lastRow", "firstCol", "lastCol",
-                                                   "band1Vert", "band2Vert", "band1Horz", "band2Horz"
+                                                   "band1Vert", "band2Vert", "band1Horz", "band2Horz", "neCell",
+                                                   "nwCell", "seCell", "swCell"
                                                  };
 
                 mu_attr(&m, "w:type", v, sizeof(v));
@@ -5734,6 +5928,7 @@ typedef struct {               /* a table being read */
     pd_sp ind, width_pct;
     int has_ind;
     int rtl;                    /* w:bidiVisual: its columns from the right */
+    pd_style_id sid;            /* its style as one of the document's: the cells and their text take it there */
     pd_sp row_h;                /* w:trHeight of the row under way */
     int cspan;                  /* the grid columns the cell under way takes */
     dtpart cell;                /* what the style does to the cell under way */
@@ -5945,17 +6140,24 @@ static void dw_begin_cell(dw* w) {
 
         memset(&e, 0, sizeof(e));
 
-        if (w->ntab >= 1 && w->ntab <= 8) {     /* what the table's style does to this cell */
+        if (w->ntab >= 1 && w->ntab <= 8) {
+            w->tabs[w->ntab - 1].cspan = w->span > 0 ? w->span : 1;
+        }
+
+        if (w->ntab >= 1 && w->ntab <= 8) {     /* what the table's style does to this cell (a style of the document's
+                                                   own does it itself, where the cell is laid out) */
             dtpart* c = &w->tabs[w->ntab - 1].cell;
 
             dw_cell_style(w, &w->tabs[w->ntab - 1]);
 
-            if (!bg && c->has_shd) {
+            if (!bg && c->has_shd && !w->tabs[w->ntab - 1].sid) {
                 bg = c->shd;
                 bg_ref = c->shd_ref;
             }
 
-            e = c->cb;
+            if (!w->tabs[w->ntab - 1].sid) {
+                e = c->cb;
+            }
         }
 
         edges_over(&e, &w->cell_edges);
@@ -6026,6 +6228,104 @@ static int known_name(const char* n) {
            strstr(low, "source") || strstr(low, "preformatted") || strcmp(low, "caption") == 0;
 }
 
+/* a part of a Word table style as Parade's */
+static void dx_tpart(const dxi* X, const dtpart* a, pd_table_style_part* p) {
+    dprops pr = a->pr;
+    int k;
+
+    memset(p, 0, sizeof(*p));
+
+    if (!a->given) {
+        return;
+    }
+
+    p->given = 1;
+    line_finish(&pr, (pr.cp.mask & PD_CP_SIZE) ? pr.cp.size : (X->defaults.cp.mask & PD_CP_SIZE) ?
+                X->defaults.cp.size : PD_PT(10));
+    p->para = pr.pp;
+    p->para.mask &= ~PD_PP_NEXT_STYLE;
+    p->chr = pr.cp;
+    p->has_shading = a->has_shd;
+    p->shading = a->shd;
+    p->shading_theme = a->shd_ref;
+    p->border_set = a->cb.set & 15;
+    p->border_on = a->cb.on & a->cb.set & 15;
+    p->border_width = a->cb.w;
+    p->border_color = a->cb.c ? a->cb.c : 0xFF000000u;
+    p->border_theme = a->cb.c ? a->cb.ref : 0;
+
+    for (k = 0; k < 4; k++) {
+        p->edge_width[k] = (p->border_on & (1 << k)) && a->cb.ew[k] && a->cb.ew[k] != a->cb.w ? a->cb.ew[k] : 0;
+    }
+}
+
+/* Word's table style WID as one of the document's, with those it is based on, on first use: its id, 0 if none */
+static pd_style_id dx_table_style_define(dxi* X, pd_bld* b, const char* wid, int depth) {
+    static const int map[TP_N] = { PD_TPART_WHOLE, PD_TPART_FIRST_ROW, PD_TPART_LAST_ROW, PD_TPART_FIRST_COL,
+                                   PD_TPART_LAST_COL, PD_TPART_BAND1_V, PD_TPART_BAND2_V, PD_TPART_BAND1_H,
+                                   PD_TPART_BAND2_H, PD_TPART_NE, PD_TPART_NW, PD_TPART_SE, PD_TPART_SW
+                                 };
+    const dtstyle* st = NULL;
+    const dstyle_x* sx;
+    pd_table_style* ts;
+    pd_style_id sid, parent = 0;
+    char name[64];
+    int i, k;
+
+    for (i = 0; i < X->ntstyles && !st; i++) {
+        st = !strcmp(X->tstyles[i].id, wid) ? &X->tstyles[i] : NULL;
+    }
+
+    if (!st || depth > 10) {
+        return 0;
+    }
+
+    sx = find_style(X, wid);
+    snprintf(name, sizeof(name), "%s", sx && sx->name[0] ? sx->name : wid);
+    sid = pd_doc_style_find(b->d, name);
+
+    if (sid && pd_doc_table_style_info(b->d, sid, NULL, NULL) != PD_OK) {    /* a paragraph style of the same name */
+        snprintf(name, sizeof(name), "%.50s (table)", sx && sx->name[0] ? sx->name : wid);
+        sid = pd_doc_style_find(b->d, name);
+    }
+
+    if (sid) {
+        return pd_doc_table_style_info(b->d, sid, NULL, NULL) == PD_OK ? sid : 0;
+    }
+
+    if (st->based_on[0] && strcmp(st->based_on, wid) != 0) {
+        parent = dx_table_style_define(X, b, st->based_on, depth + 1);
+    }
+
+    if ((ts = (pd_table_style*)malloc(sizeof(pd_table_style))) == NULL) {
+        return 0;
+    }
+
+    pd_table_style_init(ts);
+
+    for (k = 0; k < TP_N; k++) {
+        dx_tpart(X, &st->part[k], &ts->part[map[k]]);
+    }
+
+    ts->part[PD_TPART_WHOLE].given = 1;
+    ts->row_band = st->row_band > 0 ? st->row_band : 0;
+    ts->col_band = st->col_band > 0 ? st->col_band : 0;
+    ts->cell_padding = st->mar[3];
+    ts->cell_padding_v = st->mar[0];
+    ts->border_set = st->tb.set & 63;
+    ts->border_on = st->tb.on & st->tb.set & 63;
+    ts->border_width = st->tb.w;
+    ts->border_color = st->tb.c ? st->tb.c : 0xFF000000u;
+    ts->border_theme = st->tb.c ? st->tb.ref : 0;
+
+    if (pd_doc_table_style_define(b->d, name, parent, ts, &sid) != PD_OK) {
+        sid = 0;
+    }
+
+    free(ts);
+    return sid;
+}
+
 /* what w:tblPr and w:tblGrid said, into the table being built */
 static void dw_table_props(dw* w) {
     pd_bld* b = w->X->b;
@@ -6062,8 +6362,30 @@ static void dw_table_props(dw* w) {
         table_style_resolve(w->X, T->style, &T->st, 0);
         e = T->st.tb;
         edges_over(&e, &T->tb);
+        T->sid = 0;
 
-        if (!e.set && !found && T->style[0]) {
+        for (k = 0; found && k < w->X->ntstyles; k++) {   /* the style itself, the document's: what the table shows of
+                                                             it is worked out where it is laid out */
+            if (T->style[0] ? !strcmp(w->X->tstyles[k].id, T->style) : w->X->tstyles[k].is_default) {
+                T->sid = dx_table_style_define(w->X, b, w->X->tstyles[k].id, 0);
+                break;
+            }
+        }
+
+        if (T->sid) {
+            int lk = T->look;
+
+            e = T->tb;
+            tp.style = T->sid;
+            tp.look = ((lk & 0x20) ? PD_TLOOK_FIRST_ROW : 0) | ((lk & 0x40) ? PD_TLOOK_LAST_ROW : 0) |
+                      ((lk & 0x80) ? PD_TLOOK_FIRST_COL : 0) | ((lk & 0x100) ? PD_TLOOK_LAST_COL : 0) |
+                      ((lk & 0x200) ? PD_TLOOK_NO_HBAND : 0) | ((lk & 0x400) ? PD_TLOOK_NO_VBAND : 0);
+            tp.border_given = e.set & 63;
+            tp.border = e.on ? e.w : 0;
+            tp.border_sides = e.on == 63 ? 0 : e.on;
+            tp.border_color = e.c ? e.c : 0xFF000000u;
+            tp.border_theme = e.c ? e.ref : 0;
+        } else if (!e.set && !found && T->style[0]) {
             tp.border = PD_PT(0.5);     /* a style the document lacks: Word's own grid, w:sz 4 */
             tp.border_sides = 0;
         } else {
@@ -6314,7 +6636,15 @@ static void dw_begin_para(dw* w) {
         }
 
         pr_over(&full, &w->ppr);
-        pd_doc_style_resolve(b->d, sid, &rp, &w->tcp);
+
+        if (w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].sid && w->tabs[w->ntab - 1].cell.given) {
+            pd_table_style_part tpart;  /* what Parade lays the paragraph out with: its style's and its table style's */
+
+            dx_tpart(w->X, &w->tabs[w->ntab - 1].cell, &tpart);
+            pd_doc_style_resolve_with(b->d, sid, &tpart, &rp, &w->tcp);
+        } else {
+            pd_doc_style_resolve(b->d, sid, &rp, &w->tcp);
+        }
         line_finish(&full, (full.cp.mask & PD_CP_SIZE) ? full.cp.size : w->tcp.size);
         w->pcp = full.cp;
 

@@ -134,8 +134,9 @@ static pd_sp char_width(const pd_style* st, uint32_t cp, int n) {
 
 void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp* label_x) {
     const bstate* s = &b->st;
+    pd_table_style_part tpart;
 
-    pd_doc_style_resolve(d, s->style, pp, NULL);
+    pd_doc_style_resolve_in(d, s->style, pd_doc_para_table_part(d, b, &tpart), pp, NULL);
 
     /* direct properties over the style's */
 #define OVER(bit, f) if (s->pp.mask & (bit)) { pp->f = s->pp.f; }

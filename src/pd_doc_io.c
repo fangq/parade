@@ -47,7 +47,7 @@ static const char* const wrap_names[] = { "none", "left", "right", "front", "beh
 static const char* const break_names[] = { "page", "column", "oddpage", "evenpage", "rule" };
 static const char* const shift_names[] = { "none", "super", "sub" };
 static const char* const mode_names[] = { "optimal", "greedy" };
-static const char* const style_kind_names[] = { "paragraph", "character" };
+static const char* const style_kind_names[] = { "paragraph", "character", "table" };
 static const char* const dir_names[] = { "auto", "ltr", "rtl" };
 
 #define NAMES(t) (t), (int32_t)(sizeof(t) / sizeof((t)[0]))
@@ -654,6 +654,15 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_str(w, "Direction", "rtl");
             }
 
+            if (p->style) {
+                put_int(w, "Style", p->style);
+            }
+
+            if (p->look || p->border_given) {
+                put_int(w, "Look", p->look);
+                put_int(w, "BorderGiven", p->border_given);
+            }
+
             if (p->ncols) {
                 pj_key(w, "ColumnWidths");
                 pj_arr_begin(w);
@@ -769,6 +778,82 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
     pj_obj_end(w);
 }
 
+/* a table style: {"RowBand", "ColBand", "CellPadding", "CellPaddingV", "Border...", "Parts": [13: null | {...}]} */
+static void save_tstyle(pj_writer* w, const pd_table_style* ts) {
+    int k, e;
+
+    pj_obj_begin(w);
+    put_int(w, "RowBand", ts->row_band);
+    put_int(w, "ColBand", ts->col_band);
+    put_int(w, "CellPadding", ts->cell_padding);
+    put_int(w, "CellPaddingV", ts->cell_padding_v);
+    put_int(w, "BorderSet", ts->border_set);
+    put_int(w, "BorderOn", ts->border_on);
+    put_int(w, "BorderWidth", ts->border_width);
+    put_int(w, "BorderColor", (int64_t)ts->border_color);
+
+    if (ts->border_theme) {
+        put_int(w, "BorderTheme", (int64_t)ts->border_theme);
+    }
+
+    pj_key(w, "Parts");
+    pj_arr_begin(w);
+
+    for (k = 0; k < PD_TPART_COUNT; k++) {
+        const pd_table_style_part* p = &ts->part[k];
+
+        if (!p->given) {
+            pj_null(w);
+            continue;
+        }
+
+        pj_obj_begin(w);
+
+        if (p->has_shading) {
+            put_int(w, "Shading", (int64_t)p->shading);
+
+            if (p->shading_theme) {
+                put_int(w, "ShadingTheme", (int64_t)p->shading_theme);
+            }
+        }
+
+        if (p->border_set) {
+            put_int(w, "BorderSet", p->border_set);
+            put_int(w, "BorderOn", p->border_on);
+            put_int(w, "BorderWidth", p->border_width);
+            put_int(w, "BorderColor", (int64_t)p->border_color);
+
+            if (p->border_theme) {
+                put_int(w, "BorderTheme", (int64_t)p->border_theme);
+            }
+
+            pj_key(w, "EdgeWidths");
+            pj_arr_begin(w);
+
+            for (e = 0; e < 4; e++) {
+                pj_int(w, p->edge_width[e]);
+            }
+
+            pj_arr_end(w);
+        }
+
+        if (p->para.mask) {
+            pj_key(w, "Para");
+            save_pp(w, &p->para);
+        }
+
+        if (p->chr.mask) {
+            pj_key(w, "Char");
+            save_cp(w, &p->chr);
+        }
+
+        pj_obj_end(w);
+    }
+
+    pj_arr_end(w);
+    pj_obj_end(w);
+}
+
 static void save_style(pj_writer* w, const dstyle* s) {
     pj_obj_begin(w);
     put_str(w, "Name", s->name);
@@ -782,6 +867,12 @@ static void save_style(pj_writer* w, const dstyle* s) {
 
     pj_key(w, "Char");
     save_cp(w, &s->cp);
+
+    if (s->kind == PD_STYLE_TABLE && s->ts) {
+        pj_key(w, "Table");
+        save_tstyle(w, s->ts);
+    }
+
     pj_obj_end(w);
 }
 
@@ -1356,6 +1447,72 @@ static void load_theme(loader* L, const pj_node* x, pd_theme* t) {
 #undef N
 }
 
+/* a table style written by save_tstyle; a NULL x: none (an empty one) */
+static void load_tstyle(loader* L, const pj_node* x, pd_table_style* ts) {
+    const pj_node* parts, *c, *y;
+    int k, e;
+
+    pd_table_style_init(ts);
+
+    if (!x) {
+        return;
+    }
+
+    REQUIRE(x->type == PJ_OBJ);
+    ts->row_band = (int32_t)int_or(pj_get(x, "RowBand"), 0, 0, 1000, L);
+    ts->col_band = (int32_t)int_or(pj_get(x, "ColBand"), 0, 0, 1000, L);
+    ts->cell_padding = (pd_sp)int_or(pj_get(x, "CellPadding"), -1, -1, SP_MAX, L);
+    ts->cell_padding_v = (pd_sp)int_or(pj_get(x, "CellPaddingV"), -1, -1, SP_MAX, L);
+    ts->border_set = (int32_t)int_or(pj_get(x, "BorderSet"), 0, 0, 63, L);
+    ts->border_on = (int32_t)int_or(pj_get(x, "BorderOn"), 0, 0, 63, L) & ts->border_set;
+    ts->border_width = (pd_sp)int_or(pj_get(x, "BorderWidth"), 0, 0, SP_MAX, L);
+    ts->border_color = (uint32_t)int_or(pj_get(x, "BorderColor"), 0, 0, 0xFFFFFFFFLL, L);
+    ts->border_theme = (uint32_t)int_or(pj_get(x, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
+    parts = pj_get(x, "Parts");
+    REQUIRE(!parts || (parts->type == PJ_ARR && parts->n <= PD_TPART_COUNT));
+
+    for (k = 0, c = parts ? parts->child : NULL; c; c = c->next, k++) {
+        pd_table_style_part* p = &ts->part[k];
+
+        if (c->type == PJ_NULL) {
+            continue;
+        }
+
+        REQUIRE(c->type == PJ_OBJ);
+        p->given = 1;
+
+        if ((y = pj_get(c, "Shading")) != NULL) {
+            p->has_shading = 1;
+            p->shading = (uint32_t)int_or(y, 0, 0, 0xFFFFFFFFLL, L);
+            p->shading_theme = (uint32_t)int_or(pj_get(c, "ShadingTheme"), 0, 0, 0xFFFFFFFFLL, L);
+        }
+
+        p->border_set = (int32_t)int_or(pj_get(c, "BorderSet"), 0, 0, 15, L);
+        p->border_on = (int32_t)int_or(pj_get(c, "BorderOn"), 0, 0, 15, L) & p->border_set;
+        p->border_width = (pd_sp)int_or(pj_get(c, "BorderWidth"), 0, 0, SP_MAX, L);
+        p->border_color = (uint32_t)int_or(pj_get(c, "BorderColor"), 0, 0, 0xFFFFFFFFLL, L);
+        p->border_theme = (uint32_t)int_or(pj_get(c, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
+
+        if ((y = pj_get(c, "EdgeWidths")) != NULL) {
+            REQUIRE(y->type == PJ_ARR && y->n == 4);
+
+            for (e = 0, y = y->child; y; y = y->next, e++) {
+                p->edge_width[e] = (pd_sp)int_or(y, 0, 0, SP_MAX, L);
+            }
+        }
+
+        if ((y = pj_get(c, "Para")) != NULL) {
+            load_pp(y, &p->para, L);
+            p->para.mask &= ~PD_PP_NEXT_STYLE;
+            pd_doc_pp_normalize(&p->para);
+        }
+
+        if ((y = pj_get(c, "Char")) != NULL) {
+            load_cp(y, &p->chr, L);
+        }
+    }
+}
+
 /* a list definition */
 static void load_list(loader* L, const pj_node* c, dlist* lp) {
     const pj_node* lv = pj_get(c, "Levels"), *y;
@@ -1638,6 +1795,10 @@ static void load_table(loader* L, const pj_node* o, pd_table_props* p) {
     p->cell_padding_v = (pd_sp)int_or(pj_get(x, "CellPaddingV"), -1, -1, SP_MAX, L);
     p->direction = pj_get(x, "Direction") ? enum_of(pj_get(x, "Direction"), NAMES(dir_names)) : PD_DIR_AUTO;
     REQUIRE(p->direction >= 0);
+    p->style = (pd_style_id)int_or(pj_get(x, "Style"), 0, 0, L->d->nstyles, L);
+    REQUIRE(!p->style || L->d->styles[p->style - 1].kind == PD_STYLE_TABLE);
+    p->look = (int32_t)int_or(pj_get(x, "Look"), 0, 0, 63, L);
+    p->border_given = (int32_t)int_or(pj_get(x, "BorderGiven"), 0, 0, 63, L);
 
     if ((c = pj_get(x, "ColumnWidths")) != NULL) {
         int32_t i;
@@ -1861,6 +2022,14 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
         load_cp(pj_get(c, "Char"), &s->cp, L);
         pd_doc_pp_normalize(&s->pp);
         L->bad |= s->parent > (pd_style_id)d->nstyles;
+
+        if (s->kind == PD_STYLE_TABLE) {
+            if ((s->ts = (pd_table_style*)malloc(sizeof(pd_table_style))) == NULL) {
+                L->bad = 1;
+            } else {
+                load_tstyle(L, pj_get(c, "Table"), s->ts);
+            }
+        }
 
         for (a = s->parent; !L->bad && a; a = d->styles[a - 1].parent) {
             L->bad |= a > (pd_style_id)d->nstyles || !d->styles[a - 1].alive || d->styles[a - 1].kind != s->kind ||
@@ -2702,18 +2871,30 @@ pd_status pd_doc_apply_delta(pd_doc* d, const char* json, size_t len) {
                 load_cp(pj_get(sd, "Char"), &s.cp, &L);
                 pd_doc_pp_normalize(&s.pp);
                 L.bad |= s.kind < 0 || s.parent == (pd_style_id)id;
+
+                if (!L.bad && s.kind == PD_STYLE_TABLE) {
+                    if ((s.ts = (pd_table_style*)malloc(sizeof(pd_table_style))) == NULL) {
+                        FAIL(PD_ERR_NOMEM);
+                    }
+
+                    load_tstyle(&L, pj_get(sd, "Table"), s.ts);
+                }
             }
 
             if (L.bad) {
+                free(s.ts);
                 break;
             }
 
             if (id == d->nstyles + 1) {
                 if (pd_grow((void**)&d->styles, &d->capstyles, (int64_t)d->nstyles + 1, sizeof(dstyle))) {
+                    free(s.ts);
                     FAIL(PD_ERR_NOMEM);
                 }
 
                 d->nstyles++;
+            } else {
+                free(d->styles[id - 1].ts);     /* the definition replaced */
             }
 
             d->styles[id - 1] = s;
@@ -3011,6 +3192,19 @@ void pd_jd_put_pp(void* w, const pd_para_props* p) {
 
 void pd_jd_put_cp(void* w, const pd_char_props* c) {
     save_cp((pj_writer*)w, c);
+}
+
+void pd_jd_put_tstyle(void* w, const pd_table_style* ts) {
+    save_tstyle((pj_writer*)w, ts);
+}
+
+int pd_jd_get_tstyle(pd_doc* d, const void* o, pd_table_style* ts) {
+    loader L;
+
+    memset(&L, 0, sizeof(L));
+    L.d = d;
+    load_tstyle(&L, (const pj_node*)o, ts);
+    return !L.bad;
 }
 
 void pd_jd_put_theme(void* w, const pd_theme* t) {

@@ -505,7 +505,7 @@ static void lx_table(lx* x, pd_block_id t) {
     double colw;
 
     pd_doc_block_info(x->d, t, &ti);
-    pd_doc_table_props(x->d, t, &tp);
+    pd_doc_table_resolve(x->d, t, &tp);
 
     for (r = 0; r < ti.child_count; r++) {
         int32_t w = 0;
@@ -515,7 +515,7 @@ static void lx_table(lx* x, pd_block_id t) {
         for (c = 0; c < ri.child_count; c++) {
             pd_cell_props cp;
 
-            pd_doc_cell_props(x->d, pd_doc_child(x->d, pd_doc_child(x->d, t, r), c), &cp);
+            pd_doc_cell_resolve(x->d, pd_doc_child(x->d, pd_doc_child(x->d, t, r), c), &cp);
             w += cp.col_span;
         }
 
@@ -545,7 +545,7 @@ static void lx_table(lx* x, pd_block_id t) {
             pd_cell_props cp;
             pd_block_info ci;
 
-            pd_doc_cell_props(x->d, cell, &cp);
+            pd_doc_cell_resolve(x->d, cell, &cp);
             pd_doc_block_info(x->d, cell, &ci);
 
             if (c > 0) {

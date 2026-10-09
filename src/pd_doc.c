@@ -694,6 +694,8 @@ static void step_free(pd_doc* d, ustep* s, int dropping) {
             free(r->csave.text);
         } else if (r->type == UR_THEME) {
             free(r->tsave);
+        } else if (r->type == UR_STYLE) {
+            free(r->sdef.ts);
         } else if (r->type == UR_ATTACH && !r->attached && dropping) {
             /* the only owner of a detached subtree is the record that detached it */
             blk* b = r->id < d->captab ? d->tab[r->id] : NULL;
@@ -736,6 +738,15 @@ void pd_doc_free(pd_doc* d) {
         free(d->comments[i].text);
     }
 
+    for (i = 0; i < d->nstyles; i++) {
+        free(d->styles[i].ts);
+    }
+
+    for (i = 0; i < d->ntsc; i++) {
+        free(d->tsc[i].ts);
+    }
+
+    free(d->tsc);
     free(d->comments);
     free(d->revs);
     free(d->dnew);
@@ -1257,6 +1268,91 @@ static void apply_chain(const pd_doc* d, pd_style_id id, pd_para_props* pp, pd_c
     }
 }
 
+/* a style's chain with a table style's part right after Normal (style 1): Normal holds the document's defaults, which
+   are under a table style, and the styles based on it are over it (as Word has it); 1 when the chain has Normal */
+static int apply_chain_part(const pd_doc* d, pd_style_id id, const pd_table_style_part* part, pd_para_props* pp,
+                            pd_char_props* cp, int depth) {
+    dstyle* s = style_of(d, id);
+    int had;
+
+    if (!s || depth > 64) {
+        return 0;
+    }
+
+    had = apply_chain_part(d, s->parent, part, pp, cp, depth + 1);
+
+    if (pp) {
+        pp_apply(pp, &s->pp);
+    }
+
+    if (cp) {
+        cp_apply(cp, &s->cp);
+    }
+
+    if (id == 1) {
+        if (pp) {
+            pp_apply(pp, &part->para);
+        }
+
+        if (cp) {
+            cp_apply(cp, &part->chr);
+        }
+
+        return 1;
+    }
+
+    return had;
+}
+
+/* a paragraph style resolved, with a table style's part for a paragraph in a cell */
+void pd_doc_style_resolve_in(const pd_doc* d, pd_style_id id, const pd_table_style_part* part, pd_para_props* pp,
+                             pd_char_props* cp) {
+    pd_style_id a;
+    int depth = 0, normal = 0;
+
+    default_props(pp, cp);
+
+    for (a = id; part && a && depth < 64 && !normal; a = style_of(d, a) ? style_of(d, a)->parent : 0, depth++) {
+        normal = a == 1;
+    }
+
+    if (part && !normal) {  /* a chain without Normal: the part under all of it */
+        if (pp) {
+            pp_apply(pp, &part->para);
+        }
+
+        if (cp) {
+            cp_apply(cp, &part->chr);
+        }
+    }
+
+    if (part && normal) {
+        apply_chain_part(d, id, part, pp, cp, 0);
+    } else {
+        apply_chain(d, id, pp, cp, 0);
+    }
+
+    if (pp) {
+        pp->mask = PD_PP_ALL;
+        pd_doc_theme_pp(d, pp);
+    }
+
+    if (cp) {
+        cp->mask = PD_CP_ALL;
+        pd_doc_theme_cp(d, cp);
+    }
+}
+
+pd_status pd_doc_style_resolve_with(const pd_doc* d, pd_style_id id, const pd_table_style_part* part,
+                                    pd_para_props* pp, pd_char_props* cp) {
+    if (!d || (id && !style_of(d, id))) {
+        return PD_ERR_ARG;
+    }
+
+    pd_doc_style_resolve_in(d, id, part && part->given ? part : NULL, pp, cp);
+    return PD_OK;
+}
+
 pd_status pd_doc_style_resolve(const pd_doc* d, pd_style_id id, pd_para_props* pp, pd_char_props* cp) {
     if (!d || (id && !style_of(d, id))) {
         return PD_ERR_ARG;
@@ -1393,6 +1489,17 @@ pd_status pd_doc_para_props(const pd_doc* d, pd_block_id para, pd_para_props* ou
     return PD_OK;
 }
 
+pd_status pd_doc_para_resolve(const pd_doc* d, pd_block_id para, pd_para_props* out) {
+    blk* b = d ? para_of(d, para) : NULL;
+
+    if (!b || !out) {
+        return PD_ERR_ARG;
+    }
+
+    pd_doc_effective_pp(d, b, out, NULL);
+    return PD_OK;
+}
+
 int32_t pd_doc_para_rtl(const pd_doc* d, pd_block_id para) {
     blk* b = d ? para_of(d, para) : NULL;
     pd_para_props pp;
@@ -1443,8 +1550,12 @@ pd_status pd_doc_format_resolve(const pd_doc* d, pd_block_id para, pd_format_id 
         return PD_ERR_ARG;
     }
 
-    default_props(NULL, out);
-    apply_chain(d, b->st.style, NULL, out, 0);
+    {
+        pd_table_style_part buf;
+
+        pd_doc_style_resolve_in(d, b->st.style, pd_doc_para_table_part(d, b, &buf), NULL, out);
+    }
+
     apply_chain(d, f->style, NULL, out, 0);
     cp_apply(out, &f->cp);
     pd_doc_theme_cp(d, out);
@@ -2028,11 +2139,385 @@ void pd_doc_theme_raw(pd_doc* d, const pd_theme* theme) {
 }
 
 /* ------------------------------------------------------------------ */
+/* table styles                                                       */
+/* ------------------------------------------------------------------ */
+
+void pd_table_style_init(pd_table_style* ts) {
+    if (ts) {
+        memset(ts, 0, sizeof(*ts));
+        ts->cell_padding = ts->cell_padding_v = -1;
+    }
+}
+
+static int tstyle_ok(const pd_table_style* ts) {
+    int k;
+
+    if (ts->row_band < 0 || ts->col_band < 0 || ts->cell_padding < -1 || ts->cell_padding_v < -1 ||
+            ts->border_width < 0 || (ts->border_set & ~63) || (ts->border_on & ~63)) {
+        return 0;
+    }
+
+    for (k = 0; k < PD_TPART_COUNT; k++) {
+        const pd_table_style_part* p = &ts->part[k];
+
+        if ((p->border_set & ~15) || (p->border_on & ~15) || p->border_width < 0 || p->edge_width[0] < 0 ||
+                p->edge_width[1] < 0 || p->edge_width[2] < 0 || p->edge_width[3] < 0 || !pd_doc_tabs_ok(&p->para)) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/* a part's edges over another's: those it says replace (a widest width and a colour for all of them) */
+static void tpart_edges_over(pd_table_style_part* a, const pd_table_style_part* b) {
+    int k;
+
+    for (k = 0; k < 4; k++) {   /* every edge's own width said, so a new common width changes none of them */
+        if ((a->border_on & (1 << k)) && !a->edge_width[k]) {
+            a->edge_width[k] = a->border_width;
+        }
+    }
+
+    a->border_on = (a->border_on & ~b->border_set) | (b->border_on & b->border_set);
+    a->border_set |= b->border_set;
+
+    for (k = 0; k < 4; k++) {
+        if (b->border_set & (1 << k)) {
+            a->edge_width[k] = b->edge_width[k] ? b->edge_width[k] : b->border_width;
+        }
+    }
+
+    if (b->border_on) {
+        a->border_width = b->border_width;
+        a->border_color = b->border_color;
+        a->border_theme = b->border_theme;
+    }
+}
+
+static void tpart_over(pd_table_style_part* a, const pd_table_style_part* b) {
+    if (!b->given) {
+        return;
+    }
+
+    a->given = 1;
+    pp_apply(&a->para, &b->para);
+    cp_apply(&a->chr, &b->chr);
+
+    if (b->has_shading) {
+        a->has_shading = 1;
+        a->shading = b->shading;
+        a->shading_theme = b->shading_theme;
+    }
+
+    tpart_edges_over(a, b);
+}
+
+static void tstyle_fold(const pd_doc* d, pd_style_id id, pd_table_style* out, int depth) {
+    const dstyle* s = style_of(d, id);
+    const pd_table_style* ts;
+    int k;
+
+    if (!s || s->kind != PD_STYLE_TABLE || depth > 64) {
+        return;
+    }
+
+    tstyle_fold(d, s->parent, out, depth + 1);
+
+    if ((ts = s->ts) == NULL) {
+        return;
+    }
+
+    for (k = 0; k < PD_TPART_COUNT; k++) {
+        tpart_over(&out->part[k], &ts->part[k]);
+    }
+
+    out->row_band = ts->row_band > 0 ? ts->row_band : out->row_band;
+    out->col_band = ts->col_band > 0 ? ts->col_band : out->col_band;
+    out->cell_padding = ts->cell_padding >= 0 ? ts->cell_padding : out->cell_padding;
+    out->cell_padding_v = ts->cell_padding_v >= 0 ? ts->cell_padding_v : out->cell_padding_v;
+    out->border_on = (out->border_on & ~ts->border_set) | (ts->border_on & ts->border_set);
+    out->border_set |= ts->border_set;
+
+    if (ts->border_on) {
+        out->border_width = ts->border_width;
+        out->border_color = ts->border_color;
+        out->border_theme = ts->border_theme;
+    }
+}
+
+/* a table style resolved, from the document's cache (made again after any style changed) */
+static const pd_table_style* tstyle_cached(const pd_doc* dc, pd_style_id id) {
+    pd_doc* d = (pd_doc*)dc;    /* the cache is not the document's content */
+    const dstyle* s = style_of(d, id);
+
+    if (!s || s->kind != PD_STYLE_TABLE) {
+        return NULL;
+    }
+
+    if ((int32_t)id > d->ntsc) {
+        void* g = realloc(d->tsc, (size_t)id * sizeof(*d->tsc));
+
+        if (!g) {
+            return NULL;
+        }
+
+        d->tsc = g;
+        memset(d->tsc + d->ntsc, 0, (size_t)((int32_t)id - d->ntsc) * sizeof(*d->tsc));
+        d->ntsc = (int32_t)id;
+    }
+
+    if (!d->tsc[id - 1].ts && (d->tsc[id - 1].ts = (pd_table_style*)malloc(sizeof(pd_table_style))) == NULL) {
+        return NULL;
+    }
+
+    if (d->tsc[id - 1].rev != d->style_rev + 1) {
+        pd_table_style_init(d->tsc[id - 1].ts);
+        tstyle_fold(d, id, d->tsc[id - 1].ts, 0);
+        d->tsc[id - 1].rev = d->style_rev + 1;
+    }
+
+    return d->tsc[id - 1].ts;
+}
+
+pd_status pd_doc_table_style_resolve(const pd_doc* d, pd_style_id id, pd_table_style* out) {
+    const pd_table_style* ts = d && out ? tstyle_cached(d, id) : NULL;
+
+    if (!ts) {
+        return PD_ERR_ARG;
+    }
+
+    *out = *ts;
+    return PD_OK;
+}
+
+pd_status pd_doc_table_style_info(const pd_doc* d, pd_style_id id, pd_style_id* parent, pd_table_style* out) {
+    const dstyle* s = d ? style_of(d, id) : NULL;
+
+    if (!s || s->kind != PD_STYLE_TABLE) {
+        return PD_ERR_ARG;
+    }
+
+    if (parent) {
+        *parent = s->parent;
+    }
+
+    if (out) {
+        if (s->ts) {
+            *out = *s->ts;
+        } else {
+            pd_table_style_init(out);
+        }
+    }
+
+    return PD_OK;
+}
+
+/* where a cell is in its table: its row, its first column, whether it ends its row, the table's rows */
+static const blk* cell_place(const pd_doc* d, const blk* c, int32_t* row, int32_t* col, int* last_col,
+                             int32_t* nrows) {
+    const blk* r = c && c->kind == PD_BLOCK_CELL ? pd_doc_blk(d, c->parent) : NULL;
+    const blk* t = r && r->kind == PD_BLOCK_ROW ? pd_doc_blk(d, r->parent) : NULL;
+    int32_t i;
+
+    if (!t || t->kind != PD_BLOCK_TABLE) {
+        return NULL;
+    }
+
+    *row = kid_index(t, r->id);
+    *nrows = t->nkids;
+    *col = 0;
+
+    for (i = 0; i < r->nkids && r->kids[i] != c->id; i++) {
+        const blk* k = pd_doc_blk(d, r->kids[i]);
+
+        *col += k && k->st.cell.col_span > 0 ? k->st.cell.col_span : 1;
+    }
+
+    *last_col = i == r->nkids - 1;
+    return t;
+}
+
+/* the parts of a table style a cell takes, folded in Word's order */
+static int cell_part(const pd_doc* d, const blk* c, pd_table_style_part* out) {
+    int32_t row, col, nrows;
+    int lc;
+    const blk* t = cell_place(d, c, &row, &col, &lc, &nrows);
+    const pd_table_style* ts = t && t->st.tp.style ? tstyle_cached(d, t->st.tp.style) : NULL;
+    int look, fr, frow, lr, fc, lcl, rb, cb;
+
+    memset(out, 0, sizeof(*out));
+
+    if (!ts) {
+        return 0;
+    }
+
+    look = t->st.tp.look;
+    fr = (look & PD_TLOOK_FIRST_ROW) != 0;
+    fc = (look & PD_TLOOK_FIRST_COL) != 0;
+    frow = fr && row == 0;
+    lr = (look & PD_TLOOK_LAST_ROW) && row == nrows - 1 && nrows > 1;
+    lcl = (look & PD_TLOOK_LAST_COL) && lc && col > 0;
+    rb = ts->row_band > 0 ? ts->row_band : 1;
+    cb = ts->col_band > 0 ? ts->col_band : 1;
+    tpart_over(out, &ts->part[PD_TPART_WHOLE]);
+
+    if (!(look & PD_TLOOK_NO_VBAND) && col - fc >= 0) {
+        tpart_over(out, &ts->part[((col - fc) / cb) % 2 ? PD_TPART_BAND2_V : PD_TPART_BAND1_V]);
+    }
+
+    if (!(look & PD_TLOOK_NO_HBAND) && row - fr >= 0) {
+        tpart_over(out, &ts->part[((row - fr) / rb) % 2 ? PD_TPART_BAND2_H : PD_TPART_BAND1_H]);
+    }
+
+    if (fc && col == 0) {
+        tpart_over(out, &ts->part[PD_TPART_FIRST_COL]);
+    }
+
+    if (lcl) {
+        tpart_over(out, &ts->part[PD_TPART_LAST_COL]);
+    }
+
+    if (frow) {
+        tpart_over(out, &ts->part[PD_TPART_FIRST_ROW]);
+    }
+
+    if (lr) {
+        tpart_over(out, &ts->part[PD_TPART_LAST_ROW]);
+    }
+
+    if (frow && fc && col == 0) {
+        tpart_over(out, &ts->part[PD_TPART_NW]);
+    }
+
+    if (frow && lcl) {
+        tpart_over(out, &ts->part[PD_TPART_NE]);
+    }
+
+    if (lr && fc && col == 0) {
+        tpart_over(out, &ts->part[PD_TPART_SW]);
+    }
+
+    if (lr && lcl) {
+        tpart_over(out, &ts->part[PD_TPART_SE]);
+    }
+
+    return out->given;
+}
+
+pd_status pd_doc_cell_style(const pd_doc* d, pd_block_id cell, pd_table_style_part* out) {
+    const blk* c = d ? pd_doc_blk(d, cell) : NULL;
+
+    if (!c || c->kind != PD_BLOCK_CELL || !out) {
+        return PD_ERR_ARG;
+    }
+
+    cell_part(d, c, out);
+    out->shading = pd_theme_color_resolve(&d->theme, out->shading_theme, out->shading);
+    out->border_color = pd_theme_color_resolve(&d->theme, out->border_theme, out->border_color);
+    return PD_OK;
+}
+
+/* a cell's own properties with what its style says where it says nothing itself */
+void pd_doc_cell_effective(const pd_doc* d, const blk* c, pd_cell_props* out) {
+    pd_table_style_part pt, own;
+    int k;
+
+    *out = c->st.cell;
+
+    if (cell_part(d, c, &pt)) {
+        if (pt.has_shading && !out->background && !out->background_theme) {
+            out->background = pt.shading;
+            out->background_theme = pt.shading_theme;
+        }
+
+        memset(&own, 0, sizeof(own));
+        own.border_set = out->border_set;
+        own.border_on = out->border_on;
+        own.border_width = out->border_width;
+        own.border_color = out->border_color;
+        own.border_theme = out->border_theme;
+        memcpy(own.edge_width, out->edge_width, sizeof(own.edge_width));
+        tpart_edges_over(&pt, &own);
+        out->border_set = pt.border_set;
+        out->border_on = pt.border_on & pt.border_set;
+        out->border_width = pt.border_width;
+        out->border_color = pt.border_color;
+        out->border_theme = pt.border_theme;
+
+        for (k = 0; k < 4; k++) {
+            out->edge_width[k] = pt.edge_width[k] == pt.border_width ? 0 : pt.edge_width[k];
+        }
+    }
+
+    pd_doc_theme_cell(d, out);
+}
+
+pd_status pd_doc_cell_resolve(const pd_doc* d, pd_block_id cell, pd_cell_props* out) {
+    const blk* c = d ? pd_doc_blk(d, cell) : NULL;
+
+    if (!c || c->kind != PD_BLOCK_CELL || !out) {
+        return PD_ERR_ARG;
+    }
+
+    pd_doc_cell_effective(d, c, out);
+    return PD_OK;
+}
+
+/* a table's own properties, its grid's rules the style's where it gives none itself */
+void pd_doc_table_effective(const pd_doc* d, const blk* t, pd_table_props* out) {
+    const pd_table_style* ts = t->st.tp.style ? tstyle_cached(d, t->st.tp.style) : NULL;
+
+    *out = t->st.tp;
+
+    if (ts) {
+        int given = out->border_given & 63;
+        int own = (out->border ? (out->border_sides ? out->border_sides : 63) : 0) & given;
+        int theirs = ts->border_on & ts->border_set & ~given, on = own | theirs;
+
+        if (!own) {
+            out->border = ts->border_width;
+            out->border_color = ts->border_color;
+            out->border_theme = ts->border_theme;
+        }
+
+        out->border = on ? out->border : 0;
+        out->border_sides = on == 63 ? 0 : on;
+    }
+
+    pd_doc_theme_table(d, out);
+}
+
+pd_status pd_doc_table_resolve(const pd_doc* d, pd_block_id table, pd_table_props* out) {
+    const blk* t = d ? pd_doc_blk(d, table) : NULL;
+
+    if (!t || t->kind != PD_BLOCK_TABLE || !out) {
+        return PD_ERR_ARG;
+    }
+
+    pd_doc_table_effective(d, t, out);
+    return PD_OK;
+}
+
+const pd_table_style_part* pd_doc_para_table_part(const pd_doc* d, const blk* para, pd_table_style_part* buf) {
+    const blk* c = para ? pd_doc_blk(d, para->parent) : NULL;
+
+    return c && c->kind == PD_BLOCK_CELL && cell_part(d, c, buf) ? buf : NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /* operation framework                                                */
 /* ------------------------------------------------------------------ */
 
 static void touch(pd_doc* d, int32_t kind, pd_block_id block, pd_style_id style) {
     int32_t i;
+    blk* t = block && block < d->captab ? d->tab[block] : NULL;
+
+    t = t && t->kind == PD_BLOCK_ROW && t->parent < d->captab ? d->tab[t->parent] : t;
+
+    if (t && t->kind == PD_BLOCK_TABLE && t->st.tp.style) {
+        d->style_rev++;     /* a styled table changed: its cells' parts may be others, its text too */
+    }
 
     for (i = 0; i < d->ntouched; i++) {
         if (d->touched[i].kind == kind && d->touched[i].block == block && d->touched[i].style == style) {
@@ -2291,7 +2776,7 @@ static void toggle(pd_doc* d, urec* r) {
         }
 
         touch(d, PD_CHANGE_STRUCTURE, r->parent, 0);
-    } else if (r->type == UR_STYLE) {
+    } else if (r->type == UR_STYLE && r->style) {
         dstyle t = d->styles[r->style - 1];
 
         d->styles[r->style - 1] = r->sdef;
@@ -3265,7 +3750,9 @@ int pd_doc_table_props_ok(const pd_table_props* tp) {
 pd_status pd_doc_set_table_props(pd_doc* d, pd_block_id id, const pd_table_props* tp) {
     blk* b = d ? pd_doc_blk(d, id) : NULL;
 
-    BLOCK_OP("Table", b && b->kind == PD_BLOCK_TABLE && pd_doc_table_props_ok(tp),
+    BLOCK_OP("Table", b && b->kind == PD_BLOCK_TABLE && pd_doc_table_props_ok(tp) && (!tp->style ||
+             (style_of(d, tp->style) && style_of(d, tp->style)->kind == PD_STYLE_TABLE)) && (tp->look & ~63) == 0 &&
+             (tp->border_given & ~63) == 0,
              (b->st.tp = *tp, memset(b->st.tp.col_width + tp->ncols, 0,
                                      (size_t)(PD_TABLE_MAX_COLS - tp->ncols) * sizeof(pd_sp))));
 }
@@ -3544,6 +4031,7 @@ pd_status pd_doc_style_define(pd_doc* d, const char* name, pd_style_kind kind, p
         dstyle dead = ns;
 
         dead.alive = 0;
+        dead.ts = NULL;
 
         if (add_style_raw(d, name, kind, 0, NULL, NULL, &id)) {
             op_end(d, 0, 0, 0);
@@ -4834,6 +5322,99 @@ pd_status pd_doc_set_theme(pd_doc* d, const pd_theme* theme) {
     d->theme_rev++;
     d->style_rev++;
     touch(d, PD_CHANGE_STYLE, 0, 0);
+    op_end(d, 0, 0, 0);
+    return PD_OK;
+}
+
+pd_status pd_doc_table_style_define(pd_doc* d, const char* name, pd_style_id parent, const pd_table_style* ts,
+                                    pd_style_id* out) {
+    pd_style_id id, a;
+    dstyle ns, *ps;
+    urec* r;
+    int depth, k;
+
+    if (!d || !name || !name[0] || strlen(name) >= sizeof(ns.name) || !ts || !tstyle_ok(ts) ||
+            !pd_doc_utf8_valid(name, strlen(name), 0)) {
+        return PD_ERR_ARG;
+    }
+
+    ps = style_of(d, parent);
+
+    if (parent && (!ps || ps->kind != PD_STYLE_TABLE)) {
+        return PD_ERR_ARG;
+    }
+
+    id = pd_doc_style_find(d, name);
+
+    if (id && d->styles[id - 1].kind != PD_STYLE_TABLE) {
+        return PD_ERR_ARG;
+    }
+
+    for (a = parent, depth = 0; a && depth < 1000; a = d->styles[a - 1].parent, depth++) {
+        if (a == id && id) {
+            return PD_ERR_ARG;     /* would make a cycle */
+        }
+    }
+
+    memset(&ns, 0, sizeof(ns));
+    strcpy(ns.name, name);
+    ns.kind = PD_STYLE_TABLE;
+    ns.parent = parent;
+    ns.alive = 1;
+
+    if ((ns.ts = (pd_table_style*)malloc(sizeof(pd_table_style))) == NULL) {
+        return PD_ERR_NOMEM;
+    }
+
+    *ns.ts = *ts;
+
+    for (k = 0; k < PD_TPART_COUNT; k++) {
+        pd_table_style_part* p = &ns.ts->part[k];
+
+        p->given = p->given ? 1 : 0;
+        p->has_shading = p->has_shading ? 1 : 0;
+        p->border_on &= p->border_set;
+        p->para.mask &= ~PD_PP_NEXT_STYLE;
+        pd_doc_pp_normalize(&p->para);
+        pd_doc_cp_normalize(&p->chr);
+    }
+
+    ns.ts->border_on &= ns.ts->border_set;
+
+    if (op_begin(d, "Define table style", 0, 0, 0)) {
+        free(ns.ts);
+        op_end(d, 0, 0, 0);
+        return PD_ERR_NOMEM;
+    }
+
+    if (!id) {
+        if (add_style_raw(d, name, PD_STYLE_TABLE, 0, NULL, NULL, &id)) {
+            free(ns.ts);
+            op_end(d, 0, 0, 0);
+            return PD_ERR_NOMEM;
+        }
+
+        d->styles[id - 1].alive = 0;
+    }
+
+    r = add_rec(d, UR_STYLE);
+
+    if (!r) {
+        free(ns.ts);
+        op_end(d, 0, 0, 0);
+        return PD_ERR_NOMEM;
+    }
+
+    r->style = id;
+    r->sdef = d->styles[id - 1];
+    d->styles[id - 1] = ns;
+    d->style_rev++;
+    touch(d, PD_CHANGE_STYLE, 0, id);
+
+    if (out) {
+        *out = id;
+    }
+
     op_end(d, 0, 0, 0);
     return PD_OK;
 }

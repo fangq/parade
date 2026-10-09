@@ -801,7 +801,7 @@ static void mx_table(mx* x, pd_block_id t) {
         for (c = 0; c < ri.child_count; c++) {
             pd_cell_props cp;
 
-            pd_doc_cell_props(x->d, pd_doc_child(x->d, pd_doc_child(x->d, t, r), c), &cp);
+            pd_doc_cell_resolve(x->d, pd_doc_child(x->d, pd_doc_child(x->d, t, r), c), &cp);
             w += cp.col_span;
         }
 
@@ -824,7 +824,7 @@ static void mx_table(mx* x, pd_block_id t) {
             pd_cell_props cp;
 
             pd_doc_block_info(x->d, cell, &ci);
-            pd_doc_cell_props(x->d, cell, &cp);
+            pd_doc_cell_resolve(x->d, cell, &cp);
             pb_putc(x->o, ' ');
 
             for (k = 0; k < ci.child_count; k++) {
@@ -865,7 +865,7 @@ static void mx_table(mx* x, pd_block_id t) {
                 pd_para_props pp;
                 int al = -1;
 
-                pd_doc_cell_props(x->d, cell, &cp);
+                pd_doc_cell_resolve(x->d, cell, &cp);
 
                 if (pd_doc_para_props(x->d, pd_doc_child(x->d, cell, 0), &pp) == PD_OK && (pp.mask & PD_PP_ALIGN)) {
                     al = pp.align;

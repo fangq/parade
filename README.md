@@ -42,6 +42,15 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   come from .docx (`w:themeColor`/tint/shade, `w:asciiTheme`) and .pptx
   (`schemeClr`, `+mj-lt`), are kept in Parade's format and collaboration, and
   go back to .docx with a theme part patched to the theme as it is now.
+- **Table styles**: a style kind of its own (`PD_STYLE_TABLE`,
+  `pd_doc_table_style_define`): the whole table, row and column bands, first
+  and last rows and columns, corner cells, each with cell shading and rules
+  and the paragraph and character properties of the text in its cells. A
+  table names one with a look (`PD_TLOOK_*`, Word's tblLook); the cells and
+  their text take its parts where they are laid out (`pd_doc_cell_style`,
+  `pd_doc_cell_resolve`, `pd_doc_table_resolve`, `pd_doc_para_resolve`), so
+  adding a row moves the banding and redefining the style restyles every
+  table. Read from and written to .docx (`w:tblStyle`, `w:tblStylePr`).
 - **Inline objects** (images, equations, fields, footnote marks, links,
   bookmarks, tabs) occupy U+FFFC, so document and layout offsets agree.
 - **Editing**: every change is an operation recording its inverse —

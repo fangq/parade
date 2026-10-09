@@ -73,6 +73,7 @@ typedef struct {
     pd_para_props pp;
     pd_char_props cp;
     int alive;
+    pd_table_style* ts;         /* PD_STYLE_TABLE: its definition, owned (an undo record owns the one it holds) */
 } dstyle;
 
 typedef struct {
@@ -202,6 +203,11 @@ struct pd_doc {
     uint64_t comment_rev;       /* bumped by every comment change */
     uint64_t meta_rev;          /* bumped by every metadata change */
     pd_theme theme;             /* pd_doc_set_theme; Office's by default */
+    struct {                    /* table styles resolved (based-on chains folded), by style id, for style_rev */
+        uint64_t rev;
+        pd_table_style* ts;
+    }* tsc;
+    int32_t ntsc;
     uint64_t theme_rev;         /* bumped by every theme change */
     /* deltas: what each finished operation changed, for a journal or a replica */
     pd_delta_fn delta_fn;
@@ -238,6 +244,13 @@ void      pd_doc_theme_pp(const pd_doc* d, pd_para_props* pp);
 void      pd_doc_theme_cell(const pd_doc* d, pd_cell_props* c);
 void      pd_doc_theme_table(const pd_doc* d, pd_table_props* t);
 void      pd_doc_theme_raw(pd_doc* d, const pd_theme* theme);
+/* the part of its table's style a paragraph in a cell takes (NULL if none); *plain: its style is Normal */
+const pd_table_style_part* pd_doc_para_table_part(const pd_doc* d, const blk* para, pd_table_style_part* buf);
+void      pd_doc_style_resolve_in(const pd_doc* d, pd_style_id id, const pd_table_style_part* part, pd_para_props* pp,
+                                  pd_char_props* cp);
+/* a cell's and a table's properties as they show (pd_doc_cell_resolve, pd_doc_table_resolve) */
+void      pd_doc_cell_effective(const pd_doc* d, const blk* c, pd_cell_props* out);
+void      pd_doc_table_effective(const pd_doc* d, const blk* t, pd_table_props* out);
 /* a colour's HSL luminance scaled by mul and moved by add (DrawingML's lumMod and lumOff) */
 uint32_t  pd_lum_adjust(uint32_t c, double mul, double add);
 void      pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp* label_x);
@@ -275,6 +288,8 @@ void pd_jd_put_cp(void* pj_writer, const pd_char_props* c);
 int  pd_jd_get_pp(pd_doc* d, const void* pj_node, pd_para_props* p);
 int  pd_jd_get_cp(pd_doc* d, const void* pj_node, pd_char_props* c);
 void pd_jd_put_theme(void* pj_writer, const pd_theme* t);
+void pd_jd_put_tstyle(void* pj_writer, const pd_table_style* ts);
+int  pd_jd_get_tstyle(pd_doc* d, const void* pj_node, pd_table_style* ts);
 int  pd_jd_get_theme(pd_doc* d, const void* pj_node, pd_theme* t);
 /* a non-paragraph block's properties (the object pd_jd_put_block writes) into a state */
 int  pd_jd_get_block(pd_doc* d, const void* pj_node, int32_t kind, bstate* st);

@@ -690,7 +690,7 @@ static int hx_merges_at(const hx* x, pd_block_id row, int32_t col) {
     for (c = 0; c < ri.child_count && at <= col; c++) {
         pd_cell_props cp;
 
-        pd_doc_cell_props(x->d, pd_doc_child(x->d, row, c), &cp);
+        pd_doc_cell_resolve(x->d, pd_doc_child(x->d, row, c), &cp);
 
         if (at == col) {
             return cp.merge_up;
@@ -708,7 +708,7 @@ static void hx_table(hx* x, pd_block_id t) {
     int32_t r, c, col;
 
     pd_doc_block_info(x->d, t, &ti);
-    pd_doc_table_props(x->d, t, &tp);
+    pd_doc_table_resolve(x->d, t, &tp);
     pb_printf(x->o, "<table%s%s>\n", tp.border ? " class=\"grid\"" : "", tp.direction == PD_DIR_RTL ? " dir=\"rtl\"" : "");
 
     for (r = 0; r < ti.child_count; r++) {
@@ -731,7 +731,7 @@ static void hx_table(hx* x, pd_block_id t) {
             pd_cell_props cp;
             int32_t down = 1;
 
-            pd_doc_cell_props(x->d, cell, &cp);
+            pd_doc_cell_resolve(x->d, cell, &cp);
 
             if (cp.merge_up) {  /* covered by the rowspan of the cell above */
                 col += cp.col_span;

@@ -1345,7 +1345,7 @@ static pd_cell_props cell_props_at(const pd_doc* d, pd_block_id t, int32_t r, in
     pd_cell_props cp;
 
     memset(&cp, 0, sizeof(cp));
-    pd_doc_cell_props(d, pd_doc_child(d, pd_doc_child(d, t, r), c), &cp);
+    pd_doc_cell_resolve(d, pd_doc_child(d, pd_doc_child(d, t, r), c), &cp);     /* as it shows */
     return cp;
 }
 
@@ -3574,6 +3574,9 @@ static void test_docx_table_styles(void) {
 
         t = first_table(d);
         CHECK(t != 0 && pd_doc_table_props(d, t, &tp) == PD_OK);
+        CHECK(tp.style != 0 && !strcmp(pd_doc_style_name(d, tp.style), "Lined") && tp.look == (PD_TLOOK_FIRST_ROW |
+                PD_TLOOK_NO_VBAND) && tp.border_given == 0);   /* the style itself, named, its rules its own */
+        CHECK(pd_doc_table_resolve(d, t, &tp) == PD_OK);
         CHECK(tp.border == PD_PT(1.5) && tp.border_sides == (PD_TBORDER_TOP | PD_TBORDER_BOTTOM | PD_TBORDER_INSIDE_H));
         CHECK(tp.cell_padding == PD_PT(5.4) && tp.cell_padding_v == 0 && tp.indent == PD_PT(36) &&
               tp.width_pct == 500);
@@ -3594,8 +3597,9 @@ static void test_docx_table_styles(void) {
         CHECK(c.background == 0 && c.border_set == PD_BORDER_TOP && c.border_on == 0);
 
         /* the style's paragraph spacing in the cells, over Normal's */
-        pp = para_resolved(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 2), 1), 0));
-        CHECK(pp.space_after == 0);
+        CHECK(pd_doc_para_resolve(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 2), 1), 0), &pp) == PD_OK &&
+              pp.space_after == 0);
+        (void)para_resolved;
     }
 
     pd_doc_free(d);

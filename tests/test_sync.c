@@ -842,6 +842,49 @@ static void test_merge(void) {
     free(n);
 }
 
+/* a table style: defined on one replica with a table that takes it, on the others the same (by name) */
+static void test_table_style(void) {
+    pd_table_style* ts = (pd_table_style*)calloc(1, sizeof(pd_table_style));
+    pd_block_id sec, t;
+    pd_table_props tp;
+    pd_style_id sid;
+    int k;
+
+    if (!ts) {
+        return;
+    }
+
+    pd_table_style_init(ts);
+    ts->part[PD_TPART_WHOLE].given = 1;
+    ts->part[PD_TPART_FIRST_ROW].given = 1;
+    ts->part[PD_TPART_FIRST_ROW].has_shading = 1;
+    ts->part[PD_TPART_FIRST_ROW].shading = 0xFF123456u;
+    ts->part[PD_TPART_FIRST_ROW].chr.mask = PD_CP_WEIGHT;
+    ts->part[PD_TPART_FIRST_ROW].chr.weight = 700;
+    CHECK(pd_doc_table_style_define(R[2].d, "Shared Grid", 0, ts, &sid) == PD_OK);
+    sec = pd_doc_child(R[2].d, pd_doc_root(R[2].d), 0);
+    CHECK(pd_doc_insert_block(R[2].d, sec, 0, PD_BLOCK_TABLE, &t) == PD_OK);
+    pd_doc_table_props(R[2].d, t, &tp);
+    tp.style = sid;
+    tp.look = PD_TLOOK_FIRST_ROW;
+    CHECK(pd_doc_set_table_props(R[2].d, t, &tp) == PD_OK);
+    deliver_all();
+    CHECK(same_everywhere("table style", 1));
+
+    for (k = 0; k < NREP; k++) {
+        pd_block_id tk = pd_doc_child(R[k].d, pd_doc_child(R[k].d, pd_doc_root(R[k].d), 0), 0);
+        pd_cell_props c;
+        pd_table_props tq;
+
+        CHECK(pd_doc_table_props(R[k].d, tk, &tq) == PD_OK && tq.style &&
+              !strcmp(pd_doc_style_name(R[k].d, tq.style), "Shared Grid"));
+        CHECK(pd_doc_cell_resolve(R[k].d, pd_doc_child(R[k].d, pd_doc_child(R[k].d, tk, 0), 0), &c) == PD_OK &&
+              c.background == 0xFF123456u);
+    }
+
+    free(ts);
+}
+
 /* the theme: one replica changes it, the others follow, with what is linked to it; undone the same way */
 static void test_theme(void) {
     pd_theme t;
@@ -903,6 +946,8 @@ int main(void) {
     test_merge();
     printf("the theme\n");
     test_theme();
+    printf("a table style\n");
+    test_table_style();
 
     for (k = 0; k < NREP; k++) {
         pd_sync_free(R[k].s);

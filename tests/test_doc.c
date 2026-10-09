@@ -1392,6 +1392,179 @@ static void test_deltas(void) {
     pd_doc_free(d);
 }
 
+/* a table style: the parts a cell takes for where it is (bands, first and last rows, the first column, a corner) and
+   the text they give its paragraphs; redefined, undone, the theme changed, a row added; kept through saving */
+static pd_cell_props tcell(const pd_doc* d, pd_block_id t, int r, int c) {
+    pd_cell_props cp;
+
+    memset(&cp, 0, sizeof(cp));
+    pd_doc_cell_resolve(d, pd_doc_child(d, pd_doc_child(d, t, r), c), &cp);
+    return cp;
+}
+
+static pd_char_props tchars(const pd_doc* d, pd_block_id t, int r, int c) {
+    pd_block_id p = pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, r), c), 0);
+    pd_char_props cp;
+    pd_run run[4];
+    int32_t n = 0;
+
+    memset(&cp, 0, sizeof(cp));
+    pd_doc_para_runs(d, p, run, 4, &n);
+    pd_doc_format_resolve(d, p, n ? run[0].format : 0, &cp);
+    return cp;
+}
+
+static void test_table_styles(void) {
+    pd_doc* d = NULL, *back = NULL;
+    pd_block_id sec, t, row, cell, p;
+    pd_table_style* ts = (pd_table_style*)calloc(1, sizeof(pd_table_style));
+    pd_table_props tp;
+    pd_style_id sid, h1;
+    pd_cell_props c;
+    pd_char_props cp;
+    pd_para_props pp;
+    pd_theme th;
+    int r, k;
+
+    CHECK(ts && pd_doc_new(&d) == PD_OK);
+
+    if (!ts || !d) {
+        free(ts);
+        return;
+    }
+
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+    CHECK(pd_doc_insert_block(d, sec, 0, PD_BLOCK_TABLE, &t) == PD_OK);
+
+    for (r = 0; r < 4; r++) {
+        if (r > 0) {
+            pd_doc_insert_block(d, t, -1, PD_BLOCK_ROW, NULL);
+        }
+
+        row = pd_doc_child(d, t, r);
+
+        for (k = 0; k < 3; k++) {
+            if (k > 0) {
+                pd_doc_insert_block(d, row, -1, PD_BLOCK_CELL, NULL);
+            }
+
+            cell = pd_doc_child(d, row, k);
+            p = pd_doc_child(d, cell, 0);
+            pd_doc_insert_text(d, at(p, 0), "x", 1, PD_FORMAT_INHERIT, NULL);
+        }
+    }
+
+    pd_table_style_init(ts);
+    ts->border_set = ts->border_on = 63;
+    ts->border_width = PD_PT(0.5);
+    ts->border_color = 0xFF000000u;
+    ts->part[PD_TPART_WHOLE].given = 1;
+    ts->part[PD_TPART_WHOLE].chr.mask = PD_CP_SIZE;
+    ts->part[PD_TPART_WHOLE].chr.size = PD_PT(9);
+    ts->part[PD_TPART_WHOLE].para.mask = PD_PP_SPACE_AFTER;
+    ts->part[PD_TPART_WHOLE].para.space_after = 0;
+    ts->part[PD_TPART_FIRST_ROW].given = 1;
+    ts->part[PD_TPART_FIRST_ROW].has_shading = 1;
+    ts->part[PD_TPART_FIRST_ROW].shading = 0xFF4472C4u;
+    ts->part[PD_TPART_FIRST_ROW].shading_theme = pd_theme_color(PD_THEME_ACCENT1, 100000, 0);
+    ts->part[PD_TPART_FIRST_ROW].chr.mask = PD_CP_WEIGHT | PD_CP_COLOR;
+    ts->part[PD_TPART_FIRST_ROW].chr.weight = 700;
+    ts->part[PD_TPART_FIRST_ROW].chr.color = 0xFFFFFFFFu;
+    ts->part[PD_TPART_BAND1_H].given = 1;
+    ts->part[PD_TPART_BAND1_H].has_shading = 1;
+    ts->part[PD_TPART_BAND1_H].shading = 0xFFDDDDDDu;
+    ts->part[PD_TPART_LAST_ROW].given = 1;
+    ts->part[PD_TPART_LAST_ROW].border_set = ts->part[PD_TPART_LAST_ROW].border_on = PD_BORDER_TOP;
+    ts->part[PD_TPART_LAST_ROW].border_width = PD_PT(2);
+    ts->part[PD_TPART_LAST_ROW].border_color = 0xFF000000u;
+    ts->part[PD_TPART_FIRST_COL].given = 1;
+    ts->part[PD_TPART_FIRST_COL].chr.mask = PD_CP_ITALIC;
+    ts->part[PD_TPART_FIRST_COL].chr.italic = 1;
+    ts->part[PD_TPART_NW].given = 1;
+    ts->part[PD_TPART_NW].has_shading = 1;
+    ts->part[PD_TPART_NW].shading = 0xFFFF0000u;
+    CHECK(pd_doc_table_style_define(d, "Banded", 0, ts, &sid) == PD_OK && sid != 0);
+    CHECK(pd_doc_table_style_define(d, "Normal", 0, ts, NULL) == PD_ERR_ARG);   /* a paragraph style's name */
+    CHECK(pd_doc_style_define(d, "Banded", PD_STYLE_PARAGRAPH, 0, NULL, NULL, NULL) == PD_ERR_ARG);
+    pd_doc_table_props(d, t, &tp);
+    tp.style = pd_doc_style_find(d, "Normal");
+    CHECK(pd_doc_set_table_props(d, t, &tp) == PD_ERR_ARG);     /* not a table style */
+    tp.style = sid;
+    tp.look = PD_TLOOK_FIRST_ROW | PD_TLOOK_FIRST_COL | PD_TLOOK_LAST_ROW | PD_TLOOK_NO_VBAND;
+    CHECK(pd_doc_set_table_props(d, t, &tp) == PD_OK);
+
+    /* the corner, the header row, the bands, the last row */
+    c = tcell(d, t, 0, 0);
+    cp = tchars(d, t, 0, 0);
+    CHECK(c.background == 0xFFFF0000u && cp.weight == 700 && cp.italic && cp.size == PD_PT(9));
+    c = tcell(d, t, 0, 1);
+    cp = tchars(d, t, 0, 1);
+    CHECK(c.background == 0xFF4472C4u && cp.weight == 700 && !cp.italic && cp.color == 0xFFFFFFFFu);
+    CHECK(tcell(d, t, 1, 1).background == 0xFFDDDDDDu && tcell(d, t, 2, 1).background == 0);
+    c = tcell(d, t, 3, 1);
+    CHECK(c.background == 0xFFDDDDDDu && (c.border_set & PD_BORDER_TOP) && (c.border_on & PD_BORDER_TOP) &&
+          c.border_width == PD_PT(2));     /* banded too, the last row's rule over it */
+    CHECK(tchars(d, t, 2, 0).italic && !tchars(d, t, 2, 1).italic && tchars(d, t, 2, 1).weight == 400);
+    CHECK(pd_doc_table_resolve(d, t, &tp) == PD_OK && tp.border == PD_PT(0.5) && tp.border_sides == 0);
+    CHECK(pd_doc_para_resolve(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 1), 1), 0), &pp) == PD_OK &&
+          pp.space_after == 0);
+
+    /* a cell's own over the style's; a heading's size over the style's text */
+    memset(&c, 0, sizeof(c));
+    pd_doc_cell_props(d, pd_doc_child(d, pd_doc_child(d, t, 1), 2), &c);
+    c.background = 0xFF00FF00u;
+    CHECK(pd_doc_set_cell_props(d, pd_doc_child(d, pd_doc_child(d, t, 1), 2), &c) == PD_OK);
+    CHECK(tcell(d, t, 1, 2).background == 0xFF00FF00u);
+    h1 = pd_doc_style_find(d, "Heading 1");
+    p = pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 2), 2), 0);
+    CHECK(pd_doc_set_para_style(d, p, h1) == PD_OK);
+    {
+        pd_char_props hc;
+
+        pd_doc_style_resolve(d, h1, NULL, &hc);
+        CHECK(tchars(d, t, 2, 2).size == hc.size && hc.size != PD_PT(9));
+    }
+
+    /* the theme's accent: the header follows */
+    pd_doc_theme(d, &th);
+    th.color[PD_THEME_ACCENT1] = 0xFF008000u;
+    CHECK(pd_doc_set_theme(d, &th) == PD_OK && tcell(d, t, 0, 1).background == 0xFF008000u);
+
+    /* redefined: another band colour; undone, the first again */
+    ts->part[PD_TPART_BAND1_H].shading = 0xFFCCCCFFu;
+    CHECK(pd_doc_table_style_define(d, "Banded", 0, ts, NULL) == PD_OK && tcell(d, t, 1, 1).background == 0xFFCCCCFFu);
+    CHECK(pd_doc_undo(d) == PD_OK && tcell(d, t, 1, 1).background == 0xFFDDDDDDu);
+    CHECK(pd_doc_redo(d) == PD_OK && tcell(d, t, 1, 1).background == 0xFFCCCCFFu);
+
+    /* a row added at the end: the last row's rule moves to it, the bands go on */
+    CHECK(pd_doc_insert_block(d, t, -1, PD_BLOCK_ROW, NULL) == PD_OK);
+    CHECK(!(tcell(d, t, 3, 0).border_set & PD_BORDER_TOP) && (tcell(d, t, 4, 0).border_on & PD_BORDER_TOP));
+    CHECK(tcell(d, t, 3, 1).background == 0xFFCCCCFFu);
+
+    {   /* saved and loaded: the style, the table's look, what the cells come to */
+        buf_t a = save(d, PD_JDATA_TEXT), b;
+
+        CHECK(contains(a, "\"table\"", 7));
+        CHECK(pd_doc_load(a.p, a.n, PD_JDATA_AUTO, &back) == PD_OK);
+
+        if (back) {
+            pd_block_id t2 = pd_doc_child(back, pd_doc_child(back, pd_doc_root(back), 0), 0);
+
+            CHECK(tcell(back, t2, 0, 0).background == 0xFFFF0000u && tcell(back, t2, 1, 1).background == 0xFFCCCCFFu);
+            CHECK(tchars(back, t2, 0, 1).weight == 700 && tcell(back, t2, 0, 1).background == 0xFF008000u);
+            b = save(back, PD_JDATA_TEXT);
+            CHECK(same(a, b));
+            free(b.p);
+            pd_doc_free(back);
+        }
+
+        free(a.p);
+    }
+
+    pd_doc_free(d);
+    free(ts);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);   /* progress stays in order with sanitizer reports */
     printf("basics\n");
@@ -1416,6 +1589,8 @@ int main(void) {
     test_track_changes();
     printf("deltas: follower and journal\n");
     test_deltas();
+    printf("table styles\n");
+    test_table_styles();
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

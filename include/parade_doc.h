@@ -192,7 +192,8 @@ PD_API pd_block_id pd_doc_prev_paragraph(const pd_doc* doc, pd_block_id block);
 
 typedef enum {
     PD_STYLE_PARAGRAPH = 0,     /**< carries paragraph and character properties */
-    PD_STYLE_CHARACTER = 1      /**< character properties only */
+    PD_STYLE_CHARACTER = 1,     /**< character properties only */
+    PD_STYLE_TABLE = 2          /**< a table's look: pd_doc_table_style_define */
 } pd_style_kind;
 
 /* character property mask bits: a style or override sets only the masked fields */
@@ -486,6 +487,8 @@ PD_API pd_status pd_doc_para_runs(const pd_doc* doc, pd_block_id paragraph, pd_r
 
 /** a paragraph's direct properties (only the masked fields are set on the paragraph itself) */
 PD_API pd_status pd_doc_para_props(const pd_doc* doc, pd_block_id paragraph, pd_para_props* out);
+/** a paragraph's properties as it is laid out: its style's (and its table style's, in a cell), its own over them */
+PD_API pd_status pd_doc_para_resolve(const pd_doc* doc, pd_block_id paragraph, pd_para_props* out);
 
 /** 1 when a paragraph reads right to left: its direction (its own or its style's) RTL, or automatic and its first
     strong character right-to-left; then its alignment, indents and tabs are measured from the right (LEFT
@@ -665,7 +668,19 @@ typedef struct {
     int32_t direction;          /**< pd_direction: PD_DIR_RTL lays its columns out from the right (the first at the
                                      right edge), its indent and LEFT alignment measured from the right */
     uint32_t border_theme;      /**< pd_theme_color reference of border_color, 0 = none */
+    pd_style_id style;          /**< its table style (PD_STYLE_TABLE), 0 = none */
+    int32_t look;               /**< PD_TLOOK_*: which of the style's conditional parts apply */
+    int32_t border_given;       /**< with a style: the PD_TBORDER_* rules the table sets itself (border, border_sides,
+                                     border_color); the others are the style's */
 } pd_table_props;
+
+/* which parts of a table style a table shows (Word's tblLook) */
+#define PD_TLOOK_FIRST_ROW (1 << 0)
+#define PD_TLOOK_LAST_ROW  (1 << 1)
+#define PD_TLOOK_FIRST_COL (1 << 2)
+#define PD_TLOOK_LAST_COL  (1 << 3)
+#define PD_TLOOK_NO_HBAND  (1 << 4)     /**< rows not banded */
+#define PD_TLOOK_NO_VBAND  (1 << 5)     /**< columns not banded */
 
 /* when line numbers start again */
 #define PD_LINENUM_PAGE       0
@@ -698,6 +713,79 @@ typedef struct {
     uint32_t background_theme;  /**< pd_theme_color reference of background, 0 = none */
     uint32_t border_theme;      /**< pd_theme_color reference of border_color, 0 = none */
 } pd_cell_props;
+
+/* ------------------------------------------------------------------ */
+/* Table styles                                                       */
+/* ------------------------------------------------------------------ */
+
+/* the parts of a table style, in the order they apply (a later part over an earlier one) */
+#define PD_TPART_WHOLE     0    /**< every cell */
+#define PD_TPART_BAND1_V   1    /**< odd column bands */
+#define PD_TPART_BAND2_V   2
+#define PD_TPART_BAND1_H   3    /**< odd row bands */
+#define PD_TPART_BAND2_H   4
+#define PD_TPART_FIRST_COL 5
+#define PD_TPART_LAST_COL  6
+#define PD_TPART_FIRST_ROW 7
+#define PD_TPART_LAST_ROW  8
+#define PD_TPART_NE        9    /**< corner cells, where a header row and column meet */
+#define PD_TPART_NW        10
+#define PD_TPART_SE        11
+#define PD_TPART_SW        12
+#define PD_TPART_COUNT     13
+
+/** what a table style says of a part's cells, and of the text in them */
+typedef struct {
+    int32_t given;              /**< 1: the style says something of this part */
+    int32_t has_shading;        /**< 1: shading says the cells' fill (0 there: none) */
+    uint32_t shading;           /**< 0xAARRGGBB */
+    uint32_t shading_theme;     /**< pd_theme_color reference, 0 = none */
+    int32_t border_set;         /**< PD_BORDER_TOP/RIGHT/BOTTOM/LEFT edges of the cells it says */
+    int32_t border_on;          /**< of those, the ruled ones */
+    pd_sp border_width;
+    pd_sp edge_width[4];        /**< top, right, bottom, left; 0: border_width */
+    uint32_t border_color;
+    uint32_t border_theme;
+    pd_para_props para;         /**< masked: the paragraphs in its cells */
+    pd_char_props chr;          /**< masked: their text */
+} pd_table_style_part;
+
+typedef struct {
+    pd_table_style_part part[PD_TPART_COUNT];
+    int32_t row_band, col_band; /**< rows and columns in a band, 0 = 1 */
+    pd_sp cell_padding;         /**< at the sides, -1 = unsaid */
+    pd_sp cell_padding_v;       /**< above and below, -1 = unsaid */
+    int32_t border_set;         /**< PD_TBORDER_* rules of the table's grid it says */
+    int32_t border_on;          /**< of those, the ruled ones */
+    pd_sp border_width;
+    uint32_t border_color;
+    uint32_t border_theme;
+} pd_table_style;
+
+/** an empty table style: no part given, padding unsaid */
+PD_API void      pd_table_style_init(pd_table_style* ts);
+/**
+ * Define (or redefine) a table style; parent is another table style it is
+ * based on, 0 none. Tables name it in pd_table_props.style. The text of a
+ * paragraph in a styled table takes the parts' properties over Normal's and
+ * under any other paragraph style's (as Word does).
+ */
+PD_API pd_status pd_doc_table_style_define(pd_doc* doc, const char* name, pd_style_id parent, const pd_table_style* ts,
+                                           pd_style_id* out);
+/** a table style's own definition, and the style it is based on */
+PD_API pd_status pd_doc_table_style_info(const pd_doc* doc, pd_style_id style, pd_style_id* parent,
+                                         pd_table_style* out);
+/** a table style with those it is based on folded in */
+PD_API pd_status pd_doc_table_style_resolve(const pd_doc* doc, pd_style_id style, pd_table_style* out);
+/** a paragraph style resolved as for a paragraph in a cell whose table style says part (NULL: none) */
+PD_API pd_status pd_doc_style_resolve_with(const pd_doc* doc, pd_style_id style, const pd_table_style_part* part,
+                                           pd_para_props* para, pd_char_props* chr);
+/** what a cell's table style says of it: the parts for where it is, under the table's look, folded together */
+PD_API pd_status pd_doc_cell_style(const pd_doc* doc, pd_block_id cell, pd_table_style_part* out);
+/** a cell's properties as they show: its own, with its table style's shading and rules where it says none */
+PD_API pd_status pd_doc_cell_resolve(const pd_doc* doc, pd_block_id cell, pd_cell_props* out);
+/** a table's properties as they show: its grid's rules its own where given, else its style's */
+PD_API pd_status pd_doc_table_resolve(const pd_doc* doc, pd_block_id table, pd_table_props* out);
 
 PD_API pd_status pd_doc_float_props(const pd_doc* doc, pd_block_id flt, pd_float_props* out);
 PD_API pd_status pd_doc_section_props(const pd_doc* doc, pd_block_id section, pd_section_props* out);

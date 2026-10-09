@@ -1426,6 +1426,14 @@ static char* props_json(pd_sync* s, const blk* b, YTransaction* t) {
             pj_arr_end(&w);
         }
 
+        if (b->kind == PD_BLOCK_TABLE && c.st.tp.style) {     /* its table style by name, as the others know it */
+            const char* sn = pd_doc_style_name(d, c.st.tp.style);
+
+            pj_key(&w, "TS");
+            pj_cstr(&w, sn ? sn : "");
+            c.st.tp.style = 0;
+        }
+
         pj_key(&w, "B");
         pd_jd_put_block(&w, d, &c, 0);
     }
@@ -1558,8 +1566,15 @@ static void props_apply(pd_sync* s, const YTransaction* t, blk* b, const char* j
                 }
             } else if (b->kind == PD_BLOCK_FLOAT && memcmp(&st.fp, &b->st.fp, sizeof(st.fp)) != 0) {
                 pd_doc_set_float_props(d, id, &st.fp);
-            } else if (b->kind == PD_BLOCK_TABLE && memcmp(&st.tp, &b->st.tp, sizeof(st.tp)) != 0) {
-                pd_doc_set_table_props(d, id, &st.tp);
+            } else if (b->kind == PD_BLOCK_TABLE) {
+                const pj_node* tsn = pj_get(r, "TS");
+                pd_style_id ts = tsn && tsn->type == PJ_STR ? pd_doc_style_find(d, tsn->s) : 0;
+
+                st.tp.style = ts && pd_doc_table_style_info(d, ts, NULL, NULL) == PD_OK ? ts : 0;
+
+                if (memcmp(&st.tp, &b->st.tp, sizeof(st.tp)) != 0) {
+                    pd_doc_set_table_props(d, id, &st.tp);
+                }
             } else if (b->kind == PD_BLOCK_CELL && memcmp(&st.cell, &b->st.cell, sizeof(st.cell)) != 0) {
                 pd_doc_set_cell_props(d, id, &st.cell);
             } else if (b->kind == PD_BLOCK_BREAK && st.break_kind != b->st.break_kind) {
@@ -1663,6 +1678,18 @@ static char* style_json(pd_sync* s, pd_style_id id) {
     pd_jd_put_pp(&w, &pp);
     pj_key(&w, "Char");
     pd_jd_put_cp(&w, &cp);
+
+    if (kind == PD_STYLE_TABLE) {
+        pd_table_style* ts = (pd_table_style*)malloc(sizeof(pd_table_style));
+
+        if (ts && pd_doc_table_style_info(d, id, NULL, ts) == PD_OK) {
+            pj_key(&w, "Table");
+            pd_jd_put_tstyle(&w, ts);
+        }
+
+        free(ts);
+    }
+
     pj_obj_end(&w);
     pj_finish(&w);
     return pb_take(&b);
@@ -1726,8 +1753,18 @@ static void styles_pull(pd_sync* s, const YTransaction* t) {
                         parent = pd_doc_style_find(s->d, x->s);
                     }
 
-                    pd_doc_style_define(s->d, e->key, (pd_style_kind)pj_int_or(pj_get(r, "Kind"), 0), parent, &pp, &cp,
-                                        NULL);
+                    if (pj_int_or(pj_get(r, "Kind"), 0) == PD_STYLE_TABLE) {
+                        pd_table_style* ts = (pd_table_style*)malloc(sizeof(pd_table_style));
+
+                        if (ts && pd_jd_get_tstyle(s->d, pj_get(r, "Table"), ts)) {
+                            pd_doc_table_style_define(s->d, e->key, parent, ts, NULL);
+                        }
+
+                        free(ts);
+                    } else {
+                        pd_doc_style_define(s->d, e->key, (pd_style_kind)pj_int_or(pj_get(r, "Kind"), 0), parent, &pp,
+                                            &cp, NULL);
+                    }
                 }
 
                 pj_free(j);

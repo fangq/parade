@@ -41,6 +41,7 @@ type
   pd_comment_id = UInt32;
 
   Ppd_sp = ^pd_sp;
+  Ppd_style_id = ^pd_style_id;
   Ppd_font = Pointer;
   Ppd_para = Pointer;
   Ppd_doc = Pointer;
@@ -118,6 +119,7 @@ const
 
   PD_STYLE_PARAGRAPH = 0;
   PD_STYLE_CHARACTER = 1;
+  PD_STYLE_TABLE = 2;
 
   PD_CP_FAMILY = 1 shl 0;
   PD_CP_SIZE = 1 shl 1;
@@ -262,6 +264,28 @@ const
   PD_FONT_THEME_NONE = 0;
   PD_FONT_THEME_MAJOR = 1;
   PD_FONT_THEME_MINOR = 2;
+
+  { table styles: their parts, in the order they apply; a table's look }
+  PD_TPART_WHOLE = 0;
+  PD_TPART_BAND1_V = 1;
+  PD_TPART_BAND2_V = 2;
+  PD_TPART_BAND1_H = 3;
+  PD_TPART_BAND2_H = 4;
+  PD_TPART_FIRST_COL = 5;
+  PD_TPART_LAST_COL = 6;
+  PD_TPART_FIRST_ROW = 7;
+  PD_TPART_LAST_ROW = 8;
+  PD_TPART_NE = 9;
+  PD_TPART_NW = 10;
+  PD_TPART_SE = 11;
+  PD_TPART_SW = 12;
+  PD_TPART_COUNT = 13;
+  PD_TLOOK_FIRST_ROW = 1;
+  PD_TLOOK_LAST_ROW = 2;
+  PD_TLOOK_FIRST_COL = 4;
+  PD_TLOOK_LAST_COL = 8;
+  PD_TLOOK_NO_HBAND = 16;
+  PD_TLOOK_NO_VBAND = 32;
   PD_BORDER_TOP = 1;
   PD_BORDER_RIGHT = 2;
   PD_BORDER_BOTTOM = 4;
@@ -583,6 +607,9 @@ type
     cell_padding_v: pd_sp;
     direction: Int32;        { pd_direction: PD_DIR_RTL lays its columns out from the right }
     border_theme: UInt32;    { pd_theme_color reference of border_color, 0 = none }
+    style: pd_style_id;      { its table style (PD_STYLE_TABLE), 0 = none }
+    look: Int32;             { PD_TLOOK_*: the style's conditional parts it shows }
+    border_given: Int32;     { with a style: the PD_TBORDER_* rules it sets itself }
   end;
   Ppd_table_props = ^pd_table_props;
 
@@ -598,6 +625,29 @@ type
     background_theme, border_theme: UInt32;     { pd_theme_color references, 0 = none }
   end;
   Ppd_cell_props = ^pd_cell_props;
+
+  { what a table style says of a part's cells (PD_TPART_*), and of their text }
+  pd_table_style_part = record
+    given, has_shading: Int32;
+    shading, shading_theme: UInt32;
+    border_set, border_on: Int32;   { PD_BORDER_* edges said, ruled }
+    border_width: pd_sp;
+    edge_width: array[0..3] of pd_sp;
+    border_color, border_theme: UInt32;
+    para: pd_para_props;
+    chr: pd_char_props;
+  end;
+  Ppd_table_style_part = ^pd_table_style_part;
+
+  pd_table_style = record
+    part: array[0..PD_TPART_COUNT - 1] of pd_table_style_part;
+    row_band, col_band: Int32;
+    cell_padding, cell_padding_v: pd_sp;    { -1 = unsaid }
+    border_set, border_on: Int32;           { PD_TBORDER_* rules of the grid said, ruled }
+    border_width: pd_sp;
+    border_color, border_theme: UInt32;
+  end;
+  Ppd_table_style = ^pd_table_style;
 
   pd_change = record
     kind: Int32;
@@ -745,6 +795,16 @@ function pd_doc_style_define(doc: Ppd_doc; name: PAnsiChar; kind: Int32; parent:
   chr: Ppd_char_props; out_style: PUInt32): pd_status; cdecl; PDEXT;
 function pd_doc_style_find(doc: Ppd_doc; name: PAnsiChar): pd_style_id; cdecl; PDEXT;
 procedure pd_theme_init(theme: Ppd_theme); cdecl; PDEXT;
+procedure pd_table_style_init(ts: Ppd_table_style); cdecl; PDEXT;
+function pd_doc_table_style_define(doc: Ppd_doc; name: PAnsiChar; parent: pd_style_id; ts: Ppd_table_style;
+  out_: Ppd_style_id): pd_status; cdecl; PDEXT;
+function pd_doc_table_style_info(doc: Ppd_doc; style: pd_style_id; parent: Ppd_style_id;
+  out_: Ppd_table_style): pd_status; cdecl; PDEXT;
+function pd_doc_table_style_resolve(doc: Ppd_doc; style: pd_style_id; out_: Ppd_table_style): pd_status; cdecl; PDEXT;
+function pd_doc_cell_style(doc: Ppd_doc; cell: pd_block_id; out_: Ppd_table_style_part): pd_status; cdecl; PDEXT;
+function pd_doc_cell_resolve(doc: Ppd_doc; cell: pd_block_id; out_: Ppd_cell_props): pd_status; cdecl; PDEXT;
+function pd_doc_table_resolve(doc: Ppd_doc; table: pd_block_id; out_: Ppd_table_props): pd_status; cdecl; PDEXT;
+function pd_doc_para_resolve(doc: Ppd_doc; para: pd_block_id; out_: Ppd_para_props): pd_status; cdecl; PDEXT;
 function pd_doc_theme(doc: Ppd_doc; out_: Ppd_theme): pd_status; cdecl; PDEXT;
 function pd_doc_set_theme(doc: Ppd_doc; theme: Ppd_theme): pd_status; cdecl; PDEXT;
 function pd_theme_color(slot, lum_mod, lum_off: Int32): UInt32; cdecl; PDEXT;

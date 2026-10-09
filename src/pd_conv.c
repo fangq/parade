@@ -1312,6 +1312,23 @@ static pd_status copy_block(copier* C, pd_block_id src, pd_block_id parent, int3
             pd_table_props tp;
 
             if (pd_doc_table_props(C->s, src, &tp) == PD_OK) {
+                if (tp.style) {     /* its table style, by name: the target's of the name, else the source's made one */
+                    const char* sn = pd_doc_style_name(C->s, tp.style);
+                    pd_style_id ds = sn ? pd_doc_style_find(C->d, sn) : 0;
+                    pd_table_style* ts;
+
+                    if (sn && !ds && (ts = (pd_table_style*)malloc(sizeof(pd_table_style))) != NULL) {
+                        if (pd_doc_table_style_resolve(C->s, tp.style, ts) != PD_OK ||
+                                pd_doc_table_style_define(C->d, sn, 0, ts, &ds) != PD_OK) {
+                            ds = 0;
+                        }
+
+                        free(ts);
+                    }
+
+                    tp.style = ds && pd_doc_table_style_info(C->d, ds, NULL, NULL) == PD_OK ? ds : 0;
+                }
+
                 pd_doc_set_table_props(C->d, nb, &tp);
             }
 
