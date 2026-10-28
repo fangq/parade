@@ -204,6 +204,7 @@ type
     FPainterProps: pd_char_props;         { the I-beam put on the window once it exists (see MouseEnter) }
     FModified: Boolean;
     FPageGap: Integer;
+    FPaperColor: TColor;           { the paper the pages are drawn on; the desk around them is Color }
     FBack: TBitmap;                { the pages as last drawn, on the display's side: a paint copies from it }
     FBackImg: TLazIntfImage;       { ... and the same pixels here, to find what a redraw changes }
     FBackSig: string;              { what they were drawn for: size, zoom, layout, selection -- not the scroll }
@@ -255,7 +256,6 @@ type
     function PageLeft(Page: Integer): Integer;
     function TotalHeight: Integer;
     procedure UpdateScrollBar;
-    procedure Relayout;
     procedure Changed;
     procedure BuildOrder;
     function Compare(const A, B: pd_pos): Integer;
@@ -296,6 +296,7 @@ type
     function TocStyle(Level: Integer; Room: pd_sp): pd_style_id;
     function BuildToc(Container: pd_block_id; Index, MaxLevel: Integer): Integer;
     procedure SetShowMarks(AValue: Boolean);
+    procedure SetPaperColor(AValue: TColor);
     procedure PaintMarks(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double);
     function FormatAt(const P: pd_pos): pd_format_id;
     { OnScreen: the editor's view, with what only it shows (the frame of the control the caret is in) }
@@ -383,6 +384,11 @@ type
     procedure RebuildBack;
     function CaretRect(out R: TRect): Boolean;
   protected
+    { The document laid out again and the pages redrawn, without marking it
+      as changed: for a descendant that edits the document through the C
+      API of its own accord -- a view that puts a theme's colour on the
+      styles -- and so makes no edit this control can see. }
+    procedure Relayout;
     procedure Paint; override;
     procedure Resize; override;
     procedure KeyDown(var Key: Word; Shift: TShiftState); override;
@@ -846,6 +852,11 @@ type
     property OnResize;
     { formatting marks: a pilcrow at each paragraph's end }
     property ShowMarks: Boolean read FShowMarks write SetShowMarks;
+    { The paper the pages are drawn on.  White is what a document looks
+      like and is the default; a view that follows an application's theme
+      -- a preview pane on a dark theme -- sets this and Color together,
+      the one for the paper and the other for the desk around it. }
+    property PaperColor: TColor read FPaperColor write SetPaperColor default clWhite;
     property TabStop default True;
   end;
 
@@ -1626,6 +1637,7 @@ begin
   ControlStyle := ControlStyle + [csOpaque, csTripleClicks] - [csSetCaption];
   TabStop := True;
   Color := $00E0E0E0;
+  FPaperColor := clWhite;
   Cursor := crIBeam;       { a text editor's: the scroll bar has its own, below }
   FZoom := 1.0;
   FPageGap := 16;
@@ -5539,6 +5551,14 @@ begin
     Exit;
   FShowMarks := AValue;
   Invalidate;
+end;
+
+procedure TParadeEdit.SetPaperColor(AValue: TColor);
+begin
+  if AValue = FPaperColor then
+    Exit;
+  FPaperColor := AValue;
+  Invalidate;     { the pages are drawn again: the colour is in BackSignature }
 end;
 
 { a pilcrow where each paragraph on the page ends }
@@ -12820,7 +12840,7 @@ begin
   PW := Round(Info.width * PxScale);
   PH := Round(Info.height * PxScale);
   FillRectImg(Img, OX - 1, OY - 1, OX + PW + 1, OY + PH + 1, $00909090, 255);   { frame }
-  FillRectImg(Img, OX, OY, OX + PW, OY + PH, $00FFFFFF, 255);
+  FillRectImg(Img, OX, OY, OX + PW, OY + PH, TColorToRGB(FPaperColor), 255);
   if pd_layout_page_items(FLayout, Page, nil, 0, N) <> PD_OK then
     Exit;
   SetLength(Items, N + 1);
@@ -13039,8 +13059,8 @@ function TParadeEdit.BackSignature: string;
 var
   A, B: pd_pos;
 begin
-  Result := Format('%d %d %g %d %p %d %d %d', [ClientWidth, ClientHeight, FZoom, FLayoutEpoch, Pointer(FDoc),
-    Int64(pd_doc_revision(FDoc)), FRemoteRev, Ord(FShowMarks)]);
+  Result := Format('%d %d %g %d %p %d %d %d %d %d', [ClientWidth, ClientHeight, FZoom, FLayoutEpoch, Pointer(FDoc),
+    Int64(pd_doc_revision(FDoc)), FRemoteRev, Ord(FShowMarks), Integer(FPaperColor), Integer(Color)]);
   if HasSelection then
   begin
     A := SelStart;
@@ -13310,7 +13330,7 @@ var
 begin
   pd_layout_page_info(FLayout, Page, Info);
   OldZoom := FZoom;
-  Img := NewImage(Round(Info.width * Scale) + 2, Round(Info.height * Scale) + 2, $00FFFFFF);
+  Img := NewImage(Round(Info.width * Scale) + 2, Round(Info.height * Scale) + 2, TColorToRGB(FPaperColor));
   try
     PaintPage(Img, Page, 1, 1, Scale, False);
     Bmp.LoadFromIntfImage(Img);

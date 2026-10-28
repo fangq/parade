@@ -2311,6 +2311,19 @@ begin
   E.ShowMarks := True;
   Check(E.ShowMarks, 'formatting marks on');
 
+  { the paper's colour: a page drawn on dark paper is a dark page, which is
+    asked of the pixels rather than of the property that was set }
+  E.PaperColor := TColor($00201810);
+  Bmp := TBitmap.Create;
+  try
+    E.RenderPage(0, Bmp, 1.0 * 96 / 72 / PD_SP_PER_PT);
+    K := DarkPixels(Bmp);
+  finally
+    Bmp.Free;
+  end;
+  E.PaperColor := clWhite;
+  Check(K > 4 * I, Format('dark paper is drawn dark: %d dark pixels, %d on white', [K, I]));
+
   { 8h. the system's fonts: listed, loaded when used }
   Step('system fonts');
   T0 := GetTickCount64;
