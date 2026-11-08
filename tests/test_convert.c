@@ -7416,6 +7416,82 @@ static void test_docx_char_scale(void) {
     pd_doc_free(d);
 }
 
+/* A plain picture cropped (a:srcRect, in the line or floating) is drawn cropped -- the whole picture larger,
+   clipped to its box -- and the crop is written back and kept in Parade's format. */
+static void test_docx_picture_crop(void) {
+    pd_doc* d = docx_doc(
+                    "word/_rels/document.xml.rels",
+                    "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                    "</Relationships>",
+                    "word/media/image1.png", "tests/data/rgba.png",
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body><w:p>"
+                    "<w:r><w:drawing><wp:inline><wp:extent cx=\"1270000\" cy=\"635000\"/><a:graphic><a:graphicData><pic:pic>"
+                    "<pic:blipFill><a:blip r:embed=\"rId5\"/><a:srcRect l=\"25000\" t=\"10000\" r=\"25000\" b=\"10000\"/>"
+                    "<a:stretch><a:fillRect/></a:stretch></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline>"
+                    "</w:drawing></w:r></w:p></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 3 && d; pass++) {
+        pd_block_id p = pd_doc_next_paragraph(d, 0);
+        pd_inline o;
+
+        CHECK(pd_doc_inline_at(d, at(p, 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE && o.crop[0] == 25000 &&
+              o.crop[1] == 10000 && o.crop[2] == 25000 && o.crop[3] == 10000);
+
+        if (have_layout_font()) {   /* 100 x 50pt shown, of a picture drawn 200 x 62.5pt */
+            pd_layout* L = NULL;
+            pd_draw* it;
+            int32_t n = 0, k, found = 0;
+
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+            if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+                pd_layout_page_items(L, 0, NULL, 0, &n);
+                it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+                pd_layout_page_items(L, 0, it, n, &n);
+
+                for (k = 0; k < n; k++) {
+                    if (it[k].kind == PD_DRAW_IMAGE) {
+                        found = 1;
+                        CHECK(it[k].clip_w == PD_PT(100) && it[k].clip_h == PD_PT(50));
+                        CHECK(it[k].w == PD_PT(200) && it[k].h == PD_PT(62.5));
+                        CHECK(it[k].x == it[k].clip_x - PD_PT(50) && it[k].y == it[k].clip_y - PD_PT(6.25));
+                    }
+                }
+
+                free(it);
+            }
+
+            CHECK(found);
+            pd_layout_free(L);
+        }
+
+        if (pass == 0) {
+            buf_t b = { NULL, 0 };
+            char* xml;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            xml = docx_part(&b, "word/document.xml");
+            CHECK(strstr(xml, "<a:srcRect l=\"25000\" t=\"10000\" r=\"25000\" b=\"10000\"/>") != NULL);
+            free(xml);
+            free(b.p);
+            d = docx_again(d);
+        } else if (pass == 1) {
+            buf_t b = { NULL, 0 };
+            pd_doc* j = NULL;
+
+            CHECK(pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b) == PD_OK && pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = j;
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 /* the structure of the equations (m:oMath) in XML, one after another: each m: element's name and its children in
    brackets, properties (m:...Pr) left out but for a run's style and script, and the runs' text */
 static void omml_shape(const char* x, char* out, size_t cap) {
@@ -9263,6 +9339,7 @@ int main(void) {
     test_docx_omml_roundtrip();
     test_docx_ref_text();
     test_docx_char_scale();
+    test_docx_picture_crop();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

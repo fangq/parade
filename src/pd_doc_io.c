@@ -561,6 +561,19 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
                     if (o->kind == PD_INLINE_IMAGE) {
                         put_int(w, "Resource", o->resource);
+
+                        if (o->crop[0] || o->crop[1] || o->crop[2] || o->crop[3]) {
+                            int k;
+
+                            pj_key(w, "Crop");
+                            pj_arr_begin(w);
+
+                            for (k = 0; k < 4; k++) {
+                                pj_int(w, o->crop[k]);
+                            }
+
+                            pj_arr_end(w);
+                        }
                     }
 
                     if (o->kind == PD_INLINE_FIELD) {
@@ -1868,6 +1881,15 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
             q->obj.height = (pd_sp)int_or(pj_get(x, "Height"), 0, SP_MIN, SP_MAX, L);
             q->obj.depth = (pd_sp)int_or(pj_get(x, "Depth"), 0, SP_MIN, SP_MAX, L);
             q->obj.resource = (pd_res_id)int_or(pj_get(x, "Resource"), 0, 0, d->nres, L);
+
+            if ((y = pj_get(x, "Crop")) != NULL) {
+                int c;
+
+                for (c = 0; c < 4; c++) {
+                    q->obj.crop[c] = (int32_t)int_or(pj_at(y, c), 0, -100000, 100000, L);
+                }
+            }
+
             REQUIRE(q->obj.kind != PD_INLINE_IMAGE || q->obj.resource >= 1 || pj_get(x, "Source"));
 
             if ((y = pj_get(x, "Field"))) {

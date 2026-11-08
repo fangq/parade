@@ -624,6 +624,7 @@ type
     title_len: Int32;
     alt: PAnsiChar;           { images }
     alt_len: Int32;
+    crop: array[0..3] of Int32;   { images: cut off left, top, right, bottom, 100000ths }
   end;
   Ppd_inline = ^pd_inline;
 

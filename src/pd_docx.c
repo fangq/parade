@@ -793,8 +793,14 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
                 strcmp(mime, "application/vnd.parade.drawing+json") == 0;
     pd_res_id pic = ob->resource;
     int m;
+    char crop[96] = "";
 
     int chart = 0, wpc = 0;
+
+    if (ob->crop[0] || ob->crop[1] || ob->crop[2] || ob->crop[3]) {    /* cut off at its sides */
+        snprintf(crop, sizeof(crop), "<a:srcRect l=\"%d\" t=\"%d\" r=\"%d\" b=\"%d\"/>", (int)ob->crop[0],
+                 (int)ob->crop[1], (int)ob->crop[2], (int)ob->crop[3]);
+    }
 
     if (group) {    /* a metafile played into a drawing: the metafile itself goes back; a chart: the chart */
         pj_doc* jd = pj_parse(data, len, 0, NULL);
@@ -924,10 +930,10 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
 
     pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
               "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr>"
-              "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
+              "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/>%s<a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
               "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
               "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData>"
-              "</a:graphic>%s</w:drawing></w:r>", fp ? "<wp:cNvGraphicFramePr/>" : "", x->docpr, name, m + 1, cx, cy,
+              "</a:graphic>%s</w:drawing></w:r>", fp ? "<wp:cNvGraphicFramePr/>" : "", x->docpr, name, m + 1, crop, cx, cy,
               fp ? "</wp:anchor>" : "</wp:inline>");
 }
 
@@ -7348,6 +7354,7 @@ typedef struct {
     int link_depth[16], nlinks;
     /* drawings */
     char blip[64];
+    int32_t crop[4];            /* the picture's a:srcRect: l, t, r, b in 100000ths */
     long long cx, cy;
     int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
     int posh_page, posh_has_off;    /* its offset is from the page's edge; it has one */
@@ -7372,6 +7379,7 @@ typedef struct {
         const char* tbx;        /* a text box: its w:txbxContent, read into the float */
         size_t tbn;
         char* own;              /* tbx made here (WordArt's text as a paragraph), freed once read */
+        int32_t crop[4];        /* a picture's crop */
         pd_rev_id rev;          /* inserted or deleted with its anchor */
     } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
     int npend_fl;
@@ -8728,6 +8736,7 @@ static void dw_floats(dw* w) {
         memset(&o, 0, sizeof(o));
         o.kind = PD_INLINE_IMAGE;
         o.resource = w->pend_fl[k].res;
+        memcpy(o.crop, w->pend_fl[k].crop, sizeof(o.crop));
         o.width = w->pend_fl[k].w;
         o.height = w->pend_fl[k].h;
         bld_begin_para(b);
@@ -11477,6 +11486,10 @@ static void dw_image(dw* w) {
         return;
     }
 
+    if (!w->drawing_res) {
+        memcpy(o.crop, w->crop, sizeof(o.crop));
+    }
+
     if (!w->anchor) {
         dw_begin_para(w);
         dw_apply_run(w);    /* its run's format, not the one before it */
@@ -11486,6 +11499,7 @@ static void dw_image(dw* w) {
 
         memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
         w->pend_fl[k].res = o.resource;
+        memcpy(w->pend_fl[k].crop, o.crop, sizeof(o.crop));
         w->pend_fl[k].w = o.width;
         w->pend_fl[k].h = o.height;
         w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
@@ -13295,6 +13309,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->tbx = NULL;
                 w->tbn = 0;
                 w->dist = 0;
+                memset(w->crop, 0, sizeof(w->crop));
             } else if ((strcmp(t, "object") == 0 || strcmp(t, "pict") == 0) && m.type == MT_OPEN && !w->in_drawing) {
                 /* VML: an OLE object's preview picture (an equation, a chart), or an old-style picture */
                 w->in_vml = 1;
@@ -13374,6 +13389,15 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
             } else if (w->in_drawing && strcmp(t, "blip") == 0) {
                 mu_attr(&m, "r:embed", w->blip, sizeof(w->blip));
+            } else if (w->in_drawing && strcmp(t, "srcRect") == 0) {   /* the picture cropped */
+                static const char* const side[4] = { "l", "t", "r", "b" };
+                int k;
+
+                for (k = 0; k < 4; k++) {
+                    int v4 = attr_int(&m, side[k], 0);
+
+                    w->crop[k] = v4 < -100000 ? -100000 : v4 > 99999 ? 99999 : v4;
+                }
             } else if (strcmp(t, "hyperlink") == 0) {
                 int ext = 0;
                 const char* url = mu_attr(&m, "r:id", v, sizeof(v)) ? rel_target(X, v, &ext) : NULL;

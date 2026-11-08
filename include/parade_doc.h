@@ -599,6 +599,8 @@ typedef struct {
     int32_t title_len;
     const char* alt;            /**< images: the text that stands for the picture; UTF-8, as source */
     int32_t alt_len;
+    int32_t crop[4];            /**< images: how much of the picture is cut off at its left, top, right and bottom, in
+                                     100000ths of its size (DrawingML's srcRect); what is left fills width x height */
 } pd_inline;
 
 /** the inline object at a byte offset (which must hold U+FFFC) */

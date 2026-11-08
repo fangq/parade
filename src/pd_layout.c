@@ -6598,8 +6598,24 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
                 pd_doc_image_size(d, &q->obj, &iw, &ih);
 
                 if (!emit_drawing(L, D, q->obj.resource, a.x, a.y, iw, ih, b->id, g[i].cluster, l->region)) {
+                    double cl = q->obj.crop[0] / 100000.0, ct = q->obj.crop[1] / 100000.0;
+                    double cr = q->obj.crop[2] / 100000.0, cb = q->obj.crop[3] / 100000.0;
+
                     a.kind = PD_DRAW_IMAGE;
                     a.resource = q->obj.resource;
+
+                    if ((cl || ct || cr || cb) && cl + cr < 0.999 && ct + cb < 0.999) {
+                        /* cropped: the whole picture, larger, shown only in its box */
+                        a.clip_x = a.x;
+                        a.clip_y = a.y;
+                        a.clip_w = a.w;
+                        a.clip_h = a.h;
+                        a.w = (pd_sp)(a.clip_w / (1 - cl - cr));
+                        a.h = (pd_sp)(a.clip_h / (1 - ct - cb));
+                        a.x -= (pd_sp)(cl * a.w);
+                        a.y -= (pd_sp)(ct * a.h);
+                    }
+
                     emit(D, &a);
                 }
             } else if (q->obj.kind == PD_INLINE_EQUATION && d->math_font && q->obj.source && q->obj.source_len > 0) {

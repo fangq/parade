@@ -949,6 +949,19 @@ static char* obj_json(pd_sync* s, const pd_inline* o, YTransaction* t) {
         pj_cstr(&w, k);
     }
 
+    if (o->crop[0] || o->crop[1] || o->crop[2] || o->crop[3]) {
+        int c;
+
+        pj_key(&w, "Crop");
+        pj_arr_begin(&w);
+
+        for (c = 0; c < 4; c++) {
+            pj_int(&w, o->crop[c]);
+        }
+
+        pj_arr_end(&w);
+    }
+
     if (o->name[0]) {
         pj_key(&w, "Name");
         pj_cstr(&w, o->name);
@@ -1004,6 +1017,13 @@ static int obj_parse(pd_sync* s, const YTransaction* t, const pj_node* r, pd_inl
 
     if ((x = pj_get(r, "Res")) != NULL && x->type == PJ_STR) {
         o->resource = res_local(s, t, x->s);
+    }
+
+    if ((x = pj_get(r, "Crop")) != NULL) {
+        for (k = 0; k < 4; k++) {
+            o->crop[k] = (int32_t)pj_int_or(pj_at(x, k), 0);
+            o->crop[k] = o->crop[k] < -100000 ? -100000 : o->crop[k] > 100000 ? 100000 : o->crop[k];
+        }
     }
 
     if ((x = pj_get(r, "Name")) != NULL && x->type == PJ_STR) {
