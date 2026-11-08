@@ -265,6 +265,10 @@ const
   PD_PGBORDER_BEHIND = 8;
   PD_BORDER_LINE_BETWEEN = 4;
   PD_BORDER_LINE_BAR = 5;
+  PD_WRAP_POLY_MAX = 32;
+  PD_WRAPSIDE_WRAP = 0;
+  PD_WRAPSIDE_BOTH = 1;
+  PD_WRAPSIDE_LARGEST = 2;
 
   PD_MAX_TABS = 16;
   PD_TAB_LEFT = 0;
@@ -615,6 +619,9 @@ type
     offset_x: pd_sp;
     offset_y: pd_sp;
     offset_from: Int32;     { PD_FROM_* }
+    wrap_mode: Int32;       { PD_WRAPSIDE_* }
+    npoly: Int32;           { points of its wrap outline, 0 = its box }
+    poly: array[0..2 * PD_WRAP_POLY_MAX - 1] of Int32;  { x, y in 21600ths of its box }
   end;
   Ppd_float_props = ^pd_float_props;
 

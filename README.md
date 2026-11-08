@@ -100,6 +100,9 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   may be exactly as tall as they say, their cells cut off, and leave grid
   columns empty before and after their cells; header rows repeat at
   the top of every continuation.
+- Text wraps to a float's outline where it has one (Word's wrapTight and
+  wrapThrough polygons: each line narrowed to how far the outline reaches
+  beside it), on the wider side for Word's "largest" and "bothSides".
 - A table can float (a float holding just the table: Word's floating
   tables, `w:tblpPr`), placed and wrapped like a picture.
 - Floats with `wrap` left/right sit at their anchor and the following
