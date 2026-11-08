@@ -879,6 +879,68 @@ static void pdf_grad_content(pdfw* w, sbuf* c, preslist* R, const pd_draw* a, co
     sb_fmt(c, "Q\n");
 }
 
+/* An item's effect layers (pd_draw_render_layers) as a picture at 144 dpi, its alpha a soft mask, placed over what
+   the page has so far */
+static void pdf_fx_image(pdfw* w, sbuf* c, preslist* R, const pd_draw* a, int layers, int64_t H, int compress) {
+    pd_sp x0, y0, x1, y1;
+    int32_t scale = 2 << 16, W, Hp, i, img, sm;
+    uint8_t* px, *rgb, *al;
+    char dict[256];
+
+    pd_draw_bounds(a, &x0, &y0, &x1, &y1);
+    x0 -= PD_PT(2);
+    y0 -= PD_PT(2);
+    x1 += PD_PT(2);
+    y1 += PD_PT(2);
+
+    while ((int64_t)(x1 - x0) / 65536 * (y1 - y0) / 65536 * scale / 65536 * scale / 65536 > 4000000 && scale > 8192) {
+        scale /= 2;     /* no more than four million pixels */
+    }
+
+    W = (int32_t)(((int64_t)x1 - x0) * scale / 65536 / 65536) + 1;
+    Hp = (int32_t)(((int64_t)y1 - y0) * scale / 65536 / 65536) + 1;
+
+    if (W <= 0 || Hp <= 0 || !(px = (uint8_t*)calloc((size_t)W * Hp, 4))) {
+        return;
+    }
+
+    rgb = (uint8_t*)malloc((size_t)W * Hp * 3);
+    al = (uint8_t*)malloc((size_t)W * Hp);
+
+    if (rgb && al && pd_draw_render_layers(a, layers, x0, y0, scale, px, W, Hp, W * 4) == PD_OK) {
+        for (i = 0; i < W * Hp; i++) {  /* its colours unmultiplied by alpha */
+            int k, A = px[4 * i + 3];
+
+            for (k = 0; k < 3; k++) {
+                rgb[3 * i + k] = (uint8_t)(A ? (px[4 * i + k] * 255 + A / 2) / A : 0);
+            }
+
+            al[i] = (uint8_t)A;
+        }
+
+        sm = new_obj(w);
+        snprintf(dict, sizeof(dict), "/Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray "
+                 "/BitsPerComponent 8", (int)W, (int)Hp);
+        stream_obj(w, sm, dict, al, (size_t)W * Hp, compress);
+        img = new_obj(w);
+        snprintf(dict, sizeof(dict), "/Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB "
+                 "/BitsPerComponent 8 /SMask %d 0 R", (int)W, (int)Hp, (int)sm);
+        stream_obj(w, img, dict, rgb, (size_t)W * Hp * 3, compress);
+        res_add(R, 'X', img);
+        sb_fmt(c, "q ");
+        sb_num(c, (int64_t)W * 65536 * 65536 / scale);
+        sb_fmt(c, "0 0 ");
+        sb_num(c, (int64_t)Hp * 65536 * 65536 / scale);
+        sb_num(c, x0);
+        sb_num(c, H - y0 - (int64_t)Hp * 65536 * 65536 / scale);
+        sb_fmt(c, "cm /Xo%d Do Q\n", (int)img);
+    }
+
+    free(px);
+    free(rgb);
+    free(al);
+}
+
 /* A pattern fill as a tiling pattern: its 8 by 8 cells (3/4 pt each) in the foreground over the background, the
    tiles counted from the page's top left corner as the rasterizer counts them; its object */
 static int32_t pdf_pattern(pdfw* w, const pd_path_style* st, int64_t H, int compress) {
@@ -1765,7 +1827,22 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                     int stroke = a->line_width > 0 && a->color, fill = a->fill != 0;
                     pd_gradient grd;
                     int hasg = fill && pd_draw_gradient(a, &grd);
-                    int ga = see_through(fill && !hasg ? a->fill : a->color);
+                    int ga, fxl = pd_draw_effects(a);
+
+                    if (fxl & PD_LAYER_UNDER) {     /* its glow and soft shadow: pixels under it */
+                        pdf_fx_image(&w, &c, &R, a, PD_LAYER_UNDER, (int64_t)pi.height, opt->compress);
+                    }
+
+                    if (fxl & PD_LAYER_BODY) {      /* a softened edge: the fill itself as pixels */
+                        pdf_fx_image(&w, &c, &R, a, PD_LAYER_BODY | PD_LAYER_INNER, (int64_t)pi.height, opt->compress);
+                        fill = hasg = 0;
+                    }
+
+                    ga = see_through(fill && !hasg ? a->fill : a->color);
+
+                    if (!fill && !stroke) {
+                        goto path_done;
+                    }
 
                     if (ga >= 0) {
                         sb_fmt(&c, "q /GA%d gs ", ga);
@@ -1785,7 +1862,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                                 sb_fmt(&c, "Q\n");
                             }
 
-                            continue;
+                            goto path_done;
                         }
                     }
 
@@ -1798,7 +1875,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                                 sb_fmt(&c, "Q\n");
                             }
 
-                            continue;
+                            goto path_done;
                         }
                     }
 
@@ -1833,6 +1910,16 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
 
                     if (ga >= 0) {
                         sb_fmt(&c, "Q\n");
+                    }
+
+path_done:
+
+                    if ((fxl & PD_LAYER_INNER) && !(fxl & PD_LAYER_BODY)) {     /* an inner shadow over the fill */
+                        pdf_fx_image(&w, &c, &R, a, PD_LAYER_INNER, (int64_t)pi.height, opt->compress);
+                    }
+
+                    if (fxl & PD_LAYER_REFL) {
+                        pdf_fx_image(&w, &c, &R, a, PD_LAYER_REFL, (int64_t)pi.height, opt->compress);
                     }
                 } else if (a->kind == PD_DRAW_IMAGE || a->kind == PD_DRAW_BOX) {
                     for (k = 0; k < nimages && (a->kind != PD_DRAW_IMAGE || images[k].res != a->resource); k++) {

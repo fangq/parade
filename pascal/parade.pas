@@ -717,6 +717,17 @@ type
     pattern: Int32;          { the fill a pattern: pattern_bits in pattern_fg on pattern_bg (0: clear) }
     pattern_fg, pattern_bg: UInt32;
     pattern_bits: array[0..7] of Byte;   { rows top first, high bit leftmost; cells 3/4 pt from the page's corner }
+    shadow_color: UInt32;    { a soft shadow (0 none): blur, offset, scale and skew about (ox, oy) }
+    shadow_blur, shadow_dx, shadow_dy: pd_sp;
+    shadow_sx, shadow_sy, shadow_kx, shadow_ky: Int32;
+    shadow_ox, shadow_oy: pd_sp;
+    inner_color: UInt32;     { an inner shadow (0 none) }
+    inner_blur, inner_dx, inner_dy: pd_sp;
+    glow_color: UInt32;      { a glow (0 none) }
+    glow_radius: pd_sp;
+    soft_edge: pd_sp;
+    refl_alpha0, refl_alpha1, refl_pos0, refl_pos1: Int32;   { a reflection (alpha0 0: none) }
+    refl_blur, refl_dist: pd_sp;
   end;
   Ppd_path_style = ^pd_path_style;
 
@@ -975,6 +986,7 @@ function pd_layout_page_info(layout: Ppd_layout; page: Int32; out info: pd_page_
 function pd_layout_page_items(layout: Ppd_layout; page: Int32; buf: Ppd_draw; cap: Int32; out count: Int32): pd_status; cdecl; PDEXT;
 function pd_draw_render(items: Ppd_draw; n: Int32; x0, y0: pd_sp; scale: Int32; rgba: PByte; width, height,
   stride: Int32): pd_status; cdecl; PDEXT;
+procedure pd_draw_bounds(item: Ppd_draw; out x0, y0, x1, y1: pd_sp); cdecl; PDEXT;
 function pd_layout_page_markup(layout: Ppd_layout; page: Int32; buf: Ppd_markup_item; cap: Int32;
   out count: Int32): pd_status; cdecl; PDEXT;
 function pd_layout_hit_test(layout: Ppd_layout; page: Int32; x, y: pd_sp; out pos: pd_pos): pd_status; cdecl; PDEXT;

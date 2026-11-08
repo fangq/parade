@@ -24,4 +24,19 @@ int32_t pd_gradient_at(const pd_gradient* g, double x, double y);
 /* the gradient's colour at t (0..65536), 0xAARRGGBB */
 uint32_t pd_gradient_color(const pd_gradient* g, int32_t t);
 
+/* an item's layers, as pd_draw_render draws them in turn */
+#define PD_LAYER_UNDER  1       /* its glow and soft shadow */
+#define PD_LAYER_BODY   2       /* its fill (with its soft edge) */
+#define PD_LAYER_INNER  4       /* its inner shadow */
+#define PD_LAYER_STROKE 8       /* its outline */
+#define PD_LAYER_REFL   16      /* its reflection */
+#define PD_LAYER_ALL    31
+
+/* the layers of an item that only pixels can draw (PD_LAYER_UNDER, a softened BODY, INNER, REFL); 0 for none */
+int pd_draw_effects(const pd_draw* a);
+
+/* an item's layers into an RGBA image, as pd_draw_render */
+pd_status pd_draw_render_layers(const pd_draw* a, int layers, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba,
+                                int32_t width, int32_t height, int32_t stride);
+
 #endif

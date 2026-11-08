@@ -149,6 +149,12 @@ turns into display-list paths, the same for the screen and for PDF.
 - **Picture fills**: a shape's blipFill stretched into its fillRect or
   tiled (offset, scale, alignment, mirrored tiles), cropped by its
   srcRect, each picture an image item cut to the shape's outline.
+- **Effects**: soft outer shadows (blur, distance and direction, scale
+  and skew about their alignment), inner shadows, glow, soft edges and
+  reflections, drawn by the rasterizer with integer box blurs (three
+  passes, near a Gaussian); PDF places them as pictures with soft masks
+  under or over the vector shape. `pd_draw_bounds` gives what an item
+  covers with them.
 - **Rasterizer**: `pd_draw_render` draws display-list paths into an RGBA
   image with Parade's integer coverage rasterizer, so a host gets the
   library's pixels rather than drawing styles itself.

@@ -116,6 +116,20 @@ typedef struct {
     uint8_t pattern_bits[8];    /**< 8 rows of 8 cells, top first, the high bit leftmost, a set bit the foreground;
                                      a cell 3/4 pt square (a pixel at 96 dpi), the cells counted from the page's
                                      top left corner */
+    uint32_t shadow_color;      /**< a soft shadow of the fill under it (0: none; a hard one is a path of its own) */
+    pd_sp shadow_blur, shadow_dx, shadow_dy;    /**< its blur radius; how far it is cast */
+    int32_t shadow_sx, shadow_sy;   /**< scaled (65536 = 1) ... */
+    int32_t shadow_kx, shadow_ky;   /**< ... and skewed (60000ths of a degree) about (shadow_ox, shadow_oy) */
+    pd_sp shadow_ox, shadow_oy;
+    uint32_t inner_color;       /**< a shadow inside the fill, cast from its edge (0: none) */
+    pd_sp inner_blur, inner_dx, inner_dy;
+    uint32_t glow_color;        /**< a glow round the fill, glow_radius out (0: none) */
+    pd_sp glow_radius;
+    pd_sp soft_edge;            /**< the fill fading out over this much inside its edge (0: none) */
+    int32_t refl_alpha0, refl_alpha1;   /**< a reflection of the shape below it (refl_alpha0 0: none), its opacity
+                                             (100000ths) going from alpha0 at pos0 to alpha1 at pos1 ... */
+    int32_t refl_pos0, refl_pos1;   /**< ... (100000ths of the shape's height down from the mirror line) */
+    pd_sp refl_blur, refl_dist;     /**< blurred; the mirror line this far below the shape */
 } pd_path_style;
 
 #define PD_PATTERN_CELL 49152   /**< a pattern cell's side, sp */
@@ -208,6 +222,10 @@ PD_API pd_status pd_layout_caret_step(const pd_layout* layout, pd_pos pos, int32
  */
 PD_API pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba,
                                 int32_t width, int32_t height, int32_t stride);
+
+/** what an item covers when drawn, on the page: its box with its stroke, arrowheads aside, and its effects
+    (shadow, glow, reflection) */
+PD_API void pd_draw_bounds(const pd_draw* item, pd_sp* x0, pd_sp* y0, pd_sp* x1, pd_sp* y1);
 
 /* ------------------------------------------------------------------ */
 /* PDF                                                                */

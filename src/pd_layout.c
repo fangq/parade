@@ -4752,6 +4752,72 @@ static void item_pattern(dlist_t* D, int32_t n0, const pj_node* it) {
     }
 }
 
+/* An item's effects on its path, D->d[i] (lengths in the drawing's units, scaled by sc): "osh" a soft shadow
+   [blur, dx, dy, colour, sx, sy (100000ths), kx, ky (60000ths of a degree), alignment 0..8 tl..br], "ish" an inner
+   shadow [blur, dx, dy, colour], "glow" [radius, colour], "soft" a soft edge's radius, "refl" a reflection [blur,
+   start alpha, end alpha, start, end (100000ths), distance] */
+static void item_effects(dlist_t* D, int32_t i, const pj_node* it, double sx, double sy) {
+    const pj_node* o = pj_get(it, "osh"), *in = pj_get(it, "ish"), *gl = pj_get(it, "glow"), *rf = pj_get(it, "refl");
+    double sc = (sx + sy) / 2;
+    pd_path_style* st;
+    pd_draw* a;
+
+    if (i < 0 || i >= D->n || D->d[i].kind != PD_DRAW_PATH || !(o || in || gl || rf || pj_get(it, "soft")) ||
+            (st = path_style(D, i)) == NULL) {
+        return;
+    }
+
+    a = &D->d[i];
+
+    if (o && o->n >= 9) {
+        int al = (int)pj_int_or(pj_at(o, 8), 7);
+
+        st->shadow_blur = (pd_sp)(pj_int_or(pj_at(o, 0), 0) * sc);
+        st->shadow_dx = (pd_sp)(pj_int_or(pj_at(o, 1), 0) * sx);
+        st->shadow_dy = (pd_sp)(pj_int_or(pj_at(o, 2), 0) * sy);
+        st->shadow_color = (uint32_t)pj_int_or(pj_at(o, 3), 0x66000000LL);
+        st->shadow_sx = (int32_t)(pj_int_or(pj_at(o, 4), 100000) * 65536 / 100000);
+        st->shadow_sy = (int32_t)(pj_int_or(pj_at(o, 5), 100000) * 65536 / 100000);
+        st->shadow_kx = (int32_t)pj_int_or(pj_at(o, 6), 0);
+        st->shadow_ky = (int32_t)pj_int_or(pj_at(o, 7), 0);
+        st->shadow_ox = a->x + (pd_sp)((int64_t)a->w * (al % 3) / 2);   /* the point of the box it is aligned to */
+        st->shadow_oy = a->y + (pd_sp)((int64_t)a->h * (al / 3) / 2);
+    }
+
+    if (in && in->n >= 4) {
+        st->inner_blur = (pd_sp)(pj_int_or(pj_at(in, 0), 0) * sc);
+        st->inner_dx = (pd_sp)(pj_int_or(pj_at(in, 1), 0) * sx);
+        st->inner_dy = (pd_sp)(pj_int_or(pj_at(in, 2), 0) * sy);
+        st->inner_color = (uint32_t)pj_int_or(pj_at(in, 3), 0xFF000000LL);
+    }
+
+    if (gl && gl->n >= 2) {
+        st->glow_radius = (pd_sp)(pj_int_or(pj_at(gl, 0), 0) * sc);
+        st->glow_color = (uint32_t)pj_int_or(pj_at(gl, 1), 0xFF000000LL);
+    }
+
+    st->soft_edge = (pd_sp)(pj_int_or(pj_get(it, "soft"), 0) * sc);
+
+    if (rf && rf->n >= 6) {
+        st->refl_blur = (pd_sp)(pj_int_or(pj_at(rf, 0), 0) * sc);
+        st->refl_alpha0 = (int32_t)pj_int_or(pj_at(rf, 1), 100000);
+        st->refl_alpha1 = (int32_t)pj_int_or(pj_at(rf, 2), 0);
+        st->refl_pos0 = (int32_t)pj_int_or(pj_at(rf, 3), 0);
+        st->refl_pos1 = (int32_t)pj_int_or(pj_at(rf, 4), 100000);
+        st->refl_dist = (pd_sp)(pj_int_or(pj_at(rf, 5), 0) * sc);
+    }
+
+    st->shadow_color = st->shadow_color && !(st->shadow_color >> 24) ? st->shadow_color | 0xFF000000u : st->shadow_color;
+    st->inner_color = st->inner_color && !(st->inner_color >> 24) ? st->inner_color | 0xFF000000u : st->inner_color;
+    st->glow_color = st->glow_color && !(st->glow_color >> 24) ? st->glow_color | 0xFF000000u : st->glow_color;
+}
+
+/* whether an item asks for more than a plain path or box can draw */
+static int item_fancy(const pj_node* it) {
+    return pj_get(it, "gk") || pj_get(it, "shd") || pj_get(it, "patt") || pj_get(it, "bimg") || pj_get(it, "osh") ||
+           pj_get(it, "ish") || pj_get(it, "glow") || pj_get(it, "soft") || pj_get(it, "refl");
+}
+
 /* An item's gradient on the path just made: "f2" its other colour, "gk" 1 linear, 2 radial, "ga" its angle (what
    a host drawing two colours reads); and where the item has them, its stops ("gs": position in 100000ths, colour,
    ...), "gsc" a linear one's angle scaled with the box, "gp" a radial one's path (1 circle, 2 rectangle, 3 the
@@ -5280,7 +5346,7 @@ static void emit_item_path(const pd_layout* L, dlist_t* D, const pj_node* it, pd
     arrowhead hd[2];
     int32_t n0;
 
-    if (fill || shape) {
+    if ((fill || shape) && !pj_get(it, "osh")) {    /* (a soft shadow is the path's own, below) */
         item_shadow(D, it, xy, n, sx, sy, block, region);
     }
 
@@ -5303,6 +5369,7 @@ static void emit_item_path(const pd_layout* L, dlist_t* D, const pj_node* it, pd
         emit_path(D, xy, n, closed, fill, 0, 0, block, region);
         item_curve(D, n0, it, ox, oy, sx, sy);
         item_grad(D, n0, it);
+        item_effects(D, D->n > n0 ? D->n - 1 : -1, it, sx, sy);
         emit_compound(D, xy, n, closed, line, lw, cmpd, it, block, region);
     } else {
         emit_path(D, xy, n, closed, fill, line, lw, block, region);
@@ -5313,6 +5380,7 @@ static void emit_item_path(const pd_layout* L, dlist_t* D, const pj_node* it, pd
 
         item_grad(D, n0, it);
         item_style(D, n0, it);
+        item_effects(D, D->n > n0 ? D->n - 1 : -1, it, sx, sy);
     }
 
     heads_emit(D, hd, line, lw, block, region);
@@ -5433,7 +5501,7 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                     xy[2 * k + 1] = iy + (pd_sp)(ih / 2.0 * (1 + sin(t)));
                 }
 
-                if (item_styled(it) || pj_get(it, "bimg")) {
+                if (item_styled(it) || item_fancy(it)) {
                     n0 = D->n;
                     emit_item_path(L, D, it, xy, 64, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
 
@@ -5449,7 +5517,7 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                 emit_path(D, xy, 64, 1, fill, line, lw, block, region);
                 ellipse_curve(D, n0, ix, iy, iw, ih);
                 item_grad(D, n0, it);
-            } else if (pj_get(it, "gk") || pj_get(it, "shd") || pj_get(it, "patt") || pj_get(it, "bimg") || item_styled(it)) {
+            } else if (item_fancy(it) || item_styled(it)) {
                 /* a box with a gradient, a shadow or a styled outline: as a path */
                 pd_sp xy[8] = { ix, iy, ix + iw, iy, ix + iw, iy + ih, ix, iy + ih };
 

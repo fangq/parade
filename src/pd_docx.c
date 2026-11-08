@@ -8096,6 +8096,10 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     char bf_blip[64] = "";              /* a shape's picture fill: stretched into its fillRect, or tiled */
     int have_patt = 0;
     double shd_dist = 0, shd_dir = 0;
+    double shd_blur = 0, shd_k[4] = { 100000, 100000, 0, 0 };     /* a shadow's blur; its sx, sy, kx, ky */
+    int shd_algn = 7, in_ish = 0, has_ish = 0, in_glow = 0, soft = 0, has_refl = 0;   /* (algn: tl..br 0..8) */
+    double ish_blur = 0, ish_dist = 0, ish_dir = 0, glow_rad = 0, refl[6] = { 0, 0, 0, 0, 0, 0 };
+    uint32_t ish_clr = 0, glow_clr = 0;     /* inner shadow, glow; reflection: blur, stA, endA, stPos, endPos, dist */
     char gprst[32] = "";            /* a picture's geometry, when it is not a rectangle (it is cut to that shape) */
     uint32_t fill = 0, line = 0, sfill = 0, sline = 0, *cur_clr = NULL;
     char cam_prst[48] = "";         /* the shape's 3-D camera (scene3d), seen in parallel */
@@ -8345,6 +8349,10 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             memset(crop, 0, sizeof(crop));
             fill2 = shd_clr = 0;
             grad_kind = grad_ang = in_grad = in_shd = has_shd = 0;
+            shd_blur = 0;
+            shd_algn = 7;
+            in_ish = has_ish = in_glow = soft = has_refl = 0;
+            glow_rad = 0;
             ngst = grad_sc = have_patt = 0;
             in_bfill = bf_tile = 0;
             bf_blip[0] = '\0';
@@ -8605,6 +8613,41 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     snprintf(fx + fl, sizeof(fx) - fl, ",\"shd\":[%d,%d,%u]",
                              (int)emu_sp(shd_dist * cos(shd_dir * 3.14159265358979 / 180) * FR->sx),
                              (int)emu_sp(shd_dist * sin(shd_dir * 3.14159265358979 / 180) * FR->sy), (unsigned)shd_clr);
+                }
+
+                {   /* effects: a blurred, scaled, skewed shadow; an inner one; a glow; a soft edge; a reflection */
+                    size_t fl = strlen(fx);
+                    double fs = (FR->sx + FR->sy) / 2;
+
+                    if (has_shd && (shd_blur > 0 || shd_k[0] != 100000 || shd_k[1] != 100000 || shd_k[2] || shd_k[3])) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"osh\":[%d,%d,%d,%u,%d,%d,%d,%d,%d]",
+                                               (int)emu_sp(shd_blur * fs),
+                                               (int)emu_sp(shd_dist * cos(shd_dir * 3.14159265358979 / 180) * FR->sx),
+                                               (int)emu_sp(shd_dist * sin(shd_dir * 3.14159265358979 / 180) * FR->sy),
+                                               (unsigned)shd_clr, (int)shd_k[0], (int)shd_k[1], (int)shd_k[2], (int)shd_k[3],
+                                               shd_algn);
+                    }
+
+                    if (has_ish && fl < sizeof(fx)) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"ish\":[%d,%d,%d,%u]", (int)emu_sp(ish_blur * fs),
+                                               (int)emu_sp(ish_dist * cos(ish_dir * 3.14159265358979 / 180) * FR->sx),
+                                               (int)emu_sp(ish_dist * sin(ish_dir * 3.14159265358979 / 180) * FR->sy),
+                                               (unsigned)ish_clr);
+                    }
+
+                    if (glow_rad > 0 && fl < sizeof(fx)) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"glow\":[%d,%u]", (int)emu_sp(glow_rad * fs),
+                                               (unsigned)glow_clr);
+                    }
+
+                    if (soft > 0 && fl < sizeof(fx)) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"soft\":%d", (int)emu_sp(soft * fs));
+                    }
+
+                    if (has_refl && refl[1] > 0 && fl < sizeof(fx)) {
+                        snprintf(fx + fl, sizeof(fx) - fl, ",\"refl\":[%d,%d,%d,%d,%d,%d]", (int)emu_sp(refl[0] * fs),
+                                 (int)refl[1], (int)refl[2], (int)refl[3], (int)refl[4], (int)emu_sp(refl[5] * fs));
+                    }
                 }
                 int isline = !strcmp(geom, "line"), k;
                 double lwd = lw;    /* a line as wide as it says: a group's scale is not its own (Office does not scale it) */
@@ -9170,7 +9213,51 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 shd_dir = mu_attr(&g, "dir", v, sizeof(v)) ? atof(v) / 60000.0 : 45;
                 shd_clr = 0x66000000u;
                 has_shd = 1;
+                shd_blur = mu_attr(&g, "blurRad", v, sizeof(v)) ? atof(v) : 0;
+                shd_k[0] = mu_attr(&g, "sx", v, sizeof(v)) ? atof(v) : 100000;
+                shd_k[1] = mu_attr(&g, "sy", v, sizeof(v)) ? atof(v) : 100000;
+                shd_k[2] = mu_attr(&g, "kx", v, sizeof(v)) ? atof(v) : 0;
+                shd_k[3] = mu_attr(&g, "ky", v, sizeof(v)) ? atof(v) : 0;
+                shd_algn = 7;
+
+                if (mu_attr(&g, "algn", v, sizeof(v))) {
+                    static const char* al[9] = { "tl", "t", "tr", "l", "ctr", "r", "bl", "b", "br" };
+                    int q;
+
+                    for (q = 0; q < 9; q++) {
+                        shd_algn = !strcmp(v, al[q]) ? q : shd_algn;
+                    }
+                }
             }
+        } else if (in_sppr && !strcmp(t, "innerShdw")) {    /* a shadow inside, cast from the edge */
+            in_ish = g.type == MT_OPEN;
+
+            if (open) {
+                ish_blur = mu_attr(&g, "blurRad", v, sizeof(v)) ? atof(v) : 0;
+                ish_dist = mu_attr(&g, "dist", v, sizeof(v)) ? atof(v) : 0;
+                ish_dir = mu_attr(&g, "dir", v, sizeof(v)) ? atof(v) / 60000.0 : 0;
+                ish_clr = 0xFF000000u;
+                has_ish = 1;
+            }
+        } else if (in_sppr && !strcmp(t, "glow")) {
+            in_glow = g.type == MT_OPEN;
+
+            if (open) {
+                glow_rad = mu_attr(&g, "rad", v, sizeof(v)) ? atof(v) : 0;
+                glow_clr = 0xFF000000u;
+            }
+        } else if (in_sppr && !strcmp(t, "softEdge") && open) {
+            soft = mu_attr(&g, "rad", v, sizeof(v)) ? atoi(v) : 0;
+        } else if (in_sppr && !strcmp(t, "reflection") && open) {
+            static const char* ra[6] = { "blurRad", "stA", "endA", "stPos", "endPos", "dist" };
+            static const double rd[6] = { 0, 100000, 0, 0, 100000, 0 };
+            int q;
+
+            for (q = 0; q < 6; q++) {
+                refl[q] = mu_attr(&g, ra[q], v, sizeof(v)) ? atof(v) : rd[q];
+            }
+
+            has_refl = 1;
         } else if (kind == 1 && in_sppr && !strcmp(t, "prstGeom") && open && mu_attr(&g, "prst", v, sizeof(v)) &&
                    strcmp(v, "rect")) {
             snprintf(gprst, sizeof(gprst), "%.31s", v);
@@ -9441,6 +9528,12 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             if (in_shd) {
                 shd_clr = (c & 0xFFFFFFu) | 0x66000000u;    /* see-through unless its alpha says */
                 cur_clr = &shd_clr;
+            } else if (in_ish) {
+                ish_clr = c;
+                cur_clr = &ish_clr;
+            } else if (in_glow) {
+                glow_clr = c;
+                cur_clr = &glow_clr;
             } else if (in_ln) {
                 line = c;
                 have_line = 1;

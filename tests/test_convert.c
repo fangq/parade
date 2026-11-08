@@ -3684,6 +3684,117 @@ static void test_docx_picture_fill(void) {
     pd_doc_free(d);
 }
 
+/* the alpha (and its pixel) of an item drawn alone at a pixel a point, at page point (x, y) */
+static int alpha_at(const pd_draw* a, pd_sp x, pd_sp y, uint8_t* rgb) {
+    uint8_t px[4] = { 0, 0, 0, 0 };
+
+    if (pd_draw_render(a, 1, x, y, 1 << 16, px, 1, 1, 4) != PD_OK) {
+        return -1;
+    }
+
+    if (rgb) {
+        memcpy(rgb, px, 3);
+    }
+
+    return px[3];
+}
+
+/* Effects (50 pt white boxes unless said): a black shadow blurred 6 pt cast 6 pt right; a gold glow 6 pt round an
+   ellipse; a soft edge 6 pt deep; a black inner shadow cast down and right; a reflection under the box at full
+   opacity fading to none half the box's height down. The rasterizer draws each as pixels, and the PDF places them
+   as pictures with soft masks. */
+static void test_docx_shape_effects(void) {
+    const char* sp = "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"%d\" y=\"%d\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                     "<a:prstGeom prst=\"%s\"/><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill><a:ln><a:noFill/></a:ln>"
+                     "<a:effectLst>%s</a:effectLst></wps:spPr><wps:bodyPr/></wps:wsp>";
+    char shapes[8192];
+    size_t sl = 0;
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, sh = -1, gl = -1, so = -1, in = -1, re = -1;
+    pd_draw* it;
+    uint8_t rgb[3];
+
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 0, 0, "rect", "FFFFFF",
+                           "<a:outerShdw blurRad=\"76200\" dist=\"76200\" dir=\"0\"><a:srgbClr val=\"000000\"/></a:outerShdw>");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1016000, 0, "ellipse", "0000FF",
+                           "<a:glow rad=\"76200\"><a:srgbClr val=\"FFC000\"/></a:glow>");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 0, 1016000, "rect", "00FF00", "<a:softEdge rad=\"76200\"/>");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1016000, 1016000, "rect", "FFFFFF",
+                           "<a:innerShdw blurRad=\"25400\" dist=\"76200\" dir=\"2700000\"><a:srgbClr val=\"000000\"/></a:innerShdw>");
+    snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1905000, 0, "rect", "FF0000",
+             "<a:reflection stA=\"100000\" endA=\"0\" endPos=\"50000\" dist=\"0\"/>");
+    it = group_items(shapes, &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        const pd_path_style* st = it[k].kind == PD_DRAW_PATH ? it[k].style : NULL;
+
+        sh = st && st->shadow_color ? k : sh;
+        gl = st && st->glow_color ? k : gl;
+        so = st && st->soft_edge ? k : so;
+        in = st && st->inner_color ? k : in;
+        re = st && st->refl_alpha0 ? k : re;
+    }
+
+    CHECK(sh >= 0 && gl >= 0 && so >= 0 && in >= 0 && re >= 0);
+
+    if (sh >= 0 && gl >= 0 && so >= 0 && in >= 0 && re >= 0) {
+        const pd_draw* a = &it[sh];
+        pd_sp my = a->y + PD_PT(25), r = a->x + a->w;
+        int v;
+
+        CHECK(a->style->shadow_blur == PD_PT(6) && a->style->shadow_dx == PD_PT(6) && a->style->shadow_dy == 0);
+        /* blurred: part dark just past the box's right edge, clear well past the shadow's own */
+        v = alpha_at(a, r + PD_PT(5), my, rgb);
+        CHECK(v > 40 && v < 230 && rgb[0] == 0);
+        CHECK(alpha_at(a, r + PD_PT(20), my, NULL) == 0 && alpha_at(a, a->x - PD_PT(4), my, NULL) == 0);
+        /* the glow gold 3 pt outside the ellipse's right */
+        v = alpha_at(&it[gl], it[gl].x + it[gl].w + PD_PT(3), it[gl].y + PD_PT(25), rgb);
+        CHECK(v > 60 && rgb[0] > rgb[2] && rgb[1] > rgb[2]);
+        /* the soft edge: see-through 1 pt inside, solid in the middle */
+        CHECK(alpha_at(&it[so], it[so].x + PD_PT(1), it[so].y + PD_PT(25), NULL) < 128);
+        CHECK(alpha_at(&it[so], it[so].x + PD_PT(25), it[so].y + PD_PT(25), NULL) == 255);
+        /* the inner shadow dark along the top left inside, the bottom right white */
+        alpha_at(&it[in], it[in].x + PD_PT(2), it[in].y + PD_PT(25), rgb);
+        CHECK(rgb[0] < 100);
+        alpha_at(&it[in], it[in].x + PD_PT(48), it[in].y + PD_PT(25), rgb);
+        CHECK(rgb[0] == 255);
+        /* the reflection: red just under the box, fading, gone past half its height */
+        v = alpha_at(&it[re], it[re].x + PD_PT(25), it[re].y + it[re].h + PD_PT(2), rgb);
+        CHECK(v > 180 && rgb[0] > 180);
+        CHECK(alpha_at(&it[re], it[re].x + PD_PT(25), it[re].y + it[re].h + PD_PT(15), NULL) < v);
+        CHECK(alpha_at(&it[re], it[re].x + PD_PT(25), it[re].y + it[re].h + PD_PT(30), NULL) == 0);
+    }
+
+    {
+        pd_pdf_options opt;
+        buf_t b;
+        int pics = 0;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+
+        for (k = 0; b.p && (size_t)k + 27 <= b.n; k++) {     /* (the pictures' bytes hold zeros: not strstr) */
+            pics += !memcmp(b.p + k, "/BitsPerComponent 8 /SMask ", 27);
+        }
+
+        CHECK(pics == 5);   /* shadow, glow, the softened fill, the inner shadow, the reflection */
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -6177,6 +6288,7 @@ int main(void) {
     test_docx_gradients();
     test_docx_pattern_fill();
     test_docx_picture_fill();
+    test_docx_shape_effects();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();
