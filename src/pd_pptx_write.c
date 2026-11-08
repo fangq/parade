@@ -304,6 +304,61 @@ static int kept_line(const pw* P, const char* key, char f[][256], int nf) {
     return 0;
 }
 
+/* a slide's kept tail (its transition and timing as read) by its section's key: the root's namespaces it needs
+   (only those NS lacks) into ns, the XML into *xml and *xn; 0 when it has none */
+static int kept_tail(const pw* P, const char* key, pd_buf* ns, const char** xml, size_t* xn) {
+    size_t pos = 0;
+    pkept e;
+
+    while (kept_next(P, &pos, &e)) {
+        if (!strcmp(e.src, "tail") && !strcmp(e.extra, key)) {
+            const char* p = (const char*)e.data, *nl = memchr(p, '\n', e.len), *q;
+
+            if (!nl) {
+                return 0;
+            }
+
+            for (q = p; q < nl;) {  /* each ' name="value"' of the line: kept unless NS declares it already */
+                const char* a = q + 1, *eq = memchr(a, '=', (size_t)(nl - a)), *v1, *v2;
+
+                if (!eq || eq + 1 >= nl) {
+                    break;
+                }
+
+                v1 = eq + 1;
+                v2 = memchr(v1 + 1, *v1, (size_t)(nl - v1 - 1));
+
+                if (!v2) {
+                    break;
+                }
+
+                {
+                    char name[64];
+
+                    snprintf(name, sizeof(name), "%.*s=", (int)(eq - a), a);
+
+                    if (!strstr(NS, name)) {
+                        pb_put(ns, q, (size_t)(v2 + 1 - q));
+                    }
+                }
+
+                q = v2 + 1;
+            }
+
+            *xml = nl + 1;
+            *xn = e.len - (size_t)(nl + 1 - p);
+
+            while (*xn && (*xml)[*xn - 1] == '\0') {
+                (*xn)--;
+            }
+
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* the first line of the map after the theme's: the layout the first page was on, into out ("" none) */
 static void kept_first_layout(const pw* P, char* out, size_t cap) {
     pkept e;
@@ -2063,9 +2118,12 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     for (s = 0; s < nslides && !err; s++) {
         pd_block_id sec = pd_doc_child(d, pd_doc_root(d), s);
         pd_res_id cv = section_canvas(d, sec);
-        pd_buf slide;
+        pd_buf slide, tns;     /* the slide; the namespaces its kept transition needs */
+        const char* txml = NULL;
+        size_t txn = 0;
 
         memset(&slide, 0, sizeof(slide));
+        memset(&tns, 0, sizeof(tns));
         P->o = &slide;
         memset(&P->rels, 0, sizeof(P->rels));
         P->nrel = 1;
@@ -2084,15 +2142,19 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
             snprintf(key, sizeof(key), "%u", (unsigned)sec);
             f[4][0] = '\0';
 
+            if (!kept_tail(P, key, &tns, &txml, &txn)) {
+                txn = 0;
+            }
+
             if (kept_line(P, key, f, 5) >= 4 && f[0][0]) {
                 snprintf(layout, sizeof(layout), "%s", f[0]);
                 P->own_bg = atoi(f[1]);
                 P->has_rec = 1;
                 P->rec_bg = strtol(f[3], NULL, 16);
                 snprintf(P->clr_ovr, sizeof(P->clr_ovr), "%s", f[4]);   /* its own colour map, if it had one */
-                pb_printf(&slide, "<p:sld %s%s>", NS, atoi(f[2]) ? " showMasterSp=\"0\"" : "");
+                pb_printf(&slide, "<p:sld %s%s%s>", NS, tns.p ? tns.p : "", atoi(f[2]) ? " showMasterSp=\"0\"" : "");
             } else {
-                pb_printf(&slide, "<p:sld %s>", NS);
+                pb_printf(&slide, "<p:sld %s%s>", NS, tns.p ? tns.p : "");
             }
 
             if (!layout[0] && prev_layout[0]) {    /* a slide made since: on the layout of the one before it */
@@ -2114,11 +2176,17 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         }
 
         if (P->clr_ovr[0]) {
-            pb_printf(&slide, "</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping %s/></p:clrMapOvr></p:sld>",
-                      P->clr_ovr);
+            pb_printf(&slide, "</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping %s/></p:clrMapOvr>", P->clr_ovr);
         } else {
-            pb_puts(&slide, "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>");
+            pb_puts(&slide, "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>");
         }
+
+        if (txn) {      /* its transition and timing, as they were */
+            pb_put(&slide, txml, txn);
+        }
+
+        pb_puts(&slide, "</p:sld>");
+        pb_free(&tns);
         snprintf(name, sizeof(name), "ppt/slides/slide%d.xml", s + 1);
         zadd(z, name, &slide, &err);
         memset(&b, 0, sizeof(b));

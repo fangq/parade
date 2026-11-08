@@ -6102,7 +6102,12 @@ static void test_pptx_write_kept_masters(void) {
                             KSP("2", "Title", "<p:ph type=\"title\"/>", "2540000")) "</p:sldLayout>",
                     "ppt/slideLayouts/_rels/slideLayout2.xml.rels", "<Relationships>"
                     KREL("rId1", "../slideMasters/slideMaster1.xml") "</Relationships>",
-                    "ppt/slides/slide1.xml", "<p:sld " KNS ">" KTREE(KSP("3", "One", "", "254000")) "</p:sld>",
+                    "ppt/slides/slide1.xml", "<p:sld " KNS " xmlns:p14=\"p14ns\" xmlns:mc=\"mcns\" mc:Ignorable=\"p14\">"
+                    KTREE(KSP("3", "One", "", "254000")) "<mc:AlternateContent><mc:Choice Requires=\"p14\"><p:transition "
+                    "spd=\"slow\" p14:dur=\"2000\"><p:fade/></p:transition></mc:Choice><mc:Fallback><p:transition "
+                    "spd=\"slow\"><p:fade/></p:transition></mc:Fallback></mc:AlternateContent><p:timing><p:tnLst><p:par>"
+                    "<p:cTn id=\"1\" dur=\"indefinite\" restart=\"never\" nodeType=\"tmRoot\"/></p:par></p:tnLst>"
+                    "</p:timing></p:sld>",
                     "ppt/slides/_rels/slide1.xml.rels", "<Relationships>" KREL("rId1", "../slideLayouts/slideLayout1.xml")
                     "</Relationships>",
                     "ppt/slides/slide2.xml", "<p:sld " KNS " showMasterSp=\"0\"><p:cSld><p:bg><p:bgPr><a:solidFill>"
@@ -6136,6 +6141,11 @@ static void test_pptx_write_kept_masters(void) {
           !strstr(s2, "name=\"Logo\""));
     CHECK(r2 && strstr(r2, "Target=\"../slideLayouts/slideLayout2.xml\""));
     CHECK(s2 && strstr(s2, "<a:overrideClrMapping bg1=\"dk1\" tx1=\"lt1\"") && s1 && strstr(s1, "<a:masterClrMapping/>"));
+    /* the first slide's transition and timing as they were, after its colour map, with the namespaces they use */
+    CHECK(s1 && strstr(s1, "</p:clrMapOvr><mc:AlternateContent><mc:Choice Requires=\"p14\"><p:transition spd=\"slow\" "
+                       "p14:dur=\"2000\">") && strstr(s1, "<p:timing><p:tnLst>") && strstr(s1, "xmlns:p14=\"p14ns\"") &&
+          strstr(s1, "mc:Ignorable=\"p14\""));
+    CHECK(s2 && !strstr(s2, "<p:transition"));
     free(r2);
     r2 = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slideLayouts/slideLayout2.xml", &n) : NULL;
     CHECK(r2 && strstr(r2, "name=\"Logo\""));

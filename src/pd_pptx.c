@@ -64,6 +64,8 @@ typedef struct {
         int own_bg, no_master;
         long bg;
         char clr[256];          /* its own colour map (a:overrideClrMapping's attributes), "" the master's */
+        char* tail;             /* what follows its colour map as it was (its transition, timing, extensions), after
+                                   a line of the namespaces and mc:Ignorable of its root they need; malloc'ed, or NULL */
     } *rec;
     int nrec, caprec;
 } pptx;
@@ -3030,6 +3032,63 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
         r->no_master = !show;
         r->bg = bg >= 0 ? bg : 0xFFFFFF;
         r->clr[0] = '\0';
+        r->tail = NULL;
+
+        {   /* its transition and timing (animations) as they were, to be written back unchanged */
+            int cm = xd_find(&slide.x, "clrMapOvr"), cs = xd_find(&slide.x, "cSld");
+            size_t a = cm >= 0 ? slide.x.v[cm].b : cs >= 0 ? slide.x.v[cs].b : 0, e = slide.x.v[0].ib, i;
+            int any = 0;
+
+            for (i = a; a && i < e; i++) {
+                any |= slide.x.s[i] == '<';
+            }
+
+            if (any) {
+                pd_buf t;
+                const char* at = slide.x.v[0].attrs, *end = at ? at + slide.x.v[0].alen : NULL;
+
+                memset(&t, 0, sizeof(t));
+
+                while (at && at < end) {    /* the root's namespaces and mc:Ignorable, for what it holds */
+                    const char* q = at;
+
+                    while (q < end && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')) {
+                        q++;
+                    }
+
+                    at = q;
+
+                    while (at < end && *at != '"' && *at != '\'') {
+                        at++;
+                    }
+
+                    if (at < end) {
+                        char quote = *at;
+                        const char* v2 = memchr(at + 1, quote, (size_t)(end - at - 1));
+
+                        if (!v2) {
+                            break;
+                        }
+
+                        if (!strncmp(q, "xmlns:", 6) || !strncmp(q, "mc:Ignorable", 12)) {
+                            pb_putc(&t, ' ');
+                            pb_put(&t, q, (size_t)(v2 + 1 - q));
+                        }
+
+                        at = v2 + 1;
+                    }
+                }
+
+                pb_putc(&t, '\n');
+                pb_put(&t, slide.x.s + a, e - a);
+                pb_putc(&t, '\0');
+                r->tail = t.err ? NULL : t.p;
+
+                if (t.err) {
+                    pb_free(&t);
+                }
+            }
+        }
 
         {   /* its own colour map, kept to be written back */
             static const char* an[12] = { "bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4",
@@ -3327,6 +3386,15 @@ static void pkeep_read(pptx* P, pd_doc* d) {
 
         pkeep_entry(&k, "map", "", "map", "", map.p ? map.p : "", map.n);
 
+        for (i = 0; i < P->nrec; i++) {     /* each slide's transition and timing, by its section */
+            if (P->rec[i].tail) {
+                char key[16];
+
+                snprintf(key, sizeof(key), "%u", (unsigned)pd_doc_child(d, pd_doc_root(d), i));
+                pkeep_entry(&k, "tail", "", "tail", key, P->rec[i].tail, strlen(P->rec[i].tail));
+            }
+        }
+
         if (!k.b.err) {
             pd_res_id r;
 
@@ -3544,6 +3612,14 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
     if (st == PD_OK) {
         pkeep_read(&P, d);
+    }
+
+    {
+        int ri;
+
+        for (ri = 0; P.rec && ri < P.nrec; ri++) {
+            free(P.rec[ri].tail);
+        }
     }
 
     free(P.rec);
