@@ -72,6 +72,9 @@ typedef struct pcache {         /* one paragraph laid out at one width */
     pd_sp ws_w;                 /* wrap shape: lines ws_k0 to ws_k (not that one) are ws_w narrower */
     int32_t ws_side, ws_k, ws_k0;
     uint32_t ws_sig;            /* with an outline: each line's own narrowing, ws_tk[line - ws_k0], hashed */
+    int32_t ws_both;            /* text on both sides: lines ws_k0 to ws_k in pairs, the left part ws_lw wide, the
+                                   right from ws_rx, drawn side by side */
+    pd_sp ws_lw, ws_rx;
     pd_sp ws_tk[64];
     struct pcache* next;        /* other layouts (variants, shapes) of the same paragraph */
 } pcache;
@@ -83,6 +86,9 @@ typedef struct {                /* lines narrowed beside a wrapping float */
     int32_t k0;                 /* ... from this one (the float lower down the paragraph) */
     const pd_sp* tk;            /* or each line's own narrowing (a float's outline), from line k0; NULL: w */
     uint32_t sig;               /* tk's hash */
+    int32_t both;               /* or text on both sides: lines k0 to k in pairs, a left part lw wide and a right
+                                   part from rx across */
+    pd_sp lw, rx;
 } wrapshape;
 
 typedef struct {                /* a filled rectangle: rules, borders, cell backgrounds */
@@ -252,6 +258,8 @@ typedef struct {
     int32_t ntb, captb;
     pd_sp wrap_rem, wrap_w;     /* building: height still beside a wrapping float */
     int32_t wrap_fl;            /* and that float (its index in fl), when text follows its outline; -1 its box */
+    int32_t wrap_both;          /* text on both sides of it: left of wrap_lw, right of wrap_rx */
+    pd_sp wrap_lw, wrap_rx;
     pd_sp wrap_total, wrap_ox;  /* its whole height beside the text, where it is across the column */
     pd_sp wrap_skip;            /* and before that, the height of text above it (a float lower down) */
     pd_sp gap_skip, gap_h;      /* a float across the column lower down: the text before it, then its room */
@@ -416,6 +424,15 @@ static pd_status build_into(pd_layout* L, pcache* c, pd_block_id id, pd_sp width
 
             ind[i] = bi0 + (beside && c->ws_side == PD_WRAP_LEFT ? tw : 0);
             wid[i] = beside ? bw - tw : bw;
+
+            if (beside && c->ws_both && (i - c->ws_k0) % 2 == 0) {  /* the left part of a pair */
+                ind[i] = bi0;
+                wid[i] = c->ws_lw - bi0;
+            } else if (beside && c->ws_both) {  /* the right part */
+                ind[i] = c->ws_rx > c->pp.indent_left ? c->ws_rx : c->pp.indent_left;
+                wid[i] = width - c->pp.indent_right - ind[i];
+            }
+
             wid[i] = wid[i] < PD_PT(12) ? PD_PT(12) : wid[i];
         }
 
@@ -476,7 +493,7 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
     blk* b = pd_doc_blk(d, id);
     pcache* c;
     uint64_t sig;
-    wrapshape none = { 0, 0, 0, 0, NULL, 0 };
+    wrapshape none = { 0, 0, 0, 0, NULL, 0, 0, 0, 0 };
 
     if (!ws || ws->k <= 0) {
         ws = &none;
@@ -502,7 +519,8 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
     }
 
     for (c = L->cache[id]; c && !(c->loose == loose && c->ws_k == ws->k && c->ws_w == ws->w &&
-                                  c->ws_side == ws->side && c->ws_k0 == ws->k0 && c->ws_sig == ws->sig); c = c->next) {
+                                  c->ws_side == ws->side && c->ws_k0 == ws->k0 && c->ws_sig == ws->sig &&
+                                  c->ws_both == ws->both && c->ws_lw == ws->lw && c->ws_rx == ws->rx); c = c->next) {
     }
 
     sig = field_signature(L, b);
@@ -531,6 +549,9 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
         c->ws_k = ws->k;
         c->ws_k0 = ws->k0;
         c->ws_sig = ws->sig;
+        c->ws_both = ws->both;
+        c->ws_lw = ws->lw;
+        c->ws_rx = ws->rx;
 
         if (ws->sig && ws->tk) {
             memcpy(c->ws_tk, ws->tk, sizeof(c->ws_tk));
@@ -2277,7 +2298,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
         blk* b = d->tab[c->kids[i]];
 
         if (b->kind == PD_BLOCK_PARAGRAPH) {
-            pd_sp gl, rem, skip, gs;
+            pd_sp gl, rem, skip, gs, lh, vh, hidden = 0;
             int32_t loose = F->loose ? F->loose[b->id] : 0, kwrap = 0;
             pcache* pc = layout_para_ex(F->L, b->id, F->colw, F->wrap_rem > 0 ? 0 : loose, NULL, &st);
             const pd_para_props* pp;
@@ -2302,12 +2323,35 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 ws.side = F->wrap_side;
                 ws.tk = NULL;
                 ws.sig = 0;
+                ws.both = 0;
+                ws.lw = ws.rx = 0;
 
                 for (pass = 0; pass < 3; pass++) {
                     for (ws.k0 = 0; ws.k0 < pc->nlines && pc->top[ws.k0 + 1] <= skip; ws.k0++) {
                     }
 
                     for (ws.k = ws.k0; ws.k < pc->nlines && pc->top[ws.k] < skip + rem; ws.k++) {
+                    }
+
+                    if (F->wrap_both) {     /* both sides: as many pairs as rows fit beside it */
+                        int32_t rows = 0, i2 = ws.k0;
+                        pd_sp at = pc->top[ws.k0];
+
+                        while (pc->ws_both && i2 < pc->nlines && at < skip + rem) {
+                            pd_sp h0 = pc->top[i2 + 1] - pc->top[i2];
+                            pd_sp h1 = i2 + 1 < pc->nlines && i2 + 1 < pc->ws_k ? pc->top[i2 + 2] - pc->top[i2 + 1] : 0;
+
+                            at += h0 > h1 ? h0 : h1;
+                            i2 += 2;
+                            rows++;
+                        }
+
+                        rows = pc->ws_both ? rows : ws.k - ws.k0;
+                        rows = rows > 31 ? 31 : rows;
+                        ws.both = 1;
+                        ws.lw = F->wrap_lw;
+                        ws.rx = F->wrap_rx;
+                        ws.k = ws.k0 + 2 * rows;
                     }
 
                     if (F->wrap_fl >= 0 && ws.k > ws.k0) {  /* round its outline: each line as far as it reaches */
@@ -2332,7 +2376,8 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                         ws.tk = tk;
                     }
 
-                    if ((ws.k == pc->ws_k && ws.k0 == pc->ws_k0 && ws.sig == pc->ws_sig) || ws.k <= ws.k0) {
+                    if ((ws.k == pc->ws_k && ws.k0 == pc->ws_k0 && ws.sig == pc->ws_sig && ws.both == pc->ws_both) ||
+                            ws.k <= ws.k0) {
                         break;
                     }
 
@@ -2374,7 +2419,21 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                     push(F, VI_PEN, 0, ok ? INTERLINE_PEN : INF_PEN, NULL, 0, 0);
                 }
 
-                if (push(F, VI_LINE, pc->top[k + 1] - pc->top[k], 0, pc, k, b->id)) {
+                lh = pc->top[k + 1] - pc->top[k];
+
+                if (pc->ws_both && k >= pc->ws_k0 && k < pc->ws_k) {    /* a pair side by side: one row */
+                    if ((k - pc->ws_k0) % 2 == 0 && k + 1 < pc->nlines && k + 1 < pc->ws_k) {
+                        hidden += lh;   /* the left part takes no height, */
+                        lh = 0;
+                    } else if ((k - pc->ws_k0) % 2 == 1) {  /* the right one the row's */
+                        pd_sp h0 = pc->top[k] - pc->top[k - 1];
+
+                        hidden -= h0 > lh ? h0 - lh : 0;
+                        lh = h0 > lh ? h0 : lh;
+                    }
+                }
+
+                if (push(F, VI_LINE, lh, 0, pc, k, b->id)) {
                     return PD_ERR_NOMEM;
                 }
 
@@ -2385,12 +2444,13 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 }
             }
 
-            F->gap_skip = F->gap_h > 0 ? gs - pc->height : 0;
+            vh = pc->height - hidden;   /* as it shows: pairs side by side */
+            F->gap_skip = F->gap_h > 0 ? gs - vh : 0;
 
             if (F->wrap_rem > 0) {  /* what is left of the float below this paragraph, and of the text above it */
-                F->wrap_rem = skip >= pc->height ? rem : rem - (pc->height - skip);
+                F->wrap_rem = skip >= vh ? rem : rem - (vh - skip);
                 F->wrap_rem = F->wrap_rem < 0 ? 0 : F->wrap_rem;
-                F->wrap_skip = skip > pc->height ? skip - pc->height : 0;
+                F->wrap_skip = skip > vh ? skip - vh : 0;
             }
 
             *prev_after = pp->space_after;
@@ -2465,6 +2525,10 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 F->wrap_w = float_taken(&f->fp, f->w, F->colw, &ox);
                 F->wrap_side = f->fp.wrap;
                 F->wrap_fl = f->fp.npoly >= 3 ? F->nfl - 1 : -1;
+                F->wrap_lw = ox - f->fp.gap;    /* both sides: each wide enough for some words (half an inch) */
+                F->wrap_rx = ox + f->w + f->fp.gap;
+                F->wrap_both = f->fp.wrap_mode == PD_WRAPSIDE_BOTH && (f->fp.placement & PD_PLACE_OFFSET) &&
+                               F->wrap_fl < 0 && F->wrap_lw >= PD_PT(36) && F->colw - F->wrap_rx >= PD_PT(36);
                 F->wrap_total = F->wrap_rem;
                 F->wrap_ox = ox;
             } else if (f->fp.offset_y > 0) {
@@ -3054,6 +3118,19 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
     }
 }
 
+/* the right part of a pair of lines beside a float (text on both sides): how far down to put it for its baseline
+   to be its left part's; 0 for any other line */
+static pd_sp pair_dy(const pcache* pc, int32_t k) {
+    pd_line a, b;
+
+    if (!pc->ws_both || k <= pc->ws_k0 || k >= pc->ws_k || (k - pc->ws_k0) % 2 != 1 ||
+            pd_para_get_line(pc->para, k - 1, &a) != PD_OK || pd_para_get_line(pc->para, k, &b) != PD_OK) {
+        return 0;
+    }
+
+    return (a.baseline - pc->top[k - 1]) - (b.baseline - pc->top[k]);
+}
+
 /* emit a column's content (records before cut), its footnotes, and bottom floats in what is left */
 static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_at_cut, pd_sp fn_at_cut) {
     pd_sp x = col_x(F, F->page, F->col), y0 = F->top + F->top_used;
@@ -3069,7 +3146,8 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
         const vitem* v = &F->it[r[i].item];
 
         if (v->kind == VI_LINE) {
-            add_line(F->L, F->page, v->pc, v->line, x, y0 + r[i].y - v->pc->top[v->line], 0);
+            add_line(F->L, F->page, v->pc, v->line, x, y0 + r[i].y - v->pc->top[v->line] + pair_dy(v->pc, v->line),
+                     0);
         } else if (v->kind == VI_ROW) {
             place_row(F, v, x, y0 + r[i].y);
         } else if (v->kind == VI_RULE) {

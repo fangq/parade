@@ -9144,6 +9144,85 @@ static void test_wrap_outline(void) {
     pd_doc_free(d);
 }
 
+/* Text on both sides of a float in the middle of the column (wrapSquare bothSides): beside it each row of the
+   paragraph is a left part and a right part on one baseline, none of it under the picture, read left part then
+   right part; a click on the right part finds text after the left part's, and its caret is drawn there. Also
+   after .docx and native round trips */
+static void test_wrap_both_sides(void) {
+    char body[16384], *p;
+    pd_doc* d;
+    int pass, i;
+
+    p = body + sprintf(body, "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\">"
+                       "<w:body><w:p>"
+                       "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"114300\" distR=\"114300\">"
+                       "<wp:positionH relativeFrom=\"column\"><wp:posOffset>2286000</wp:posOffset></wp:positionH>"
+                       "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset></wp:positionV>"
+                       "<wp:extent cx=\"914400\" cy=\"914400\"/><wp:wrapSquare wrapText=\"bothSides\"/>"
+                       "<wp:docPr id=\"1\" name=\"p\"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip "
+                       "r:embed=\"rId5\"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:anchor>"
+                       "</w:drawing></w:r><w:r><w:t>BOTH");
+
+    for (i = 0; i < 60; i++) {
+        p += sprintf(p, " words on either side");
+    }
+
+    sprintf(p, "</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" "
+            "w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>"
+            "</w:sectPr></w:body></w:document>");
+    d = docx_doc("word/_rels/document.xml.rels",
+                 "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                 "</Relationships>", "word/media/image1.png", "tests/data/rgba.png", "word/document.xml", body, NULL);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            pd_block_id para = find_para(d, "BOTH");
+            int32_t n, k, left = 0, right = 0, under = 0, pg;
+            pd_sp ly = -1, ry = -1, lo = PD_PT(72 + 180), hi = PD_PT(72 + 252), cx, cb, ca, cd;
+            pd_draw* it = page_draws(L, 0, &n);
+            pd_pos at, at2;
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind != PD_DRAW_GLYPH || it[k].block != para || it[k].y > PD_PT(72 + 70)) {
+                    continue;
+                }
+
+                left += it[k].x + it[k].w <= lo;
+                right += it[k].x >= hi;
+                under += it[k].x + it[k].w > lo && it[k].x < hi;
+                ly = ly < 0 && it[k].x < lo ? it[k].y : ly;
+                ry = ry < 0 && it[k].x >= hi ? it[k].y : ry;
+            }
+
+            free(it);
+            CHECK(left > 20 && right > 20 && under == 0 && ly == ry && ly > 0);
+            CHECK(pd_layout_hit_test(L, 0, PD_PT(80), ly, &at) == PD_OK && at.block == para);
+            CHECK(pd_layout_hit_test(L, 0, PD_PT(72 + 300), ly, &at2) == PD_OK && at2.block == para &&
+                  at2.offset > at.offset + 10);
+            CHECK(pd_layout_caret(L, at2, &pg, &cx, &cb, &ca, &cd) == PD_OK && pg == 0 && cb == ly && cx > hi);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9180,6 +9259,7 @@ int main(void) {
     test_page_features();
     test_para_border_lines();
     test_wrap_outline();
+    test_wrap_both_sides();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

@@ -106,7 +106,10 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   the top of every continuation.
 - Text wraps to a float's outline where it has one (Word's wrapTight and
   wrapThrough polygons: each line narrowed to how far the outline reaches
-  beside it), on the wider side for Word's "largest" and "bothSides".
+  beside it), on the wider side for Word's "largest"; with "bothSides"
+  beside a float in the middle of the column each row is a left and a
+  right part on one baseline (the paragraph broken to alternating widths,
+  each pair of lines set side by side).
 - A table can float (a float holding just the table: Word's floating
   tables, `w:tblpPr`), placed and wrapped like a picture.
 - Floats with `wrap` left/right sit at their anchor and the following
