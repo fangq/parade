@@ -291,6 +291,14 @@ int main(void) {
     printf("pd_table_props.style %zu\n", offsetof(pd_table_props, style));
     printf("pd_table_props.look %zu\n", offsetof(pd_table_props, look));
     printf("pd_table_props.border_given %zu\n", offsetof(pd_table_props, border_given));
+    printf("pd_row_props %zu\n", sizeof(pd_row_props));
+    printf("pd_row_props.grid_before %zu\n", offsetof(pd_row_props, grid_before));
+    printf("pd_row_props.grid_after %zu\n", offsetof(pd_row_props, grid_after));
+    printf("pd_row_props.width_before %zu\n", offsetof(pd_row_props, width_before));
+    printf("pd_row_props.width_after %zu\n", offsetof(pd_row_props, width_after));
+    printf("pd_row_props.height %zu\n", offsetof(pd_row_props, height));
+    printf("pd_row_props.height_exact %zu\n", offsetof(pd_row_props, height_exact));
+    printf("pd_row_props.split %zu\n", offsetof(pd_row_props, split));
     printf("pd_cell_props %zu\n", sizeof(pd_cell_props));
     printf("pd_cell_props.col_span %zu\n", offsetof(pd_cell_props, col_span));
     printf("pd_cell_props.valign %zu\n", offsetof(pd_cell_props, valign));
@@ -304,6 +312,8 @@ int main(void) {
     printf("pd_cell_props.edge_width %zu\n", offsetof(pd_cell_props, edge_width));
     printf("pd_cell_props.background_theme %zu\n", offsetof(pd_cell_props, background_theme));
     printf("pd_cell_props.border_theme %zu\n", offsetof(pd_cell_props, border_theme));
+    printf("pd_cell_props.width %zu\n", offsetof(pd_cell_props, width));
+    printf("pd_cell_props.width_pct %zu\n", offsetof(pd_cell_props, width_pct));
     printf("pd_theme %zu\n", sizeof(pd_theme));
     printf("pd_theme.name %zu\n", offsetof(pd_theme, name));
     printf("pd_theme.color %zu\n", offsetof(pd_theme, color));

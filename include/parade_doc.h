@@ -689,7 +689,8 @@ typedef enum {
                                      line longer or shorter to avoid bad pages (Mittelbach) */
 } pd_page_breaking;
 
-#define PD_TABLE_MAX_COLS 32
+#define PD_TABLE_MAX_COLS 64     /**< fixed widths a table holds (Word's tables have at most 63 columns) */
+#define PD_TABLE_MAX_GRID 4096   /**< columns a table's grid may have; those past col_width's are automatic */
 
 typedef struct {
     pd_sp width;                /**< 0 = automatic: from the content, at most the text column */
@@ -735,7 +736,7 @@ typedef struct {
 #define PD_TBORDER_INSIDE_V (1 << 5)
 
 typedef struct {
-    int32_t col_span;           /**< columns this cell covers, >= 1 */
+    int32_t col_span;           /**< columns this cell covers, 1 to PD_TABLE_MAX_GRID */
     int32_t valign;             /**< 0 top, 1 middle, 2 bottom */
     uint32_t background;        /**< 0xAARRGGBB, 0 = none */
     int32_t merge_up;           /**< 1 = continues the cell above it (a vertical merge, Word's vMerge, HTML's
@@ -751,7 +752,27 @@ typedef struct {
                                      0: border_width */
     uint32_t background_theme;  /**< pd_theme_color reference of background, 0 = none */
     uint32_t border_theme;      /**< pd_theme_color reference of border_color, 0 = none */
+    pd_sp width;                /**< its preferred width (Word's tcW), for a column the table does not size itself;
+                                     0 = automatic */
+    int32_t width_pct;          /**< or that in per-mille of the table's width (width 0) */
 } pd_cell_props;
+
+/** a table row's own properties (Word's w:trPr) */
+typedef struct {
+    int32_t grid_before;        /**< grid columns left empty before its first cell (Word's gridBefore) */
+    int32_t grid_after;         /**< and after its last (gridAfter) */
+    pd_sp width_before;         /**< the empty columns' width before, at least (w:wBefore), 0 = unsaid */
+    pd_sp width_after;          /**< and after (w:wAfter) */
+    pd_sp height;               /**< with height_exact: the row's height (else its cells' min_height say) */
+    int32_t height_exact;       /**< 1: exactly height tall, what its cells hold beyond that cut off (Word's
+                                     hRule="exact"); such a row is never broken */
+    int32_t split;              /**< PD_ROWSPLIT_*: whether it may be broken across columns and pages */
+} pd_row_props;
+
+/* where a table row may break */
+#define PD_ROWSPLIT_TALL  0     /**< only when it is taller than a column */
+#define PD_ROWSPLIT_NEVER 1     /**< never (Word's cantSplit): what passes a column's foot is cut off */
+#define PD_ROWSPLIT_ANY   2     /**< after any line where the column ends (Word's rows by default) */
 
 /* ------------------------------------------------------------------ */
 /* Table styles                                                       */
@@ -854,6 +875,7 @@ PD_API pd_status pd_doc_section_props(const pd_doc* doc, pd_block_id section, pd
 PD_API void      pd_section_props_init(pd_section_props* props);
 PD_API pd_status pd_doc_table_props(const pd_doc* doc, pd_block_id table, pd_table_props* out);
 PD_API pd_status pd_doc_cell_props(const pd_doc* doc, pd_block_id cell, pd_cell_props* out);
+PD_API pd_status pd_doc_row_props(const pd_doc* doc, pd_block_id row, pd_row_props* out);
 /** automatic width and columns, 4pt padding, 0.4pt black rules, no header rows */
 PD_API void      pd_table_props_init(pd_table_props* props);
 
@@ -976,6 +998,7 @@ PD_API pd_status pd_doc_set_float_props(pd_doc* doc, pd_block_id flt, const pd_f
 PD_API pd_status pd_doc_set_section_props(pd_doc* doc, pd_block_id section, const pd_section_props* props);
 PD_API pd_status pd_doc_set_table_props(pd_doc* doc, pd_block_id table, const pd_table_props* props);
 PD_API pd_status pd_doc_set_cell_props(pd_doc* doc, pd_block_id cell, const pd_cell_props* props);
+PD_API pd_status pd_doc_set_row_props(pd_doc* doc, pd_block_id row, const pd_row_props* props);
 PD_API pd_status pd_doc_set_break(pd_doc* doc, pd_block_id brk, pd_break_kind kind);
 
 /* ------------------------------------------------------------------ */

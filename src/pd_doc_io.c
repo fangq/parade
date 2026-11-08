@@ -707,7 +707,8 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
         case PD_BLOCK_CELL: {
             const pd_cell_props* p = &s->cell;
 
-            if (p->col_span != 1 || p->valign || p->background || p->merge_up || p->min_height || p->border_set) {
+            if (p->col_span != 1 || p->valign || p->background || p->merge_up || p->min_height || p->border_set ||
+                    p->width || p->width_pct) {
                 pj_key(w, "Cell");
                 pj_obj_begin(w);
                 put_int(w, "ColumnSpan", p->col_span);
@@ -730,6 +731,14 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                     put_int(w, "MinHeight", p->min_height);
                 }
 
+                if (p->width) {
+                    put_int(w, "Width", p->width);
+                }
+
+                if (p->width_pct) {
+                    put_int(w, "WidthPerMille", p->width_pct);
+                }
+
                 if (p->border_set) {
                     put_int(w, "BorderSet", p->border_set);
                     put_int(w, "BorderOn", p->border_on);
@@ -748,6 +757,38 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                         pj_int_matrix(w, ew, 1, 4);
                     }
                 }
+                pj_obj_end(w);
+            }
+
+            break;
+        }
+
+        case PD_BLOCK_ROW: {
+            const pd_row_props* p = &s->row;
+
+            if (p->grid_before || p->grid_after || p->width_before || p->width_after || p->height_exact || p->split) {
+                pj_key(w, "Row");
+                pj_obj_begin(w);
+
+                if (p->grid_before || p->width_before) {
+                    put_int(w, "GridBefore", p->grid_before);
+                    put_int(w, "WidthBefore", p->width_before);
+                }
+
+                if (p->grid_after || p->width_after) {
+                    put_int(w, "GridAfter", p->grid_after);
+                    put_int(w, "WidthAfter", p->width_after);
+                }
+
+                if (p->height_exact) {
+                    put_int(w, "Height", p->height);
+                    put_bool(w, "HeightExact", p->height_exact);
+                }
+
+                if (p->split) {
+                    put_int(w, "Split", p->split);
+                }
+
                 pj_obj_end(w);
             }
 
@@ -1859,6 +1900,23 @@ static void load_table(loader* L, const pj_node* o, pd_table_props* p) {
     }
 }
 
+static void load_row(loader* L, const pj_node* o, pd_row_props* p) {
+    const pj_node* x = pj_get(o, "Row");
+
+    if (!x) {
+        return;
+    }
+
+    REQUIRE(x->type == PJ_OBJ);
+    p->grid_before = (int32_t)int_or(pj_get(x, "GridBefore"), 0, 0, PD_TABLE_MAX_GRID - 1, L);
+    p->grid_after = (int32_t)int_or(pj_get(x, "GridAfter"), 0, 0, PD_TABLE_MAX_GRID - 1, L);
+    p->width_before = (pd_sp)int_or(pj_get(x, "WidthBefore"), 0, 0, SP_MAX, L);
+    p->width_after = (pd_sp)int_or(pj_get(x, "WidthAfter"), 0, 0, SP_MAX, L);
+    p->height = (pd_sp)int_or(pj_get(x, "Height"), 0, 0, SP_MAX, L);
+    p->height_exact = (int32_t)int_or(pj_get(x, "HeightExact"), 0, 0, 1, L);
+    p->split = (int32_t)int_or(pj_get(x, "Split"), PD_ROWSPLIT_TALL, PD_ROWSPLIT_TALL, PD_ROWSPLIT_ANY, L);
+}
+
 static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     const pj_node* x = pj_get(o, "Cell");
 
@@ -1867,7 +1925,7 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     }
 
     REQUIRE(x->type == PJ_OBJ);
-    p->col_span = (int32_t)int_or(pj_get(x, "ColumnSpan"), 1, 1, PD_TABLE_MAX_COLS, L);
+    p->col_span = (int32_t)int_or(pj_get(x, "ColumnSpan"), 1, 1, PD_TABLE_MAX_GRID, L);
     p->valign = (int32_t)int_or(pj_get(x, "VerticalAlign"), 0, 0, 2, L);
     p->background = (uint32_t)int_or(pj_get(x, "Background"), 0, 0, 0xFFFFFFFFLL, L);
     p->merge_up = (int32_t)int_or(pj_get(x, "MergeUp"), 0, 0, 1, L);
@@ -1878,6 +1936,8 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     p->border_color = (uint32_t)int_or(pj_get(x, "BorderColor"), 0, 0, 0xFFFFFFFFLL, L);
     p->background_theme = (uint32_t)int_or(pj_get(x, "BackgroundTheme"), 0, 0, 0xFFFFFFFFLL, L);
     p->border_theme = (uint32_t)int_or(pj_get(x, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
+    p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);
+    p->width_pct = (int32_t)int_or(pj_get(x, "WidthPerMille"), 0, 0, 1000, L);
 
     {
         const pj_node* ew = pj_get(x, "EdgeWidths");
@@ -1966,6 +2026,8 @@ static pd_block_id load_tree(loader* L, const pj_node* node, pd_block_id parent,
         load_table(L, data, &b->st.tp);
     } else if (kind == PD_BLOCK_CELL) {
         load_cell(L, data, &b->st.cell);
+    } else if (kind == PD_BLOCK_ROW) {
+        load_row(L, data, &b->st.row);
     } else if (kind == PD_BLOCK_BREAK && pj_get(data, "Break")) {
         b->st.break_kind = enum_of(pj_get(data, "Break"), NAMES(break_names));
         REQUIRE0(b->st.break_kind >= 0);
@@ -3016,6 +3078,8 @@ pd_status pd_doc_apply_delta(pd_doc* d, const char* json, size_t len) {
                     load_table(&L, data, &ns.tp);
                 } else if (b->kind == PD_BLOCK_CELL) {
                     load_cell(&L, data, &ns.cell);
+                } else if (b->kind == PD_BLOCK_ROW) {
+                    load_row(&L, data, &ns.row);
                 } else if (b->kind == PD_BLOCK_BREAK && pj_get(data, "Break")) {
                     ns.break_kind = enum_of(pj_get(data, "Break"), NAMES(break_names));
                     L.bad |= ns.break_kind < 0;
@@ -3315,6 +3379,8 @@ int pd_jd_get_block(pd_doc* d, const void* node, int32_t kind, bstate* st) {
         load_table(&L, data, &st->tp);
     } else if (kind == PD_BLOCK_CELL) {
         load_cell(&L, data, &st->cell);
+    } else if (kind == PD_BLOCK_ROW) {
+        load_row(&L, data, &st->row);
     } else if (kind == PD_BLOCK_BREAK && pj_get(data, "Break")) {
         st->break_kind = enum_of(pj_get(data, "Break"), NAMES(break_names));
         L.bad |= st->break_kind < 0;

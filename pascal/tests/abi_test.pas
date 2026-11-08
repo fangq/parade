@@ -26,6 +26,7 @@ var
   v_pd_float_props: pd_float_props;
   v_pd_section_props: pd_section_props;
   v_pd_table_props: pd_table_props;
+  v_pd_row_props: pd_row_props;
   v_pd_cell_props: pd_cell_props;
   v_pd_theme: pd_theme;
   v_pd_table_style_part: pd_table_style_part;
@@ -327,6 +328,14 @@ begin
   WriteLn('pd_table_props.style ', PtrUInt(@v_pd_table_props.style) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.look ', PtrUInt(@v_pd_table_props.look) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.border_given ', PtrUInt(@v_pd_table_props.border_given) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_row_props ', SizeOf(pd_row_props));
+  WriteLn('pd_row_props.grid_before ', PtrUInt(@v_pd_row_props.grid_before) - PtrUInt(@v_pd_row_props));
+  WriteLn('pd_row_props.grid_after ', PtrUInt(@v_pd_row_props.grid_after) - PtrUInt(@v_pd_row_props));
+  WriteLn('pd_row_props.width_before ', PtrUInt(@v_pd_row_props.width_before) - PtrUInt(@v_pd_row_props));
+  WriteLn('pd_row_props.width_after ', PtrUInt(@v_pd_row_props.width_after) - PtrUInt(@v_pd_row_props));
+  WriteLn('pd_row_props.height ', PtrUInt(@v_pd_row_props.height) - PtrUInt(@v_pd_row_props));
+  WriteLn('pd_row_props.height_exact ', PtrUInt(@v_pd_row_props.height_exact) - PtrUInt(@v_pd_row_props));
+  WriteLn('pd_row_props.split ', PtrUInt(@v_pd_row_props.split) - PtrUInt(@v_pd_row_props));
   WriteLn('pd_cell_props ', SizeOf(pd_cell_props));
   WriteLn('pd_cell_props.col_span ', PtrUInt(@v_pd_cell_props.col_span) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.valign ', PtrUInt(@v_pd_cell_props.valign) - PtrUInt(@v_pd_cell_props));
@@ -340,6 +349,8 @@ begin
   WriteLn('pd_cell_props.edge_width ', PtrUInt(@v_pd_cell_props.edge_width) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.background_theme ', PtrUInt(@v_pd_cell_props.background_theme) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.border_theme ', PtrUInt(@v_pd_cell_props.border_theme) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.width ', PtrUInt(@v_pd_cell_props.width) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.width_pct ', PtrUInt(@v_pd_cell_props.width_pct) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_theme ', SizeOf(pd_theme));
   WriteLn('pd_theme.name ', PtrUInt(@v_pd_theme.name) - PtrUInt(@v_pd_theme));
   WriteLn('pd_theme.color ', PtrUInt(@v_pd_theme.color) - PtrUInt(@v_pd_theme));

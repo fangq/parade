@@ -6856,6 +6856,374 @@ static void test_docx_kept_parts(void) {
     free(z.p);
 }
 
+/* ------------------------------------------------------------------ */
+/* tables and pages laid out                                          */
+/* ------------------------------------------------------------------ */
+
+/* a laid-out document (fonts from have_layout_font), NULL when it cannot be */
+static pd_layout* laid_out(pd_doc* d) {
+    pd_layout* L = NULL;
+
+    if (!d || !have_layout_font()) {
+        return NULL;
+    }
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) != PD_OK || pd_layout_update(L, NULL) != PD_OK) {
+        pd_layout_free(L);
+        return NULL;
+    }
+
+    return L;
+}
+
+/* the display list of a page, malloc'ed, *n items */
+static pd_draw* page_draws(const pd_layout* L, int32_t page, int32_t* n) {
+    pd_draw* it;
+
+    *n = 0;
+
+    if (pd_layout_page_items(L, page, NULL, 0, n) != PD_OK ||
+            (it = (pd_draw*)malloc(((size_t) * n + 1) * sizeof(pd_draw))) == NULL) {
+        return NULL;
+    }
+
+    pd_layout_page_items(L, page, it, *n, n);
+    return it;
+}
+
+/* where the first glyph of the paragraph holding s is drawn: its page, pen x and baseline; 0 if nowhere */
+static int text_drawn(const pd_doc* d, const pd_layout* L, const char* s, int32_t* page, pd_sp* x, pd_sp* y) {
+    pd_block_id p = find_para(d, s);
+    int32_t pg, k, n;
+
+    for (pg = 0; p && pg < pd_layout_page_count(L); pg++) {
+        pd_draw* it = page_draws(L, pg, &n);
+
+        for (k = 0; it && k < n; k++) {
+            if (it[k].kind == PD_DRAW_GLYPH && it[k].block == p) {
+                *page = pg;
+                *x = it[k].x;
+                *y = it[k].y;
+                free(it);
+                return 1;
+            }
+        }
+
+        free(it);
+    }
+
+    return 0;
+}
+
+#define WDOC(body) "<w:document xmlns:w=\"w\"><w:body>" body "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/>" \
+    "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" " \
+    "w:gutter=\"0\"/></w:sectPr></w:body></w:document>"
+
+/* A table of 40 columns (Word allows 63): every cell laid out in its own column, left to right, and the
+   last ones still there after a trip through .docx and Parade's own format */
+static void test_wide_table(void) {
+    char* body = (char*)malloc(32768), *p;
+    pd_doc* d;
+    pd_layout* L;
+    int pass, c;
+
+    if (!body) {
+        return;
+    }
+
+    p = body + sprintf(body, "<w:document xmlns:w=\"w\"><w:body><w:tbl><w:tblGrid>");
+
+    for (c = 0; c < 40; c++) {
+        p += sprintf(p, "<w:gridCol w:w=\"220\"/>");
+    }
+
+    p += sprintf(p, "</w:tblGrid><w:tr>");
+
+    for (c = 0; c < 40; c++) {
+        p += sprintf(p, "<w:tc><w:p><w:r><w:t>k%02d</w:t></w:r></w:p></w:tc>", c);
+    }
+
+    sprintf(p, "</w:tr></w:tbl><w:p/></w:body></w:document>");
+    d = docx_doc("word/document.xml", body, NULL);
+    free(body);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if ((L = laid_out(d)) != NULL) {
+            int32_t pg[3];
+            pd_sp x[3], y[3];
+
+            CHECK(text_drawn(d, L, "k31", &pg[0], &x[0], &y[0]) && text_drawn(d, L, "k32", &pg[1], &x[1], &y[1]) &&
+                  text_drawn(d, L, "k39", &pg[2], &x[2], &y[2]));
+            CHECK(x[1] > x[0] + PD_PT(10) && x[2] > x[1] + PD_PT(70) && y[2] == y[0]);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+        CHECK(d && find_para(d, "k39") != 0);
+    }
+
+    pd_doc_free(d);
+
+    {
+        /* HTML: a rowspan in column 70 of 80 still makes a merged cell below it */
+        char* h = (char*)malloc(8192), *q;
+
+        if (!h) {
+            return;
+        }
+
+        q = h + sprintf(h, "<table><tr>");
+
+        for (c = 0; c < 80; c++) {
+            q += sprintf(q, c == 70 ? "<td rowspan=\"2\">m</td>" : "<td>a</td>");
+        }
+
+        q += sprintf(q, "</tr><tr>");
+
+        for (c = 0; c < 79; c++) {
+            q += sprintf(q, "<td>b</td>");
+        }
+
+        sprintf(q, "</tr></table>");
+        d = NULL;
+        CHECK(pd_doc_import(h, strlen(h), PD_CONV_HTML, &d) == PD_OK);
+        free(h);
+
+        if (d) {
+            pd_block_id t = first_table(d);
+
+            CHECK(cell_props_at(d, t, 1, 70).merge_up == 1 && cell_props_at(d, t, 1, 69).merge_up == 0 &&
+                  has_text(d, t, 1, 71, "b"));
+            pd_doc_free(d);
+        }
+    }
+}
+
+/* Rows that leave grid columns empty (gridBefore, gridAfter): a row's one cell after a skipped column sits under
+   the second column, not the first, also after .docx and native round trips; HTML gets an empty cell for it */
+static void test_grid_before(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblGrid><w:gridCol w:w=\"3000\"/><w:gridCol w:w=\"3000\"/><w:gridCol w:w=\"3000\"/>"
+                             "</w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>AA</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>BB</w:t>"
+                             "</w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>CC</w:t></w:r></w:p></w:tc></w:tr>"
+                             "<w:tr><w:trPr><w:gridBefore w:val=\"1\"/><w:gridAfter w:val=\"1\"/><w:wBefore w:w=\"3000\" "
+                             "w:type=\"dxa\"/></w:trPr><w:tc><w:p><w:r><w:t>GB</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+                             "<w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pg[3];
+            pd_sp x[3], y[3];
+
+            CHECK(text_drawn(d, L, "AA", &pg[0], &x[0], &y[0]) && text_drawn(d, L, "BB", &pg[1], &x[1], &y[1]) &&
+                  text_drawn(d, L, "GB", &pg[2], &x[2], &y[2]));
+            CHECK(x[2] == x[1] && x[1] > x[0] + PD_PT(140) && y[2] > y[1]);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    if (d) {
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "<tr><td colspan=\"1\" style=\"border:none\"></td><td>") != NULL);
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
+/* A row of exact height (trHeight hRule="exact") keeps it, and what its cell holds past it is cut off, the next
+   row right below; also after .docx and native round trips */
+static void test_exact_row(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblGrid><w:gridCol w:w=\"3000\"/></w:tblGrid>"
+                             "<w:tr><w:trPr><w:trHeight w:val=\"400\" w:hRule=\"exact\"/></w:trPr><w:tc>"
+                             "<w:p><w:r><w:t>L1</w:t></w:r></w:p><w:p><w:r><w:t>L2</w:t></w:r></w:p>"
+                             "<w:p><w:r><w:t>L3</w:t></w:r></w:p><w:p><w:r><w:t>L4</w:t></w:r></w:p></w:tc></w:tr>"
+                             "<w:tr><w:tc><w:p><w:r><w:t>NEXT</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pg[2];
+            pd_sp x[2], y[2];
+
+            CHECK(text_drawn(d, L, "L1", &pg[0], &x[0], &y[0]) && text_drawn(d, L, "NEXT", &pg[1], &x[1], &y[1]));
+            CHECK(y[1] - y[0] > PD_PT(19) && y[1] - y[0] < PD_PT(21));    /* 20pt below: the row's height */
+            CHECK(!text_drawn(d, L, "L2", &pg[0], &x[0], &y[0]) && !text_drawn(d, L, "L4", &pg[0], &x[0], &y[0]));
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    if (d) {
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK && b.p && strstr(b.p, "<tr style=\"height:20.00pt\">"));
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
+/* A table row near a page's foot: Word breaks it there (its first line on one page, its last on the next) unless
+   it is cantSplit, when it goes whole to the next page; cantSplit kept through .docx and the native format */
+static void test_cant_split(void) {
+    int cant;
+
+    for (cant = 0; cant < 2; cant++) {
+        char* body = (char*)malloc(16384), *p;
+        pd_doc* d;
+        int i, pass;
+
+        if (!body) {
+            return;
+        }
+
+        p = body + sprintf(body, "<w:document xmlns:w=\"w\"><w:body>");
+
+        for (i = 0; i < 40; i++) {
+            p += sprintf(p, "<w:p><w:r><w:t>filler %d</w:t></w:r></w:p>", i);
+        }
+
+        p += sprintf(p, "<w:tbl><w:tblGrid><w:gridCol w:w=\"3000\"/><w:gridCol w:w=\"3000\"/></w:tblGrid><w:tr>%s<w:tc>",
+                     cant ? "<w:trPr><w:cantSplit/></w:trPr>" : "");
+
+        for (i = 1; i <= 20; i++) {
+            p += sprintf(p, "<w:p><w:r><w:t>R%d</w:t></w:r></w:p>", i);
+        }
+
+        sprintf(p, "</w:tc><w:tc><w:p><w:r><w:t>side</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"
+                "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" "
+                "w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>"
+                "</w:body></w:document>");
+        d = docx_doc("word/document.xml", body, NULL);
+        free(body);
+        CHECK(d != NULL);
+
+        for (pass = 0; d && pass < 3; pass++) {
+            pd_layout* L = laid_out(d);
+            pd_doc* back = NULL;
+            buf_t b;
+
+            if (L) {
+                int32_t pg[3];
+                pd_sp x, y;
+
+                CHECK(text_drawn(d, L, "R1", &pg[0], &x, &y) && text_drawn(d, L, "R20", &pg[1], &x, &y) &&
+                      text_drawn(d, L, "filler 0", &pg[2], &x, &y));
+                CHECK(cant ? pg[0] == 1 && pg[1] == 1 : pg[0] == 0 && pg[1] == 1);
+                pd_layout_free(L);
+            }
+
+            if (pass == 2) {
+                break;
+            }
+
+            memset(&b, 0, sizeof(b));
+            CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = back;
+        }
+
+        pd_doc_free(d);
+    }
+}
+
+/* A cell's preferred width (tcW) sizes a column the table leaves automatic: 4000 twips (200pt) puts the next
+   cell 200pt to the right, also after .docx and native round trips */
+static void test_cell_width(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:w=\"4000\" w:type=\"dxa\"/></w:tcPr><w:p><w:r><w:t>WIDE"
+                             "</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr><w:p><w:r>"
+                             "<w:t>NARROW</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pg[2];
+            pd_sp x[2], y[2];
+
+            CHECK(text_drawn(d, L, "WIDE", &pg[0], &x[0], &y[0]) && text_drawn(d, L, "NARROW", &pg[1], &x[1], &y[1]));
+            CHECK(x[1] - x[0] > PD_PT(199) && x[1] - x[0] < PD_PT(201));
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -6879,6 +7247,12 @@ int main(void) {
     test_docx_headers();
     printf("docx tables\n");
     test_docx_tables();
+    printf("tables and pages\n");
+    test_wide_table();
+    test_grid_before();
+    test_exact_row();
+    test_cant_split();
+    test_cell_width();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

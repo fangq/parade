@@ -2608,9 +2608,14 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
 /* whether the cell of a row starting at grid column col continues the one above */
 static int dx_merges_below(const dxo* x, pd_block_id row, int32_t col) {
     pd_block_info ri;
+    pd_row_props rp;
     int32_t c, at = 0;
 
     pd_doc_block_info(x->d, row, &ri);
+
+    if (pd_doc_row_props(x->d, row, &rp) == PD_OK) {
+        at = rp.grid_before;
+    }
 
     for (c = 0; c < ri.child_count && at <= col; c++) {
         pd_cell_props cp;
@@ -2630,6 +2635,7 @@ static int dx_merges_below(const dxo* x, pd_block_id row, int32_t col) {
 static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
     pd_block_info ti, ri;
     pd_table_props tp;
+    pd_row_props rp;
     int32_t r, c, k, ncols = 0, col;
     pd_buf* o = x->o;
     int colw, fixed = 0;
@@ -2641,6 +2647,10 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         int32_t w = 0;
 
         pd_doc_block_info(x->d, pd_doc_child(x->d, t, r), &ri);
+
+        if (pd_doc_row_props(x->d, pd_doc_child(x->d, t, r), &rp) == PD_OK) {
+            w = rp.grid_before + rp.grid_after;
+        }
 
         for (c = 0; c < ri.child_count; c++) {
             pd_cell_props cp;
@@ -2754,8 +2764,9 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         pd_block_id row = pd_doc_child(x->d, t, r);
 
         pd_doc_block_info(x->d, row, &ri);
+        pd_doc_row_props(x->d, row, &rp);
         pb_puts(o, "<w:tr>");
-        col = 0;
+        col = rp.grid_before;
 
         {   /* the row's height: the tallest a cell asks for */
             pd_sp minh = 0;
@@ -2767,11 +2778,35 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 minh = cp.min_height > minh ? cp.min_height : minh;
             }
 
-            if (minh > 0 || r < tp.header_rows) {
+            if (rp.height_exact) {
+                minh = rp.height;
+            }
+
+            if (minh > 0 || r < tp.header_rows || rp.grid_before || rp.grid_after || rp.split == PD_ROWSPLIT_NEVER) {
                 pb_puts(o, "<w:trPr>");
 
+                if (rp.grid_before) {
+                    pb_printf(o, "<w:gridBefore w:val=\"%d\"/>", (int)rp.grid_before);
+                }
+
+                if (rp.grid_after) {
+                    pb_printf(o, "<w:gridAfter w:val=\"%d\"/>", (int)rp.grid_after);
+                }
+
+                if (rp.grid_before && rp.width_before) {
+                    pb_printf(o, "<w:wBefore w:w=\"%d\" w:type=\"dxa\"/>", TW(rp.width_before));
+                }
+
+                if (rp.grid_after && rp.width_after) {
+                    pb_printf(o, "<w:wAfter w:w=\"%d\" w:type=\"dxa\"/>", TW(rp.width_after));
+                }
+
+                if (rp.split == PD_ROWSPLIT_NEVER) {
+                    pb_puts(o, "<w:cantSplit/>");
+                }
+
                 if (minh > 0) {
-                    pb_printf(o, "<w:trHeight w:val=\"%d\"/>", TW(minh));
+                    pb_printf(o, "<w:trHeight w:val=\"%d\"%s/>", TW(minh), rp.height_exact ? " w:hRule=\"exact\"" : "");
                 }
 
                 if (r < tp.header_rows) {
@@ -2790,7 +2825,13 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
             pd_doc_cell_props(x->d, cell, &cp);
             pd_doc_block_info(x->d, cell, &ci);
-            pb_printf(o, "<w:tc><w:tcPr><w:tcW w:w=\"%d\" w:type=\"dxa\"/>", colw * cp.col_span);
+            if (cp.width > 0) {
+                pb_printf(o, "<w:tc><w:tcPr><w:tcW w:w=\"%d\" w:type=\"dxa\"/>", TW(cp.width));
+            } else if (cp.width_pct > 0) {
+                pb_printf(o, "<w:tc><w:tcPr><w:tcW w:w=\"%d\" w:type=\"pct\"/>", (int)cp.width_pct * 5);
+            } else {    /* the grid says */
+                pb_puts(o, "<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/>");
+            }
 
             if (cp.col_span > 1) {
                 pb_printf(o, "<w:gridSpan w:val=\"%d\"/>", (int)cp.col_span);
@@ -6977,6 +7018,9 @@ typedef struct {
     int ntab;
     dedges cell_edges;          /* the cell's own w:tcBorders */
     int pend_row, row_header, pend_cell, span, cell_merge, cell_valign;
+    pd_row_props row_pr;        /* the row's w:trPr, for the row when its first cell makes it */
+    pd_sp cell_w;               /* the cell's w:tcW: twips made sp, or (cell_wpct) per-mille */
+    int32_t cell_wpct;
     uint32_t cell_bg, cell_bg_ref;
     int in_tblpr, in_grid, in_borders, in_mar, in_cb;
     pd_sp t_width, grid[PD_TABLE_MAX_COLS];
@@ -7121,12 +7165,24 @@ static void dw_cell_style(dw* w, dtab* T) {
     T->cell.given = 1;
 }
 
+/* the row whose first cell is coming, with what its w:trPr said */
+static void dw_row_begin(dw* w) {
+    pd_bld* b = w->X->b;
+
+    bld_row_begin(b, w->row_header);
+    w->pend_row = 0;
+
+    if (b->ntables >= 1 && b->ntables <= 8 && b->table[b->ntables - 1] && (w->row_pr.grid_before ||
+            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after || w->row_pr.height_exact || w->row_pr.split)) {
+        pd_doc_set_row_props(b->d, b->row[b->ntables - 1], &w->row_pr);
+    }
+}
+
 static void dw_begin_cell(dw* w) {
     pd_bld* b = w->X->b;
 
     if (w->pend_row) {
-        bld_row_begin(b, w->row_header);
-        w->pend_row = 0;
+        dw_row_begin(w);
     }
 
     if (w->pend_cell) {
@@ -7186,10 +7242,12 @@ static void dw_begin_cell(dw* w) {
             bld_cell_merge_up(b);
         }
 
-        if (w->cell_valign) {
+        if (w->cell_valign || w->cell_w || w->cell_wpct) {
             pd_cell_props cp;
 
             if (pd_doc_cell_props(b->d, bld_container(b), &cp) == PD_OK) {
+                cp.width = w->cell_w;
+                cp.width_pct = w->cell_w ? 0 : w->cell_wpct;
                 cp.valign = w->cell_valign;
                 pd_doc_set_cell_props(b->d, bld_container(b), &cp);
             }
@@ -11558,6 +11616,15 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     mu_attr(&m, "r:id", w->hf_ref[k], sizeof(w->hf_ref[0]));
                 } else if (strcmp(t, "titlePg") == 0) {
                     w->sp.title_page = attr_on(&m);
+                } else if (strcmp(t, "tcW") == 0) {
+                    if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
+                        w->cell_w = twips(attr_int(&m, "w:w", 0));
+                        w->cell_w = w->cell_w > 0 ? w->cell_w : 0;
+                    } else if (strcmp(v, "pct") == 0 && mu_attr(&m, "w:w", v, sizeof(v))) {
+                        double pct = strchr(v, '%') ? atof(v) * 10 : atof(v) / 5;
+
+                        w->cell_wpct = (int32_t)(pct < 0 ? 0 : pct > 1000 ? 1000 : pct);
+                    }
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->sp.page_valign = !strcmp(v, "center") ? 1 : !strcmp(v, "bottom") ? 2 : 0;
                 } else if (strcmp(t, "bidi") == 0) {    /* right to left: its columns from the right */
@@ -11954,6 +12021,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (strcmp(t, "tr") == 0) {
                 w->pend_row = 1;
                 w->row_header = 0;
+                memset(&w->row_pr, 0, sizeof(w->row_pr));
+                w->row_pr.split = PD_ROWSPLIT_ANY;  /* Word breaks a row where the page ends, unless told not to */
 
                 if (w->ntab >= 1 && w->ntab <= 8) {
                     w->tabs[w->ntab - 1].row++;
@@ -11962,14 +12031,35 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
             } else if (strcmp(t, "trPr") == 0) {
                 w->in_trpr = m.type == MT_OPEN;
+            } else if (w->in_trpr && strcmp(t, "cantSplit") == 0) {
+                w->row_pr.split = attr_on(&m) ? PD_ROWSPLIT_NEVER : PD_ROWSPLIT_ANY;
+            } else if (w->in_trpr && (strcmp(t, "gridBefore") == 0 || strcmp(t, "gridAfter") == 0)) {
+                int g = attr_int(&m, "w:val", 0);
+
+                g = g < 0 ? 0 : g >= PD_TABLE_MAX_GRID ? PD_TABLE_MAX_GRID - 1 : g;
+                *(t[4] == 'B' ? &w->row_pr.grid_before : &w->row_pr.grid_after) = g;
+            } else if (w->in_trpr && (strcmp(t, "wBefore") == 0 || strcmp(t, "wAfter") == 0)) {
+                if (mu_attr(&m, "w:type", v, sizeof(v)) == 0 || strcmp(v, "dxa") == 0) {
+                    pd_sp ww = twips(attr_int(&m, "w:w", 0));
+
+                    *(t[1] == 'B' ? &w->row_pr.width_before : &w->row_pr.width_after) = ww > 0 ? ww : 0;
+                }
             } else if (w->in_trpr && strcmp(t, "tblHeader") == 0) {
                 w->row_header = attr_on(&m);
             } else if (w->in_trpr && strcmp(t, "trHeight") == 0 && w->ntab >= 1 && w->ntab <= 8) {
-                w->tabs[w->ntab - 1].row_h = twips(attr_int(&m, "w:val", 0));    /* at least, or exactly: at least */
+                pd_sp hh = twips(attr_int(&m, "w:val", 0));
+
+                hh = hh > 0 ? hh : 0;
+
+                if (!mu_attr(&m, "w:hRule", v, sizeof(v)) || strcmp(v, "atLeast") == 0) {
+                    w->tabs[w->ntab - 1].row_h = hh;
+                } else if (strcmp(v, "exact") == 0 && hh > 0) {   /* "auto": as tall as its content */
+                    w->row_pr.height = hh;
+                    w->row_pr.height_exact = 1;
+                }
             } else if (strcmp(t, "tc") == 0) {
                 if (w->pend_row) {
-                    bld_row_begin(X->b, w->row_header);
-                    w->pend_row = 0;
+                    dw_row_begin(w);
                 }
 
                 w->pend_cell = 1;
@@ -11977,6 +12067,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->cell_bg = w->cell_bg_ref = 0;
                 w->cell_merge = 0;
                 w->cell_valign = 0;
+                w->cell_w = 0;
+                w->cell_wpct = 0;
                 memset(&w->cell_edges, 0, sizeof(w->cell_edges));
             } else if (strcmp(t, "tcPr") == 0) {
                 w->in_tcpr = m.type == MT_OPEN;
@@ -11985,6 +12077,15 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->span = attr_int(&m, "w:val", 1);
                 } else if (strcmp(t, "vMerge") == 0) {   /* no value: continues the cell above */
                     w->cell_merge = !(mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "restart") == 0);
+                } else if (strcmp(t, "tcW") == 0) {
+                    if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
+                        w->cell_w = twips(attr_int(&m, "w:w", 0));
+                        w->cell_w = w->cell_w > 0 ? w->cell_w : 0;
+                    } else if (strcmp(v, "pct") == 0 && mu_attr(&m, "w:w", v, sizeof(v))) {
+                        double pct = strchr(v, '%') ? atof(v) * 10 : atof(v) / 5;
+
+                        w->cell_wpct = (int32_t)(pct < 0 ? 0 : pct > 1000 ? 1000 : pct);
+                    }
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->cell_valign = strcmp(v, "center") == 0 ? 1 : strcmp(v, "bottom") == 0 ? 2 : 0;
                 } else if (strcmp(t, "shd") == 0 && shd_color_ref(w->X, &m, &w->cell_bg, &w->cell_bg_ref)) {
@@ -12150,8 +12251,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             }
         } else if (strcmp(t, "tr") == 0) {
             if (w->pend_row) {
-                bld_row_begin(X->b, w->row_header);
-                w->pend_row = 0;
+                dw_row_begin(w);
             }
         } else if (strcmp(t, "tbl") == 0) {
             bld_table_end(X->b);

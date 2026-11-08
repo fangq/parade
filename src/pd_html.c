@@ -683,9 +683,14 @@ static void hx_cell_content(hx* x, pd_block_id cell) {
 /* whether the cell of a row starting at grid column col continues the one above */
 static int hx_merges_at(const hx* x, pd_block_id row, int32_t col) {
     pd_block_info ri;
+    pd_row_props rp;
     int32_t c, at = 0;
 
     pd_doc_block_info(x->d, row, &ri);
+
+    if (pd_doc_row_props(x->d, row, &rp) == PD_OK) {
+        at = rp.grid_before;
+    }
 
     for (c = 0; c < ri.child_count && at <= col; c++) {
         pd_cell_props cp;
@@ -714,6 +719,7 @@ static void hx_table(hx* x, pd_block_id t) {
     for (r = 0; r < ti.child_count; r++) {
         pd_block_id row = pd_doc_child(x->d, t, r);
         pd_block_info ri;
+        pd_row_props rp;
         int head = r < tp.header_rows;
 
         if (r == 0 && head) {
@@ -723,8 +729,18 @@ static void hx_table(hx* x, pd_block_id t) {
         }
 
         pd_doc_block_info(x->d, row, &ri);
-        pb_puts(x->o, "<tr>");
-        col = 0;
+        pd_doc_row_props(x->d, row, &rp);
+
+        if (rp.height_exact && rp.height > 0) {
+            pb_printf(x->o, "<tr style=\"height:%.2fpt\">", rp.height / 65536.0);
+        } else {
+            pb_puts(x->o, "<tr>");
+        }
+        col = rp.grid_before;
+
+        if (rp.grid_before > 0) {   /* the grid columns it leaves empty: a cell of nothing */
+            pb_printf(x->o, "<td colspan=\"%d\" style=\"border:none\"></td>", (int)rp.grid_before);
+        }
 
         for (c = 0; c < ri.child_count; c++) {
             pd_block_id cell = pd_doc_child(x->d, row, c);
@@ -763,8 +779,12 @@ static void hx_table(hx* x, pd_block_id t) {
                 }
             }
 
-            if (cp.background || cp.valign) {
+            if (cp.background || cp.valign || cp.width) {
                 pb_puts(x->o, " style=\"");
+
+                if (cp.width) {
+                    pb_printf(x->o, "width:%.2fpt;", cp.width / 65536.0);
+                }
 
                 if (cp.background) {
                     pb_puts(x->o, "background-color:");
@@ -963,6 +983,8 @@ typedef struct {
 } hnote;
 
 typedef struct {
+#define HI_COLS 1024            /* grid columns a rowspan is followed in */
+
     pd_bld* b;
     hel stack[128];
     int32_t depth;
@@ -972,7 +994,7 @@ typedef struct {
     int skip_anchor;            /* inside a footnote back-link or reference: drop its text */
     const char* src;
     /* rowspan: per table being built, the rows each grid column is still covered for */
-    int rs_left[8][PD_TABLE_MAX_COLS], rs_span[8][PD_TABLE_MAX_COLS], rs_col[8];
+    int rs_left[8][HI_COLS], rs_span[8][HI_COLS], rs_col[8];
 } hi;
 
 /* The cells a rowspan above covers, as cells continuing it: those at the
@@ -984,7 +1006,7 @@ static void hi_merged_cells(hi* h, int to_end) {
         return;
     }
 
-    while (h->rs_col[t] < PD_TABLE_MAX_COLS) {
+    while (h->rs_col[t] < HI_COLS) {
         int c = h->rs_col[t];
 
         if (h->rs_left[t][c] > 0) {
@@ -2235,9 +2257,9 @@ static void hi_parse(hi* h, const char* s, size_t n, int depth) {
                     if (h->b->ntables >= 1 && h->b->ntables <= 8) {
                         int t = h->b->ntables - 1, c0 = h->rs_col[t];
 
-                        span = span < 1 ? 1 : span > PD_TABLE_MAX_COLS ? PD_TABLE_MAX_COLS : span;
+                        span = span < 1 ? 1 : span > HI_COLS ? HI_COLS : span;
 
-                        if (rows > 1 && c0 < PD_TABLE_MAX_COLS) {
+                        if (rows > 1 && c0 < HI_COLS) {
                             h->rs_left[t][c0] = rows - 1 > 1000 ? 1000 : rows - 1;
                             h->rs_span[t][c0] = span;
                         }
@@ -2324,7 +2346,7 @@ static void find_notes(hi* h, const char* s, size_t n) {
 
 pd_status pd_html_import(pd_doc* d, const char* s, size_t n) {
     pd_bld b;
-    hi h;
+    hi* h;
     const char* frag;
 
     /* Windows clipboard HTML: a header of offsets, then the page */
@@ -2334,17 +2356,21 @@ pd_status pd_html_import(pd_doc* d, const char* s, size_t n) {
     }
 
     bld_init(&b, d);
-    memset(&h, 0, sizeof(h));
-    h.b = &b;
-    h.src = s;
-    find_notes(&h, s, n);
-    hi_parse(&h, s, n, 0);
-    close_from(&h, 0);
+    if ((h = (hi*)calloc(1, sizeof(hi))) == NULL) {
+        return PD_ERR_NOMEM;
+    }
+
+    h->b = &b;
+    h->src = s;
+    find_notes(h, s, n);
+    hi_parse(h, s, n, 0);
+    close_from(h, 0);
 
     while (b.ntables > 0) {
         bld_table_end(&b);
     }
 
-    free(h.notes);
+    free(h->notes);
+    free(h);
     return bld_finish(&b);
 }

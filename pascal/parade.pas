@@ -241,7 +241,11 @@ const
   PD_WRAP_BEHIND = 4;
   PD_PAGES_GREEDY = 0;
   PD_PAGES_OPTIMAL = 1;
-  PD_TABLE_MAX_COLS = 32;
+  PD_TABLE_MAX_COLS = 64;
+  PD_TABLE_MAX_GRID = 4096;
+  PD_ROWSPLIT_TALL = 0;
+  PD_ROWSPLIT_NEVER = 1;
+  PD_ROWSPLIT_ANY = 2;
 
   PD_MAX_TABS = 16;
   PD_TAB_LEFT = 0;
@@ -665,8 +669,19 @@ type
     border_color: UInt32;
     edge_width: array[0..3] of pd_sp;   { each edge's width (top, right, bottom, left); 0: border_width }
     background_theme, border_theme: UInt32;     { pd_theme_color references, 0 = none }
+    width: pd_sp;            { preferred width (Word's tcW), 0 = automatic }
+    width_pct: Int32;        { or per-mille of the table's width }
   end;
   Ppd_cell_props = ^pd_cell_props;
+
+  { a table row's own properties (Word's w:trPr) }
+  pd_row_props = record
+    grid_before, grid_after: Int32;     { grid columns left empty before its first cell, after its last }
+    width_before, width_after: pd_sp;   { their widths, at least (0 = unsaid) }
+    height: pd_sp;                      { with height_exact: the row's height }
+    height_exact: Int32;                { 1: exactly that tall, its cells' content cut off there }
+    split: Int32;                       { PD_ROWSPLIT_* }
+  end;
 
   { what a table style says of a part's cells (PD_TPART_*), and of their text }
   pd_table_style_part = record
@@ -891,6 +906,7 @@ function pd_doc_section_props(doc: Ppd_doc; section: pd_block_id; out props: pd_
 procedure pd_section_props_init(out props: pd_section_props); cdecl; PDEXT;
 function pd_doc_table_props(doc: Ppd_doc; table: pd_block_id; out props: pd_table_props): pd_status; cdecl; PDEXT;
 function pd_doc_cell_props(doc: Ppd_doc; cell: pd_block_id; out props: pd_cell_props): pd_status; cdecl; PDEXT;
+function pd_doc_row_props(doc: Ppd_doc; row: pd_block_id; out props: pd_row_props): pd_status; cdecl; PDEXT;
 procedure pd_table_props_init(out props: pd_table_props); cdecl; PDEXT;
 
 function pd_doc_insert_text(doc: Ppd_doc; at: pd_pos; utf8: PAnsiChar; len: csize_t; format: pd_format_id; after: Ppd_pos): pd_status; cdecl; PDEXT;
@@ -919,6 +935,7 @@ function pd_doc_set_float_props(doc: Ppd_doc; flt: pd_block_id; constref props: 
 function pd_doc_set_section_props(doc: Ppd_doc; section: pd_block_id; constref props: pd_section_props): pd_status; cdecl; PDEXT;
 function pd_doc_set_table_props(doc: Ppd_doc; table: pd_block_id; constref props: pd_table_props): pd_status; cdecl; PDEXT;
 function pd_doc_set_cell_props(doc: Ppd_doc; cell: pd_block_id; constref props: pd_cell_props): pd_status; cdecl; PDEXT;
+function pd_doc_set_row_props(doc: Ppd_doc; row: pd_block_id; constref props: pd_row_props): pd_status; cdecl; PDEXT;
 function pd_doc_set_break(doc: Ppd_doc; brk: pd_block_id; kind: Int32): pd_status; cdecl; PDEXT;
 
 procedure pd_doc_begin_group(doc: Ppd_doc; label_: PAnsiChar); cdecl; PDEXT;
