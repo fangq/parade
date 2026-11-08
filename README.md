@@ -411,9 +411,11 @@ pd_para_break(p, &prm, NULL);
     src/pd_conv.c        converters: dispatch, builder, clipboard copy/paste, text
     src/pd_markup.c      HTML/XML tokenizer
     src/pd_html.c src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c
-    src/pd_pptx.c        PowerPoint read: each slide a page that is a canvas (placeholders from the layout
-                         and master, theme colours and fonts, pictures, tables, SmartArt drawings), made a
-                         .docx in memory and read as one; a .docx's SmartArt made groups of its shapes
+    src/pd_pptx.c        PowerPoint read: each slide shown a page that is a canvas (placeholders from the
+                         layout and master, each master's theme colours, fonts and styles, pictures, tables
+                         with their styles, SmartArt drawings, charts, embedded objects' pictures, equations,
+                         numbered and picture bullets, links), made a .docx in memory and read as one; a
+                         .docx's SmartArt made groups of its shapes
     src/pd_dgm.c         SmartArt laid out from its definition when it has no drawing saved of it (data
                          model, layout nodes, constraints and rules; composite, lin, snake, hierRoot,
                          hierChild, cycle, pyra); PD_SMARTART=layout lays out even those that have one,
