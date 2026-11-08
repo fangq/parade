@@ -263,6 +263,8 @@ const
   PD_PGBORDER_FIRST = 2;
   PD_PGBORDER_NOT_FIRST = 4;
   PD_PGBORDER_BEHIND = 8;
+  PD_BORDER_LINE_BETWEEN = 4;
+  PD_BORDER_LINE_BAR = 5;
 
   PD_MAX_TABS = 16;
   PD_TAB_LEFT = 0;
@@ -520,6 +522,15 @@ type
   end;
   Ppd_tab_stop = ^pd_tab_stop;
 
+  { one side of a border }
+  pd_border_line = record
+    style: Int32;             { PD_LINE_* }
+    width: pd_sp;
+    color: UInt32;
+    space: pd_sp;
+  end;
+  Ppd_border_line = ^pd_border_line;
+
   pd_para_props = record
     mask: UInt32;
     align: Int32;
@@ -539,6 +550,7 @@ type
     snap_grid: Int32;         { lines on the section's grid (1) }
     border_theme: UInt32;     { pd_theme_color reference of the border, 0 = none }
     shading_theme: UInt32;    { pd_theme_color reference of the shading, 0 = none }
+    border_line: array[0..5] of pd_border_line;  { each edge's own: top, right, bottom, left, between, bar }
   end;
   Ppd_para_props = ^pd_para_props;
 
@@ -605,15 +617,6 @@ type
     offset_from: Int32;     { PD_FROM_* }
   end;
   Ppd_float_props = ^pd_float_props;
-
-  { one side of a border }
-  pd_border_line = record
-    style: Int32;             { PD_LINE_* }
-    width: pd_sp;
-    color: UInt32;
-    space: pd_sp;
-  end;
-  Ppd_border_line = ^pd_border_line;
 
   pd_section_props = record
     page_width, page_height: pd_sp;

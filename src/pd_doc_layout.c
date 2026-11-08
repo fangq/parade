@@ -166,6 +166,7 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
         pp->border_width = s->pp.border_width;
         pp->border_sides = s->pp.border_sides;
         pp->border_space = s->pp.border_space;
+        memcpy(pp->border_line, s->pp.border_line, sizeof(pp->border_line));
     }
 
     if (s->pp.mask & PD_PP_TABS) {

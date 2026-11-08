@@ -616,16 +616,53 @@ static pd_sp line_thickness(const pd_border_line* l) {
     }
 }
 
-/* A border line drawn in the band x, y, w by h (horiz: running across, its strokes stacked down the band; else
+/* A paragraph's border as lines: its own edges' (top, right, bottom, left, between, bar), or the single lines its
+   colour, width, sides and space say */
+static void para_lines(const pd_para_props* pp, pd_border_line* out) {
+    int32_t k, sides = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM |
+                       PD_BORDER_LEFT;
+    static const int bit[5] = { PD_BORDER_TOP, PD_BORDER_RIGHT, PD_BORDER_BOTTOM, PD_BORDER_LEFT, PD_BORDER_BETWEEN };
+
+    memcpy(out, pp->border_line, 6 * sizeof(pd_border_line));
+
+    for (k = 0; k < 6; k++) {
+        if (out[k].style != PD_LINE_NONE) {
+            return;
+        }
+    }
+
+    for (k = 0; pp->border_color && pp->border_width > 0 && k < 5; k++) {
+        if (sides & bit[k]) {
+            out[k].style = PD_LINE_SINGLE;
+            out[k].width = pp->border_width;
+            out[k].color = pp->border_color;
+            out[k].space = k < 4 ? pp->border_space : 0;
+        }
+    }
+}
+
+/* the room a border edge takes: its strokes and its space */
+static pd_sp line_room(const pd_border_line* l) {
+    return l->style != PD_LINE_NONE ? line_thickness(l) + l->space : 0;
+}
+
+/* what draws a border line's strokes: a filled rectangle each */
+typedef void (*stroke_fn)(void* ctx, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color);
+
+/* A border line's strokes in the band x, y, w by h (horiz: running across, its strokes stacked down the band; else
    running down, stacked across), outer: its first stroke at the band's top or left (the side away from what it
-   surrounds) -- thin and thick strokes in their order from there; dots and dashes as short rules */
-static void border_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l,
-                        int horiz, int outer, int32_t region, pd_block_id block) {
+   surrounds) -- thin and thick strokes in their order from there; dots and dashes as short rectangles */
+static void line_strokes(pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l, int horiz, int outer,
+                         stroke_fn fn, void* ctx) {
     pd_sp lw = l->width, thin = lw / 4 > PD_PT(0.5) ? lw / 4 : PD_PT(0.5), off[3], th[3], len = horiz ? w : h;
     int32_t n = 1, k;
 
     off[0] = 0;
     th[0] = lw;
+
+    if (l->style == PD_LINE_NONE || lw <= 0 || len <= 0) {
+        return;
+    }
 
     if (l->style == PD_LINE_DOUBLE || l->style == PD_LINE_TRIPLE) {     /* strokes as wide as gaps */
         n = l->style == PD_LINE_DOUBLE ? 2 : 3;
@@ -655,20 +692,44 @@ static void border_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, p
                 d = pos + d > len ? len - pos : d;
 
                 if (horiz) {
-                    add_rule(L, page, x + pos, at, d, th[k], l->color, region, block);
+                    fn(ctx, x + pos, at, d, th[k], l->color);
                 } else {
-                    add_rule(L, page, at, y + pos, th[k], d, l->color, region, block);
+                    fn(ctx, at, y + pos, th[k], d, l->color);
                 }
 
                 pos += d + (l->style == PD_LINE_DOTTED ? dot : 2 * dot);
                 i++;
             }
         } else if (horiz) {
-            add_rule(L, page, x, at, len, th[k], l->color, region, block);
+            fn(ctx, x, at, len, th[k], l->color);
         } else {
-            add_rule(L, page, at, y, th[k], len, l->color, region, block);
+            fn(ctx, at, y, th[k], len, l->color);
         }
     }
+}
+
+typedef struct {
+    pd_layout* L;
+    int32_t page, region;
+    pd_block_id block;
+} rule_ctx;
+
+static void stroke_rule(void* ctx, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color) {
+    rule_ctx* c = (rule_ctx*)ctx;
+
+    add_rule(c->L, c->page, x, y, w, h, color, c->region, c->block);
+}
+
+/* a border line as rules of a page (line_strokes) */
+static void border_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l,
+                        int horiz, int outer, int32_t region, pd_block_id block) {
+    rule_ctx c;
+
+    c.L = L;
+    c.page = page;
+    c.region = region;
+    c.block = block;
+    line_strokes(x, y, w, h, l, horiz, outer, stroke_rule, &c);
 }
 
 /* the rules a page got from FROM on moved to AT, before those there (under what is drawn after them) */
@@ -1012,8 +1073,11 @@ static pd_sp para_gap(const pd_doc* d, pd_block_id prev, pd_sp prev_after, pd_bl
     const pd_section_props* sp = section_of(d, cur);
     pd_sp before = pp->space_before, room = 0;
     pd_para_props ap;
-    int top = pp->border_color && pp->border_width > 0 &&
-              (!pp->border_sides || (pp->border_sides & PD_BORDER_TOP));
+    pd_border_line bl[6], al[6];
+    int top;
+
+    para_lines(pp, bl);
+    top = bl[0].style != PD_LINE_NONE;
 
     if (a && b && a->kind == PD_BLOCK_PARAGRAPH) {
         pd_style_id normal = pd_doc_style_find(d, "Normal");
@@ -1030,15 +1094,17 @@ static pd_sp para_gap(const pd_doc* d, pd_block_id prev, pd_sp prev_after, pd_bl
         }
 
         /* borders take room: a box's top and bottom edges and their space, a rule between */
+        para_lines(&ap, al);
+
         if (has_box(&ap) && same_box(&ap, pp)) {
             top = 0;
-            room = (pp->border_sides & PD_BORDER_BETWEEN) && pp->border_color ? pp->border_width : 0;
-        } else if (ap.border_color && ap.border_width > 0 && (!ap.border_sides || (ap.border_sides & PD_BORDER_BOTTOM))) {
-            room = ap.border_width + ap.border_space;
+            room = line_room(&bl[PD_BORDER_LINE_BETWEEN]);
+        } else {
+            room = line_room(&al[2]);
         }
     }
 
-    room += top ? pp->border_width + pp->border_space : 0;
+    room += top ? line_room(&bl[0]) : 0;
     return room + (sp && sp->add_spacing ? before + prev_after : before > prev_after ? before : prev_after);
 }
 
@@ -4755,14 +4821,28 @@ static void emit_leaders(const pd_layout* L, dlist_t* D, const pline* l, const p
 
 /* a paragraph border or shading */
 static int has_box(const pd_para_props* pp) {
-    return (pp->border_color && pp->border_width > 0) || pp->shading;
+    pd_border_line l[6];
+    int k;
+
+    para_lines(pp, l);
+
+    for (k = 0; k < 6; k++) {
+        if (l[k].style != PD_LINE_NONE) {
+            return 1;
+        }
+    }
+
+    return pp->shading != 0;
 }
 
 /* paragraphs one after another that share one box */
 static int same_box(const pd_para_props* a, const pd_para_props* b) {
-    return a->border_color == b->border_color && a->border_width == b->border_width &&
-           a->border_sides == b->border_sides && a->border_space == b->border_space && a->shading == b->shading &&
-           a->indent_left == b->indent_left && a->indent_right == b->indent_right;
+    pd_border_line la[6], lb[6];
+
+    para_lines(a, la);
+    para_lines(b, lb);
+    return memcmp(la, lb, sizeof(la)) == 0 && a->shading == b->shading && a->indent_left == b->indent_left &&
+           a->indent_right == b->indent_right;
 }
 
 static void emit_rect(dlist_t* D, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color, pd_block_id block, int32_t region) {
@@ -5395,6 +5475,18 @@ static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, 
     return emit_drawing_at(L, D, res, x, y, w, h, block, off, region, 0);
 }
 
+typedef struct {
+    dlist_t* D;
+    pd_block_id block;
+    int32_t region;
+} emit_ctx;
+
+static void stroke_emit(void* ctx, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color) {
+    emit_ctx* c = (emit_ctx*)ctx;
+
+    emit_rect(c->D, x, y, w, h, color, c->block, c->region);
+}
+
 /* Paragraph shading and borders, under the text: one box round the lines of
    paragraphs that share it, its top edge only where the first of them
    starts and its bottom where the last ends (a box broken by the page stays
@@ -5406,9 +5498,10 @@ static void emit_para_boxes(dlist_t* D, const ppage* p) {
         const pline* l = &p->lines[i];
         const pd_para_props* pp;
         const pline* e;
-        pd_sp x0, x1, y0, y1, bw;
-        int sides;
-        uint32_t bc;
+        pd_sp x0, x1, y0, y1, t[6];
+        pd_border_line bl[6];
+        emit_ctx ec;
+        int first, last;
 
         if (!l->pc || l->line < 0 || !has_box(&l->pc->pp)) {
             i++;
@@ -5428,42 +5521,57 @@ static void emit_para_boxes(dlist_t* D, const ppage* p) {
         }
 
         e = &p->lines[j - 1];
-        sides = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM | PD_BORDER_LEFT;
-        bw = pp->border_color ? pp->border_width : 0;
-        bc = pp->border_color;
-        x0 = l->ox + pp->indent_left - ((sides & PD_BORDER_LEFT) && bw ? pp->border_space : 0);
-        x1 = l->ox + l->pc->width - pp->indent_right + ((sides & PD_BORDER_RIGHT) && bw ? pp->border_space : 0);
-        y0 = l->top - (l->line == 0 && (sides & PD_BORDER_TOP) && bw ? pp->border_space : 0);
-        y1 = e->bottom + (e->line == e->pc->nlines - 1 && (sides & PD_BORDER_BOTTOM) && bw ? pp->border_space : 0);
+        para_lines(pp, bl);
+
+        for (k = 0; k < 6; k++) {
+            t[k] = bl[k].style != PD_LINE_NONE ? line_thickness(&bl[k]) : 0;
+        }
+
+        first = l->line == 0;
+        last = e->line == e->pc->nlines - 1;
+        x0 = l->ox + pp->indent_left - (t[3] ? bl[3].space : 0);
+        x1 = l->ox + l->pc->width - pp->indent_right + (t[1] ? bl[1].space : 0);
+        y0 = l->top - (first && t[0] ? bl[0].space : 0);
+        y1 = e->bottom + (last && t[2] ? bl[2].space : 0);
+        ec.D = D;
+        ec.block = l->pc->block;
+        ec.region = l->region;
 
         if (pp->shading) {
             emit_rect(D, x0, y0, x1 - x0, y1 - y0, pp->shading, l->pc->block, l->region);
         }
 
-        if (bw > 0) {
-            pd_sp lx = x0 - ((sides & PD_BORDER_LEFT) ? bw : 0), rx = x1 + ((sides & PD_BORDER_RIGHT) ? bw : 0);
+        {
+            pd_sp lx = x0 - t[3], rx = x1 + t[1];
 
-            if ((sides & PD_BORDER_TOP) && l->line == 0) {
-                emit_rect(D, lx, y0 - bw, rx - lx, bw, bc, l->pc->block, l->region);
+            if (t[0] && first) {
+                line_strokes(lx, y0 - t[0], rx - lx, t[0], &bl[0], 1, 1, stroke_emit, &ec);
             }
 
-            if ((sides & PD_BORDER_BOTTOM) && e->line == e->pc->nlines - 1) {
-                emit_rect(D, lx, y1, rx - lx, bw, bc, l->pc->block, l->region);
+            if (t[2] && last) {
+                line_strokes(lx, y1, rx - lx, t[2], &bl[2], 1, 0, stroke_emit, &ec);
             }
 
-            if (sides & PD_BORDER_LEFT) {
-                emit_rect(D, x0 - bw, y0, bw, y1 - y0, bc, l->pc->block, l->region);
+            if (t[3]) {
+                line_strokes(x0 - t[3], y0, t[3], y1 - y0, &bl[3], 0, 1, stroke_emit, &ec);
             }
 
-            if (sides & PD_BORDER_RIGHT) {
-                emit_rect(D, x1, y0, bw, y1 - y0, bc, l->pc->block, l->region);
+            if (t[1]) {
+                line_strokes(x1, y0, t[1], y1 - y0, &bl[1], 0, 0, stroke_emit, &ec);
             }
 
-            for (k = i + 1; (sides & PD_BORDER_BETWEEN) && k < j; k++) {
+            if (t[PD_BORDER_LINE_BAR]) {    /* a bar left of the text, its space from it */
+                line_strokes(l->ox + pp->indent_left - bl[PD_BORDER_LINE_BAR].space - t[PD_BORDER_LINE_BAR], y0,
+                             t[PD_BORDER_LINE_BAR], y1 - y0, &bl[PD_BORDER_LINE_BAR], 0, 1, stroke_emit, &ec);
+            }
+
+            for (k = i + 1; t[PD_BORDER_LINE_BETWEEN] && k < j; k++) {
                 const pline* a = &p->lines[k - 1], *b = &p->lines[k];
 
                 if (a->pc->block != b->pc->block) {     /* half way between the two */
-                    emit_rect(D, x0, (a->bottom + b->top - bw) / 2, x1 - x0, bw, bc, b->pc->block, b->region);
+                    ec.block = b->pc->block;
+                    line_strokes(x0, (a->bottom + b->top - t[PD_BORDER_LINE_BETWEEN]) / 2, x1 - x0,
+                                 t[PD_BORDER_LINE_BETWEEN], &bl[PD_BORDER_LINE_BETWEEN], 1, 1, stroke_emit, &ec);
                 }
             }
         }

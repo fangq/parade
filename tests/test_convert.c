@@ -6227,6 +6227,80 @@ static void test_page_features(void) {
     pd_doc_free(d);
 }
 
+/* Paragraph borders, each edge its own line: a double blue top (two strokes 1.5pt apart), dashed red left
+   (dashes, longer than wide), a thick-thin green bottom (a 3pt and a thinner stroke), a dotted right (square
+   dots); two paragraphs sharing a box with a rule between them; a bar left of a paragraph. Also after .docx and
+   native round trips */
+static void test_para_border_lines(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:p><w:pPr><w:pBdr><w:top w:val=\"double\" w:sz=\"6\" w:space=\"1\" w:color=\"0000FF\"/>"
+                             "<w:left w:val=\"dashed\" w:sz=\"6\" w:space=\"4\" w:color=\"FF0000\"/>"
+                             "<w:bottom w:val=\"thickThinSmallGap\" w:sz=\"24\" w:space=\"1\" w:color=\"00FF00\"/>"
+                             "<w:right w:val=\"dotted\" w:sz=\"6\" w:space=\"4\" w:color=\"112233\"/></w:pBdr></w:pPr>"
+                             "<w:r><w:t>BOXED</w:t></w:r></w:p><w:p/>"
+                             "<w:p><w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"8\" w:color=\"445566\"/><w:between "
+                             "w:val=\"single\" w:sz=\"8\" w:color=\"778899\"/></w:pBdr></w:pPr><w:r><w:t>PAIR1</w:t></w:r>"
+                             "</w:p><w:p><w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"8\" w:color=\"445566\"/><w:between "
+                             "w:val=\"single\" w:sz=\"8\" w:color=\"778899\"/></w:pBdr></w:pPr><w:r><w:t>PAIR2</w:t></w:r>"
+                             "</w:p><w:p/><w:p><w:pPr><w:ind w:left=\"720\"/><w:pBdr><w:bar w:val=\"single\" w:sz=\"16\" "
+                             "w:space=\"6\" w:color=\"AA00AA\"/></w:pBdr></w:pPr><w:r><w:t>BARRED</w:t></w:r></w:p>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, blue = 0, red = 0, green3 = 0, greenthin = 0, dots = 0, between = 0, tops = 0, bar = 0;
+            pd_sp by[2] = { 0, 0 };
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                const pd_draw* a = &it[k];
+
+                if (a->kind != PD_DRAW_RULE) {
+                    continue;
+                }
+
+                if (a->color == 0xFF0000FFu && a->h == PD_PT(0.75) && blue < 2) {
+                    by[blue++] = a->y;
+                }
+
+                red += a->color == 0xFFFF0000u && a->w == PD_PT(0.75) && a->h == PD_PT(2.25);
+                green3 += a->color == 0xFF00FF00u && a->h == PD_PT(3);
+                greenthin += a->color == 0xFF00FF00u && a->h == PD_PT(0.75);
+                dots += a->color == 0xFF112233u && a->w == PD_PT(0.75) && a->h == PD_PT(0.75);
+                tops += a->color == 0xFF445566u;
+                between += a->color == 0xFF778899u;
+                bar += a->color == 0xFFAA00AAu && a->w == PD_PT(2) && a->x < PD_PT(108 - 6) &&
+                       a->x > PD_PT(108 - 10);
+            }
+
+            CHECK(blue == 2 && by[1] - by[0] == PD_PT(1.5));
+            CHECK(red >= 3 && green3 == 1 && greenthin == 1 && dots > 3);
+            CHECK(tops == 1 && between == 1 && bar == 1);
+            free(it);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -6260,6 +6334,7 @@ int main(void) {
     test_cell_spacing();
     test_floating_table();
     test_page_features();
+    test_para_border_lines();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

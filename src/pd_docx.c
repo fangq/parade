@@ -3232,8 +3232,29 @@ static void dx_ppr_head(pd_buf* o, const pd_para_props* pp, uint32_t m) {
 
 /* ... and those after it, in the schema's order; hyph_auto: the document hyphenates (settings.xml) */
 static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto, const pd_para_props* base) {
-    if ((m & PD_PP_BORDER) && pp->border_color && pp->border_width > 0) {
-        int sz = (int)SCALE(pp->border_width, 8, 65536), side;
+    int lines = 0, side;
+
+    for (side = 0; side < 6; side++) {
+        lines |= pp->border_line[side].style != PD_LINE_NONE;
+    }
+
+    if ((m & PD_PP_BORDER) && lines) {  /* each edge its own line */
+        static const char* names[] = { "top", "left", "bottom", "right", "between", "bar" };
+        static const int at[] = { 0, 3, 2, 1, PD_BORDER_LINE_BETWEEN, PD_BORDER_LINE_BAR };
+
+        pb_puts(o, "<w:pBdr>");
+
+        for (side = 0; side < 6; side++) {
+            if (pp->border_line[at[side]].style != PD_LINE_NONE) {
+                dx_border_line(o, names[side], &pp->border_line[at[side]]);
+            } else if (base && base->border_color && base->border_width > 0 && side < 5) {
+                pb_printf(o, "<w:%s w:val=\"nil\"/>", names[side]);
+            }
+        }
+
+        pb_puts(o, "</w:pBdr>");
+    } else if ((m & PD_PP_BORDER) && pp->border_color && pp->border_width > 0) {
+        int sz = (int)SCALE(pp->border_width, 8, 65536);
         int has = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM | PD_BORDER_LEFT;
         static const char* names[] = { "top", "left", "bottom", "right", "between" };
         static const int bits[] = { PD_BORDER_TOP, PD_BORDER_LEFT, PD_BORDER_BOTTOM, PD_BORDER_RIGHT, PD_BORDER_BETWEEN };
@@ -5170,6 +5191,56 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     }
 }
 
+/* Word's border styles as Parade's line styles: the art ones (apples, ...) and others as single */
+static int32_t line_style_of(const char* v) {
+    static const struct {
+        const char* name;
+        int32_t style;
+    } map[] = {
+        { "nil", PD_LINE_NONE }, { "none", PD_LINE_NONE }, { "double", PD_LINE_DOUBLE }, { "dotted", PD_LINE_DOTTED },
+        { "dashed", PD_LINE_DASHED }, { "dashSmallGap", PD_LINE_DASHED }, { "thick", PD_LINE_THICK },
+        { "dotDash", PD_LINE_DOT_DASH }, { "dotDotDash", PD_LINE_DOT_DASH }, { "triple", PD_LINE_TRIPLE },
+        { "thinThickSmallGap", PD_LINE_THIN_THICK }, { "thinThickMediumGap", PD_LINE_THIN_THICK },
+        { "thinThickLargeGap", PD_LINE_THIN_THICK }, { "thickThinSmallGap", PD_LINE_THICK_THIN },
+        { "thickThinMediumGap", PD_LINE_THICK_THIN }, { "thickThinLargeGap", PD_LINE_THICK_THIN },
+        { "thinThickThinSmallGap", PD_LINE_TRIPLE }, { "thinThickThinMediumGap", PD_LINE_TRIPLE },
+        { "thinThickThinLargeGap", PD_LINE_TRIPLE }, { "doubleWave", PD_LINE_DOUBLE },
+        { "threeDEmboss", PD_LINE_THICK }, { "threeDEngrave", PD_LINE_THICK }
+    };
+    size_t k;
+
+    for (k = 0; k < sizeof(map) / sizeof(map[0]); k++) {
+        if (!strcmp(v, map[k].name)) {
+            return map[k].style;
+        }
+    }
+
+    return PD_LINE_SINGLE;
+}
+
+/* one side of a w:pBdr or w:pgBorders (space in points; on a page from its edge or the text) as a border line */
+static void border_line(const dxi* X, const pd_markup* m, pd_border_line* l, int page) {
+    char v[40];
+    uint32_t ref = 0;
+
+    memset(l, 0, sizeof(*l));
+
+    if (!mu_attr(m, "w:val", v, sizeof(v)) || (l->style = line_style_of(v)) == PD_LINE_NONE) {
+        return;
+    }
+
+    l->width = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
+    l->width = l->width > 0 ? l->width > PD_PT(100) ? PD_PT(100) : l->width : PD_PT(0.25);
+    l->space = (pd_sp)attr_int(m, "w:space", 0) * 65536;
+    l->space = l->space < 0 ? 0 : l->space > PD_PT(page ? 1000 : 31) ? PD_PT(page ? 1000 : 31) : l->space;
+    l->color = 0xFF000000u;
+
+    if (mu_attr(m, "w:color", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+        wcolor_ref(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &l->color, &ref);
+        l->color = l->color ? l->color : 0xFF000000u;
+    }
+}
+
 /* one child of a w:pPr into pr */
 static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr) {
     pd_para_props* pp = &pr->pp;
@@ -5248,12 +5319,20 @@ static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr
         pp->border_width = 0;
         pp->border_sides = 0;
         pp->border_space = 0;
+        memset(pp->border_line, 0, sizeof(pp->border_line));
+    } else if (strcmp(t, "bar") == 0) {     /* a line in the left margin */
+        pp->mask |= PD_PP_BORDER;
+        border_line(X, m, &pp->border_line[PD_BORDER_LINE_BAR], 0);
     } else if (strcmp(t, "top") == 0 || strcmp(t, "bottom") == 0 || strcmp(t, "left") == 0 ||
                strcmp(t, "right") == 0 || strcmp(t, "start") == 0 || strcmp(t, "end") == 0 ||
                strcmp(t, "between") == 0) {
         /* an edge of w:pBdr (no other w:pPr child has these names) */
         int side = t[0] == 't' ? PD_BORDER_TOP : t[0] == 'b' && t[1] == 'o' ? PD_BORDER_BOTTOM : t[0] == 'b' ?
                    PD_BORDER_BETWEEN : t[0] == 'r' || t[0] == 'e' ? PD_BORDER_RIGHT : PD_BORDER_LEFT;
+        int slot = side == PD_BORDER_TOP ? 0 : side == PD_BORDER_RIGHT ? 1 : side == PD_BORDER_BOTTOM ? 2 :
+                   side == PD_BORDER_LEFT ? 3 : PD_BORDER_LINE_BETWEEN;
+
+        border_line(X, m, &pp->border_line[slot], 0);     /* each edge its own; the summary below */
 
         if (mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "none") != 0 && strcmp(v, "nil") != 0) {
             pd_sp bw = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
@@ -5334,6 +5413,7 @@ static void pr_over(dprops* d, const dprops* s) {
         dp->border_width = sp->border_width;
         dp->border_sides = sp->border_sides;
         dp->border_space = sp->border_space;
+        memcpy(dp->border_line, sp->border_line, sizeof(dp->border_line));
     }
 
     if (sp->mask & PD_PP_LINE_SPACING) {
@@ -5504,56 +5584,6 @@ static void read_styles(dxi* X, const char* xml, size_t n) {
 }
 
 /* the edges of a w:tblBorders or w:tcBorders: one child into e */
-/* Word's border styles as Parade's line styles: the art ones (apples, ...) and others as single */
-static int32_t line_style_of(const char* v) {
-    static const struct {
-        const char* name;
-        int32_t style;
-    } map[] = {
-        { "nil", PD_LINE_NONE }, { "none", PD_LINE_NONE }, { "double", PD_LINE_DOUBLE }, { "dotted", PD_LINE_DOTTED },
-        { "dashed", PD_LINE_DASHED }, { "dashSmallGap", PD_LINE_DASHED }, { "thick", PD_LINE_THICK },
-        { "dotDash", PD_LINE_DOT_DASH }, { "dotDotDash", PD_LINE_DOT_DASH }, { "triple", PD_LINE_TRIPLE },
-        { "thinThickSmallGap", PD_LINE_THIN_THICK }, { "thinThickMediumGap", PD_LINE_THIN_THICK },
-        { "thinThickLargeGap", PD_LINE_THIN_THICK }, { "thickThinSmallGap", PD_LINE_THICK_THIN },
-        { "thickThinMediumGap", PD_LINE_THICK_THIN }, { "thickThinLargeGap", PD_LINE_THICK_THIN },
-        { "thinThickThinSmallGap", PD_LINE_TRIPLE }, { "thinThickThinMediumGap", PD_LINE_TRIPLE },
-        { "thinThickThinLargeGap", PD_LINE_TRIPLE }, { "doubleWave", PD_LINE_DOUBLE },
-        { "threeDEmboss", PD_LINE_THICK }, { "threeDEngrave", PD_LINE_THICK }
-    };
-    size_t k;
-
-    for (k = 0; k < sizeof(map) / sizeof(map[0]); k++) {
-        if (!strcmp(v, map[k].name)) {
-            return map[k].style;
-        }
-    }
-
-    return PD_LINE_SINGLE;
-}
-
-/* one side of a w:pBdr or w:pgBorders (space in points; on a page from its edge or the text) as a border line */
-static void border_line(const dxi* X, const pd_markup* m, pd_border_line* l, int page) {
-    char v[40];
-    uint32_t ref = 0;
-
-    memset(l, 0, sizeof(*l));
-
-    if (!mu_attr(m, "w:val", v, sizeof(v)) || (l->style = line_style_of(v)) == PD_LINE_NONE) {
-        return;
-    }
-
-    l->width = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
-    l->width = l->width > 0 ? l->width > PD_PT(100) ? PD_PT(100) : l->width : PD_PT(0.25);
-    l->space = (pd_sp)attr_int(m, "w:space", 0) * 65536;
-    l->space = l->space < 0 ? 0 : l->space > PD_PT(page ? 1000 : 31) ? PD_PT(page ? 1000 : 31) : l->space;
-    l->color = 0xFF000000u;
-
-    if (mu_attr(m, "w:color", v, sizeof(v)) && strcmp(v, "auto") != 0) {
-        wcolor_ref(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &l->color, &ref);
-        l->color = l->color ? l->color : 0xFF000000u;
-    }
-}
-
 static void edge_elem(const dxi* X, const pd_markup* m, const char* t, dedges* e) {
     char v[32];
     int bit = !strcmp(t, "top") ? PD_TBORDER_TOP : !strcmp(t, "bottom") ? PD_TBORDER_BOTTOM :
@@ -6910,7 +6940,8 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid, const
 
         if ((sty.pp.mask & PD_PP_BORDER) && sty.pp.border_color == rp.border_color && sty.pp.border_theme == rp.border_theme &&
                 sty.pp.border_width == rp.border_width && sty.pp.border_sides == rp.border_sides &&
-                sty.pp.border_space == rp.border_space) {
+                sty.pp.border_space == rp.border_space &&
+                memcmp(sty.pp.border_line, rp.border_line, sizeof(rp.border_line)) == 0) {
             sty.pp.mask &= ~PD_PP_BORDER;
         }
 
@@ -7097,13 +7128,15 @@ static void dw_begin_para(dw* w) {
 
         if ((f->mask & PD_PP_BORDER) && (f->border_color != rp.border_color || f->border_width != rp.border_width ||
                                          f->border_sides != rp.border_sides || f->border_space != rp.border_space ||
-                                         f->border_theme != rp.border_theme)) {
+                                         f->border_theme != rp.border_theme ||
+                                         memcmp(f->border_line, rp.border_line, sizeof(rp.border_line)) != 0)) {
             b->pp.mask |= PD_PP_BORDER;
             b->pp.border_theme = f->border_theme;
             b->pp.border_color = f->border_color;
             b->pp.border_width = f->border_width;
             b->pp.border_sides = f->border_sides;
             b->pp.border_space = f->border_space;
+            memcpy(b->pp.border_line, f->border_line, sizeof(b->pp.border_line));
         }
 
         if ((f->mask & PD_PP_TABS) && (f->ntabs != rp.ntabs || f->tab_interval != rp.tab_interval ||

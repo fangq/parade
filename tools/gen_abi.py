@@ -27,7 +27,7 @@ STRUCTS = {
     "pd_para_props": "mask align indent_left indent_right indent_first space_before space_after line_spacing "
                      "keep_with_next keep_lines widows orphans page_break_before hyphenate break_mode next_style "
                      "border_color border_width shading direction ntabs tabs tab_interval contextual border_sides border_space "
-                     "snap_grid border_theme shading_theme",
+                     "snap_grid border_theme shading_theme border_line",
     "pd_tab_stop": "position align leader",
     "pd_list_level": "format start text indent hanging restart_after label_family label_size label_weight "
                      "label_italic label_color",

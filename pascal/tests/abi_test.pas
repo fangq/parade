@@ -215,6 +215,7 @@ begin
   WriteLn('pd_para_props.snap_grid ', PtrUInt(@v_pd_para_props.snap_grid) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.border_theme ', PtrUInt(@v_pd_para_props.border_theme) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.shading_theme ', PtrUInt(@v_pd_para_props.shading_theme) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.border_line ', PtrUInt(@v_pd_para_props.border_line) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_tab_stop ', SizeOf(pd_tab_stop));
   WriteLn('pd_tab_stop.position ', PtrUInt(@v_pd_tab_stop.position) - PtrUInt(@v_pd_tab_stop));
   WriteLn('pd_tab_stop.align ', PtrUInt(@v_pd_tab_stop.align) - PtrUInt(@v_pd_tab_stop));

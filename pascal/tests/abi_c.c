@@ -178,6 +178,7 @@ int main(void) {
     printf("pd_para_props.snap_grid %zu\n", offsetof(pd_para_props, snap_grid));
     printf("pd_para_props.border_theme %zu\n", offsetof(pd_para_props, border_theme));
     printf("pd_para_props.shading_theme %zu\n", offsetof(pd_para_props, shading_theme));
+    printf("pd_para_props.border_line %zu\n", offsetof(pd_para_props, border_line));
     printf("pd_tab_stop %zu\n", sizeof(pd_tab_stop));
     printf("pd_tab_stop.position %zu\n", offsetof(pd_tab_stop, position));
     printf("pd_tab_stop.align %zu\n", offsetof(pd_tab_stop, align));

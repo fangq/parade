@@ -190,6 +190,18 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
         if (p->border_theme) {
             put_int(w, "BorderTheme", p->border_theme);
         }
+
+        {
+            int k, any = 0;
+
+            for (k = 0; k < 6; k++) {
+                any |= p->border_line[k].style != PD_LINE_NONE;
+            }
+
+            if (any) {
+                put_lines(w, "BorderLines", p->border_line, 6);
+            }
+        }
     }
 
     if (m & PD_PP_SHADING) {
@@ -1373,6 +1385,26 @@ static void copy_name(const pj_node* x, char* dst, size_t cap, loader* L) {
 #define SP_MAX 0x7FFFFFFF
 #define SP_MIN (-0x7FFFFFFF - 1)
 
+static void load_lines(loader* L, const pj_node* x, pd_border_line* l, int n) {
+    int k;
+
+    if (!x) {
+        return;
+    }
+
+    REQUIRE(x->type == PJ_ARR && (int)x->n <= n);
+
+    for (k = 0; k < (int)x->n; k++) {
+        const pj_node* r = pj_at(x, k);
+
+        REQUIRE(r && r->type == PJ_ARR);
+        l[k].style = (int32_t)int_or(pj_at(r, 0), 0, 0, PD_LINE_DOT_DASH, L);
+        l[k].width = (pd_sp)int_or(pj_at(r, 1), 0, 0, PD_PT(100), L);
+        l[k].color = (uint32_t)int_or(pj_at(r, 2), 0, 0, 0xFFFFFFFFLL, L);
+        l[k].space = (pd_sp)int_or(pj_at(r, 3), 0, 0, PD_PT(1000), L);
+    }
+}
+
 static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
     const pj_node* x;
 
@@ -1422,6 +1454,11 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
         p->border_sides = (int32_t)int_or(pj_get(o, "BorderSides"), 0, 0, 31, L);
         p->border_space = (pd_sp)int_or(pj_get(o, "BorderSpace"), 0, 0, SP_MAX, L);
         p->border_theme = (uint32_t)int_or(pj_get(o, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
+    }
+
+    if ((x = pj_get(o, "BorderLines"))) {
+        p->mask |= PD_PP_BORDER;
+        load_lines(L, x, p->border_line, 6);
     }
 
     if ((x = pj_get(o, "Shading"))) {
@@ -1822,25 +1859,6 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
     }
 }
 
-static void load_lines(loader* L, const pj_node* x, pd_border_line* l, int n) {
-    int k;
-
-    if (!x) {
-        return;
-    }
-
-    REQUIRE(x->type == PJ_ARR && (int)x->n <= n);
-
-    for (k = 0; k < (int)x->n; k++) {
-        const pj_node* r = pj_at(x, k);
-
-        REQUIRE(r && r->type == PJ_ARR);
-        l[k].style = (int32_t)int_or(pj_at(r, 0), 0, 0, PD_LINE_DOT_DASH, L);
-        l[k].width = (pd_sp)int_or(pj_at(r, 1), 0, 0, PD_PT(100), L);
-        l[k].color = (uint32_t)int_or(pj_at(r, 2), 0, 0, 0xFFFFFFFFLL, L);
-        l[k].space = (pd_sp)int_or(pj_at(r, 3), 0, 0, PD_PT(1000), L);
-    }
-}
 
 static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     const pj_node* x = pj_get(o, "Page");

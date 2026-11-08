@@ -356,7 +356,13 @@ typedef struct {
     int32_t snap_grid;          /**< its lines on the section's grid, when it has one (1, the default) */
     uint32_t border_theme;      /**< pd_theme_color reference of the border (with PD_PP_BORDER), 0 = none */
     uint32_t shading_theme;     /**< pd_theme_color reference of the shading (with PD_PP_SHADING), 0 = none */
+    pd_border_line border_line[6];  /**< with PD_PP_BORDER, each edge's own line: top, right, bottom, left, between
+                                         (PD_BORDER_LINE_*), and a bar in the left margin; when all are PD_LINE_NONE,
+                                         border_color, border_width, border_sides and border_space say (single) */
 } pd_para_props;
+
+#define PD_BORDER_LINE_BETWEEN 4    /**< border_line: the rule between paragraphs that share a box */
+#define PD_BORDER_LINE_BAR     5    /**< the bar left of the paragraph (Word's w:bar) */
 
 /* the edges of a paragraph border; paragraphs one after another with the
    same border share one box, and BETWEEN rules them off from each other */

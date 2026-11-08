@@ -227,6 +227,7 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
         z.border_width = pp->border_width;
         z.border_sides = pp->border_sides & 31;
         z.border_space = pp->border_space;
+        memcpy(z.border_line, pp->border_line, sizeof(z.border_line));
         z.border_theme = pd_theme_color_parts(pp->border_theme, NULL, NULL, NULL) ? pp->border_theme : 0;
     }
 
@@ -382,6 +383,7 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
         dst->border_sides = src->border_sides;
         dst->border_space = src->border_space;
         dst->border_theme = src->border_theme;
+        memcpy(dst->border_line, src->border_line, sizeof(dst->border_line));
     }
 
     SET(PD_PP_SHADING, shading);
