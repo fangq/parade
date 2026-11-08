@@ -5069,8 +5069,8 @@ static char* slide_json(const pd_doc* d, int k) {
            drawing_json(d, o.resource) : NULL;
 }
 
-/* a hidden slide (show="0") is not shown in the slide show: no page of it, the slides after it numbered as
-   PowerPoint numbers them */
+/* a hidden slide (show="0") is kept and edited as the others, marked hidden: left out of a PDF (two pages of three),
+   written back hidden; the slides after it numbered as PowerPoint numbers them */
 static void test_pptx_hidden(void) {
     pd_doc* d = pptx_doc(3,
                          "ppt/slides/slide1.xml", PSLD("", PSP("2", PP("One"))),
@@ -5079,6 +5079,8 @@ static void test_pptx_hidden(void) {
                                  "<a:p><a:fld id=\"{1}\" type=\"slidenum\"><a:t>9</a:t></a:fld></a:p>")),
                          NULL);
     pd_block_info ri;
+    pd_section_props sp;
+    int k;
 
     CHECK(d != NULL);
 
@@ -5086,15 +5088,40 @@ static void test_pptx_hidden(void) {
         return;
     }
 
-    CHECK(pd_doc_block_info(d, pd_doc_root(d), &ri) == PD_OK && ri.child_count == 2);
-    CHECK(story_para_with(d, "One") && story_para_with(d, "Three") && !story_para_with(d, "Two"));
+    CHECK(pd_doc_block_info(d, pd_doc_root(d), &ri) == PD_OK && ri.child_count == 3);
+    CHECK(story_para_with(d, "One") && story_para_with(d, "Two") && story_para_with(d, "Three"));
     CHECK(story_para_with(d, "3") && text_is(d, story_para_with(d, "3"), "3"));
-    {   /* the second page the third slide's */
-        char* js = slide_json(d, 1);
 
-        CHECK(js != NULL);
-        free(js);
+    for (k = 0; k < 3; k++) {
+        CHECK(pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), k), &sp) == PD_OK && sp.hidden == (k == 1));
     }
+
+    if (have_layout_font()) {   /* the PDF: the hidden slide's page left out */
+        pd_layout* L = NULL;
+        buf_t b = { 0 };
+
+        pd_doc_set_font_resolver(d, layout_resolver, NULL);
+        CHECK(pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK && pd_layout_page_count(L) == 3);
+        CHECK(pd_layout_write_pdf(L, NULL, to_buf, &b) == PD_OK && b.p && strstr(b.p, "/Count 2 >>"));
+        free(b.p);
+        pd_layout_free(L);
+    }
+
+    {   /* written back hidden */
+        buf_t b = { 0 };
+        char* x;
+        size_t n;
+
+        CHECK(pd_doc_export(d, PD_CONV_PPTX, to_buf, &b) == PD_OK);
+        x = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide2.xml", &n) : NULL;
+        CHECK(x && strstr(x, " show=\"0\""));
+        free(x);
+        x = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide1.xml", &n) : NULL;
+        CHECK(x && !strstr(x, " show=\"0\""));
+        free(x);
+        free(b.p);
+    }
+
     pd_doc_free(d);
 }
 

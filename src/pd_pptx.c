@@ -3150,7 +3150,7 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
     part_free(&slide);
 }
 
-/* whether a slide is hidden (show="0"): not shown in the slide show, so not a page */
+/* whether a slide is hidden (show="0"): not shown in the slide show */
 static int slide_hidden(pptx* P, const char* path) {
     size_t len = 0;
     char* s = (char*)pd_zip_get(P->zip, P->zn, path, &len);
@@ -3503,7 +3503,7 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     ppart pres, ts;
     int have_ts = 0;
     pd_buf zip;
-    int lst, k, nslides = 0, idx = 0, ds, no, nos[1024];
+    int lst, k, nslides = 0, idx = 0, ds, no, nos[1024], hid[1024];
     const char* paths[1024];
     char tp[300];
     pd_status st;
@@ -3553,10 +3553,10 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
     lst = xd_find(&pres.x, "sldIdLst");
 
-    /* the slides shown: a hidden one is left out (its number kept: those after it count it, as PowerPoint's do) */
+    /* the slides, hidden ones too (marked so once read: edited as the others, left out of a PDF) */
     for (k = lst >= 0 ? pres.x.v[lst].kid : -1, no = 0; k >= 0 && nslides < 1024; k = pres.x.v[k].next) {
-        if (xd_attr(&pres.x, k, "r:id", tp, sizeof(tp)) && rel_of(&pres, tp) && ++no &&
-                !slide_hidden(&P, rel_of(&pres, tp))) {
+        if (xd_attr(&pres.x, k, "r:id", tp, sizeof(tp)) && rel_of(&pres, tp) && ++no) {
+            hid[nslides] = slide_hidden(&P, rel_of(&pres, tp));
             nos[nslides] = no;
             paths[nslides++] = rel_of(&pres, tp);
         }
@@ -3699,6 +3699,18 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     if (st == PD_OK) {
         pkeep_read(&P, d);
         notes_read(&P, d);
+
+        for (k = 0; k < nslides; k++) {     /* the hidden ones marked */
+            pd_block_id sec = pd_doc_child(d, pd_doc_root(d), k);
+            pd_section_props sp;
+
+            if (hid[k] && sec && pd_doc_section_props(d, sec, &sp) == PD_OK) {
+                sp.hidden = 1;
+                pd_doc_set_section_props(d, sec, &sp);
+            }
+        }
+
+        pd_doc_clear_undo(d);
     }
 
     {

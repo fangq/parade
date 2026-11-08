@@ -1996,6 +1996,15 @@ typedef struct {
     char title[256];
 } outline;
 
+/* whether page pg is a hidden slide's: left out of the PDF */
+static int page_hidden(const pd_layout* L, int32_t pg) {
+    pd_page_info pi;
+    pd_section_props sp;
+
+    return pd_layout_page_info(L, pg, &pi) == PD_OK && pi.section &&
+           pd_doc_section_props(pd_layout_doc(L), pi.section, &sp) == PD_OK && sp.hidden;
+}
+
 pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_writer fn, void* user) {
     pd_pdf_options defaults;
     const pd_doc* d;
@@ -2168,6 +2177,11 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
             }
 
             outs = q;
+
+            if (page_hidden(L, page)) {     /* on a hidden slide: no bookmark */
+                continue;
+            }
+
             memset(&outs[nout], 0, sizeof(outline));
             outs[nout].block = b;
             outs[nout].level = p->st.role == PD_ROLE_TITLE ? 0 : p->st.level;
@@ -2207,11 +2221,14 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
     begin_obj(&w, pages_obj);
     w_str(&w, "<< /Type /Pages /Kids [");
 
-    for (pg = 0; pg < npages; pg++) {
-        w_fmt(&w, "%d 0 R ", (int)page_obj[pg]);
+    for (pg = 0, k = 0; pg < npages; pg++) {   /* a hidden slide's page left out */
+        if (!page_hidden(L, pg)) {
+            w_fmt(&w, "%d 0 R ", (int)page_obj[pg]);
+            k++;
+        }
     }
 
-    w_fmt(&w, "] /Count %d >>", (int)npages);
+    w_fmt(&w, "] /Count %d >>", (int)k);
     end_obj(&w);
     /* pages and their content */
     for (pg = 0; pg < npages && !w.err; pg++) {

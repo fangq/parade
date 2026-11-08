@@ -708,6 +708,7 @@ type
     page_color: UInt32;       { 0 = none }
     text_flow: Int32;         { PD_CELLTEXT_* }
     notes: pd_block_id;       { a STORY: a slide's speaker notes, 0 none }
+    hidden: Int32;            { 1: a hidden slide, left out of a PDF }
   end;
   Ppd_section_props = ^pd_section_props;
 

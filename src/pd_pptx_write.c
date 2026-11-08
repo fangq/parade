@@ -2269,6 +2269,8 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         pd_block_id sec = pd_doc_child(d, pd_doc_root(d), s);
         pd_res_id cv = section_canvas(d, sec);
         pd_buf slide, tns;     /* the slide; the namespaces its kept transition needs */
+        pd_section_props hsp;
+        const char* hidden_attr = pd_doc_section_props(d, sec, &hsp) == PD_OK && hsp.hidden ? " show=\"0\"" : "";
         const char* txml = NULL;
         size_t txn = 0;
 
@@ -2302,9 +2304,10 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
                 P->has_rec = 1;
                 P->rec_bg = strtol(f[3], NULL, 16);
                 snprintf(P->clr_ovr, sizeof(P->clr_ovr), "%s", f[4]);   /* its own colour map, if it had one */
-                pb_printf(&slide, "<p:sld %s%s%s>", NS, tns.p ? tns.p : "", atoi(f[2]) ? " showMasterSp=\"0\"" : "");
+                pb_printf(&slide, "<p:sld %s%s%s%s>", NS, tns.p ? tns.p : "", atoi(f[2]) ? " showMasterSp=\"0\"" : "",
+                          hidden_attr);
             } else {
-                pb_printf(&slide, "<p:sld %s%s>", NS, tns.p ? tns.p : "");
+                pb_printf(&slide, "<p:sld %s%s%s>", NS, tns.p ? tns.p : "", hidden_attr);
             }
 
             if (!layout[0] && prev_layout[0]) {    /* a slide made since: on the layout of the one before it */
@@ -2315,7 +2318,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
 
             snprintf(prev_layout, sizeof(prev_layout), "%s", layout);
         } else {
-            pb_printf(&slide, "<p:sld %s>", NS);
+            pb_printf(&slide, "<p:sld %s%s>", NS, hidden_attr);
         }
 
         if (cv) {
