@@ -5195,6 +5195,84 @@ static void emr(buf_t* b, uint32_t type, const uint32_t* w, int n) {
     }
 }
 
+/* Metafile shapes the player skipped and pens and brushes it flattened: a pie (a quarter of a circle, the top right,
+   from the radial on the right anticlockwise to the one at the top), a horizontal red-to-blue GRADIENTFILL, a box
+   in a dashed pen and a cross-hatched brush, and an open arc. */
+static void test_emf_shapes(void) {
+    buf_t e = { NULL, 0 };
+    uint32_t hdr[20];
+    pd_doc* d;
+    pd_res_id r, src;
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t len = 0;
+    char* js, want[96];
+    double W = 25 / 25.4 * 72 * 65536;
+
+    memset(hdr, 0, sizeof(hdr));
+    hdr[2] = 99; hdr[3] = 99;
+    hdr[6] = 2500; hdr[7] = 2500;
+    hdr[8] = 0x464D4520u;
+    hdr[9] = 0x10000; hdr[12] = 4;
+    hdr[16] = 100; hdr[17] = 100;
+    hdr[18] = 25; hdr[19] = 25;
+    emr(&e, 1, hdr, 20);
+    {
+        uint32_t brush[4] = { 1, 0, 0x0000FF00, 0 }, sel[1] = { 1 }, pie[8] = { 10, 10, 50, 50, 50, 30, 30, 10 };
+
+        emr(&e, 39, brush, 4);
+        emr(&e, 37, sel, 1);
+        emr(&e, 47, pie, 8);
+    }
+    {   /* two vertices, one rectangle, horizontal: red at the left, blue at the right */
+        uint32_t g[7 + 8 + 2] = { 0, 0, 0, 0, 2, 1, 0, 60, 10, 0xFF00u, 0, 90, 30, 0, 0xFF00u, 0, 1 };
+
+        emr(&e, 118, g, 17);
+    }
+    {
+        uint32_t pen[5] = { 2, 1, 1, 0, 0x00000000 }, hatch[4] = { 3, 2, 0x00000000, 4 }, s2[1] = { 2 }, s3[1] = { 3 };
+        uint32_t box[4] = { 60, 60, 90, 90 }, arcw[8] = { 10, 60, 50, 90, 50, 75, 10, 75 };
+
+        emr(&e, 38, pen, 5);    /* a dashed pen, one unit */
+        emr(&e, 39, hatch, 4);  /* a cross-hatched brush, black */
+        emr(&e, 37, s2, 1);
+        emr(&e, 37, s3, 1);
+        emr(&e, 43, box, 4);
+        emr(&e, 45, arcw, 8);
+    }
+    emr(&e, 14, hdr, 3);
+
+    pd_doc_new(&d);
+    CHECK(pd_doc_add_resource(d, "image/x-emf", e.p, e.n, &src) == PD_OK);
+    r = pd_metafile_drawing(d, (const unsigned char*)e.p, e.n, src);
+    CHECK(r != 0 && pd_doc_resource(d, r, &mime, &data, &len) == PD_OK);
+    js = (char*)malloc(len + 1);
+
+    if (js && r) {
+        char item[8192];
+
+        memcpy(js, data, len);
+        js[len] = '\0';
+        /* the pie: green, from its centre, through the right and the top, not the bottom */
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(W * 0.5), (int)(W * 0.3));
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"fill\":4278255360") && strstr(item, "\"closed\":1"));
+        CHECK(item_has_pt(item, (long)(W * 0.3), (long)(W * 0.3)) && item_has_pt(item, (long)(W * 0.3), (long)(W * 0.1)));
+        CHECK(!item_has_pt(item, (long)(W * 0.3), (long)(W * 0.5)) && !item_has_pt(item, (long)(W * 0.1), (long)(W * 0.3)));
+        /* the gradient */
+        CHECK(strstr(js, "\"gk\":1,\"f2\":4278190335,\"ga\":0,\"gs\":[0,4294901760,100000,4278190335]") != NULL);
+        /* the box: dashed, cross-hatched */
+        CHECK(strstr(js, "\"dash\":[300000,100000]") != NULL && strstr(js, "\"patt\":[255,128,128,128,128,128,128,128]") != NULL);
+        /* the arc: open, over the top of its ellipse (anticlockwise from the right to the left) */
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(W * 0.5), (int)(W * 0.75));
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"closed\":0") &&
+              item_has_pt(item, (long)(W * 0.3), (long)(W * 0.6)) && !item_has_pt(item, (long)(W * 0.3), (long)(W * 0.9)));
+    }
+
+    free(js);
+    free(e.p);
+    pd_doc_free(d);
+}
+
 /* A small EMF made here: a red-filled rectangle, a polygon with a hole
    drawn as a path, a line of text, a mask-and-picture pair of bitmaps
    (only the picture shows) and a white "nothing" blit that must not cover
@@ -6447,6 +6525,7 @@ int main(void) {
     test_docx_drawings();
     printf("EMF pictures\n");
     test_emf();
+    test_emf_shapes();
     printf("docx equations\n");
     test_docx_omml();
     printf("docx fields and references\n");

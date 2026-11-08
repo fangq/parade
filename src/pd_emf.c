@@ -263,6 +263,67 @@ static void ellipse(mf* M, double l, double t, double r, double b) {
     figure(M, xy, 64, 1, 1, 1);
 }
 
+/* GDI's arcs: on the ellipse in (l, t, r, b), anticlockwise on the device from the radial through (xs, ys) to the
+   one through (xe, ye). how 0 an arc (open), 1 a chord (closed), 2 a pie (closed through the centre), 3 an arc
+   joined from the current position (ArcTo), which then moves to its end */
+static void arc(mf* M, double l, double t, double r, double b, double xs, double ys, double xe, double ye, int how) {
+    double xy[2 * 68], cx = (l + r) / 2, cy = (t + b) / 2, rx = fabs(r - l) / 2, ry = fabs(b - t) / 2;
+    double a0 = atan2((ys - cy) * (rx > 0 ? rx : 1), (xs - cx) * (ry > 0 ? ry : 1));
+    double a1 = atan2((ye - cy) * (rx > 0 ? rx : 1), (xe - cx) * (ry > 0 ? ry : 1));
+    int k, n = 0;
+
+    if (a1 >= a0) {     /* anticlockwise with y down: the angle falls */
+        a1 -= 6.283185307179586;
+    }
+
+    if (how == 3) {
+        xy[n++] = M->g.cx;
+        xy[n++] = M->g.cy;
+    }
+
+    for (k = 0; k <= 64; k++) {
+        double a = a0 + (a1 - a0) * k / 64;
+
+        xy[n++] = cx + rx * cos(a);
+        xy[n++] = cy + ry * sin(a);
+    }
+
+    if (how == 2) {
+        xy[n++] = cx;
+        xy[n++] = cy;
+    }
+
+    if (how == 3 && M->in_path && M->fig_open) {    /* goes on from where the figure is */
+        figure(M, xy + 2, n / 2 - 1, 0, 0, 1);
+    } else {
+        figure(M, xy, n / 2, how == 1 || how == 2, how == 1 || how == 2, 1);
+    }
+
+    if (how == 3) {
+        M->g.cx = xy[n - 2];
+        M->g.cy = xy[n - 1];
+    }
+}
+
+/* a GRADIENTFILL rectangle (logical units): from colour c0 at its left (top, when down) to c1 at its right */
+static void grad_rect(mf* M, double l, double t, double r, double b, uint32_t c0, uint32_t c1, int down) {
+    double x[4] = { l, r, r, l }, y[4] = { t, t, b, b }, q[8];
+    int k;
+
+    if (M->in_path) {
+        return;
+    }
+
+    for (k = 0; k < 4; k++) {
+        map_pt(M, x[k], y[k], &q[2 * k], &q[2 * k + 1]);
+    }
+
+    sep(M);
+    pb_printf(M->o, "{\"path\":[%d,%d,%d,%d,%d,%d,%d,%d],\"closed\":1,\"fill\":%u,\"line\":0,\"lw\":0,\"gk\":1,"
+              "\"f2\":%u,\"ga\":%d,\"gs\":[0,%u,100000,%u]}", (int)q[0], (int)q[1], (int)q[2], (int)q[3], (int)q[4], (int)q[5],
+              (int)q[6], (int)q[7], (unsigned)c0, (unsigned)c1, down ? 5400000 : 0, (unsigned)c0, (unsigned)c1);
+}
+
 static void rect(mf* M, double l, double t, double r, double b) {
     double xy[8] = { l, t, r, t, r, b, l, b };
 
@@ -973,6 +1034,54 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
 
                 break;
 
+            case 118:   /* GRADIENTFILL bounds, vertices, meshes, mode; TRIVERTEX x, y, r, g, b, a (16 bits each) */
+                if (size >= 36) {
+                    uint32_t nv = u32(r + 24), nm = u32(r + 28), mode = u32(r + 32), i;
+
+                    for (i = 0; mode <= 1 && i < nm && 36 + 16 * (uint64_t)nv + 8 * (uint64_t)(i + 1) <= size; i++) {
+                        uint32_t a = u32(r + 36 + 16 * nv + 8 * i), b = u32(r + 40 + 16 * nv + 8 * i);
+                        const unsigned char* va = r + 36 + 16 * a, *vb = r + 36 + 16 * b;
+                        uint32_t ca, cb;
+
+                        if (a >= nv || b >= nv) {
+                            continue;
+                        }
+
+                        ca = 0xFF000000u | (uint32_t)va[9] << 16 | (uint32_t)va[11] << 8 | va[13];  /* each 16-bit's high byte */
+                        cb = 0xFF000000u | (uint32_t)vb[9] << 16 | (uint32_t)vb[11] << 8 | vb[13];
+                        grad_rect(M, s32(va), s32(va + 4), s32(vb), s32(vb + 4), ca, cb, mode == 1);
+                    }
+                }
+
+                break;
+
+            case 45:    /* ARC box, start, end */
+            case 46:    /* CHORD */
+            case 47:    /* PIE */
+            case 55:    /* ARCTO */
+                if (size >= 40) {
+                    arc(M, s32(r + 8), s32(r + 12), s32(r + 16), s32(r + 20), s32(r + 24), s32(r + 28), s32(r + 32),
+                        s32(r + 36), type == 45 ? 0 : type == 46 ? 1 : type == 47 ? 2 : 3);
+                }
+
+                break;
+
+            case 41:    /* ANGLEARC centre, radius, start and sweep angles (degrees, anticlockwise) */
+                if (size >= 28) {
+                    double cx = s32(r + 8), cy = s32(r + 12), rad = u32(r + 16), st, sw;
+                    float f[2];
+
+                    memcpy(f, r + 20, 8);
+                    st = f[0] * 3.14159265358979 / 180;
+                    sw = f[1] * 3.14159265358979 / 180;
+                    /* (a sweep of 0 or a full turn: the start and end radials the same) */
+                    arc(M, cx - rad, cy - rad, cx + rad, cy + rad, cx + cos(st) * rad, cy - sin(st) * rad,
+                        cx + cos(st + (fabs(sw) >= 6.2831 ? sw * 0.9999 : sw)) * rad,
+                        cy - sin(st + (fabs(sw) >= 6.2831 ? sw * 0.9999 : sw)) * rad, 3);
+                }
+
+                break;
+
             case 3:     /* POLYGON */
             case 4:     /* POLYLINE */
             case 86:    /* POLYGON16 */
@@ -1376,6 +1485,13 @@ static void wmf_play(mf* M, const unsigned char* p, size_t n) {
 
             case 0x0418:    /* ELLIPSE bottom, right, top, left */
                 ellipse(M, P16(3), P16(2), P16(1), P16(0));
+                break;
+
+            case 0x0817:    /* ARC yend, xend, ystart, xstart, bottom, right, top, left */
+            case 0x0830:    /* CHORD */
+            case 0x081A:    /* PIE */
+                arc(M, P16(7), P16(6), P16(5), P16(4), P16(3), P16(2), P16(1), P16(0),
+                    fn == 0x0817 ? 0 : fn == 0x0830 ? 1 : 2);
                 break;
 
             case 0x02FA: {  /* CREATEPENINDIRECT style, width x, width y, colour */
