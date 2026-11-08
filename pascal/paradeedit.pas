@@ -606,6 +606,10 @@ type
       away). False when there is no such slide }
     function SlideNotes(Index: Integer): string;
     function SetSlideNotes(Index: Integer; const ANotes: string): Boolean;
+    { a slide hidden (laid out and edited as the others, left out of a PDF and of a slide show); set as one step of
+      undo }
+    function SlideHidden(Index: Integer): Boolean;
+    function SetSlideHidden(Index: Integer; Hidden: Boolean): Boolean;
     function CurrentSlide: Integer;
     function GoToSlide(Index: Integer): Boolean;
     { a slide's page at the top of the view, the selection as it is }
@@ -8673,6 +8677,36 @@ begin
   finally
     pd_doc_end_group(FDoc);
     Lines.Free;
+  end;
+  if Result then
+    Changed;
+end;
+
+function TParadeEdit.SlideHidden(Index: Integer): Boolean;
+var
+  Sp: pd_section_props;
+begin
+  Result := (Index >= 0) and (Index < ChildCount(pd_doc_root(FDoc))) and
+    (pd_doc_section_props(FDoc, pd_doc_child(FDoc, pd_doc_root(FDoc), Index), Sp) = PD_OK) and (Sp.hidden <> 0);
+end;
+
+function TParadeEdit.SetSlideHidden(Index: Integer; Hidden: Boolean): Boolean;
+var
+  Sec: pd_block_id;
+  Sp: pd_section_props;
+begin
+  Result := False;
+  if FReadOnly or (Index < 0) or (Index >= ChildCount(pd_doc_root(FDoc))) then
+    Exit;
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
+  if pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK then
+    Exit;
+  Sp.hidden := Ord(Hidden);
+  pd_doc_begin_group(FDoc, PAnsiChar(IfThen(Hidden, 'Hide slide', 'Show slide')));
+  try
+    Result := pd_doc_set_section_props(FDoc, Sec, Sp) = PD_OK;
+  finally
+    pd_doc_end_group(FDoc);
   end;
   if Result then
     Changed;
