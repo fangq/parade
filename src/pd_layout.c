@@ -72,6 +72,7 @@ typedef struct pcache {         /* one paragraph laid out at one width */
     pd_sp ws_w;                 /* wrap shape: lines ws_k0 to ws_k (not that one) are ws_w narrower */
     int32_t ws_side, ws_k, ws_k0;
     uint32_t ws_sig;            /* with an outline: each line's own narrowing, ws_tk[line - ws_k0], hashed */
+    int32_t ws_cols;            /* the narrowing is columns' widths, not a float's (lines may break between) */
     int32_t ws_both;            /* text on both sides: lines ws_k0 to ws_k in pairs, the left part ws_lw wide, the
                                    right from ws_rx, drawn side by side */
     pd_sp ws_lw, ws_rx;
@@ -89,6 +90,7 @@ typedef struct {                /* lines narrowed beside a wrapping float */
     int32_t both;               /* or text on both sides: lines k0 to k in pairs, a left part lw wide and a right
                                    part from rx across */
     pd_sp lw, rx;
+    int32_t cols;               /* tk is not a float's: the lines' columns' widths (columns of their own widths) */
 } wrapshape;
 
 typedef struct {                /* a filled rectangle: rules, borders, cell backgrounds */
@@ -269,6 +271,12 @@ typedef struct {
     pd_sp floor_y;              /* and the height its content takes there */
     uint8_t* chosen;            /* optimal page breaking: penalty items to break at */
     int8_t* loose;              /* optimal page breaking: \looseness by block id */
+    int32_t uneq;               /* columns of their own widths: cw, cx (from the text's left), else 0 */
+    pd_sp cw[PD_SECTION_MAX_COLS], cx[PD_SECTION_MAX_COLS];
+    int8_t* lcol;               /* the column each line item was put in, by item (columns of their own widths) */
+    int32_t caplcol;
+    int8_t (*bcol)[64];         /* by block id: the columns its lines went to the last time, and how many */
+    int16_t* nbcol;
     int32_t page_start_item;    /* first item of the current page (balancing) */
     int32_t page_start_n, page_start_nrules;
     int resume;                 /* fill: continue on the current page */
@@ -494,7 +502,7 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
     blk* b = pd_doc_blk(d, id);
     pcache* c;
     uint64_t sig;
-    wrapshape none = { 0, 0, 0, 0, NULL, 0, 0, 0, 0 };
+    wrapshape none = { 0, 0, 0, 0, NULL, 0, 0, 0, 0, 0 };
 
     if (!ws || ws->k <= 0) {
         ws = &none;
@@ -521,7 +529,8 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
 
     for (c = L->cache[id]; c && !(c->loose == loose && c->ws_k == ws->k && c->ws_w == ws->w &&
                                   c->ws_side == ws->side && c->ws_k0 == ws->k0 && c->ws_sig == ws->sig &&
-                                  c->ws_both == ws->both && c->ws_lw == ws->lw && c->ws_rx == ws->rx); c = c->next) {
+                                  c->ws_both == ws->both && c->ws_lw == ws->lw && c->ws_rx == ws->rx &&
+                                  c->ws_cols == ws->cols); c = c->next) {
     }
 
     sig = field_signature(L, b);
@@ -551,6 +560,7 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
         c->ws_k0 = ws->k0;
         c->ws_sig = ws->sig;
         c->ws_both = ws->both;
+        c->ws_cols = ws->cols;
         c->ws_lw = ws->lw;
         c->ws_rx = ws->rx;
 
@@ -855,8 +865,17 @@ static void page_frame(pd_layout* L, int32_t page) {
         colw = (pg->text_w - (sp->columns - 1) * sp->column_gap) / sp->columns;
 
         for (i = 1; top < bottom && i < sp->columns; i++) {
-            add_rule(L, page, pg->text_x + i * (colw + sp->column_gap) - sp->column_gap / 2 - PD_PT(0.25), top,
-                     PD_PT(0.5), bottom - top, 0xFF000000u, 0, pg->section);
+            pd_sp at = pg->text_x + i * (colw + sp->column_gap) - sp->column_gap / 2;
+
+            if (sp->ncol_widths == sp->columns) {   /* columns of their own widths: in the middle of each space */
+                int32_t j;
+
+                for (at = pg->text_x, j = 0; j < i; j++) {
+                    at += sp->col_width[j] + (j + 1 < i ? sp->col_space[j] : sp->col_space[j] / 2);
+                }
+            }
+
+            add_rule(L, page, at - PD_PT(0.25), top, PD_PT(0.5), bottom - top, 0xFF000000u, 0, pg->section);
         }
     }
 }
@@ -2389,6 +2408,35 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
 
                 kwrap = pc->ws_k;
                 pp = &pc->pp;
+            } else if (F->uneq && F->nbcol && F->nbcol[b->id] > 0) {
+                /* columns of their own widths: each line as wide as the column it went to the last time */
+                wrapshape ws;
+                pd_sp tk[64], wl = F->cw[F->bcol[b->id][F->nbcol[b->id] - 1]];
+                int32_t i2, nl = F->nbcol[b->id];
+
+                memset(&ws, 0, sizeof(ws));
+                ws.side = PD_WRAP_RIGHT;
+                ws.k = nl;
+                ws.cols = 1;
+                ws.sig = 2166136261u;
+                memset(tk, 0, sizeof(tk));
+
+                for (i2 = 0; i2 < nl; i2++) {
+                    tk[i2] = wl - F->cw[F->bcol[b->id][i2]];
+                    ws.sig = (ws.sig ^ (uint32_t)tk[i2]) * 16777619u;
+                }
+
+                ws.sig |= 1;
+                ws.tk = tk;
+
+                for (i2 = 0; i2 < nl && tk[i2] == 0; i2++) {
+                }
+
+                if ((pc = layout_para_ex(F->L, b->id, wl, 0, i2 < nl ? &ws : NULL, &st)) == NULL) {
+                    return st;
+                }
+
+                pp = &pc->pp;
             } else if (F->wrap_rem > 0) {
                 F->wrap_rem = 0;
                 F->wrap_skip = 0;
@@ -2624,6 +2672,11 @@ static pd_status rebuild_flow(filler* F) {
 static pd_sp col_x(const filler* F, int32_t page, int32_t col) {
     if (F->sp && F->sp->direction == PD_DIR_RTL) {  /* right to left: the first column at the right */
         col = F->ncols - 1 - col;
+    }
+
+    if (F->uneq) {  /* each its own width */
+        return F->sp && F->sp->direction == PD_DIR_RTL ? F->L->pages[page].text_x + F->L->pages[page].text_w -
+               F->cx[F->ncols - 1 - col] - F->cw[F->ncols - 1 - col] : F->L->pages[page].text_x + F->cx[col];
     }
 
     return F->L->pages[page].text_x + col * (F->colw + F->gap);
@@ -3159,6 +3212,10 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
         if (v->kind == VI_LINE) {
             add_line(F->L, F->page, v->pc, v->line, x, y0 + r[i].y - v->pc->top[v->line] + pair_dy(v->pc, v->line),
                      0);
+
+            if (F->uneq && r[i].item < F->caplcol) {
+                F->lcol[r[i].item] = (int8_t)F->col;
+            }
         } else if (v->kind == VI_ROW) {
             place_row(F, v, x, y0 + r[i].y);
         } else if (v->kind == VI_RULE) {
@@ -4311,6 +4368,84 @@ static void body_area(pd_layout* L, const pd_section_props* sp, pd_sp* top, pd_s
     }
 }
 
+/* pages from n on gone (a section laid out again); blocks first shown on them shown nowhere yet */
+static void drop_pages(pd_layout* L, int32_t n) {
+    int32_t i, k;
+    uint32_t b;
+
+    for (i = n; i < L->npages; i++) {
+        free(L->pages[i].lines);
+        free(L->pages[i].rules);
+        free(L->pages[i].pts);
+        free(L->pages[i].sty);
+        free(L->pages[i].items);
+
+        for (k = 0; k < L->pages[i].nowned; k++) {
+            pcache_free(L->pages[i].owned[k]);
+        }
+
+        free(L->pages[i].owned);
+    }
+
+    L->npages = n < L->npages ? n : L->npages;
+
+    for (b = 0; L->first_page && b <= L->doc->captab; b++) {
+        L->first_page[b] = L->first_page[b] >= n ? -1 : L->first_page[b];
+    }
+}
+
+/* The columns a section's lines went to, by paragraph, taken in for the next layout: 1 if they differ from the
+   ones the paragraphs were broken for */
+static int uneq_learn(filler* F) {
+    int32_t i, changed = 0;
+    uint32_t cap = F->L->doc->captab + 1;
+
+    if (!F->bcol) {
+        F->bcol = (int8_t (*)[64])calloc(cap, 64);
+        F->nbcol = (int16_t*)calloc(cap, sizeof(int16_t));
+
+        if (!F->bcol || !F->nbcol) {
+            return 0;
+        }
+    }
+
+    for (i = 0; i < F->n && i < F->caplcol; i++) {
+        const vitem* v = &F->it[i];
+        pd_block_id b;
+        int32_t k = v->line;
+
+        if (v->kind != VI_LINE || !v->pc || (b = v->pc->block) >= cap || k >= 64) {
+            continue;
+        }
+
+        if (k == 0) {
+            int16_t nl = (int16_t)(v->pc->nlines < 64 ? v->pc->nlines : 64);
+
+            changed |= F->nbcol[b] != nl;
+            F->nbcol[b] = nl;
+        }
+
+        changed |= F->bcol[b][k] != F->lcol[i];
+        F->bcol[b][k] = F->lcol[i];
+    }
+
+    for (i = 0; changed && i < F->n && i < F->caplcol; i++) {     /* worth another pass only if some line is at
+                                                                     a width not its column's */
+        const vitem* v = &F->it[i];
+
+        if (v->kind == VI_LINE && v->pc) {
+            pd_sp at = v->pc->ws_cols && v->line < v->pc->ws_k && v->line < 64 ? v->pc->width - v->pc->ws_tk[v->line] :
+                       v->pc->width;
+
+            if (at != F->cw[(int)F->lcol[i]]) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
 static pd_status paginate(pd_layout* L) {
     const pd_doc* d = L->doc;
     blk* root;
@@ -4357,6 +4492,19 @@ static pd_status paginate(pd_layout* L) {
                  F.ncols;
         F.number = F.sp->first_page_number > 0 && !F.sp->continuous ? F.sp->first_page_number : number;
         F.floor_page = -1;
+
+        if (F.ncols > 1 && F.sp->ncol_widths == F.ncols) {  /* columns of their own widths */
+            pd_sp at = 0;
+
+            for (i = 0; i < F.ncols; i++) {
+                F.cx[i] = at;
+                F.cw[i] = F.sp->col_width[i] > PD_PT(12) ? F.sp->col_width[i] : PD_PT(12);
+                at += F.cw[i] + F.sp->col_space[i];
+            }
+
+            F.uneq = 1;
+            F.colw = F.cw[0];
+        }
 
         if (F.colw <= 0 || F.colh <= 0) {
             st = PD_ERR_RANGE;
@@ -4405,14 +4553,40 @@ static pd_status paginate(pd_layout* L) {
             number++;
         }
 
-        st = rebuild_flow(&F);
+        {   /* columns of their own widths: laid out again while lines go to columns of other widths than they
+               were broken at (each paragraph re-broken to the widths of the columns its lines went to) */
+            int32_t np0 = L->npages, num0 = F.number, sp0 = F.section_page, pass;
 
-        if (st == PD_OK && F.sp->page_breaking == PD_PAGES_OPTIMAL) {
-            st = plan_optimal(&F);
-        }
+            for (pass = 0; ; pass++) {
+                st = rebuild_flow(&F);
 
-        if (st == PD_OK) {
-            st = fill(&F, 0);
+                if (st == PD_OK && F.uneq && grow((void**)&F.lcol, &F.caplcol, (int64_t)F.n + 1, 1)) {
+                    st = PD_ERR_NOMEM;
+                }
+
+                if (st == PD_OK && F.uneq) {
+                    memset(F.lcol, 0, (size_t)F.caplcol);
+                }
+
+                if (st == PD_OK && F.sp->page_breaking == PD_PAGES_OPTIMAL) {
+                    st = plan_optimal(&F);
+                }
+
+                if (st == PD_OK) {
+                    st = fill(&F, 0);
+                }
+
+                if (st != PD_OK || !F.uneq || F.floor_page >= 0 || pass >= 3 || !uneq_learn(&F)) {
+                    break;
+                }
+
+                drop_pages(L, np0);
+                F.number = num0;
+                F.section_page = sp0;
+                F.nq = 0;
+                F.top_used = 0;
+                F.col = 0;
+            }
         }
 
         F.resume = 0;
@@ -4438,6 +4612,9 @@ static pd_status paginate(pd_layout* L) {
         free(F.tb);
         free(F.chosen);
         free(F.loose);
+        free(F.lcol);
+        free(F.bcol);
+        free(F.nbcol);
     }
 
     /* list labels into the paragraph caches, now that every paragraph has one */

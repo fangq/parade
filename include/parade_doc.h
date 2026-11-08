@@ -722,7 +722,8 @@ typedef struct {
     int32_t page_border_flags;  /**< PD_PGBORDER_* */
     int32_t column_rule;        /**< 1: a line between its columns (Word's w:cols w:sep) */
     int32_t ncol_widths;        /**< columns of their own widths (Word's equalWidth="0"), 0 = all column_gap apart,
-                                     equal; laid out as equal columns of the same total (kept, read and written) */
+                                     equal; used when it is columns (each paragraph broken at the widths of the
+                                     columns its lines go to) */
     pd_sp col_width[PD_SECTION_MAX_COLS];   /**< each column's width */
     pd_sp col_space[PD_SECTION_MAX_COLS];   /**< and the space after it */
     int32_t start;              /**< where it starts, unless continuous: PD_BREAK_PAGE (the next page),

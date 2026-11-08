@@ -9292,6 +9292,79 @@ static void test_anchor_follows_paragraph(void) {
     CHECK(found || !have_layout_font());
 }
 
+/* Columns of their own widths (w:cols equalWidth="0"): a paragraph running from a 100pt column into a 332pt one
+   is broken at each column's width, its lines in the first no wider than it, those in the second starting where
+   it does and reaching across it; also after .docx and native round trips */
+static void test_unequal_columns(void) {
+    char* body = (char*)malloc(32768), *p;
+    pd_doc* d;
+    int pass, i;
+
+    if (!body) {
+        return;
+    }
+
+    p = body + sprintf(body, "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>COLUMNS");
+
+    for (i = 0; i < 260; i++) {
+        p += sprintf(p, " some words");
+    }
+
+    sprintf(p, "</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" "
+            "w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>"
+            "<w:cols w:num=\"2\" w:space=\"720\" w:equalWidth=\"0\"><w:col w:w=\"2000\" w:space=\"720\"/>"
+            "<w:col w:w=\"6640\"/></w:cols></w:sectPr></w:body></w:document>");
+    d = docx_doc("word/document.xml", body, NULL);
+    free(body);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, in0 = 0, in1 = 0;
+            pd_sp right0 = 0, left1 = PD_PT(1000), right1 = 0;
+            pd_block_id para = find_para(d, "COLUMNS");
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind != PD_DRAW_GLYPH || it[k].block != para) {
+                    continue;
+                }
+
+                if (it[k].x < PD_PT(72 + 118)) {
+                    in0++;
+                    right0 = it[k].x + it[k].w > right0 ? it[k].x + it[k].w : right0;
+                } else {
+                    in1++;
+                    left1 = it[k].x < left1 ? it[k].x : left1;
+                    right1 = it[k].x + it[k].w > right1 ? it[k].x + it[k].w : right1;
+                }
+            }
+
+            free(it);
+            CHECK(in0 > 100 && in1 > 100 && right0 <= PD_PT(72 + 100) + PD_PT(0.5));
+            CHECK(left1 >= PD_PT(72 + 136) - PD_PT(0.5) && left1 < PD_PT(72 + 140) && right1 > PD_PT(72 + 136 + 300));
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9330,6 +9403,7 @@ int main(void) {
     test_wrap_outline();
     test_wrap_both_sides();
     test_anchor_follows_paragraph();
+    test_unequal_columns();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

@@ -118,7 +118,8 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
 - Sections may have page borders (each side's line style, width, colour
   and space, from the page's edge or the text, on all, the first or all
   but the first page, over or under the text), a page colour, a line
-  between columns, and start on an odd or even page (a blank page put in
+  between columns, columns of their own widths (paragraphs re-broken at
+  the width of the column each line lands in), and start on an odd or even page (a blank page put in
   before them when needed).
 - Continuous sections start below the previous one on the same page;
   a multi-column section ending there gets balanced columns.
