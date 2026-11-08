@@ -4419,6 +4419,33 @@ static void test_pptx_run_props(void) {
     pd_doc_free(d);
 }
 
+/* an equation (Office Math in a14:m, in the Choice of an mc:AlternateContent that asks for a14) read as one, not its
+   fallback */
+static void test_pptx_math(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", "<mc:AlternateContent xmlns:mc=\"mc\"><mc:Choice "
+                         "xmlns:a14=\"a14\" Requires=\"a14\">" PSP("2", "<a:p><a14:m><m:oMathPara xmlns:m=\"m\"><m:oMath>"
+                                 "<m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f>"
+                                 "</m:oMath></m:oMathPara></a14:m></a:p>") "</mc:Choice><mc:Fallback>"
+                         PSP("2", PP("MATHFALLBACK")) "</mc:Fallback></mc:AlternateContent>"), NULL);
+    int32_t i;
+    int found = 0;
+    pd_inline o;
+
+    CHECK(d != NULL);
+
+    for (i = 0; d && i < pd_doc_story_count(d); i++) {
+        pd_block_id p = pd_doc_child(d, pd_doc_story_at(d, i), 0);
+
+        if (object_in(d, p, PD_INLINE_EQUATION, &o) && o.source && strstr(o.source, "\\frac{a}{b}")) {
+            found = 1;
+            CHECK(chars_at(d, p, 0).size == PD_PT(18));     /* PowerPoint's size, not Word's */
+        }
+    }
+
+    CHECK(found && !story_para_with(d, "MATHFALLBACK"));
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5965,6 +5992,7 @@ int main(void) {
     test_pptx_chart();
     test_pptx_ph_inherit();
     test_pptx_run_props();
+    test_pptx_math();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

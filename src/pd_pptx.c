@@ -1145,6 +1145,8 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
         if (!strcmp(d->v[k].name, "r") && first_rpr < 0) {
             first_rpr = xd_kid(d, k, "rPr");
             any = 1;
+        } else if (!strcmp(d->v[k].name, "m")) {
+            any = 1;    /* an equation */
         }
     }
 
@@ -1337,6 +1339,8 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
             }
 
             pb_puts(o, link ? "</w:t></w:r></w:hyperlink>" : "</w:t></w:r>");
+        } else if (!strcmp(n, "m")) {   /* an equation (a14:m): its Office Math, as Word has it in a paragraph */
+            xd_inner(o, d, k);
         } else if (!strcmp(n, "br")) {
             pb_puts(o, "<w:r>");
             put_rpr(o, T, d, xd_kid(d, k, "rPr"));
@@ -1674,7 +1678,7 @@ static int has_text(const xdoc* d, int tx) {
 
     for (p = tx >= 0 ? d->v[tx].kid : -1; p >= 0; p = d->v[p].next) {
         for (r = d->v[p].kid; r >= 0; r = d->v[r].next) {
-            if (!strcmp(d->v[r].name, "r") || !strcmp(d->v[r].name, "fld")) {
+            if (!strcmp(d->v[r].name, "r") || !strcmp(d->v[r].name, "fld") || !strcmp(d->v[r].name, "m")) {
                 return 1;
             }
         }
@@ -2370,6 +2374,19 @@ static void put_chart(conv* C, ppart* pt, int gf, int ch) {
               "r:id=\"rIdPc%d\"/></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>", id, x, y, cx, cy, id, no);
 }
 
+/* whether there is an equation (a14:m, Office Math) under element N */
+static int has_math(const xdoc* d, int n) {
+    int k;
+
+    for (k = n; k < d->nv && d->v[k].a < d->v[n].b; k++) {
+        if (!strcmp(d->v[k].name, "oMath")) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
     const xdoc* d = &pt->x;
     const char* el = d->v[n].name;
@@ -2524,8 +2541,18 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
         } else if (gd >= 0) {
             put_ole(C, pt, n, gd);
         }
-    } else if (!strcmp(el, "AlternateContent")) {   /* what a newer PowerPoint has: its fallback */
-        int fb = xd_kid(d, n, "Fallback"), k;
+    } else if (!strcmp(el, "AlternateContent")) {   /* what a newer PowerPoint has: its fallback, but an equation */
+        int fb = xd_kid(d, n, "Fallback"), k, ch;
+
+        for (ch = d->v[n].kid; ch >= 0; ch = d->v[ch].next) {
+            char req[64];
+
+            if (!strcmp(d->v[ch].name, "Choice") && xd_attr(d, ch, "Requires", req, sizeof(req)) &&
+                    !strcmp(req, "a14") && has_math(d, ch)) {
+                fb = ch;    /* (its fallback a picture of it) */
+                break;
+            }
+        }
 
         for (k = fb >= 0 ? d->v[fb].kid : -1; k >= 0; k = d->v[k].next) {
             put_shape(C, pt, k, skip_ph);
@@ -2868,7 +2895,8 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
             "xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\" "
             "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" "
             "xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" "
-            "xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\"><w:body>");
+            "xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\" "
+            "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><w:body>");
     pb_puts(&P.rels, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships "
             "xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
             "<Relationship Id=\"rIdPt\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
@@ -2893,6 +2921,20 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
         pd_zipw_add(P.zw, "[Content_Types].xml", types, sizeof(types) - 1);
     }
     pd_zipw_add(P.zw, "word/document.xml", P.doc.p, P.doc.n);
+    {   /* what text takes that is in no run -- an equation -- PowerPoint's 18 points in the body font */
+        pd_buf sty;
+
+        memset(&sty, 0, sizeof(sty));
+        pb_puts(&sty, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:styles "
+                "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault>"
+                "<w:rPr><w:rFonts w:ascii=\"");
+        put_esc(&sty, P.minor);
+        pb_puts(&sty, "\" w:hAnsi=\"");
+        put_esc(&sty, P.minor);
+        pb_puts(&sty, "\"/><w:sz w:val=\"36\"/><w:szCs w:val=\"36\"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>");
+        pd_zipw_add(P.zw, "word/styles.xml", sty.p, sty.n);
+        pb_free(&sty);
+    }
 
     {   /* the font table: what kind each face is, so one not here is stood in for by one like it (a sans for a
            sans: most slides' faces are) */
