@@ -964,6 +964,86 @@ static void test_theme(void) {
     }
 }
 
+/* tracked changes shared by value, everything they carry: a move's number, a formatting change's old properties, a
+   paragraph mark's deletion and a table row's insertion (their ids are each replica's own) */
+static void test_revisions(void) {
+    pd_doc* d = R[1].d;
+    pd_block_id sec = pd_doc_child(d, pd_doc_root(d), 0), p, t;
+    pd_revision rv;
+    pd_rev_id mv, fm, mk, rw;
+    pd_char_props cp;
+    pd_para_attrs pa;
+    pd_row_props rp;
+    int k;
+
+    CHECK(pd_doc_insert_block(d, sec, 0, PD_BLOCK_PARAGRAPH, &p) == PD_OK);
+    pd_doc_insert_text(d, at(p, 0), "Moved Bold", 10, PD_FORMAT_INHERIT, NULL);
+    memset(&rv, 0, sizeof(rv));
+    rv.kind = PD_REV_DELETE;
+    snprintf(rv.author, sizeof(rv.author), "Ann");
+    snprintf(rv.date, sizeof(rv.date), "2026-11-08T00:00:00Z");
+    rv.move = 7;
+    CHECK(pd_doc_revision_add(d, &rv, &mv) == PD_OK);
+    rv.kind = PD_REV_FORMAT;
+    rv.move = 0;
+    rv.old.mask = PD_CP_WEIGHT;
+    rv.old.weight = 400;
+    CHECK(pd_doc_revision_add(d, &rv, &fm) == PD_OK);
+    memset(&rv, 0, sizeof(rv));
+    rv.kind = PD_REV_DELETE;
+    snprintf(rv.author, sizeof(rv.author), "Bob");
+    CHECK(pd_doc_revision_add(d, &rv, &mk) == PD_OK);
+    rv.kind = PD_REV_INSERT;
+    snprintf(rv.author, sizeof(rv.author), "Cy");
+    CHECK(pd_doc_revision_add(d, &rv, &rw) == PD_OK);
+    memset(&cp, 0, sizeof(cp));
+    cp.mask = PD_CP_REVISION;
+    cp.revision = mv;
+    CHECK(pd_doc_set_char_props(d, (pd_range) { at(p, 0), at(p, 5) }, &cp) == PD_OK);
+    cp.mask = PD_CP_REVISION | PD_CP_WEIGHT;
+    cp.revision = fm;
+    cp.weight = 700;
+    CHECK(pd_doc_set_char_props(d, (pd_range) { at(p, 6), at(p, 10) }, &cp) == PD_OK);
+    CHECK(pd_doc_para_attrs(d, p, &pa) == PD_OK);
+    pa.mark_rev = mk;
+    CHECK(pd_doc_set_para_attrs(d, p, &pa) == PD_OK);
+    CHECK(pd_doc_insert_block(d, sec, 1, PD_BLOCK_TABLE, &t) == PD_OK);
+    CHECK(pd_doc_row_props(d, pd_doc_child(d, t, 0), &rp) == PD_OK);
+    rp.revision = rw;
+    CHECK(pd_doc_set_row_props(d, pd_doc_child(d, t, 0), &rp) == PD_OK);
+    deliver_all();
+    CHECK(same_everywhere("revisions", 1));
+
+    for (k = 0; k < NREP; k++) {
+        pd_doc* e = R[k].d;
+        pd_block_id s2 = pd_doc_child(e, pd_doc_root(e), 0), q = pd_doc_child(e, s2, 0), tk = pd_doc_child(e, s2, 1);
+        pd_run run[16];
+        int32_t nr = 0, i, moved = 0, formatted = 0;
+        pd_revision g;
+        pd_para_attrs qa;
+        pd_row_props qr;
+
+        CHECK(pd_doc_para_runs(e, q, run, 16, &nr) == PD_OK);
+
+        for (i = 0; i < nr; i++) {
+            pd_char_props r;
+
+            if (pd_doc_format_resolve(e, q, run[i].format, &r) == PD_OK && r.revision &&
+                    pd_doc_revision_get(e, r.revision, &g) == PD_OK) {
+                moved |= g.kind == PD_REV_DELETE && g.move == 7 && !strcmp(g.author, "Ann");
+                formatted |= g.kind == PD_REV_FORMAT && (g.old.mask & PD_CP_WEIGHT) && g.old.weight == 400 &&
+                             r.weight == 700;
+            }
+        }
+
+        CHECK(moved && formatted);
+        CHECK(pd_doc_para_attrs(e, q, &qa) == PD_OK && qa.mark_rev && pd_doc_revision_get(e, qa.mark_rev, &g) == PD_OK &&
+              g.kind == PD_REV_DELETE && !strcmp(g.author, "Bob"));
+        CHECK(pd_doc_row_props(e, pd_doc_child(e, tk, 0), &qr) == PD_OK && qr.revision &&
+              pd_doc_revision_get(e, qr.revision, &g) == PD_OK && g.kind == PD_REV_INSERT && !strcmp(g.author, "Cy"));
+    }
+}
+
 int main(void) {
     int k;
 
@@ -981,6 +1061,7 @@ int main(void) {
     test_merge();
     printf("the theme\n");
     test_theme();
+    test_revisions();
     printf("a table style\n");
     test_table_style();
 

@@ -555,13 +555,112 @@ static const attr* at_get(const attrs* a, const char* name) {
     return NULL;
 }
 
+/* A tracked change as the replicas share it, by value (their ids are their own): kind|author|date, and when it is a
+   move or a formatting change, a unit separator and {"m": its move, "o": the old character props, "p": the old
+   paragraph props} */
+static void rev_value(pd_doc* d, pd_rev_id id, pd_buf* out) {
+    pd_revision rv;
+
+    out->n = 0;
+
+    if (!id || pd_doc_revision_get(d, id, &rv) != PD_OK) {
+        return;
+    }
+
+    pb_printf(out, "%d|%s|%s", (int)rv.kind, rv.author, rv.date);
+
+    if (rv.move || rv.old.mask || rv.old_para.mask) {
+        pd_buf j;
+        pj_writer w;
+
+        memset(&j, 0, sizeof(j));
+        pj_init(&w, 0, to_pb, &j);
+        pj_obj_begin(&w);
+
+        if (rv.move) {
+            pj_key(&w, "m");
+            pj_int(&w, rv.move);
+        }
+
+        if (rv.old.mask) {
+            pj_key(&w, "o");
+            pd_jd_put_cp(&w, &rv.old);
+        }
+
+        if (rv.old_para.mask) {
+            pj_key(&w, "p");
+            pd_jd_put_pp(&w, &rv.old_para);
+        }
+
+        pj_obj_end(&w);
+        pj_finish(&w);
+        pb_putc(out, '\x1F');
+        pb_put(out, j.p, j.n);
+        pb_free(&j);
+    }
+}
+
+/* the revision a shared value names, made one of this replica's (0 when it names none) */
+static pd_rev_id rev_from(pd_doc* d, const char* v, size_t n) {
+    pd_revision rv;
+    char buf[1024], *p, *q, *x;
+    pd_rev_id id = 0;
+
+    if (!v || n == 0 || n >= sizeof(buf)) {
+        return 0;
+    }
+
+    memcpy(buf, v, n);
+    buf[n] = '\0';
+    memset(&rv, 0, sizeof(rv));
+    rv.kind = atoi(buf);
+    x = strchr(buf, '\x1F');
+
+    if (x) {
+        *x++ = '\0';
+    }
+
+    if ((p = strchr(buf, '|')) == NULL || (q = strchr(p + 1, '|')) == NULL) {
+        return 0;
+    }
+
+    *q = '\0';
+    snprintf(rv.author, sizeof(rv.author), "%s", p + 1);
+    snprintf(rv.date, sizeof(rv.date), "%s", q + 1);
+
+    if (x) {    /* the move, the old props */
+        pj_doc* j = pj_parse(x, strlen(x), 0, NULL);
+        const pj_node* r = j ? pj_root(j) : NULL;
+
+        if (r) {
+            rv.move = (int32_t)pj_int_or(pj_get(r, "m"), 0);
+
+            if (pj_get(r, "o")) {
+                pd_jd_get_cp(d, pj_get(r, "o"), &rv.old);
+            }
+
+            if (pj_get(r, "p")) {
+                pd_jd_get_pp(d, pj_get(r, "p"), &rv.old_para);
+            }
+        }
+
+        pj_free(j);
+    }
+
+    if (pd_doc_revision_add(d, &rv, &id) != PD_OK) {
+        id = 0;
+    }
+
+    return id;
+}
+
 /* the attributes of a format */
 static void fmt_attrs(pd_sync* s, pd_format_id f, attrs* a, int* has_link) {
     pd_doc* d = s->d;
     pd_style_id cs = 0;
     pd_char_props cp;
     uint32_t m;
-    static char rev[160];
+    static char rev[2048];
 
     a->n = 0;
     *has_link = 0;
@@ -636,12 +735,18 @@ static void fmt_attrs(pd_sync* s, pd_format_id f, attrs* a, int* has_link) {
     }
 
     if ((m & PD_CP_REVISION) && cp.revision) {
-        pd_revision rv;
+        pd_buf rb;
 
-        if (pd_doc_revision_get(d, cp.revision, &rv) == PD_OK) {
-            snprintf(rev, sizeof(rev), "%d|%s|%s", (int)rv.kind, rv.author, rv.date);
-            at_str(a, "rev", rev, strlen(rev));
+        memset(&rb, 0, sizeof(rb));
+        rev_value((pd_doc*)d, cp.revision, &rb);
+
+        if (rb.n && rb.n < sizeof(rev)) {
+            memcpy(rev, rb.p, rb.n);
+            rev[rb.n] = '\0';
+            at_str(a, "rev", rev, rb.n);
         }
+
+        pb_free(&rb);
     }
 }
 
@@ -758,23 +863,8 @@ static pd_format_id sig_fmt(pd_sync* s, int32_t sig) {
         }
     }
 
-    if ((x = at_get(&a, "rev")) != NULL) {
-        pd_revision rv;
-        char* p, *q;
-
-        memset(&rv, 0, sizeof(rv));
-        snprintf(buf, sizeof(buf), "%.*s", (int)x->sl, x->s);
-        rv.kind = atoi(buf);
-
-        if ((p = strchr(buf, '|')) != NULL && (q = strchr(p + 1, '|')) != NULL) {
-            *q = '\0';
-            snprintf(rv.author, sizeof(rv.author), "%s", p + 1);
-            snprintf(rv.date, sizeof(rv.date), "%s", q + 1);
-
-            if (pd_doc_revision_add(d, &rv, &cp.revision) == PD_OK) {
-                cp.mask |= PD_CP_REVISION;
-            }
-        }
+    if ((x = at_get(&a, "rev")) != NULL && (cp.revision = rev_from(d, x->s, x->sl)) != 0) {
+        cp.mask |= PD_CP_REVISION;
     }
 
     f = pd_doc_format(d, cs, &cp);
@@ -1422,7 +1512,27 @@ static char* props_json(pd_sync* s, const blk* b, YTransaction* t) {
             pj_cstr(&w, st->at.div_class);
             pj_arr_end(&w);
         }
-    } else if (b->kind != PD_BLOCK_ROOT && b->kind != PD_BLOCK_STORY && b->kind != PD_BLOCK_ROW) {
+
+        if (st->at.mark_rev || st->at.format_rev) {     /* its tracked changes, by value */
+            pd_buf rb;
+
+            memset(&rb, 0, sizeof(rb));
+
+            if (st->at.mark_rev) {
+                rev_value((pd_doc*)d, st->at.mark_rev, &rb);
+                pj_key(&w, "MR");
+                pj_str(&w, rb.p ? rb.p : "", rb.n);
+            }
+
+            if (st->at.format_rev) {
+                rev_value((pd_doc*)d, st->at.format_rev, &rb);
+                pj_key(&w, "FR");
+                pj_str(&w, rb.p ? rb.p : "", rb.n);
+            }
+
+            pb_free(&rb);
+        }
+    } else if (b->kind != PD_BLOCK_ROOT && b->kind != PD_BLOCK_STORY) {
         blk c = *b;     /* the stories a section names go as keys, by themselves */
 
         if (b->kind == PD_BLOCK_SECTION) {
@@ -1454,6 +1564,17 @@ static char* props_json(pd_sync* s, const blk* b, YTransaction* t) {
             pj_key(&w, "TS");
             pj_cstr(&w, sn ? sn : "");
             c.st.tp.style = 0;
+        }
+
+        if (b->kind == PD_BLOCK_ROW && c.st.row.revision) {     /* a row inserted or deleted: by value */
+            pd_buf rb;
+
+            memset(&rb, 0, sizeof(rb));
+            rev_value((pd_doc*)d, c.st.row.revision, &rb);
+            pj_key(&w, "RR");
+            pj_str(&w, rb.p ? rb.p : "", rb.n);
+            pb_free(&rb);
+            c.st.row.revision = 0;
         }
 
         pj_key(&w, "B");
@@ -1559,10 +1680,11 @@ static void props_apply(pd_sync* s, const YTransaction* t, blk* b, const char* j
             }
         }
 
-        if ((b = pd_doc_blk(d, id)) != NULL) {     /* its tracked changes are not shared: this replica's stay */
-            at.mark_rev = b->st.at.mark_rev;
-            at.format_rev = b->st.at.format_rev;
-        }
+        b = pd_doc_blk(d, id);     /* its tracked changes, as this replica's */
+        x = pj_get(r, "MR");
+        at.mark_rev = x && x->type == PJ_STR ? rev_from(d, x->s, x->len) : 0;
+        x = pj_get(r, "FR");
+        at.format_rev = x && x->type == PJ_STR ? rev_from(d, x->s, x->len) : 0;
 
         if (b && memcmp(&at, &b->st.at, sizeof(at)) != 0) {
             pd_doc_set_para_attrs(d, id, &at);
@@ -1604,8 +1726,14 @@ static void props_apply(pd_sync* s, const YTransaction* t, blk* b, const char* j
                 }
             } else if (b->kind == PD_BLOCK_CELL && memcmp(&st.cell, &b->st.cell, sizeof(st.cell)) != 0) {
                 pd_doc_set_cell_props(d, id, &st.cell);
-            } else if (b->kind == PD_BLOCK_ROW && memcmp(&st.row, &b->st.row, sizeof(st.row)) != 0) {
-                pd_doc_set_row_props(d, id, &st.row);
+            } else if (b->kind == PD_BLOCK_ROW) {
+                const pj_node* rr = pj_get(r, "RR");
+
+                st.row.revision = rr && rr->type == PJ_STR ? rev_from(d, rr->s, rr->len) : 0;
+
+                if (memcmp(&st.row, &b->st.row, sizeof(st.row)) != 0) {
+                    pd_doc_set_row_props(d, id, &st.row);
+                }
             } else if (b->kind == PD_BLOCK_BREAK && st.break_kind != b->st.break_kind) {
                 pd_doc_set_break(d, id, (pd_break_kind)st.break_kind);
             }

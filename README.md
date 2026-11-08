@@ -292,7 +292,7 @@ follow. A replica that was away sends `pd_sync_state_vector` and applies the
 
 Shared: the block tree, text with each character property merged on its
 own, inline objects and their pictures, paragraph and block properties,
-styles, lists, tracked changes, and comments with replies (a comment's
+styles, lists, tracked changes (moves, formatting changes with what the text had, paragraph marks, table rows), and comments with replies (a comment's
 range is the characters carrying its mark, so it moves with them).
 `pd_sync_undo`/`pd_sync_redo` undo this replica's own edits only; with a
 `pd_sync` the document's own undo history is not used. Not yet shared:
