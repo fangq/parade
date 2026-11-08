@@ -4239,6 +4239,34 @@ static void test_pptx_autonum(void) {
     pd_doc_free(d);
 }
 
+/* a picture bullet (buBlip): the picture before the text, as tall as the text, square */
+static void test_pptx_picture_bullet(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PSP("2",
+                         PPP("><a:buBlip><a:blip r:embed=\"rIdB\"/></a:buBlip>", "pictured"))),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdB\" "
+                         "Target=\"../media/b.png\"/></Relationships>",
+                         "ppt/media/b.png", "tests/data/rgba.png", NULL);
+    pd_block_id p = 0;
+    pd_inline o;
+    int32_t i;
+
+    CHECK(d != NULL);
+
+    for (i = 0; d && i < pd_doc_story_count(d); i++) {
+        pd_block_id q = pd_doc_child(d, pd_doc_story_at(d, i), 0);
+        uint32_t n;
+        const char* t = para_text(d, q, &n);
+
+        if (n >= 8 && !memcmp(t + n - 8, "pictured", 8)) {
+            p = q;
+        }
+    }
+
+    CHECK(p && pd_doc_inline_at(d, at(p, 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE && o.width == PD_PT(20) &&
+          o.height == PD_PT(20));
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5780,6 +5808,7 @@ int main(void) {
     test_pptx_hidden();
     test_pptx_one_slide();
     test_pptx_autonum();
+    test_pptx_picture_bullet();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

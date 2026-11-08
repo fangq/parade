@@ -600,6 +600,7 @@ typedef struct {
     double bu_scale;            /* and its size (buSzPct), 0 the text's */
     long bu_sz;                 /* its size in hundredths of a point (buSzPts), 0 none */
     const char* bu_face;        /* its face (buFont), NULL the text's */
+    const ppart* parts[3];      /* the parts the levels' properties are in: for a picture bullet's picture */
     long def_sz;                /* the size of runs that give none (hundredths of a point), 0: 18 points */
 } tctx;
 
@@ -1079,6 +1080,7 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
     long long marl, ind;
     long bu_colour = -1, bu_sz = 0;
     double bu_scale = 0, line;
+    const char* blip = NULL;
 
     for (k = d->v[p].kid; k >= 0; k = d->v[k].next) {
         if (!strcmp(d->v[k].name, "r") && first_rpr < 0) {
@@ -1182,8 +1184,16 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
                     !strcmp(bu_face, "Webdings") || !strcmp(bu_face, "Marlett")) {
                 bu_face[0] = '\0';     /* a symbol font's character made Unicode: in the text's face */
             }
-        } else if (which == 3) {
-            snprintf(bu, sizeof(bu), "\xE2\x96\xA0");     /* a picture: a square where it is */
+        } else if (which == 3) {   /* a picture: drawn as big as the text (a square where there is none) */
+            int bl = xd_kid(r.d, r.n, "blip");
+
+            for (k = 0; k < 3 && !blip; k++) {
+                if (T->parts[k] && &T->parts[k]->x == r.d && xd_attr(r.d, bl, "r:embed", v, sizeof(v))) {
+                    blip = media_id(T->P, T->parts[k], v);
+                }
+            }
+
+            snprintf(bu, sizeof(bu), "%s", blip ? " " : "\xE2\x96\xA0");
         }
 
         if (bu[0]) {
@@ -1206,11 +1216,28 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
         B.bu_face = bu_face[0] ? bu_face : NULL;
         pb_puts(o, "<w:r>");
         put_rpr(o, &B, d, first_rpr);
-        pb_puts(o, "<w:t xml:space=\"preserve\">");
-        put_esc(o, bu);
-        pb_puts(o, "</w:t></w:r><w:r>");
-        put_rpr(o, T, d, first_rpr);
-        pb_puts(o, "<w:tab/></w:r>");
+
+        if (blip) {     /* a picture as tall as the text, square */
+            long long e = (long long)((bu_sz > 0 ? bu_sz : (rpr_attr(T, d, first_rpr, "sz", v, sizeof(v)) ? atof(v) :
+                                       T->def_sz > 0 ? T->def_sz : 1800) * (bu_scale > 0 ? bu_scale : 1)) *
+                                      T->scale * 127 + 0.5);
+
+            pb_printf(o, "<w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"%lld\" "
+                      "cy=\"%lld\"/><wp:docPr id=\"%d\" name=\"Bullet\"/><a:graphic><a:graphicData uri=\"http://schemas."
+                      "openxmlformats.org/drawingml/2006/picture\"><pic:pic><pic:nvPicPr><pic:cNvPr id=\"0\" name=\"Bullet\"/>"
+                      "<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"%s\"/><a:stretch><a:fillRect/>"
+                      "</a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData>"
+                      "</a:graphic></wp:inline></w:drawing></w:r><w:r>", e, e, 3700000 + ++T->P->docpr, blip, e, e);
+            put_rpr(o, T, d, first_rpr);
+            pb_puts(o, "<w:tab/></w:r>");
+        } else {
+            pb_puts(o, "<w:t xml:space=\"preserve\">");
+            put_esc(o, bu);
+            pb_puts(o, "</w:t></w:r><w:r>");
+            put_rpr(o, T, d, first_rpr);
+            pb_puts(o, "<w:tab/></w:r>");
+        }
     }
 
     for (k = d->v[p].kid; k >= 0; k = d->v[k].next) {
@@ -1404,6 +1431,9 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
 
     memset(&T, 0, sizeof(T));
     T.P = C->P;
+    T.parts[0] = pt;
+    T.parts[1] = C->layout;
+    T.parts[2] = C->master;
     T.slide_no = C->slide_no;
     T.title = kind == 1;
     T.scale = na >= 0 ? xd_int(d, na, "fontScale", 100000) / 100000.0 : 1;
@@ -1804,6 +1834,8 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
             memset(&T, 0, sizeof(T));
             memset(&an, 0, sizeof(an));
             T.P = C->P;
+            T.parts[0] = pt;
+            T.parts[2] = C->master;
             T.scale = T.spacing = 1;
             T.font_colour = style >= 0 ? stext : first && row == 0 ? 0xFFFFFF : -1;
             T.force_bold = style >= 0 && sbold == 1;
