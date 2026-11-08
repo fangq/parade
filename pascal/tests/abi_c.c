@@ -398,6 +398,18 @@ int main(void) {
     printf("pd_path_style.dash %zu\n", offsetof(pd_path_style, dash));
     printf("pd_path_style.cap %zu\n", offsetof(pd_path_style, cap));
     printf("pd_path_style.join %zu\n", offsetof(pd_path_style, join));
+    printf("pd_path_style.grad_kind %zu\n", offsetof(pd_path_style, grad_kind));
+    printf("pd_path_style.nstops %zu\n", offsetof(pd_path_style, nstops));
+    printf("pd_path_style.stop_color %zu\n", offsetof(pd_path_style, stop_color));
+    printf("pd_path_style.stop_pos %zu\n", offsetof(pd_path_style, stop_pos));
+    printf("pd_path_style.grad_x0 %zu\n", offsetof(pd_path_style, grad_x0));
+    printf("pd_path_style.grad_y0 %zu\n", offsetof(pd_path_style, grad_y0));
+    printf("pd_path_style.grad_x1 %zu\n", offsetof(pd_path_style, grad_x1));
+    printf("pd_path_style.grad_y1 %zu\n", offsetof(pd_path_style, grad_y1));
+    printf("pd_path_style.grad_bx0 %zu\n", offsetof(pd_path_style, grad_bx0));
+    printf("pd_path_style.grad_by0 %zu\n", offsetof(pd_path_style, grad_by0));
+    printf("pd_path_style.grad_bx1 %zu\n", offsetof(pd_path_style, grad_bx1));
+    printf("pd_path_style.grad_by1 %zu\n", offsetof(pd_path_style, grad_by1));
     printf("pd_markup_item %zu\n", sizeof(pd_markup_item));
     printf("pd_markup_item.kind %zu\n", offsetof(pd_markup_item, kind));
     printf("pd_markup_item.id %zu\n", offsetof(pd_markup_item, id));

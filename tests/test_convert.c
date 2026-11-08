@@ -3442,6 +3442,100 @@ static void test_docx_curves(void) {
     pd_doc_free(d);
 }
 
+/* Gradients as Office has them: three stops left to right (red, green half way, blue), a rectangular one out from
+   the middle, and a circle fading from opaque blue to clear. The display list carries the stops and where they run;
+   the rasterizer colours each pixel by them; the PDF uses shadings, a stitching function for three stops and a soft
+   mask for the fading one, not bands. */
+static void test_docx_gradients(void) {
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, lin = -1, rect = -1, fade = -1;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"FF0000\"/></a:gs>"
+                      "<a:gs pos=\"100000\"><a:srgbClr val=\"0000FF\"/></a:gs><a:gs pos=\"50000\"><a:srgbClr val=\"00FF00\"/>"
+                      "</a:gs></a:gsLst><a:lin ang=\"0\" scaled=\"0\"/></a:gradFill><a:ln><a:noFill/></a:ln></wps:spPr>"
+                      "<wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"FFFF00\"/></a:gs>"
+                      "<a:gs pos=\"100000\"><a:srgbClr val=\"000000\"/></a:gs></a:gsLst><a:path path=\"rect\"><a:fillToRect "
+                      "l=\"50000\" t=\"50000\" r=\"50000\" b=\"50000\"/></a:path></a:gradFill><a:ln><a:noFill/></a:ln>"
+                      "</wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"635000\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"ellipse\"/><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"0000FF\"/>"
+                      "</a:gs><a:gs pos=\"100000\"><a:srgbClr val=\"0000FF\"><a:alpha val=\"0\"/></a:srgbClr></a:gs></a:gsLst>"
+                      "<a:path path=\"circle\"><a:fillToRect l=\"50000\" t=\"50000\" r=\"50000\" b=\"50000\"/></a:path>"
+                      "</a:gradFill><a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>", &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        const pd_path_style* st = it[k].kind == PD_DRAW_PATH ? it[k].style : NULL;
+
+        lin = st && st->grad_kind == PD_GRAD_LINEAR ? k : lin;
+        rect = st && st->grad_kind == PD_GRAD_RECT ? k : rect;
+        fade = st && st->grad_kind == PD_GRAD_CIRCLE ? k : fade;
+    }
+
+    CHECK(lin >= 0 && rect >= 0 && fade >= 0);
+
+    if (lin >= 0) {
+        const pd_draw* a = &it[lin];
+        const pd_path_style* st = a->style;
+        int32_t W = 100, H = 10, x;
+        uint8_t* px = (uint8_t*)calloc((size_t)W * H, 4);
+
+        /* the stops in order, the middle one green; the gradient from the box's left edge to its right */
+        CHECK(st->nstops == 3 && st->stop_pos[1] == 50000 && st->stop_color[1] == 0xFF00FF00u &&
+              st->stop_color[2] == 0xFF0000FFu);
+        CHECK(st->grad_x0 == a->x && st->grad_x1 == a->x + PD_PT(100) && st->grad_y0 == st->grad_y1);
+
+        if (px) {   /* a pixel a point: red at the left, green in the middle, blue at the right, mixed between */
+            CHECK(pd_draw_render(a, 1, a->x, a->y + PD_PT(20), 1 << 16, px, W, H, W * 4) == PD_OK);
+            x = 1;
+            CHECK(px[4 * x] > 240 && px[4 * x + 1] < 15 && px[4 * x + 2] == 0);
+            x = 50;
+            CHECK(px[4 * x] < 10 && px[4 * x + 1] > 245 && px[4 * x + 2] < 10);
+            x = 98;
+            CHECK(px[4 * x] == 0 && px[4 * x + 1] < 15 && px[4 * x + 2] > 240);
+            x = 25;
+            CHECK(px[4 * x] > 110 && px[4 * x] < 145 && px[4 * x + 1] > 110 && px[4 * x + 1] < 145);
+            free(px);
+        }
+    }
+
+    if (rect >= 0 && fade >= 0) {
+        const pd_path_style* st = it[rect].style;
+
+        /* the rectangle out from a point in the middle to the box's edges */
+        CHECK(st->grad_x0 == st->grad_x1 && st->grad_x0 == it[rect].x + PD_PT(25) && st->grad_bx0 == it[rect].x &&
+              st->grad_by1 == it[rect].y + PD_PT(50));
+        CHECK(it[fade].style->stop_color[1] == 0x010000FFu);    /* (alpha 1 at the least: 0 is opaque) */
+    }
+
+    {
+        pd_pdf_options opt;
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "/ShadingType 2") && strstr(b.p, "/ShadingType 3"));
+        CHECK(b.p && strstr(b.p, "/FunctionType 3 /Domain [0 1] /Functions [") && strstr(b.p, "/Bounds [0.50000 ]"));
+        CHECK(b.p && strstr(b.p, "/SMask << /Type /Mask /S /Luminosity") && strstr(b.p, "/CS /DeviceGray"));
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -5932,6 +6026,7 @@ int main(void) {
     test_docx_custgeom_paths();
     test_docx_line_styles();
     test_docx_curves();
+    test_docx_gradients();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();

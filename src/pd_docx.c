@@ -18,6 +18,7 @@
 #include "pd_conv.h"
 #include "pd_json.h"
 #include "pd_preset.h"
+#include "parade_layout.h"
 
 /* parts kept whole with the document, to write again */
 #define CHART_MIME "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
@@ -8088,6 +8089,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     dw_cust* cg = (dw_cust*)calloc(1, sizeof(dw_cust));     /* a custom geometry's paths */
     uint32_t fill2 = 0, shd_clr = 0;    /* a gradient's last stop; a shadow's colour */
     int grad_kind = 0, grad_ang = 0, in_grad = 0, in_shd = 0, has_shd = 0;
+    int ngst = 0, gst_pos[PD_MAX_STOPS], grad_sc = 0, grad_path = 1, grad_rws = 1, gft[4] = { 50000, 50000, 50000, 50000 };
+    uint32_t gst_clr[PD_MAX_STOPS];     /* a gradient's stops, as listed; scaled; its path; turned with the shape */
     double shd_dist = 0, shd_dir = 0;
     char gprst[32] = "";            /* a picture's geometry, when it is not a rectangle (it is cut to that shape) */
     uint32_t fill = 0, line = 0, sfill = 0, sline = 0, *cur_clr = NULL;
@@ -8338,6 +8341,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             memset(crop, 0, sizeof(crop));
             fill2 = shd_clr = 0;
             grad_kind = grad_ang = in_grad = in_shd = has_shd = 0;
+            ngst = grad_sc = 0;
+            grad_path = grad_rws = 1;
+            gft[0] = gft[1] = gft[2] = gft[3] = 50000;
             gprst[0] = '\0';
             strcpy(geom, "rect");
             have_fill = have_line = style_fill = style_line = 0;
@@ -8492,12 +8498,30 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 }
             } else if (kind == 2) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
-                char fx[160] = "";  /* the fill's gradient and shadow, for the items that fill */
+                char fx[640] = "";  /* the fill's gradient and shadow, for the items that fill */
                 char lx[160], ax[64];   /* the outline's dashes, ends, corners and lines; its arrowheads */
 
                 if (grad_kind && fill2 && have_fill) {
+                    size_t fl;
+                    int q;
+
                     snprintf(fx, sizeof(fx), ",\"gk\":%d,\"f2\":%u,\"ga\":%d", grad_kind, (unsigned)fill2,
-                             grad_ang + xf.rot);
+                             grad_ang + (grad_rws ? xf.rot : 0));
+
+                    if (ngst >= 2) {    /* every stop, where it is, with its own alpha */
+                        fl = strlen(fx);
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"gsc\":%d,\"gp\":%d,\"gft\":[%d,%d,%d,%d],\"gs\":[",
+                                               grad_sc, grad_path, gft[0], gft[1], gft[2], gft[3]);
+
+                        for (q = 0; q < ngst && fl < sizeof(fx); q++) {
+                            fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, "%s%d,%u", q ? "," : "", gst_pos[q],
+                                                   (unsigned)gst_clr[q]);
+                        }
+
+                        if (fl < sizeof(fx)) {
+                            snprintf(fx + fl, sizeof(fx) - fl, "]");
+                        }
+                    }
                 }
 
                 {   /* the outline's style, for the items it outlines; arrowheads for the open ones */
@@ -9049,17 +9073,52 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             continue;
         }
 
-        if (in_sppr && !in_ln && !strcmp(t, "gradFill")) {     /* a gradient: from its first stop to its last */
+        if (in_sppr && !in_ln && !strcmp(t, "gradFill")) {     /* a gradient: its stops, in order */
             in_grad = g.type == MT_OPEN;
 
             if (open && !have_fill) {
                 grad_kind = 1;
                 grad_ang = 0;
+                ngst = 0;
+                grad_rws = !(mu_attr(&g, "rotWithShape", v, sizeof(v)) && (!strcmp(v, "0") || !strcmp(v, "false")));
+            }
+
+            if (g.type != MT_OPEN && grad_kind && ngst > 0 && !have_fill) {
+                int q, r;
+
+                for (q = 1; q < ngst; q++) {    /* by position, those at one place kept in their order */
+                    for (r = q; r > 0 && gst_pos[r - 1] > gst_pos[r]; r--) {
+                        int tp = gst_pos[r];
+                        uint32_t tc = gst_clr[r];
+
+                        gst_pos[r] = gst_pos[r - 1];
+                        gst_clr[r] = gst_clr[r - 1];
+                        gst_pos[r - 1] = tp;
+                        gst_clr[r - 1] = tc;
+                    }
+                }
+
+                fill = gst_clr[0];      /* a host drawing two colours: the first and the last */
+                fill2 = ngst > 1 ? gst_clr[ngst - 1] : 0;
+                have_fill = 1;
+                grad_kind = ngst > 1 ? grad_kind : 0;
             }
         } else if (in_grad && !strcmp(t, "lin") && open) {
             grad_ang = mu_attr(&g, "ang", v, sizeof(v)) ? atoi(v) : 0;
+            grad_sc = mu_attr(&g, "scaled", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
         } else if (in_grad && !strcmp(t, "path") && open) {
             grad_kind = 2;
+            grad_path = mu_attr(&g, "path", v, sizeof(v)) ? (!strcmp(v, "rect") ? 2 : !strcmp(v, "shape") ? 3 : 1) : 1;
+        } else if (in_grad && !strcmp(t, "fillToRect") && open) {
+            static const char* side[4] = { "l", "t", "r", "b" };
+            int q;
+
+            for (q = 0; q < 4; q++) {
+                gft[q] = mu_attr(&g, side[q], v, sizeof(v)) ? atoi(v) : 0;
+            }
+        } else if (in_grad && grad_kind && !strcmp(t, "gs") && g.type == MT_OPEN && ngst < PD_MAX_STOPS) {
+            gst_pos[ngst] = mu_attr(&g, "pos", v, sizeof(v)) ? atoi(v) : 0;
+            gst_clr[ngst] = 0xFF000000u;
         } else if (in_sppr && !strcmp(t, "outerShdw")) {    /* a shadow cast down and across */
             in_shd = g.type == MT_OPEN;
 
@@ -9229,7 +9288,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 cg_w = (long long)cg->path[0].w;
                 cg_h = (long long)cg->path[0].h;
             }
-        } else if (in_sppr && cg && !strcmp(t, "path") && !strcmp(geom, "cust")) {
+        } else if (in_sppr && cg && !in_grad && !strcmp(t, "path") && !strcmp(geom, "cust")) {
             /* a path: its own coordinate space, fill and outline */
             if (cg->np < DW_CG_MAXPATH) {
                 cg->np++;
@@ -9343,6 +9402,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 line = c;
                 have_line = 1;
                 cur_clr = &line;
+            } else if (in_sppr && in_grad && in_gs && grad_kind && !have_fill) {
+                if (ngst < PD_MAX_STOPS) {  /* a stop's colour, its modifiers to follow */
+                    gst_clr[ngst] = c;
+                    cur_clr = &gst_clr[ngst++];
+                }
             } else if (in_sppr && in_grad && in_gs && have_fill) {
                 fill2 = c;      /* a later stop: the last one, in the end */
                 cur_clr = &fill2;

@@ -93,12 +93,24 @@ typedef enum {
 #define PD_JOIN_BEVEL  1        /**< corners cut across */
 #define PD_JOIN_MITER  2        /**< corners pointed, cut across where the point would pass 8 line widths */
 
+#define PD_GRAD_LINEAR 1        /**< colours along the line from (grad_x0, grad_y0) to (grad_x1, grad_y1) */
+#define PD_GRAD_CIRCLE 2        /**< out in circles from (grad_x0, grad_y0) to one through (grad_x1, grad_y1) */
+#define PD_GRAD_RECT   3        /**< out in rectangles from the rectangle grad_x0..grad_x1, grad_y0..grad_y1 to the
+                                     rectangle grad_bx0..grad_bx1, grad_by0..grad_by1 */
+#define PD_MAX_STOPS   10
+
 /** A path's further paint, where it has one (pd_draw.style): what the plain fields cannot say */
 typedef struct {
     int32_t dash_count;         /**< 0: a solid stroke; else the lengths in dash, dash first, then gap, ... */
     pd_sp dash[8];              /**< on the page */
     int32_t cap;                /**< PD_CAP_* (of each dash too) */
     int32_t join;               /**< PD_JOIN_* */
+    int32_t grad_kind;          /**< the fill's gradient, PD_GRAD_*; 0: none here (fill, fill2 and grad say) */
+    int32_t nstops;             /**< its colour stops, in order */
+    uint32_t stop_color[PD_MAX_STOPS];  /**< 0xAARRGGBB, alpha its own */
+    int32_t stop_pos[PD_MAX_STOPS];     /**< where along it, 0 at its start to 100000 at its end */
+    pd_sp grad_x0, grad_y0, grad_x1, grad_y1;       /**< on the page, as PD_GRAD_* says */
+    pd_sp grad_bx0, grad_by0, grad_bx1, grad_by1;
 } pd_path_style;
 
 typedef struct {

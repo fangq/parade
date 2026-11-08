@@ -4718,14 +4718,107 @@ static void emit_label(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp 
     }
 }
 
-/* an item's gradient ("f2": its other colour, "gk": 1 linear, 2 radial, "ga": its angle) on the path just made */
+/* item D->d[i]'s style, made (all plain) if it has none; NULL when out of memory. Good until the next one is made */
+static pd_path_style* path_style(dlist_t* D, int32_t i) {
+    if (D->d[i].style) {
+        return D->sty + ((intptr_t)D->d[i].style - 1);
+    }
+
+    if (grow((void**)&D->sty, &D->capsty, (int64_t)D->nsty + 1, sizeof(pd_path_style))) {
+        D->err = 1;
+        return NULL;
+    }
+
+    memset(&D->sty[D->nsty], 0, sizeof(pd_path_style));
+    D->d[i].style = (const pd_path_style*)(intptr_t)(++D->nsty);
+    return &D->sty[D->nsty - 1];
+}
+
+/* An item's gradient on the path just made: "f2" its other colour, "gk" 1 linear, 2 radial, "ga" its angle (what
+   a host drawing two colours reads); and where the item has them, its stops ("gs": position in 100000ths, colour,
+   ...), "gsc" a linear one's angle scaled with the box, "gp" a radial one's path (1 circle, 2 rectangle, 3 the
+   shape, drawn as a rectangle) and "gft" its inner rectangle (fillToRect: insets in 100000ths of the box) */
 static void item_grad(dlist_t* D, int32_t n0, const pj_node* it) {
     if (D->n > n0 && pj_get(it, "gk") && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].fill) {
         pd_draw* a = &D->d[D->n - 1];
+        const pj_node* gs = pj_get(it, "gs"), *q;
+        pd_path_style* st;
+        double x = a->x, y = a->y, w = a->w, h = a->h;
+        int k;
 
         a->grad = (int32_t)pj_int_or(pj_get(it, "gk"), 0);
         a->fill2 = (uint32_t)pj_int_or(pj_get(it, "f2"), 0);
         a->grad_angle = (int32_t)pj_int_or(pj_get(it, "ga"), 0);
+
+        if (!gs || gs->n < 2 || (st = path_style(D, D->n - 1)) == NULL) {
+            return;
+        }
+
+        for (q = gs->child, k = 0; q && q->next && k < PD_MAX_STOPS; q = q->next->next, k++) {
+            st->stop_pos[k] = (int32_t)pj_int_or(q, 0);
+            st->stop_color[k] = (uint32_t)pj_int_or(q->next, 0);
+        }
+
+        st->nstops = k;
+
+        if (a->grad == 1) {     /* along the angle, across the box's extent that way */
+            double th = a->grad_angle / 60000.0 * 3.14159265358979 / 180, ux = cos(th), uy = sin(th), l, lo = 1e300,
+                   hi = -1e300, cx = x + w / 2, cy = y + h / 2;
+
+            if (pj_int_or(pj_get(it, "gsc"), 0) && w > 0 && h > 0) {   /* drawn in a square, stretched to the box */
+                double vx = h * ux, vy = w * uy;
+
+                ux = vx;
+                uy = vy;
+            }
+
+            l = sqrt(ux * ux + uy * uy);
+            ux = l > 0 ? ux / l : 1;
+            uy = l > 0 ? uy / l : 0;
+
+            for (k = 0; k < 4; k++) {
+                double t = ((k & 1 ? w : 0) - w / 2) * ux + ((k & 2 ? h : 0) - h / 2) * uy;
+
+                lo = t < lo ? t : lo;
+                hi = t > hi ? t : hi;
+            }
+
+            st->grad_kind = PD_GRAD_LINEAR;
+            st->grad_x0 = (pd_sp)lround(cx + ux * lo);
+            st->grad_y0 = (pd_sp)lround(cy + uy * lo);
+            st->grad_x1 = (pd_sp)lround(cx + ux * hi);
+            st->grad_y1 = (pd_sp)lround(cy + uy * hi);
+        } else {                /* out from the inner rectangle */
+            const pj_node* ft = pj_get(it, "gft");
+            double fl = pj_int_or(pj_at(ft, 0), 50000) / 100000.0, ftp = pj_int_or(pj_at(ft, 1), 50000) / 100000.0;
+            double fr = pj_int_or(pj_at(ft, 2), 50000) / 100000.0, fb = pj_int_or(pj_at(ft, 3), 50000) / 100000.0;
+            double fx0 = x + w * fl, fy0 = y + h * ftp, fx1 = x + w * (1 - fr), fy1 = y + h * (1 - fb);
+            double mx = (fx0 + fx1) / 2, my = (fy0 + fy1) / 2, r = 0;
+
+            if (pj_int_or(pj_get(it, "gp"), 1) == 1) {  /* a circle reaching the farthest corner */
+                for (k = 0; k < 4; k++) {
+                    double dx = x + (k & 1 ? w : 0) - mx, dy = y + (k & 2 ? h : 0) - my;
+
+                    r = sqrt(dx * dx + dy * dy) > r ? sqrt(dx * dx + dy * dy) : r;
+                }
+
+                st->grad_kind = PD_GRAD_CIRCLE;
+                st->grad_x0 = (pd_sp)lround(mx);
+                st->grad_y0 = (pd_sp)lround(my);
+                st->grad_x1 = (pd_sp)lround(mx + r);
+                st->grad_y1 = (pd_sp)lround(my);
+            } else {
+                st->grad_kind = PD_GRAD_RECT;
+                st->grad_x0 = (pd_sp)lround(fx0 < fx1 ? fx0 : fx1);
+                st->grad_y0 = (pd_sp)lround(fy0 < fy1 ? fy0 : fy1);
+                st->grad_x1 = (pd_sp)lround(fx0 < fx1 ? fx1 : fx0);
+                st->grad_y1 = (pd_sp)lround(fy0 < fy1 ? fy1 : fy0);
+                st->grad_bx0 = a->x;
+                st->grad_by0 = a->y;
+                st->grad_bx1 = a->x + a->w;
+                st->grad_by1 = a->y + a->h;
+            }
+        }
     }
 }
 
@@ -4781,27 +4874,23 @@ static void item_style(dlist_t* D, int32_t n0, const pj_node* it) {
 
     for (i = n0; i < D->n; i++) {
         pd_draw* a = &D->d[i];
+        pd_path_style* ps;
         int32_t j;
 
-        if (a->kind != PD_DRAW_PATH || a->line_width <= 0 || a->style) {
+        if (a->kind != PD_DRAW_PATH || a->line_width <= 0 || (ps = path_style(D, i)) == NULL) {
             continue;
         }
 
-        if (grow((void**)&D->sty, &D->capsty, (int64_t)D->nsty + 1, sizeof(pd_path_style))) {
-            D->err = 1;
-            return;
-        }
-
-        D->sty[D->nsty] = st;
+        ps->cap = st.cap;
+        ps->join = st.join;
 
         for (j = 0, q = dn ? dn->child : NULL; q && j < k; q = q->next, j++) {    /* as long as this line is wide */
             int64_t v = (int64_t)pj_int_or(q, 100000) * a->line_width / 100000;
 
-            D->sty[D->nsty].dash[j] = (pd_sp)(v < 1 ? 1 : v > INT32_MAX ? INT32_MAX : v);
+            ps->dash[j] = (pd_sp)(v < 1 ? 1 : v > INT32_MAX ? INT32_MAX : v);
         }
 
-        D->sty[D->nsty].dash_count = k;
-        a->style = (const pd_path_style*)(intptr_t)(++D->nsty);
+        ps->dash_count = k;
     }
 }
 

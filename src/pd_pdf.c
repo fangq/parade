@@ -25,6 +25,7 @@
 #include <string.h>
 #include "pd_doc_internal.h"
 #include "parade_layout.h"
+#include "pd_paint.h"
 
 /* ------------------------------------------------------------------ */
 /* buffered output with offsets                                       */
@@ -696,80 +697,226 @@ static void sb_path(sbuf* c, const pd_draw* a, int closed, int64_t H) {
     }
 }
 
-static uint32_t mix_rgb(uint32_t a, uint32_t b, double t) {
-    int k;
-    uint32_t o = 0;
+/* resources made while the pages are written (shadings, soft masks, patterns, pictures), named by object number:
+   /Sh12, /SG13, /Pt14, /Xo15 */
+typedef struct {
+    char kind;                  /* S shading, G graphics state, P pattern, X XObject */
+    int32_t obj;
+} pres;
 
-    for (k = 0; k < 24; k += 8) {
-        double v = ((a >> k) & 255) * (1 - t) + ((b >> k) & 255) * t;
+typedef struct {
+    pres* r;
+    int32_t n, cap;
+} preslist;
 
-        o |= (uint32_t)(v + 0.5) << k;
+static void res_add(preslist* L, char kind, int32_t obj) {
+    if (obj && !pd_grow((void**)&L->r, &L->cap, (int64_t)L->n + 1, sizeof(pres))) {
+        L->r[L->n].kind = kind;
+        L->r[L->n++].obj = obj;
     }
-
-    return o;
 }
 
-/* a gradient over a path, inside it (its rings the clip): bands across a linear one, rings out from the middle of
-   a radial one, each its colour of the way from fill to fill2 */
-static void sb_gradient(sbuf* c, const pd_draw* a, int64_t H) {
-    const int N = 48;
-    double cx = a->x + a->w / 2.0, cy = a->y + a->h / 2.0, half = sqrt((double)a->w * a->w + (double)a->h * a->h) / 2;
-    int i, k;
+/* the resources of a kind as dictionary entries: " /Sh12 12 0 R ..." */
+static void w_res(pdfw* w, const preslist* L, char kind, const char* prefix) {
+    int32_t i;
+
+    for (i = 0; i < L->n; i++) {
+        if (L->r[i].kind == kind) {
+            w_fmt(w, " /%s%d %d 0 R", prefix, (int)L->r[i].obj, (int)L->r[i].obj);
+        }
+    }
+}
+
+/* a colour of a gradient's stop as a function's output: r g b, or its alpha as a gray */
+static void fn_color(char* out, size_t cap, uint32_t c, int alpha) {
+    if (alpha) {
+        snprintf(out, cap, "%.4f", ((c >> 24) & 255) / 255.0);
+    } else {
+        snprintf(out, cap, "%.4f %.4f %.4f", ((c >> 16) & 255) / 255.0, ((c >> 8) & 255) / 255.0, (c & 255) / 255.0);
+    }
+}
+
+/* a gradient's colours (or alphas) from 0 to 1: a Type 2 function between two stops, a Type 3 stitching of them for
+   more; its object */
+static int32_t pdf_grad_fn(pdfw* w, const pd_gradient* g, int alpha) {
+    char c0[64], c1[64];
+    int32_t parts[PD_MAX_STOPS + 2], obj;
+    int i;
+
+    if (g->n == 2) {
+        obj = new_obj(w);
+        fn_color(c0, sizeof(c0), g->color[0], alpha);
+        fn_color(c1, sizeof(c1), g->color[1], alpha);
+        begin_obj(w, obj);
+        w_fmt(w, "<< /FunctionType 2 /Domain [0 1] /C0 [%s] /C1 [%s] /N 1 >>", c0, c1);
+        end_obj(w);
+        return obj;
+    }
+
+    for (i = 0; i + 1 < g->n; i++) {
+        parts[i] = new_obj(w);
+        fn_color(c0, sizeof(c0), g->color[i], alpha);
+        fn_color(c1, sizeof(c1), g->color[i + 1], alpha);
+        begin_obj(w, parts[i]);
+        w_fmt(w, "<< /FunctionType 2 /Domain [0 1] /C0 [%s] /C1 [%s] /N 1 >>", c0, c1);
+        end_obj(w);
+    }
+
+    obj = new_obj(w);
+    begin_obj(w, obj);
+    w_str(w, "<< /FunctionType 3 /Domain [0 1] /Functions [");
+
+    for (i = 0; i + 1 < g->n; i++) {
+        w_fmt(w, "%d 0 R ", (int)parts[i]);
+    }
+
+    w_str(w, "] /Bounds [");
+
+    for (i = 1; i + 1 < g->n; i++) {
+        w_fmt(w, "%.5f ", g->pos[i] / 65536.0);
+    }
+
+    w_str(w, "] /Encode [");
+
+    for (i = 0; i + 1 < g->n; i++) {
+        w_str(w, "0 1 ");
+    }
+
+    w_str(w, "] >>");
+    end_obj(w);
+    return obj;
+}
+
+/* a shading object: axial along (x0, y0)-(x1, y1), or radial about (x0, y0) out to r; page sp, PDF's y up */
+static int32_t pdf_shading(pdfw* w, int32_t fn, int alpha, int radial, double x0, double y0, double x1, double y1,
+                           double r, int64_t H) {
+    int32_t obj = new_obj(w);
+    char a[32], b[32], c[32], d[32], e[32];
+
+    num(a, sizeof(a), (int64_t)x0);
+    num(b, sizeof(b), H - (int64_t)y0);
+    num(c, sizeof(c), (int64_t)x1);
+    num(d, sizeof(d), H - (int64_t)y1);
+    num(e, sizeof(e), (int64_t)r);
+    begin_obj(w, obj);
+
+    if (radial) {
+        w_fmt(w, "<< /ShadingType 3 /ColorSpace /Device%s /Coords [%s %s 0 %s %s %s] /Function %d 0 R /Extend [true true] >>",
+              alpha ? "Gray" : "RGB", a, b, a, b, e, (int)fn);
+    } else {
+        w_fmt(w, "<< /ShadingType 2 /ColorSpace /Device%s /Coords [%s %s %s %s] /Function %d 0 R /Extend [true true] >>",
+              alpha ? "Gray" : "RGB", a, b, c, d, (int)fn);
+    }
+
+    end_obj(w);
+    return obj;
+}
+
+static void sb_poly4(sbuf* c, const double* q, int64_t H) {
+    int k;
+
+    for (k = 0; k < 4; k++) {
+        sb_num(c, (int64_t)q[2 * k]);
+        sb_num(c, H - (int64_t)q[2 * k + 1]);
+        sb_fmt(c, k ? "l " : "m ");
+    }
+
+    sb_fmt(c, "h W n ");
+}
+
+/* A path filled with its gradient (or the gradient's alphas, as grays, for its soft mask): the path the clip, then
+   the shading; a rectangular one as four axial shadings, one between each side of its inner rectangle and the
+   outer, and the inner one's colour. Shadings made are added to R. */
+static void pdf_grad_content(pdfw* w, sbuf* c, preslist* R, const pd_draw* a, const pd_gradient* g, int alpha,
+                             int64_t H) {
+    int32_t fn = pdf_grad_fn(w, g, alpha), sh;
 
     sb_fmt(c, "q ");
     sb_path(c, a, 1, H);
     sb_fmt(c, "W n ");
 
-    if (a->grad == 2) {     /* from the outside in: fill2 there, fill at the middle */
-        for (i = 0; i < N; i++) {
-            double r = half * (1 - (double)i / N);
-
-            sb_rgb(c, mix_rgb(a->fill2, a->fill, (double)i / (N - 1)), "rg");
-
-            for (k = 0; k < 32; k++) {
-                double t = k * 6.283185307179586 / 32;
-
-                sb_num(c, (int64_t)(cx + r * cos(t)));
-                sb_num(c, H - (int64_t)(cy + r * sin(t)));
-                sb_fmt(c, k ? "l " : "m ");
-            }
-
-            sb_fmt(c, "h f ");
-        }
-    } else {                /* across its direction: N bands, each wide enough to cover the path */
-        double th = a->grad_angle / 60000.0 * 3.14159265358979 / 180, ux = cos(th), uy = sin(th), lo = 1e300, hi = -1e300;
-        double corners[4][2] = { { (double)a->x, (double)a->y }, { (double)a->x + a->w, (double)a->y },
-            { (double)a->x, (double)a->y + a->h }, { (double)a->x + a->w, (double)a->y + a->h }
+    if (g->kind == PD_GRAD_RECT) {
+        double side[4][8] = {   /* top, right, bottom, left: outer corners, then inner */
+            { g->bx0, g->by0, g->bx1, g->by0, g->x1, g->y0, g->x0, g->y0 },
+            { g->bx1, g->by0, g->bx1, g->by1, g->x1, g->y1, g->x1, g->y0 },
+            { g->bx1, g->by1, g->bx0, g->by1, g->x0, g->y1, g->x1, g->y1 },
+            { g->bx0, g->by1, g->bx0, g->by0, g->x0, g->y0, g->x0, g->y1 }
         };
+        double from[4][4] = {   /* each side's axis: from the inner edge to the outer */
+            { g->x0, g->y0, g->x0, g->by0 }, { g->x1, g->y0, g->bx1, g->y0 }, { g->x0, g->y1, g->x0, g->by1 },
+            { g->x0, g->y0, g->bx0, g->y0 }
+        };
+        char col[64];
+        int k;
+
+        fn_color(col, sizeof(col), g->color[0], alpha);
+        sb_fmt(c, "q %s %s ", col, alpha ? "g" : "rg");
+        sb_num(c, (int64_t)g->x0);
+        sb_num(c, H - (int64_t)g->y1);
+        sb_num(c, (int64_t)(g->x1 - g->x0));
+        sb_num(c, (int64_t)(g->y1 - g->y0));
+        sb_fmt(c, "re f Q\n");
 
         for (k = 0; k < 4; k++) {
-            double t = (corners[k][0] - cx) * ux + (corners[k][1] - cy) * uy;
-
-            lo = t < lo ? t : lo;
-            hi = t > hi ? t : hi;
-        }
-
-        for (i = 0; i < N; i++) {
-            double t0 = lo + (hi - lo) * i / N - 1, t1 = lo + (hi - lo) * (i + 1) / N + 1;
-            double p[4][2] = { { cx + ux * t0 - uy * half, cy + uy * t0 + ux * half },
-                { cx + ux * t1 - uy * half, cy + uy * t1 + ux * half },
-                { cx + ux * t1 + uy * half, cy + uy * t1 - ux * half },
-                { cx + ux * t0 + uy * half, cy + uy * t0 - ux * half }
-            };
-
-            sb_rgb(c, mix_rgb(a->fill, a->fill2, (i + 0.5) / N), "rg");
-
-            for (k = 0; k < 4; k++) {
-                sb_num(c, (int64_t)p[k][0]);
-                sb_num(c, H - (int64_t)p[k][1]);
-                sb_fmt(c, k ? "l " : "m ");
+            if (from[k][0] == from[k][2] && from[k][1] == from[k][3]) {
+                continue;   /* the inner rectangle reaches this side */
             }
 
-            sb_fmt(c, "h f ");
+            sh = pdf_shading(w, fn, alpha, 0, from[k][0], from[k][1], from[k][2], from[k][3], 0, H);
+            res_add(R, 'S', sh);
+            sb_fmt(c, "q ");
+            sb_poly4(c, side[k], H);
+            sb_fmt(c, "/Sh%d sh Q\n", (int)sh);
         }
+    } else {
+        double r = sqrt((g->x1 - g->x0) * (g->x1 - g->x0) + (g->y1 - g->y0) * (g->y1 - g->y0));
+
+        sh = pdf_shading(w, fn, alpha, g->kind == PD_GRAD_CIRCLE, g->x0, g->y0, g->x1, g->y1, r, H);
+        res_add(R, 'S', sh);
+        sb_fmt(c, "/Sh%d sh ", (int)sh);
     }
 
     sb_fmt(c, "Q\n");
+}
+
+/* A path's gradient fill: as it is, or, with see-through stops, under a soft mask of their alphas (a form drawing
+   the same gradient in grays, its luminosity the mask) */
+static void pdf_gradient(pdfw* w, sbuf* c, preslist* R, const pd_draw* a, const pd_gradient* g, int64_t W, int64_t H,
+                         int compress) {
+    if (g->alpha) {
+        sbuf m;
+        preslist F;
+        char dict[512], ws[32], hs[32];
+        int32_t form = new_obj(w), gs, i;
+        size_t dl;
+
+        memset(&m, 0, sizeof(m));
+        memset(&F, 0, sizeof(F));
+        pdf_grad_content(w, &m, &F, a, g, 1, H);
+        num(ws, sizeof(ws), W);
+        num(hs, sizeof(hs), H);
+        dl = (size_t)snprintf(dict, sizeof(dict), "/Type /XObject /Subtype /Form /BBox [0 0 %s %s] /Group << /S "
+                              "/Transparency /CS /DeviceGray >> /Resources << /Shading <<", ws, hs);
+
+        for (i = 0; i < F.n && dl + 32 < sizeof(dict); i++) {
+            dl += (size_t)snprintf(dict + dl, sizeof(dict) - dl, " /Sh%d %d 0 R", (int)F.r[i].obj, (int)F.r[i].obj);
+        }
+
+        snprintf(dict + dl, sizeof(dict) - dl, " >> >>");
+        stream_obj(w, form, dict, m.p ? m.p : "", m.n, compress);
+        gs = new_obj(w);
+        begin_obj(w, gs);
+        w_fmt(w, "<< /SMask << /Type /Mask /S /Luminosity /G %d 0 R >> >>", (int)form);
+        end_obj(w);
+        res_add(R, 'G', gs);
+        sb_fmt(c, "q /SG%d gs\n", (int)gs);
+        pdf_grad_content(w, c, R, a, g, 0, H);
+        sb_fmt(c, "Q\n");
+        free(m.p);
+        free(F.r);
+    } else {
+        pdf_grad_content(w, c, R, a, g, 0, H);
+    }
 }
 
 /* rows of a PNG (each a filter byte, then stride bytes) unfiltered in place */
@@ -1298,6 +1445,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
     pfont* fonts = NULL;
     pimage* images = NULL;
     outline* outs = NULL;
+    preslist R;
     int32_t catalog, pages_obj, res_obj, info_obj, outlines_obj = 0, *page_obj, *content_obj;
     pd_status st = PD_OK;
 
@@ -1312,6 +1460,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
 
     d = pd_layout_doc(L);
     memset(&w, 0, sizeof(w));
+    memset(&R, 0, sizeof(R));
     w.fn = fn;
     w.user = user;
     w.hash = 1469598103934665603ULL;
@@ -1505,35 +1654,6 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
 
     w_fmt(&w, "] /Count %d >>", (int)npages);
     end_obj(&w);
-    begin_obj(&w, res_obj);
-    w_str(&w, "<< /ProcSet [/PDF /Text /ImageC /ImageB] /Font <<");
-
-    for (i = 0; i < nfonts; i++) {
-        if (fonts[i].truetype) {
-            w_fmt(&w, " /F%d %d 0 R", (int)i, (int)fonts[i].obj);
-        } else {
-            for (k = 0; k < fonts[i].nchunks; k++) {
-                w_fmt(&w, " /F%dc%d %d 0 R", (int)i, (int)k, (int)fonts[i].t3obj[k]);
-            }
-        }
-    }
-
-    w_str(&w, " >> /ExtGState <<");     /* see-through fills and strokes, in sixteenths */
-
-    for (i = 0; i <= 16; i++) {
-        w_fmt(&w, " /GA%d << /ca %d.%04d /CA %d.%04d >>", (int)i, (int)(i / 16), (int)(i % 16 * 625),
-              (int)(i / 16), (int)(i % 16 * 625));
-    }
-
-    w_str(&w, " >> /XObject <<");
-
-    for (i = 0; i < nimages; i++) {
-        w_fmt(&w, " /Im%d %d 0 R", (int)i, (int)images[i].obj);
-    }
-
-    w_str(&w, " >> >>");
-    end_obj(&w);
-
     /* pages and their content */
     for (pg = 0; pg < npages && !w.err; pg++) {
         pd_page_info pi;
@@ -1600,14 +1720,16 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                 } else if (a->kind == PD_DRAW_PATH && a->points && a->npoints >= 2) {
                     int32_t q, first;
                     int stroke = a->line_width > 0 && a->color, fill = a->fill != 0;
-                    int ga = see_through(fill ? a->fill : a->color);
+                    pd_gradient grd;
+                    int hasg = fill && pd_draw_gradient(a, &grd);
+                    int ga = see_through(fill && !hasg ? a->fill : a->color);
 
                     if (ga >= 0) {
                         sb_fmt(&c, "q /GA%d gs ", ga);
                     }
 
-                    if (fill && a->grad && a->fill2) {     /* a gradient: drawn on its own, then the outline */
-                        sb_gradient(&c, a, (int64_t)pi.height);
+                    if (hasg) {     /* a gradient: drawn on its own, then the outline */
+                        pdf_gradient(&w, &c, &R, a, &grd, pi.width, (int64_t)pi.height, opt->compress);
                         fill = 0;
 
                         if (!stroke) {
@@ -1807,6 +1929,43 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
         stream_obj(&w, content_obj[pg], "", c.p ? c.p : "", c.n, opt->compress);
         free(c.p);
     }
+
+    /* the resources, the shadings and the rest the pages made among them */
+    begin_obj(&w, res_obj);
+    w_str(&w, "<< /ProcSet [/PDF /Text /ImageC /ImageB] /Font <<");
+
+    for (i = 0; i < nfonts; i++) {
+        if (fonts[i].truetype) {
+            w_fmt(&w, " /F%d %d 0 R", (int)i, (int)fonts[i].obj);
+        } else {
+            for (k = 0; k < fonts[i].nchunks; k++) {
+                w_fmt(&w, " /F%dc%d %d 0 R", (int)i, (int)k, (int)fonts[i].t3obj[k]);
+            }
+        }
+    }
+
+    w_str(&w, " >> /ExtGState <<");     /* see-through fills and strokes, in sixteenths */
+
+    for (i = 0; i <= 16; i++) {
+        w_fmt(&w, " /GA%d << /ca %d.%04d /CA %d.%04d >>", (int)i, (int)(i / 16), (int)(i % 16 * 625),
+              (int)(i / 16), (int)(i % 16 * 625));
+    }
+
+    w_res(&w, &R, 'G', "SG");
+    w_str(&w, " >> /XObject <<");
+
+    for (i = 0; i < nimages; i++) {
+        w_fmt(&w, " /Im%d %d 0 R", (int)i, (int)images[i].obj);
+    }
+
+    w_res(&w, &R, 'X', "Xo");
+    w_str(&w, " >> /Shading <<");
+    w_res(&w, &R, 'S', "Sh");
+    w_str(&w, " >> /Pattern <<");
+    w_res(&w, &R, 'P', "Pt");
+    w_str(&w, " >> >>");
+    end_obj(&w);
+
 
     /* fonts */
     for (i = 0; i < nfonts && !w.err; i++) {
@@ -2258,6 +2417,7 @@ done:
     free(fonts);
     free(images);
     free(outs);
+    free(R.r);
     free(w.offs);
     return st;
 }

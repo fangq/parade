@@ -340,6 +340,10 @@ const
   PD_JOIN_ROUND = 0;
   PD_JOIN_BEVEL = 1;
   PD_JOIN_MITER = 2;
+  PD_GRAD_LINEAR = 1;
+  PD_GRAD_CIRCLE = 2;
+  PD_GRAD_RECT = 3;
+  PD_MAX_STOPS = 10;
   PD_PATH_BREAK = Low(Int32);
 
 type
@@ -703,6 +707,12 @@ type
     dash: array[0..7] of pd_sp;
     cap: Int32;              { PD_CAP_* }
     join: Int32;             { PD_JOIN_* }
+    grad_kind: Int32;        { the fill's gradient, PD_GRAD_*; 0 none }
+    nstops: Int32;
+    stop_color: array[0..PD_MAX_STOPS - 1] of UInt32;
+    stop_pos: array[0..PD_MAX_STOPS - 1] of Int32;   { 0..100000 }
+    grad_x0, grad_y0, grad_x1, grad_y1: pd_sp;
+    grad_bx0, grad_by0, grad_bx1, grad_by1: pd_sp;
   end;
   Ppd_path_style = ^pd_path_style;
 

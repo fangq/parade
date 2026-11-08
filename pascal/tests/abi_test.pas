@@ -434,6 +434,18 @@ begin
   WriteLn('pd_path_style.dash ', PtrUInt(@v_pd_path_style.dash) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_path_style.cap ', PtrUInt(@v_pd_path_style.cap) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_path_style.join ', PtrUInt(@v_pd_path_style.join) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_kind ', PtrUInt(@v_pd_path_style.grad_kind) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.nstops ', PtrUInt(@v_pd_path_style.nstops) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.stop_color ', PtrUInt(@v_pd_path_style.stop_color) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.stop_pos ', PtrUInt(@v_pd_path_style.stop_pos) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_x0 ', PtrUInt(@v_pd_path_style.grad_x0) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_y0 ', PtrUInt(@v_pd_path_style.grad_y0) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_x1 ', PtrUInt(@v_pd_path_style.grad_x1) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_y1 ', PtrUInt(@v_pd_path_style.grad_y1) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_bx0 ', PtrUInt(@v_pd_path_style.grad_bx0) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_by0 ', PtrUInt(@v_pd_path_style.grad_by0) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_bx1 ', PtrUInt(@v_pd_path_style.grad_bx1) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.grad_by1 ', PtrUInt(@v_pd_path_style.grad_by1) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_markup_item ', SizeOf(pd_markup_item));
   WriteLn('pd_markup_item.kind ', PtrUInt(@v_pd_markup_item.kind) - PtrUInt(@v_pd_markup_item));
   WriteLn('pd_markup_item.id ', PtrUInt(@v_pd_markup_item.id) - PtrUInt(@v_pd_markup_item));

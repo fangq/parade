@@ -16,6 +16,7 @@
 #include <string.h>
 #include "pd_internal.h"
 #include "parade_layout.h"
+#include "pd_paint.h"
 
 #define ONE 256                 /* subpixels per pixel */
 /* bound for accumulated glyf deltas: real outlines stay within int16, so 26.6 values fit int32 */
@@ -963,11 +964,19 @@ static void rc_dashed(canvas* c, const double* xy, int32_t n, int closed, double
 /* what a pixel is painted with */
 typedef struct {
     uint32_t color;             /* 0xAARRGGBB */
+    const pd_gradient* grad;    /* or a gradient, */
+    pd_sp x0, y0;               /* pixels mapped back to the page: x0 + (x + 1/2) / scale */
+    int32_t scale;
 } rpaint;
 
 static uint32_t rp_color(const rpaint* p, int32_t x, int32_t y) {
-    (void)x;
-    (void)y;
+    if (p->grad) {
+        double k = 16777216.0 / p->scale;   /* sp a subpixel: 2^24 / scale */
+
+        return pd_gradient_color(p->grad, pd_gradient_at(p->grad, p->x0 + (x * ONE + ONE / 2) * k,
+                                 p->y0 + (y * ONE + ONE / 2) * k));
+    }
+
     return p->color;
 }
 
@@ -1138,6 +1147,7 @@ pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, in
         canvas c;
         rpaint paint;
         rc_job J;
+        pd_gradient grad;
 
         if (a->kind == PD_DRAW_PATH && (!a->points || a->npoints < 1)) {
             continue;
@@ -1178,7 +1188,11 @@ pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, in
         }
 
         memset(&J, 0, sizeof(J));
+        memset(&paint, 0, sizeof(paint));
         J.c = &c;
+        paint.x0 = x0;
+        paint.y0 = y0;
+        paint.scale = scale;
 
         if (a->kind == PD_DRAW_RULE) {
             double q[8];
@@ -1194,7 +1208,9 @@ pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, in
             if (a->fill) {
                 rc_rings(a, x0, y0, scale, (double)px0 * ONE, (double)py0 * ONE, rc_ring, &J);
                 paint.color = a->fill;
+                paint.grad = pd_draw_gradient(a, &grad) ? &grad : NULL;
                 rc_composite(&c, px0, py0, &paint, rgba, stride);
+                paint.grad = NULL;
             }
 
             if (hw > 0) {
@@ -1223,4 +1239,157 @@ pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, in
     }
 
     return PD_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* gradients                                                          */
+/* ------------------------------------------------------------------ */
+
+int pd_draw_gradient(const pd_draw* a, pd_gradient* g) {
+    const pd_path_style* st = a->kind == PD_DRAW_PATH ? a->style : NULL;
+    int i, k;
+
+    memset(g, 0, sizeof(*g));
+
+    if (a->kind != PD_DRAW_PATH || !a->fill) {
+        return 0;
+    }
+
+    if (st && st->grad_kind >= PD_GRAD_LINEAR && st->grad_kind <= PD_GRAD_RECT && st->nstops >= 1) {
+        int n = st->nstops > PD_MAX_STOPS ? PD_MAX_STOPS : st->nstops;
+
+        g->kind = st->grad_kind;
+
+        for (i = 0; i < n; i++) {   /* in order, held to 0..1, the ends made stops if they are not */
+            int32_t p = (int32_t)((int64_t)(st->stop_pos[i] < 0 ? 0 : st->stop_pos[i] > 100000 ? 100000 :
+                                            st->stop_pos[i]) * 65536 / 100000);
+
+            if (g->n == 0 && p > 0) {
+                g->color[g->n] = st->stop_color[i];
+                g->pos[g->n++] = 0;
+            }
+
+            p = g->n && p < g->pos[g->n - 1] ? g->pos[g->n - 1] : p;
+            g->color[g->n] = st->stop_color[i];
+            g->pos[g->n++] = p;
+        }
+
+        if (g->pos[g->n - 1] < 65536) {
+            g->color[g->n] = g->color[g->n - 1];
+            g->pos[g->n++] = 65536;
+        }
+
+        if (g->n == 1) {
+            g->color[1] = g->color[0];
+            g->pos[1] = 65536;
+            g->n = 2;
+        }
+
+        g->x0 = st->grad_x0;
+        g->y0 = st->grad_y0;
+        g->x1 = st->grad_x1;
+        g->y1 = st->grad_y1;
+        g->bx0 = st->grad_bx0;
+        g->by0 = st->grad_by0;
+        g->bx1 = st->grad_bx1;
+        g->by1 = st->grad_by1;
+    } else if (a->grad && a->fill2) {   /* the plain two colours: across the box at an angle, or out from its middle */
+        double cx = a->x + a->w / 2.0, cy = a->y + a->h / 2.0;
+
+        g->n = 2;
+        g->color[0] = a->fill;
+        g->color[1] = a->fill2;
+        g->pos[1] = 65536;
+
+        if (a->grad == 2) {
+            g->kind = PD_GRAD_CIRCLE;
+            g->x0 = cx;
+            g->y0 = cy;
+            g->x1 = a->x;
+            g->y1 = a->y;
+        } else {
+            double th = a->grad_angle / 60000.0 * 3.14159265358979 / 180, ux = cos(th), uy = sin(th), lo = 1e300,
+                   hi = -1e300;
+            double cs[4][2] = { { (double)a->x, (double)a->y }, { (double)a->x + a->w, (double)a->y },
+                { (double)a->x, (double)a->y + a->h }, { (double)a->x + a->w, (double)a->y + a->h }
+            };
+
+            for (k = 0; k < 4; k++) {
+                double t = (cs[k][0] - cx) * ux + (cs[k][1] - cy) * uy;
+
+                lo = t < lo ? t : lo;
+                hi = t > hi ? t : hi;
+            }
+
+            g->kind = PD_GRAD_LINEAR;
+            g->x0 = cx + ux * lo;
+            g->y0 = cy + uy * lo;
+            g->x1 = cx + ux * hi;
+            g->y1 = cy + uy * hi;
+        }
+    } else {
+        return 0;
+    }
+
+    for (i = 0; i < g->n; i++) {
+        g->color[i] |= (g->color[i] >> 24) == 0 ? 0xFF000000u : 0;    /* (no alpha given: opaque) */
+        g->alpha |= (g->color[i] >> 24) != 255;
+    }
+
+    return 1;
+}
+
+int32_t pd_gradient_at(const pd_gradient* g, double x, double y) {
+    double t = 0;
+
+    if (g->kind == PD_GRAD_LINEAR) {
+        double dx = g->x1 - g->x0, dy = g->y1 - g->y0, l2 = dx * dx + dy * dy;
+
+        t = l2 > 0 ? ((x - g->x0) * dx + (y - g->y0) * dy) / l2 : 0;
+    } else if (g->kind == PD_GRAD_CIRCLE) {
+        double r = sqrt((g->x1 - g->x0) * (g->x1 - g->x0) + (g->y1 - g->y0) * (g->y1 - g->y0));
+
+        t = r > 0 ? sqrt((x - g->x0) * (x - g->x0) + (y - g->y0) * (y - g->y0)) / r : 0;
+    } else if (g->kind == PD_GRAD_RECT) {   /* how far out from the inner rectangle towards the outer, the larger way */
+        double tx = 0, ty = 0;
+
+        if (x < g->x0) {
+            tx = g->x0 > g->bx0 ? (g->x0 - x) / (g->x0 - g->bx0) : 1;
+        } else if (x > g->x1) {
+            tx = g->bx1 > g->x1 ? (x - g->x1) / (g->bx1 - g->x1) : 1;
+        }
+
+        if (y < g->y0) {
+            ty = g->y0 > g->by0 ? (g->y0 - y) / (g->y0 - g->by0) : 1;
+        } else if (y > g->y1) {
+            ty = g->by1 > g->y1 ? (y - g->y1) / (g->by1 - g->y1) : 1;
+        }
+
+        t = tx > ty ? tx : ty;
+    }
+
+    return t <= 0 ? 0 : t >= 1 ? 65536 : (int32_t)(t * 65536);
+}
+
+uint32_t pd_gradient_color(const pd_gradient* g, int32_t t) {
+    int i, k;
+    uint32_t o = 0;
+
+    for (i = 1; i < g->n - 1 && t > g->pos[i]; i++) {
+    }
+
+    {
+        uint32_t a = g->color[i - 1], b = g->color[i];
+        int32_t span = g->pos[i] - g->pos[i - 1], f = span > 0 ? (int32_t)((int64_t)(t - g->pos[i - 1]) * 256 / span) : 256;
+
+        f = f < 0 ? 0 : f > 256 ? 256 : f;
+
+        for (k = 0; k < 32; k += 8) {
+            uint32_t ca = (a >> k) & 255, cb = (b >> k) & 255;
+
+            o |= ((ca * (uint32_t)(256 - f) + cb * (uint32_t)f + 128) >> 8) << k;
+        }
+    }
+
+    return o;
 }
