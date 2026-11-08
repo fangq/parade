@@ -757,6 +757,8 @@ typedef struct {
     int32_t text_flow;          /**< PD_CELLTEXT_*: Word's section w:textDirection; PD_CELLTEXT_TBRL: vertical
                                      text, its lines running down the page from the right (btLr kept, laid out
                                      across) */
+    pd_block_id notes;          /**< a STORY: the speaker's notes of the slide the section is (0 = none); not laid out
+                                     with the pages */
 } pd_section_props;
 
 /* where notes are numbered from the start again */

@@ -707,6 +707,7 @@ type
     start: Int32;             { PD_BREAK_PAGE, _ODD_PAGE, _EVEN_PAGE, _COLUMN }
     page_color: UInt32;       { 0 = none }
     text_flow: Int32;         { PD_CELLTEXT_* }
+    notes: pd_block_id;       { a STORY: a slide's speaker notes, 0 none }
   end;
   Ppd_section_props = ^pd_section_props;
 

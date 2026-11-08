@@ -6109,7 +6109,13 @@ static void test_pptx_write_kept_masters(void) {
                     "<p:cTn id=\"1\" dur=\"indefinite\" restart=\"never\" nodeType=\"tmRoot\"/></p:par></p:tnLst>"
                     "</p:timing></p:sld>",
                     "ppt/slides/_rels/slide1.xml.rels", "<Relationships>" KREL("rId1", "../slideLayouts/slideLayout1.xml")
-                    "</Relationships>",
+                    KREL("rId9", "../notesSlides/notesSlide1.xml") "</Relationships>",
+                    "ppt/notesSlides/notesSlide1.xml", "<p:notes " KNS "><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"2\" "
+                    "name=\"I\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"sldImg\"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp><p:sp>"
+                    "<p:nvSpPr><p:cNvPr id=\"3\" name=\"N\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr>"
+                    "</p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Say hello &amp; smile.</a:t></a:r></a:p><a:p>"
+                    "<a:r><a:t>Then the </a:t></a:r><a:r><a:t>results.</a:t></a:r></a:p></p:txBody></p:sp></p:spTree>"
+                    "</p:cSld></p:notes>",
                     "ppt/slides/slide2.xml", "<p:sld " KNS " showMasterSp=\"0\"><p:cSld><p:bg><p:bgPr><a:solidFill>"
                     "<a:srgbClr val=\"FF0000\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr>"
                     "<p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>"
@@ -6146,6 +6152,39 @@ static void test_pptx_write_kept_masters(void) {
                        "p14:dur=\"2000\">") && strstr(s1, "<p:timing><p:tnLst>") && strstr(s1, "xmlns:p14=\"p14ns\"") &&
           strstr(s1, "mc:Ignorable=\"p14\""));
     CHECK(s2 && !strstr(s2, "<p:transition"));
+    {   /* the first slide's speaker notes: a story of its section, two paragraphs; written back as a notes slide on a
+           notes master the presentation names, and read again */
+        pd_section_props sp;
+        pd_block_id st;
+        const char* t;
+        uint32_t tl;
+        char* ns, *pres;
+        size_t nn;
+        int pass;
+
+        for (pass = 0; pass < 2; pass++) {
+            pd_doc* e = pass ? back : d;
+
+            CHECK(e && pd_doc_section_props(e, pd_doc_child(e, pd_doc_root(e), 0), &sp) == PD_OK && sp.notes);
+            st = e ? sp.notes : 0;
+            CHECK(st && pd_doc_para_text(e, pd_doc_child(e, st, 0), &t, &tl) == PD_OK && tl == 18 &&
+                  !memcmp(t, "Say hello & smile.", 18));
+            CHECK(st && pd_doc_para_text(e, pd_doc_child(e, st, 1), &t, &tl) == PD_OK && tl == 17 &&
+                  !memcmp(t, "Then the results.", 17));
+            CHECK(e && pd_doc_section_props(e, pd_doc_child(e, pd_doc_root(e), 1), &sp) == PD_OK && !sp.notes);
+        }
+
+        ns = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/notesSlides/notesSlide1.xml", &nn) : NULL;
+        CHECK(ns && strstr(ns, "<a:t>Say hello &amp; smile.</a:t>") && strstr(ns, "<p:ph type=\"body\" idx=\"1\"/>"));
+        free(ns);
+        pres = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/presentation.xml", &nn) : NULL;
+        CHECK(pres && strstr(pres, "</p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId r:id=\"rIdNM\"/>"));
+        free(pres);
+        ns = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/notesMasters/notesMaster1.xml", &nn) : NULL;
+        CHECK(ns != NULL);
+        free(ns);
+        CHECK(b.p && !pd_zip_get((const unsigned char*)b.p, b.n, "ppt/notesSlides/notesSlide2.xml", &nn));
+    }
     free(r2);
     r2 = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slideLayouts/slideLayout2.xml", &n) : NULL;
     CHECK(r2 && strstr(r2, "name=\"Logo\""));

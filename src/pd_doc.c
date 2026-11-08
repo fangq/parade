@@ -4196,6 +4196,7 @@ pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_p
              (int64_t)sp->margin_top + sp->margin_bottom < sp->page_height && sp->columns >= 1 && sp->columns <= 16 &&
              story_ok(d, sp->header) && story_ok(d, sp->header_first) && story_ok(d, sp->header_even) &&
              story_ok(d, sp->footer) && story_ok(d, sp->footer_first) && story_ok(d, sp->footer_even) &&
+             story_ok(d, sp->notes) &&
              (sp->continuous == 0 || sp->continuous == 1) && sp->page_breaking >= PD_PAGES_GREEDY &&
              sp->page_breaking <= PD_PAGES_OPTIMAL && sp->footnote_skip >= 0 && sp->line_numbers >= 0 &&
              sp->line_numbers <= 100 && sp->line_number_start >= 0 && sp->line_number_distance >= 0 &&
@@ -4379,7 +4380,7 @@ static int story_referenced(const pd_doc* d, pd_block_id id) {
             const pd_section_props* sp = &b->st.sp;
 
             if (sp->header == id || sp->header_first == id || sp->header_even == id || sp->footer == id ||
-                    sp->footer_first == id || sp->footer_even == id) {
+                    sp->footer_first == id || sp->footer_even == id || sp->notes == id) {
                 return 1;
             }
         }

@@ -693,6 +693,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
             put_int(w, "FooterFirst", p->footer_first);
             put_int(w, "FooterEven", p->footer_even);
 
+            if (p->notes) {
+                put_int(w, "Notes", p->notes);
+            }
+
             if (p->continuous) {
                 put_bool(w, "Continuous", p->continuous);
             }
@@ -2082,6 +2086,7 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->footer = (pd_block_id)int_or(pj_get(x, "Footer"), 0, 0, PD_MAX_BLOCKS, L);
     p->footer_first = (pd_block_id)int_or(pj_get(x, "FooterFirst"), 0, 0, PD_MAX_BLOCKS, L);
     p->footer_even = (pd_block_id)int_or(pj_get(x, "FooterEven"), 0, 0, PD_MAX_BLOCKS, L);
+    p->notes = (pd_block_id)int_or(pj_get(x, "Notes"), 0, 0, PD_MAX_BLOCKS, L);
     p->continuous = (int32_t)int_or(pj_get(x, "Continuous"), 0, 0, 1, L);
     p->footnote_skip = (pd_sp)int_or(pj_get(x, "FootnoteSkip"), p->footnote_skip, 0, SP_MAX, L);
     p->add_spacing = (int32_t)int_or(pj_get(x, "AddSpacing"), 0, 0, 1, L);
@@ -2152,6 +2157,7 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     want_story(L, p->footer);
     want_story(L, p->footer_first);
     want_story(L, p->footer_even);
+    want_story(L, p->notes);
 }
 
 static void load_table(loader* L, const pj_node* o, pd_table_props* p) {

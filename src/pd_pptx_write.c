@@ -384,6 +384,136 @@ static void kept_first_layout(const pw* P, char* out, size_t cap) {
     }
 }
 
+
+static void zadd(void* z, const char* name, const pd_buf* b, int* err);
+
+/* ---- speaker notes ---- */
+
+/* the notes story of slide (section) sec, 0 none */
+static pd_block_id slide_notes(const pd_doc* d, pd_block_id sec) {
+    pd_section_props sp;
+
+    return pd_doc_section_props(d, sec, &sp) == PD_OK ? sp.notes : 0;
+}
+
+/* whether any slide of d has notes */
+static int any_notes(const pd_doc* d, int nslides) {
+    int s;
+
+    for (s = 0; s < nslides; s++) {
+        if (slide_notes(d, pd_doc_child(d, pd_doc_root(d), s))) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* slide n's notes slide (ppt/notesSlides/notesSlideN.xml and its relationships): its slide's picture and its body,
+   a paragraph for each of the story's */
+static void put_notes_slide(pw* P, void* z, int n, pd_block_id story, int* err) {
+    const pd_doc* d = P->d;
+    pd_buf b;
+    pd_block_info bi;
+    char name[96];
+    int32_t k;
+
+    memset(&b, 0, sizeof(b));
+    pb_puts(&b, DECL);
+    pb_printf(&b, "<p:notes %s><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/>"
+              "</p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Slide Image Placeholder 1\"/><p:cNvSpPr>"
+              "<a:spLocks noGrp=\"1\" noRot=\"1\" noChangeAspect=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"sldImg\"/></p:nvPr>"
+              "</p:nvSpPr><p:spPr/></p:sp><p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Notes Placeholder 2\"/><p:cNvSpPr>"
+              "<a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/>"
+              "<p:txBody><a:bodyPr/><a:lstStyle/>", NS);
+
+    if (pd_doc_block_info(d, story, &bi) == PD_OK) {
+        for (k = 0; k < bi.child_count; k++) {
+            const char* t;
+            uint32_t len = 0, i, st = 0;
+            pd_block_id para = pd_doc_child(d, story, k);
+
+            pb_puts(&b, "<a:p>");
+
+            if (pd_doc_para_text(d, para, &t, &len) == PD_OK) {
+                for (i = 0; i <= len; i++) {    /* runs between its line breaks; objects left out */
+                    if (i == len || t[i] == '\n' || (i + 2 < len && (unsigned char)t[i] == 0xEF &&
+                                                     (unsigned char)t[i + 1] == 0xBF && (unsigned char)t[i + 2] == 0xBC)) {
+                        if (i > st) {
+                            char* seg = (char*)malloc(i - st + 1);
+
+                            if (seg) {
+                                memcpy(seg, t + st, i - st);
+                                seg[i - st] = '\0';
+                                pb_puts(&b, "<a:r><a:rPr lang=\"en-US\" dirty=\"0\"/><a:t>");
+                                escs(&b, seg);
+                                pb_puts(&b, "</a:t></a:r>");
+                                free(seg);
+                            }
+                        }
+
+                        if (i < len && t[i] == '\n') {
+                            pb_puts(&b, "<a:br><a:rPr lang=\"en-US\"/></a:br>");
+                        }
+
+                        st = i < len && t[i] != '\n' ? i + 3 : i + 1;
+                        i = i < len && t[i] != '\n' ? i + 2 : i;
+                    }
+                }
+            }
+
+            pb_puts(&b, "</a:p>");
+        }
+    }
+
+    pb_puts(&b, "</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>");
+    snprintf(name, sizeof(name), "ppt/notesSlides/notesSlide%d.xml", n);
+    zadd(z, name, &b, err);
+    b.n = 0;
+    pb_puts(&b, DECL);
+    pb_printf(&b, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+              "<Relationship Id=\"rId1\" Type=\"%snotesMaster\" Target=\"../notesMasters/notesMaster1.xml\"/>"
+              "<Relationship Id=\"rId2\" Type=\"%sslide\" Target=\"../slides/slide%d.xml\"/></Relationships>", REL, REL, n);
+    snprintf(name, sizeof(name), "ppt/notesSlides/_rels/notesSlide%d.xml.rels", n);
+    zadd(z, name, &b, err);
+    pb_free(&b);
+}
+
+/* the notes master the notes slides are on (its picture of the slide above, the notes below), and its theme */
+static void put_notes_master(pw* P, void* z, int* err) {
+    pd_buf b;
+
+    memset(&b, 0, sizeof(b));
+    pb_puts(&b, DECL);
+    pb_printf(&b, "<p:notesMaster %s><p:cSld><p:bg><p:bgRef idx=\"1001\"><a:schemeClr val=\"bg1\"/></p:bgRef></p:bg>"
+              "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>"
+              "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Slide Image Placeholder 1\"/><p:cNvSpPr><a:spLocks noGrp=\"1\" "
+              "noRot=\"1\" noChangeAspect=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"sldImg\" idx=\"2\"/></p:nvPr></p:nvSpPr>"
+              "<p:spPr><a:xfrm><a:off x=\"1143000\" y=\"685800\"/><a:ext cx=\"4572000\" cy=\"3429000\"/></a:xfrm>"
+              "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr></p:sp><p:sp><p:nvSpPr><p:cNvPr "
+              "id=\"3\" name=\"Notes Placeholder 2\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph "
+              "type=\"body\" sz=\"quarter\" idx=\"3\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"685800\" "
+              "y=\"4400550\"/><a:ext cx=\"5486400\" cy=\"3600450\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/>"
+              "</a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang=\"en-US\"/></a:p>"
+              "</p:txBody></p:sp></p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" "
+              "accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" "
+              "accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:notesStyle><a:lvl1pPr marL=\"0\" algn=\"l\" "
+              "defTabSz=\"914400\" rtl=\"0\" eaLnBrk=\"1\" latinLnBrk=\"0\" hangingPunct=\"1\"><a:defRPr sz=\"1200\" "
+              "kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mn-lt\"/>"
+              "<a:ea typeface=\"+mn-ea\"/><a:cs typeface=\"+mn-cs\"/></a:defRPr></a:lvl1pPr></p:notesStyle>"
+              "</p:notesMaster>", NS);
+    zadd(z, "ppt/notesMasters/notesMaster1.xml", &b, err);
+    b.n = 0;
+    pb_puts(&b, DECL);
+    pb_printf(&b, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+              "<Relationship Id=\"rId1\" Type=\"%stheme\" Target=\"../theme/pdNotesTheme1.xml\"/></Relationships>", REL);
+    zadd(z, "ppt/notesMasters/_rels/notesMaster1.xml.rels", &b, err);
+    b.n = 0;
+    pd_docx_theme_part(P->d, &b);
+    zadd(z, "ppt/theme/pdNotesTheme1.xml", &b, err);
+    pb_free(&b);
+}
+
 /* ---- text ---- */
 
 static const char* face_of(const char* f) {
@@ -1970,7 +2100,15 @@ static void put_kept_package(pw* P, void* z, pd_buf* ct, long long sw, long long
         pb_puts(&prels, "\"/>");
     }
 
-    pb_puts(&b, "</p:sldMasterIdLst><p:sldIdLst>");
+    pb_puts(&b, "</p:sldMasterIdLst>");
+
+    if (any_notes(P->d, nslides)) {     /* the notes master */
+        pb_puts(&b, "<p:notesMasterIdLst><p:notesMasterId r:id=\"rIdNM\"/></p:notesMasterIdLst>");
+        pb_printf(&prels, "<Relationship Id=\"rIdNM\" Type=\"%snotesMaster\" Target=\"notesMasters/notesMaster1.xml\"/>",
+                  REL);
+    }
+
+    pb_puts(&b, "<p:sldIdLst>");
 
     for (s = 0; s < nslides; s++) {
         pb_printf(&b, "<p:sldId id=\"%d\" r:id=\"rId%d\"/>", 256 + s, s + 2);
@@ -2112,6 +2250,18 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     for (s = 0; s < nslides; s++) {
         pb_printf(&ct, "<Override PartName=\"/ppt/slides/slide%d.xml\" ContentType=\"application/vnd.openxmlformats-"
                   "officedocument.presentationml.slide+xml\"/>", s + 1);
+
+        if (slide_notes(d, pd_doc_child(d, pd_doc_root(d), s))) {
+            pb_printf(&ct, "<Override PartName=\"/ppt/notesSlides/notesSlide%d.xml\" ContentType=\"application/vnd."
+                      "openxmlformats-officedocument.presentationml.notesSlide+xml\"/>", s + 1);
+        }
+    }
+
+    if (any_notes(d, nslides)) {    /* the notes master, its theme */
+        pb_puts(&ct, "<Override PartName=\"/ppt/notesMasters/notesMaster1.xml\" ContentType=\"application/vnd."
+                "openxmlformats-officedocument.presentationml.notesMaster+xml\"/><Override PartName=\"/ppt/theme/"
+                "pdNotesTheme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
+        put_notes_master(P, z, &err);
     }
 
     /* the slides */
@@ -2195,6 +2345,13 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
                   "<Relationship Id=\"rId1\" Type=\"%sslideLayout\" Target=\"../%s\"/>", REL,
                   P->kept && !strncmp(layout, "ppt/", 4) ? layout + 4 : "slideLayouts/slideLayout1.xml");
         pb_put(&b, P->rels.p ? P->rels.p : "", P->rels.n);
+
+        if (slide_notes(d, sec)) {  /* its speaker notes */
+            pb_printf(&b, "<Relationship Id=\"rIdNotes\" Type=\"%snotesSlide\" Target=\"../notesSlides/notesSlide%d.xml\"/>",
+                      REL, s + 1);
+            put_notes_slide(P, z, s + 1, slide_notes(d, sec), &err);
+        }
+
         pb_puts(&b, "</Relationships>");
         snprintf(name, sizeof(name), "ppt/slides/_rels/slide%d.xml.rels", s + 1);
         zadd(z, name, &b, &err);
@@ -2266,10 +2423,16 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     } else {   /* the presentation */
         pb_puts(&b, DECL);
         pb_printf(&b, "<p:presentation %s saveSubsetFonts=\"1\"><p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" "
-                  "r:id=\"rId1\"/></p:sldMasterIdLst><p:sldIdLst>", NS);
+                  "r:id=\"rId1\"/></p:sldMasterIdLst>%s<p:sldIdLst>", NS, any_notes(d, nslides) ?
+                  "<p:notesMasterIdLst><p:notesMasterId r:id=\"rIdNM\"/></p:notesMasterIdLst>" : "");
         pb_puts(&prels, DECL);
         pb_printf(&prels, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
                   "<Relationship Id=\"rId1\" Type=\"%sslideMaster\" Target=\"slideMasters/slideMaster1.xml\"/>", REL);
+
+        if (any_notes(d, nslides)) {
+            pb_printf(&prels, "<Relationship Id=\"rIdNM\" Type=\"%snotesMaster\" Target=\"notesMasters/notesMaster1.xml\"/>",
+                      REL);
+        }
 
         for (s = 0; s < nslides; s++) {
             pb_printf(&b, "<p:sldId id=\"%d\" r:id=\"rId%d\"/>", 256 + s, s + 2);

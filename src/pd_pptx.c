@@ -64,6 +64,7 @@ typedef struct {
         int own_bg, no_master;
         long bg;
         char clr[256];          /* its own colour map (a:overrideClrMapping's attributes), "" the master's */
+        char notes[256];        /* its notes slide's part ("" none) */
         char* tail;             /* what follows its colour map as it was (its transition, timing, extensions), after
                                    a line of the namespaces and mc:Ignorable of its root they need; malloc'ed, or NULL */
     } *rec;
@@ -3033,6 +3034,8 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
         r->bg = bg >= 0 ? bg : 0xFFFFFF;
         r->clr[0] = '\0';
         r->tail = NULL;
+        snprintf(r->notes, sizeof(r->notes), "%s", rel_like(&slide, "notesSlides/") ? rel_like(&slide, "notesSlides/") :
+                 "");
 
         {   /* its transition and timing (animations) as they were, to be written back unchanged */
             int cm = xd_find(&slide.x, "clrMapOvr"), cs = xd_find(&slide.x, "cSld");
@@ -3315,6 +3318,89 @@ static void pkeep_part(pptx* P, pkeep* k, const xdoc* ct, const char* name, cons
     }
 
     free(pt.rels);
+}
+
+/* Each slide's speaker notes (its notes slide's body placeholder) made a story of its section (pd_section_props.notes):
+   a paragraph of the story for each of the body's, their text as it is */
+static void notes_read(pptx* P, pd_doc* d) {
+    int i;
+
+    for (i = 0; i < P->nrec; i++) {
+        pd_block_id sec = pd_doc_child(d, pd_doc_root(d), i), story = 0;
+        pd_section_props sp;
+        ppart np;
+        int n, first = 1;
+
+        if (!P->rec[i].notes[0] || !sec || pd_doc_section_props(d, sec, &sp) != PD_OK ||
+                !part_load(P, &np, P->rec[i].notes)) {
+            continue;
+        }
+
+        for (n = 0; n < np.x.nv; n++) {     /* the shape with the body placeholder: its text's paragraphs */
+            int ph, tb, p;
+            char ty[32] = "";
+
+            if (strcmp(np.x.v[n].name, "sp") || (ph = xd_path(&np.x, n, "nvSpPr/nvPr/ph")) < 0 ||
+                    !xd_attr(&np.x, ph, "type", ty, sizeof(ty)) || strcmp(ty, "body") ||
+                    (tb = xd_kid(&np.x, n, "txBody")) < 0) {
+                continue;
+            }
+
+            for (p = np.x.v[tb].kid; p >= 0; p = np.x.v[p].next) {
+                pd_buf txt;
+                pd_block_id para = 0;
+                int r;
+
+                if (strcmp(np.x.v[p].name, "p")) {
+                    continue;
+                }
+
+                memset(&txt, 0, sizeof(txt));
+
+                for (r = p + 1; r < np.x.nv && np.x.v[r].a < np.x.v[p].b; r++) {   /* its runs' text, in order */
+                    if (!strcmp(np.x.v[r].name, "t")) {
+                        mu_decode(np.x.s + np.x.v[r].ia, np.x.v[r].ib - np.x.v[r].ia, &txt);
+                    } else if (!strcmp(np.x.v[r].name, "br")) {
+                        pb_putc(&txt, '\n');
+                    }
+                }
+
+                if (!story && pd_doc_insert_block(d, 0, -1, PD_BLOCK_STORY, &story) != PD_OK) {
+                    pb_free(&txt);
+                    break;
+                }
+
+                if (first && pd_doc_child(d, story, 0)) {   /* a new story's own empty paragraph: the first */
+                    para = pd_doc_child(d, story, 0);
+                } else {
+                    pd_doc_insert_block(d, story, -1, PD_BLOCK_PARAGRAPH, &para);
+                }
+
+                first = 0;
+
+                if (para && txt.n) {
+                    pd_pos at;
+
+                    at.block = para;
+                    at.offset = 0;
+                    pd_doc_insert_text(d, at, txt.p, (uint32_t)txt.n, PD_FORMAT_INHERIT, NULL);
+                }
+
+                pb_free(&txt);
+            }
+
+            break;
+        }
+
+        part_free(&np);
+
+        if (story) {
+            sp.notes = story;
+            pd_doc_set_section_props(d, sec, &sp);
+        }
+    }
+
+    pd_doc_clear_undo(d);
 }
 
 /* the presentation's masters and what they reach, and what each page of d was on, made a resource of d */
@@ -3612,6 +3698,7 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
     if (st == PD_OK) {
         pkeep_read(&P, d);
+        notes_read(&P, d);
     }
 
     {
