@@ -105,6 +105,11 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
 - Floats with `wrap` left/right sit at their anchor and the following
   paragraphs are re-broken with a narrower `\parshape` for the float's
   height (kept together with it).
+- Sections may have page borders (each side's line style, width, colour
+  and space, from the page's edge or the text, on all, the first or all
+  but the first page, over or under the text), a page colour, a line
+  between columns, and start on an odd or even page (a blank page put in
+  before them when needed).
 - Continuous sections start below the previous one on the same page;
   a multi-column section ending there gets balanced columns.
 - `PD_PAGES_OPTIMAL` sections choose all column breaks at once (shortest

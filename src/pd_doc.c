@@ -3890,6 +3890,34 @@ static int story_ok(const pd_doc* d, pd_block_id id) {
     return id == 0 || (b && b->kind == PD_BLOCK_STORY);
 }
 
+/* a border side's line is one Parade draws */
+int pd_doc_line_ok(const pd_border_line* l) {
+    return l->style >= PD_LINE_NONE && l->style <= PD_LINE_DOT_DASH && l->width >= 0 && l->width <= PD_PT(100) &&
+           l->space >= 0 && l->space <= PD_PT(1000);
+}
+
+/* the page borders, columns of their own widths, start, colour and text flow of a section are sound */
+static int section_extras_ok(const pd_section_props* sp) {
+    int32_t k;
+
+    for (k = 0; k < 4; k++) {
+        if (!pd_doc_line_ok(&sp->page_border[k])) {
+            return 0;
+        }
+    }
+
+    for (k = 0; k < sp->ncol_widths && k < PD_SECTION_MAX_COLS; k++) {
+        if (sp->col_width[k] < 0 || sp->col_space[k] < 0) {
+            return 0;
+        }
+    }
+
+    return (sp->page_border_flags & ~15) == 0 && (sp->page_border_flags & 6) != 6 && (sp->column_rule == 0 ||
+            sp->column_rule == 1) && sp->ncol_widths >= 0 && sp->ncol_widths <= PD_SECTION_MAX_COLS &&
+           (sp->start == PD_BREAK_PAGE || sp->start == PD_BREAK_COLUMN || sp->start == PD_BREAK_ODD_PAGE ||
+            sp->start == PD_BREAK_EVEN_PAGE) && sp->text_flow >= PD_CELLTEXT_LRTB && sp->text_flow <= PD_CELLTEXT_TBRL;
+}
+
 pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_props* sp) {
     blk* b = d ? pd_doc_blk(d, id) : NULL;
 
@@ -3906,7 +3934,7 @@ pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_p
              sp->direction >= PD_DIR_AUTO && sp->direction <= PD_DIR_RTL &&
              sp->mirror_margins >= -1 && sp->mirror_margins <= 1 && sp->gutter >= 0 &&
              (int64_t)sp->margin_left + sp->margin_right + sp->gutter < sp->page_width && sp->page_valign >= 0 &&
-             sp->page_valign <= 2,
+             sp->page_valign <= 2 && section_extras_ok(sp),
              b->st.sp = *sp);
 }
 

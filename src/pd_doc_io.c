@@ -94,6 +94,22 @@ static void put_bool(pj_writer* w, const char* k, int v) {
     pj_bool(w, v != 0);
 }
 
+/* border lines, as rows of style, width, colour, space */
+static void put_lines(pj_writer* w, const char* key, const pd_border_line* l, int n) {
+    int64_t m[4 * 6];
+    int k;
+
+    for (k = 0; k < n && k < 6; k++) {
+        m[4 * k] = l[k].style;
+        m[4 * k + 1] = l[k].width;
+        m[4 * k + 2] = l[k].color;
+        m[4 * k + 3] = l[k].space;
+    }
+
+    pj_key(w, key);
+    pj_int_matrix(w, m, n, 4);
+}
+
 static void save_pp(pj_writer* w, const pd_para_props* p) {
     uint32_t m = p->mask;
 
@@ -607,6 +623,41 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
             if (p->direction == PD_DIR_RTL) {
                 put_str(w, "Direction", "rtl");
+            }
+
+            if (p->page_border[0].style || p->page_border[1].style || p->page_border[2].style ||
+                    p->page_border[3].style) {
+                put_lines(w, "PageBorders", p->page_border, 4);
+                put_int(w, "PageBorderFlags", p->page_border_flags);
+            }
+
+            if (p->column_rule) {
+                put_bool(w, "ColumnRule", p->column_rule);
+            }
+
+            if (p->ncol_widths) {
+                int64_t cw[2 * PD_SECTION_MAX_COLS];
+                int k;
+
+                for (k = 0; k < p->ncol_widths; k++) {
+                    cw[2 * k] = p->col_width[k];
+                    cw[2 * k + 1] = p->col_space[k];
+                }
+
+                pj_key(w, "ColumnWidths");
+                pj_int_matrix(w, cw, p->ncol_widths, 2);
+            }
+
+            if (p->start) {
+                put_str(w, "Start", name_of(NAMES(break_names), p->start));
+            }
+
+            if (p->page_color) {
+                put_int(w, "PageColor", (int64_t)p->page_color);
+            }
+
+            if (p->text_flow) {
+                put_int(w, "TextFlow", p->text_flow);
             }
 
             if (p->line_numbers) {
@@ -1771,6 +1822,26 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
     }
 }
 
+static void load_lines(loader* L, const pj_node* x, pd_border_line* l, int n) {
+    int k;
+
+    if (!x) {
+        return;
+    }
+
+    REQUIRE(x->type == PJ_ARR && (int)x->n <= n);
+
+    for (k = 0; k < (int)x->n; k++) {
+        const pj_node* r = pj_at(x, k);
+
+        REQUIRE(r && r->type == PJ_ARR);
+        l[k].style = (int32_t)int_or(pj_at(r, 0), 0, 0, PD_LINE_DOT_DASH, L);
+        l[k].width = (pd_sp)int_or(pj_at(r, 1), 0, 0, PD_PT(100), L);
+        l[k].color = (uint32_t)int_or(pj_at(r, 2), 0, 0, 0xFFFFFFFFLL, L);
+        l[k].space = (pd_sp)int_or(pj_at(r, 3), 0, 0, PD_PT(1000), L);
+    }
+}
+
 static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     const pj_node* x = pj_get(o, "Page");
 
@@ -1816,6 +1887,33 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->line_number_start = (int32_t)int_or(pj_get(x, "LineNumberStart"), 0, 0, 1000000, L);
     p->line_number_distance = (pd_sp)int_or(pj_get(x, "LineNumberDistance"), 0, 0, PD_PT(1000), L);
     p->line_number_restart = (int32_t)int_or(pj_get(x, "LineNumberRestart"), 0, 0, 2, L);
+
+    load_lines(L, pj_get(x, "PageBorders"), p->page_border, 4);
+    p->page_border_flags = (int32_t)int_or(pj_get(x, "PageBorderFlags"), 0, 0, 15, L);
+    p->column_rule = (int32_t)int_or(pj_get(x, "ColumnRule"), 0, 0, 1, L);
+    p->page_color = (uint32_t)int_or(pj_get(x, "PageColor"), 0, 0, 0xFFFFFFFFLL, L);
+    p->text_flow = (int32_t)int_or(pj_get(x, "TextFlow"), 0, 0, PD_CELLTEXT_TBRL, L);
+
+    if (pj_get(x, "Start")) {
+        p->start = enum_of(pj_get(x, "Start"), NAMES(break_names));
+        REQUIRE(p->start == PD_BREAK_PAGE || p->start == PD_BREAK_COLUMN || p->start == PD_BREAK_ODD_PAGE ||
+                p->start == PD_BREAK_EVEN_PAGE);
+    }
+
+    {
+        const pj_node* cw = pj_get(x, "ColumnWidths");
+        int32_t k;
+
+        if (cw) {
+            REQUIRE(cw->type == PJ_ARR && cw->n <= PD_SECTION_MAX_COLS);
+            p->ncol_widths = (int32_t)cw->n;
+
+            for (k = 0; k < p->ncol_widths; k++) {
+                p->col_width[k] = (pd_sp)int_or(pj_at(pj_at(cw, k), 0), 0, 0, SP_MAX, L);
+                p->col_space[k] = (pd_sp)int_or(pj_at(pj_at(cw, k), 1), 0, 0, SP_MAX, L);
+            }
+        }
+    }
 
     if (pj_get(x, "PageBreaking")) {
         static const char* const pb_names[] = { "greedy", "optimal" };

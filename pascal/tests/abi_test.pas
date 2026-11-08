@@ -25,6 +25,7 @@ var
   v_pd_font_info: pd_font_info;
   v_pd_float_props: pd_float_props;
   v_pd_section_props: pd_section_props;
+  v_pd_border_line: pd_border_line;
   v_pd_table_props: pd_table_props;
   v_pd_row_props: pd_row_props;
   v_pd_cell_props: pd_cell_props;
@@ -309,6 +310,20 @@ begin
   WriteLn('pd_section_props.page_valign ', PtrUInt(@v_pd_section_props.page_valign) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.line_pitch ', PtrUInt(@v_pd_section_props.line_pitch) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.direction ', PtrUInt(@v_pd_section_props.direction) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.page_border ', PtrUInt(@v_pd_section_props.page_border) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.page_border_flags ', PtrUInt(@v_pd_section_props.page_border_flags) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.column_rule ', PtrUInt(@v_pd_section_props.column_rule) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.ncol_widths ', PtrUInt(@v_pd_section_props.ncol_widths) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.col_width ', PtrUInt(@v_pd_section_props.col_width) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.col_space ', PtrUInt(@v_pd_section_props.col_space) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.start ', PtrUInt(@v_pd_section_props.start) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.page_color ', PtrUInt(@v_pd_section_props.page_color) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.text_flow ', PtrUInt(@v_pd_section_props.text_flow) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_border_line ', SizeOf(pd_border_line));
+  WriteLn('pd_border_line.style ', PtrUInt(@v_pd_border_line.style) - PtrUInt(@v_pd_border_line));
+  WriteLn('pd_border_line.width ', PtrUInt(@v_pd_border_line.width) - PtrUInt(@v_pd_border_line));
+  WriteLn('pd_border_line.color ', PtrUInt(@v_pd_border_line.color) - PtrUInt(@v_pd_border_line));
+  WriteLn('pd_border_line.space ', PtrUInt(@v_pd_border_line.space) - PtrUInt(@v_pd_border_line));
   WriteLn('pd_table_props ', SizeOf(pd_table_props));
   WriteLn('pd_table_props.width ', PtrUInt(@v_pd_table_props.width) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.align ', PtrUInt(@v_pd_table_props.align) - PtrUInt(@v_pd_table_props));

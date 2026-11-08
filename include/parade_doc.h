@@ -306,6 +306,26 @@ typedef struct {
 #define PD_PP_CONTEXTUAL   (1u << 19) /**< no space between this and a neighbour of the same style */
 #define PD_PP_SNAP_GRID    (1u << 20) /**< lines on the section's grid (pd_section_props.line_pitch) */
 
+/* how a border line is drawn */
+#define PD_LINE_NONE       0
+#define PD_LINE_SINGLE     1
+#define PD_LINE_DOUBLE     2    /**< two lines, each a third of the width, a third apart */
+#define PD_LINE_DOTTED     3
+#define PD_LINE_DASHED     4
+#define PD_LINE_THICK      5    /**< one line (Word's "thick": as single, its width as said) */
+#define PD_LINE_THIN_THICK 6    /**< a thin line inside a thick one (outermost thick) */
+#define PD_LINE_THICK_THIN 7    /**< a thick line inside a thin one */
+#define PD_LINE_TRIPLE     8
+#define PD_LINE_DOT_DASH   9
+
+/** one side of a border: how it is drawn, its width, colour and distance from what it surrounds */
+typedef struct {
+    int32_t style;              /**< PD_LINE_*, PD_LINE_NONE = no line */
+    pd_sp width;
+    uint32_t color;             /**< 0xAARRGGBB */
+    pd_sp space;                /**< from the text (or the page's edge) to the line */
+} pd_border_line;
+
 typedef struct {
     uint32_t mask;              /**< PD_PP_* bits that are set */
     int32_t align;              /**< pd_align */
@@ -628,6 +648,8 @@ typedef struct {
 #define PD_FROM_PAGE 1          /**< the top edge of the page its anchor is on */
 #define PD_FROM_MARGIN 2        /**< the top margin of that page (where its text starts) */
 
+#define PD_SECTION_MAX_COLS 16
+
 typedef struct {
     pd_sp page_width, page_height;
     pd_sp margin_top, margin_bottom, margin_left, margin_right;
@@ -656,7 +678,24 @@ typedef struct {
     pd_sp line_pitch;           /**< the document grid (East Asian layout): every line a whole number of this high,
                                      in paragraphs that snap to it (0 = no grid) */
     int32_t direction;          /**< pd_direction: PD_DIR_RTL puts its first column at the right */
+    pd_border_line page_border[4];  /**< round its pages: top, right, bottom, left */
+    int32_t page_border_flags;  /**< PD_PGBORDER_* */
+    int32_t column_rule;        /**< 1: a line between its columns (Word's w:cols w:sep) */
+    int32_t ncol_widths;        /**< columns of their own widths (Word's equalWidth="0"), 0 = all column_gap apart,
+                                     equal; laid out as equal columns of the same total (kept, read and written) */
+    pd_sp col_width[PD_SECTION_MAX_COLS];   /**< each column's width */
+    pd_sp col_space[PD_SECTION_MAX_COLS];   /**< and the space after it */
+    int32_t start;              /**< where it starts, unless continuous: PD_BREAK_PAGE (the next page),
+                                     PD_BREAK_ODD_PAGE / PD_BREAK_EVEN_PAGE (a blank page put in when needed),
+                                     PD_BREAK_COLUMN (the next column: laid out as a new page) */
+    uint32_t page_color;        /**< its pages' background, 0 = none (Word's w:background, document-wide) */
+    int32_t text_flow;          /**< PD_CELLTEXT_*: Word's section w:textDirection (kept; laid out across) */
 } pd_section_props;
+
+#define PD_PGBORDER_FROM_TEXT   1   /**< the border's space measured from the text, not the page's edge */
+#define PD_PGBORDER_FIRST       2   /**< only on the section's first page */
+#define PD_PGBORDER_NOT_FIRST   4   /**< on all its pages but the first */
+#define PD_PGBORDER_BEHIND      8   /**< under the text (Word's zOrder="back") */
 
 typedef enum {
     PD_PAGES_GREEDY = 0,        /**< fill each column, best break on it (TeX) */

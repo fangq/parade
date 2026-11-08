@@ -593,6 +593,172 @@ static int add_rule(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp
     return 0;
 }
 
+/* how thick a border line is drawn, all its strokes and gaps */
+static pd_sp line_thickness(const pd_border_line* l) {
+    pd_sp w = l->width, thin = w / 4 > PD_PT(0.5) ? w / 4 : PD_PT(0.5);
+
+    switch (l->style) {
+        case PD_LINE_NONE:
+            return 0;
+
+        case PD_LINE_DOUBLE:
+            return 3 * w;
+
+        case PD_LINE_TRIPLE:
+            return 5 * w;
+
+        case PD_LINE_THIN_THICK:
+        case PD_LINE_THICK_THIN:
+            return w + 2 * thin;
+
+        default:
+            return w;
+    }
+}
+
+/* A border line drawn in the band x, y, w by h (horiz: running across, its strokes stacked down the band; else
+   running down, stacked across), outer: its first stroke at the band's top or left (the side away from what it
+   surrounds) -- thin and thick strokes in their order from there; dots and dashes as short rules */
+static void border_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l,
+                        int horiz, int outer, int32_t region, pd_block_id block) {
+    pd_sp lw = l->width, thin = lw / 4 > PD_PT(0.5) ? lw / 4 : PD_PT(0.5), off[3], th[3], len = horiz ? w : h;
+    int32_t n = 1, k;
+
+    off[0] = 0;
+    th[0] = lw;
+
+    if (l->style == PD_LINE_DOUBLE || l->style == PD_LINE_TRIPLE) {     /* strokes as wide as gaps */
+        n = l->style == PD_LINE_DOUBLE ? 2 : 3;
+
+        for (k = 0; k < n; k++) {
+            off[k] = 2 * k * lw;
+            th[k] = lw;
+        }
+    } else if (l->style == PD_LINE_THIN_THICK || l->style == PD_LINE_THICK_THIN) {
+        int thick_first = (l->style == PD_LINE_THIN_THICK) == !!outer;  /* thin inside thick: thick outermost */
+
+        n = 2;
+        th[0] = thick_first ? lw : thin;
+        th[1] = thick_first ? thin : lw;
+        off[1] = th[0] + thin;
+    }
+
+    for (k = 0; k < n; k++) {
+        pd_sp at = horiz ? y + off[k] : x + off[k];
+
+        if (l->style == PD_LINE_DOTTED || l->style == PD_LINE_DASHED || l->style == PD_LINE_DOT_DASH) {
+            pd_sp dot = th[k] > PD_PT(0.5) ? th[k] : PD_PT(0.5), d, pos = 0;
+            int32_t i = 0;
+
+            while (pos < len && i < 100000) {   /* dashes three dots long, a dot apart */
+                d = l->style == PD_LINE_DOTTED ? dot : l->style == PD_LINE_DASHED ? 3 * dot : (i % 2 ? dot : 3 * dot);
+                d = pos + d > len ? len - pos : d;
+
+                if (horiz) {
+                    add_rule(L, page, x + pos, at, d, th[k], l->color, region, block);
+                } else {
+                    add_rule(L, page, at, y + pos, th[k], d, l->color, region, block);
+                }
+
+                pos += d + (l->style == PD_LINE_DOTTED ? dot : 2 * dot);
+                i++;
+            }
+        } else if (horiz) {
+            add_rule(L, page, x, at, len, th[k], l->color, region, block);
+        } else {
+            add_rule(L, page, at, y, th[k], len, l->color, region, block);
+        }
+    }
+}
+
+/* the rules a page got from FROM on moved to AT, before those there (under what is drawn after them) */
+static void rules_to_front(pd_layout* L, int32_t page, int32_t from, int32_t at) {
+    ppage* p = &L->pages[page];
+    int32_t n = p->nrules - from;
+    prule* tmp;
+
+    if (n <= 0 || from <= at || (tmp = (prule*)malloc((size_t)n * sizeof(prule))) == NULL) {
+        return;
+    }
+
+    memcpy(tmp, p->rules + from, (size_t)n * sizeof(prule));
+    memmove(p->rules + at + n, p->rules + at, (size_t)(from - at) * sizeof(prule));
+    memcpy(p->rules + at, tmp, (size_t)n * sizeof(prule));
+    free(tmp);
+}
+
+/* A page's colour, its section's page borders and the lines between its columns */
+static void page_frame(pd_layout* L, int32_t page) {
+    ppage* pg = &L->pages[page];
+    const pd_section_props* sp = pg->sp;
+    int32_t n0 = pg->nrules, i, f = sp->page_border_flags;
+    const pd_border_line* b = sp->page_border;
+
+    if (sp->page_color && add_rule(L, page, 0, 0, pg->w, pg->h, sp->page_color, 0, pg->section) == 0) {
+        rules_to_front(L, page, n0, 0);     /* under everything */
+        n0 = pg->nrules;
+    }
+
+    if ((b[0].style || b[1].style || b[2].style || b[3].style) && !((f & PD_PGBORDER_FIRST) && pg->section_index > 0) &&
+            !((f & PD_PGBORDER_NOT_FIRST) && pg->section_index == 0)) {
+        pd_sp t[4], x0, y0, x1, y1;
+
+        for (i = 0; i < 4; i++) {
+            t[i] = line_thickness(&b[i]);
+        }
+
+        if (f & PD_PGBORDER_FROM_TEXT) {    /* outside the text by each one's space */
+            x0 = pg->text_x - b[3].space - t[3];
+            x1 = pg->text_x + pg->text_w + b[1].space + t[1];
+            y0 = sp->margin_top - b[0].space - t[0];
+            y1 = pg->h - sp->margin_bottom + b[2].space + t[2];
+        } else {    /* in from the page's edges */
+            x0 = b[3].space;
+            x1 = pg->w - b[1].space;
+            y0 = b[0].space;
+            y1 = pg->h - b[2].space;
+        }
+
+        if (b[0].style) {
+            border_band(L, page, x0, y0, x1 - x0, t[0], &b[0], 1, 1, 0, pg->section);
+        }
+
+        if (b[2].style) {
+            border_band(L, page, x0, y1 - t[2], x1 - x0, t[2], &b[2], 1, 0, 0, pg->section);
+        }
+
+        if (b[3].style) {
+            border_band(L, page, x0, y0, t[3], y1 - y0, &b[3], 0, 1, 0, pg->section);
+        }
+
+        if (b[1].style) {
+            border_band(L, page, x1 - t[1], y0, t[1], y1 - y0, &b[1], 0, 0, 0, pg->section);
+        }
+
+        if (f & PD_PGBORDER_BEHIND) {   /* under the text, over the colour */
+            rules_to_front(L, page, n0, sp->page_color ? 1 : 0);
+        }
+    }
+
+    if (sp->column_rule && sp->columns > 1) {   /* between the columns, as far down as the text goes */
+        pd_sp top = INT32_MAX, bottom = INT32_MIN, colw;
+
+        for (i = 0; i < pg->n; i++) {
+            if (pg->lines[i].region == 0) {
+                top = pg->lines[i].top < top ? pg->lines[i].top : top;
+                bottom = pg->lines[i].bottom > bottom ? pg->lines[i].bottom : bottom;
+            }
+        }
+
+        colw = (pg->text_w - (sp->columns - 1) * sp->column_gap) / sp->columns;
+
+        for (i = 1; top < bottom && i < sp->columns; i++) {
+            add_rule(L, page, pg->text_x + i * (colw + sp->column_gap) - sp->column_gap / 2 - PD_PT(0.25), top,
+                     PD_PT(0.5), bottom - top, 0xFF000000u, 0, pg->section);
+        }
+    }
+}
+
 /* a line corner to corner across the box x, y, w by h (diag 1: from top left, 2: from top right), lw wide */
 static void add_diag(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, int32_t diag, pd_sp lw,
                      uint32_t color, int32_t region, pd_block_id block) {
@@ -3904,6 +4070,18 @@ static pd_status paginate(pd_layout* L) {
             }
         }
 
+        /* starting on an odd (or even) page: a blank one first, the previous section's, when the next is not */
+        if (s > 0 && F.floor_page < 0 && L->npages > 0 && (F.sp->start == PD_BREAK_ODD_PAGE ||
+                F.sp->start == PD_BREAK_EVEN_PAGE) && (F.number % 2 == 0) == (F.sp->start == PD_BREAK_ODD_PAGE)) {
+            if (!new_page(L, d->tab[root->kids[s - 1]], number, L->pages[L->npages - 1].section_index + 1)) {
+                st = PD_ERR_NOMEM;
+                break;
+            }
+
+            F.number += F.sp->first_page_number > 0 ? 0 : 1;
+            number++;
+        }
+
         st = rebuild_flow(&F);
 
         if (st == PD_OK && F.sp->page_breaking == PD_PAGES_OPTIMAL) {
@@ -3949,6 +4127,7 @@ static pd_status paginate(pd_layout* L) {
 
         place_story(L, i, first_page ? sp->header_first : even ? sp->header_even : sp->header, 0);
         place_story(L, i, first_page ? sp->footer_first : even ? sp->footer_even : sp->footer, 1);
+        page_frame(L, i);
     }
 
     return st;

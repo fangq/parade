@@ -6163,6 +6163,70 @@ static void test_floating_table(void) {
     pd_doc_free(d);
 }
 
+/* Page features of a section: the pages' colour under everything, a page border 24pt in from the edge, a line
+   between two columns, and a section that starts on an odd page getting a blank page before it; also after
+   .docx and native round trips */
+static void test_page_features(void) {
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:background w:color=\"FFFFCC\"/><w:body>"
+                         "<w:p><w:r><w:t>FIRST one two three four five six seven eight nine ten eleven twelve thirteen "
+                         "fourteen fifteen sixteen seventeen eighteen nineteen twenty one two three four five six seven "
+                         "eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen "
+                         "twenty</w:t></w:r></w:p>"
+                         "<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" "
+                         "w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" "
+                         "w:gutter=\"0\"/><w:pgBorders w:offsetFrom=\"page\"><w:top w:val=\"single\" w:sz=\"8\" "
+                         "w:space=\"24\" w:color=\"FF0000\"/></w:pgBorders><w:cols w:num=\"2\" w:space=\"720\" "
+                         "w:sep=\"1\"/></w:sectPr></w:pPr></w:p>"
+                         "<w:p><w:r><w:t>SECOND</w:t></w:r></w:p>"
+                         "<w:sectPr><w:type w:val=\"oddPage\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar "
+                         "w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" "
+                         "w:footer=\"720\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>", NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, pg, border = 0, sep = 0;
+            pd_sp x, y;
+            pd_draw* it = page_draws(L, 0, &n);
+
+            CHECK(it && n > 0 && it[0].kind == PD_DRAW_RULE && it[0].color == 0xFFFFFFCCu && it[0].x == 0 &&
+                  it[0].w == PD_PT(612) && it[0].h == PD_PT(792));
+
+            for (k = 0; it && k < n; k++) {
+                border += it[k].kind == PD_DRAW_RULE && it[k].color == 0xFFFF0000u && it[k].y == PD_PT(24) &&
+                          it[k].h == PD_PT(1) && it[k].w > PD_PT(500);
+                sep += it[k].kind == PD_DRAW_RULE && it[k].color == 0xFF000000u && it[k].w == PD_PT(0.5) &&
+                       it[k].h > PD_PT(5) && it[k].x > PD_PT(300) && it[k].x < PD_PT(312);
+            }
+
+            CHECK(border == 1 && sep == 1);
+            free(it);
+            CHECK(pd_layout_page_count(L) == 3 && text_drawn(d, L, "SECOND", &pg, &x, &y) && pg == 2);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -6195,6 +6259,7 @@ int main(void) {
     test_cell_diagonals();
     test_cell_spacing();
     test_floating_table();
+    test_page_features();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

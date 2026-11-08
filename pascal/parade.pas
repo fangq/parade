@@ -248,6 +248,21 @@ const
   PD_CELLTEXT_LRTB = 0;
   PD_CELLTEXT_BTLR = 1;
   PD_CELLTEXT_TBRL = 2;
+  PD_SECTION_MAX_COLS = 16;
+  PD_LINE_NONE = 0;
+  PD_LINE_SINGLE = 1;
+  PD_LINE_DOUBLE = 2;
+  PD_LINE_DOTTED = 3;
+  PD_LINE_DASHED = 4;
+  PD_LINE_THICK = 5;
+  PD_LINE_THIN_THICK = 6;
+  PD_LINE_THICK_THIN = 7;
+  PD_LINE_TRIPLE = 8;
+  PD_LINE_DOT_DASH = 9;
+  PD_PGBORDER_FROM_TEXT = 1;
+  PD_PGBORDER_FIRST = 2;
+  PD_PGBORDER_NOT_FIRST = 4;
+  PD_PGBORDER_BEHIND = 8;
 
   PD_MAX_TABS = 16;
   PD_TAB_LEFT = 0;
@@ -591,6 +606,15 @@ type
   end;
   Ppd_float_props = ^pd_float_props;
 
+  { one side of a border }
+  pd_border_line = record
+    style: Int32;             { PD_LINE_* }
+    width: pd_sp;
+    color: UInt32;
+    space: pd_sp;
+  end;
+  Ppd_border_line = ^pd_border_line;
+
   pd_section_props = record
     page_width, page_height: pd_sp;
     margin_top, margin_bottom, margin_left, margin_right: pd_sp;
@@ -611,6 +635,14 @@ type
     page_valign: Int32;
     line_pitch: pd_sp;        { the document grid's line pitch; 0 none }
     direction: Int32;         { pd_direction: PD_DIR_RTL puts its first column at the right }
+    page_border: array[0..3] of pd_border_line;   { top, right, bottom, left }
+    page_border_flags: Int32; { PD_PGBORDER_* }
+    column_rule: Int32;       { 1: a line between the columns }
+    ncol_widths: Int32;       { columns of their own widths, 0 = equal }
+    col_width, col_space: array[0..PD_SECTION_MAX_COLS - 1] of pd_sp;
+    start: Int32;             { PD_BREAK_PAGE, _ODD_PAGE, _EVEN_PAGE, _COLUMN }
+    page_color: UInt32;       { 0 = none }
+    text_flow: Int32;         { PD_CELLTEXT_* }
   end;
   Ppd_section_props = ^pd_section_props;
 

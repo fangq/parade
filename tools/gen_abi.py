@@ -41,7 +41,9 @@ STRUCTS = {
                         "footer_distance columns column_gap first_page_number page_number_format title_page "
                         "facing_pages header header_first header_even footer footer_first footer_even continuous page_breaking "
                         "footnote_skip add_spacing line_numbers line_number_start line_number_distance "
-                        "line_number_restart mirror_margins gutter page_valign line_pitch direction",
+                        "line_number_restart mirror_margins gutter page_valign line_pitch direction page_border "
+                        "page_border_flags column_rule ncol_widths col_width col_space start page_color text_flow",
+    "pd_border_line": "style width color space",
     "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width indent width_pct "
                       "border_sides cell_padding_v direction border_theme style look border_given cell_spacing",
     "pd_row_props": "grid_before grid_after width_before width_after height height_exact split",

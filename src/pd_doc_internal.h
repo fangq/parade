@@ -13,6 +13,7 @@
 #define PD_MAX_BLOCKS 0x10000000
 
 int pd_doc_table_props_ok(const pd_table_props* tp);
+int pd_doc_line_ok(const pd_border_line* l);
 
 /* an inline object; source owns its strings, "source\0title\0alt\0", and obj points into them */
 typedef struct {
