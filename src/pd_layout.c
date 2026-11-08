@@ -212,6 +212,8 @@ struct pd_layout {
     int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
     int32_t dtext_rot;          /* the one being placed: how far it is turned (60000ths of a degree, clockwise), */
     pd_sp dtext_rx, dtext_ry;   /* about its middle */
+    int32_t turn_rot;           /* lines placed now are turned this far (a table cell's turned text), */
+    pd_sp turn_rx, turn_ry;     /* about this point */
 };
 
 /* filler state for one section */
@@ -625,6 +627,12 @@ static int add_line(pd_layout* L, int32_t page, pcache* pc, int32_t line, pd_sp 
     l->rot = region == 5 && L->dtext_depth > 0 ? L->dtext_rot : 0;
     l->rx = L->dtext_rx;
     l->ry = L->dtext_ry;
+
+    if (!l->rot && L->turn_rot) {
+        l->rot = L->turn_rot;
+        l->rx = L->turn_rx;
+        l->ry = L->turn_ry;
+    }
 
     if (region == 0 || region == 3 || region == 4) {
         blk* b = pd_doc_blk(L->doc, pc->block);
@@ -1356,17 +1364,62 @@ static int row_alone(const pd_doc* d, const ptable* T, const blk* t, int32_t r) 
     return 1;
 }
 
-/* some cell of a row has its content in the middle or at the bottom (which slices of it would not keep) */
+/* some cell of a row has its content in the middle or at the bottom, or turned (which slices of it would not keep) */
 static int row_valigned(const pd_doc* d, const blk* row) {
     int32_t k;
 
     for (k = 0; k < row->nkids; k++) {
-        if (d->tab[row->kids[k]]->st.cell.valign) {
+        if (d->tab[row->kids[k]]->st.cell.valign || d->tab[row->kids[k]]->st.cell.text_dir) {
             return 1;
         }
     }
 
     return 0;
+}
+
+/* The length of the lines of a cell whose text is turned: what is left of its row's height, when that is set,
+   else the length of its longest line unbroken */
+static pd_sp cell_vlen(pd_layout* L, const blk* cell, pd_sp padv) {
+    const blk* row = pd_doc_blk(L->doc, cell->parent);
+    pd_sp h = row && row->st.row.height_exact ? row->st.row.height : cell->st.cell.min_height, a, b;
+
+    if (h > 2 * padv + PD_PT(1)) {
+        return h - 2 * padv;
+    }
+
+    cell_minmax(L, cell->id, &a, &b);
+    return b + PD_PT(0.5) > PD_PT(1) ? b + PD_PT(0.5) : PD_PT(1);
+}
+
+/* how far a cell's turned text is across it: its lines' stack, laid out cell_vlen long */
+static pd_sp cell_across(pd_layout* L, const blk* cell, pd_sp padv) {
+    pd_status st;
+    pd_sp h = stack_height(L, cell->id, cell_vlen(L, cell, padv), &st);
+
+    return h > 0 ? h : 0;
+}
+
+/* A cell's turned text placed in its box (x, y, w by h, padding pad and padv): its lines laid out cell_vlen long,
+   turned a quarter, and set in the box by the cell's alignment (top: its first line at the box's left for btLr,
+   at its right for tbRl) */
+static void place_turned(pd_layout* L, const blk* cell, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, pd_sp pad,
+                         pd_sp padv, int32_t region) {
+    pd_sp v = cell_vlen(L, cell, padv), across = cell_across(L, cell, padv), room = w - 2 * pad - across, cx, cy;
+    int32_t rot0 = L->turn_rot;
+    pd_sp rx0 = L->turn_rx, ry0 = L->turn_ry;
+    int up = cell->st.cell.text_dir == PD_CELLTEXT_BTLR;
+
+    room = room > 0 ? room : 0;
+    room = cell->st.cell.valign == 1 ? room / 2 : cell->st.cell.valign == 2 ? room : 0;
+    cx = up ? x + pad + room + across / 2 : x + w - pad - room - across / 2;
+    cy = y + h / 2;
+    L->turn_rot = up ? 16200000 : 5400000;
+    L->turn_rx = cx;
+    L->turn_ry = cy;
+    place_stack(L, cell->id, v, page, cx - v / 2, cy - across / 2, region);
+    L->turn_rot = rot0;
+    L->turn_rx = rx0;
+    L->turn_ry = ry0;
 }
 
 /* Where a row of height rowh may be cut: the ends of its tallest cell's lines (from the row's top) that no line of
@@ -1544,7 +1597,12 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
                     continue;
                 }
 
-                cell_minmax(L, cell->id, &a, &b);
+                if (cell->st.cell.text_dir) {   /* turned: as wide as its lines' stack */
+                    a = b = cell_across(L, cell, tp->cell_padding_v >= 0 ? tp->cell_padding_v : pad);
+                } else {
+                    cell_minmax(L, cell->id, &a, &b);
+                }
+
                 a += 2 * pad;
                 b += 2 * pad;
 
@@ -1684,7 +1742,8 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
                     continue;
                 }
 
-                h = stack_height(F->L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, &st);
+                h = cell->st.cell.text_dir ? cell_vlen(F->L, cell, padv) :
+                    stack_height(F->L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, &st);
 
                 if (h < 0) {
                     return st;
@@ -2305,7 +2364,8 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                 continue;
             }
 
-            ch = stack_walk(L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, 0, 0, 0, 0, 0, st);
+            ch = cell->st.cell.text_dir ? cell_vlen(L, cell, padv) :
+                 stack_walk(L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, 0, 0, 0, 0, 0, st);
 
             if (ch < 0) {
                 free(rowh);
@@ -2348,7 +2408,9 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                 add_rule(L, page, cx, ry, cw, rowh[r], cell_fill(L->doc, cell), region, cell->id);
             }
 
-            if (!cell->st.cell.merge_up) {
+            if (!cell->st.cell.merge_up && cell->st.cell.text_dir) {
+                place_turned(L, cell, page, cx, ry, cw, rowh[r], pad, padv, region);
+            } else if (!cell->st.cell.merge_up) {
                 ch = stack_walk(L, cell->id, inner, 0, 0, 0, 0, 0, st);
                 off = cell->st.cell.valign == 1 ? (rowh[r] - 2 * padv - ch) / 2 : cell->st.cell.valign == 2 ?
                       rowh[r] - 2 * padv - ch : 0;
@@ -2441,6 +2503,12 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
             place_stack_clip(F->L, cell->id, inner, F->page, cx + pad, y - v->from + padv, v->from - padv,
                              v->from - padv + v->h, 0, 0);
+        } else if (!cell->st.cell.merge_up && cell->st.cell.text_dir) {
+            if (cell_fill(F->L->doc, cell)) {
+                add_rule(F->L, F->page, cx, y, cw, ch, cell_fill(F->L->doc, cell), 0, cell->id);
+            }
+
+            place_turned(F->L, cell, F->page, cx, y, cw, ch, pad, padv, 0);
         } else if (!cell->st.cell.merge_up) {
             if (cell_fill(F->L->doc, cell)) {
                 add_rule(F->L, F->page, cx, y, cw, ch, cell_fill(F->L->doc, cell), 0, cell->id);

@@ -5923,6 +5923,69 @@ static void test_cell_width(void) {
     pd_doc_free(d);
 }
 
+/* the first two glyphs drawn of the paragraph holding s, on page 0: 1 if there are two */
+static int two_glyphs(const pd_doc* d, const pd_layout* L, const char* s, pd_draw* g) {
+    pd_block_id p = find_para(d, s);
+    int32_t k, n, got = 0;
+    pd_draw* it = page_draws(L, 0, &n);
+
+    for (k = 0; it && k < n && got < 2; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].block == p) {
+            g[got++] = it[k];
+        }
+    }
+
+    free(it);
+    return got == 2;
+}
+
+/* Text turned in a cell (w:textDirection): btLr runs up the cell, its glyphs turned a quarter left, tbRl runs
+   down, turned a quarter right, each within its cell; also after .docx and native round trips */
+static void test_cell_text_dir(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblGrid><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"1000\"/></w:tblGrid><w:tr>"
+                             "<w:trPr><w:trHeight w:val=\"2000\" w:hRule=\"exact\"/></w:trPr>"
+                             "<w:tc><w:tcPr><w:textDirection w:val=\"btLr\"/></w:tcPr><w:p><w:r><w:t>UPWARD</w:t></w:r>"
+                             "</w:p></w:tc><w:tc><w:tcPr><w:textDirection w:val=\"tbRl\"/></w:tcPr><w:p><w:r><w:t>"
+                             "DOWNWARD</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>below</w:t></w:r></w:p>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            pd_draw u[2], w[2];
+            int32_t pg;
+            pd_sp bx, by;
+
+            CHECK(two_glyphs(d, L, "UPWARD", u) && two_glyphs(d, L, "DOWNWARD", w) &&
+                  text_drawn(d, L, "below", &pg, &bx, &by));
+            CHECK(u[0].rotation == 16200000 && u[1].y < u[0].y - PD_PT(4) && u[1].x == u[0].x);
+            CHECK(w[0].rotation == 5400000 && w[1].y > w[0].y + PD_PT(4) && w[1].x == w[0].x);
+            CHECK(u[0].x > bx && u[0].x < bx + PD_PT(50) && w[0].x > bx + PD_PT(50) && w[0].x < bx + PD_PT(100));
+            CHECK(u[0].y < by && w[0].y < by - PD_PT(20));      /* in the row, above the next paragraph */
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -5951,6 +6014,7 @@ int main(void) {
     test_exact_row();
     test_cant_split();
     test_cell_width();
+    test_cell_text_dir();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

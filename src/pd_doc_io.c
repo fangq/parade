@@ -684,7 +684,7 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
             const pd_cell_props* p = &s->cell;
 
             if (p->col_span != 1 || p->valign || p->background || p->merge_up || p->min_height || p->border_set ||
-                    p->width || p->width_pct) {
+                    p->width || p->width_pct || p->text_dir) {
                 pj_key(w, "Cell");
                 pj_obj_begin(w);
                 put_int(w, "ColumnSpan", p->col_span);
@@ -713,6 +713,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
                 if (p->width_pct) {
                     put_int(w, "WidthPerMille", p->width_pct);
+                }
+
+                if (p->text_dir) {
+                    put_int(w, "TextDirection", p->text_dir);
                 }
 
                 if (p->border_set) {
@@ -1893,6 +1897,7 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     p->border_theme = (uint32_t)int_or(pj_get(x, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
     p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);
     p->width_pct = (int32_t)int_or(pj_get(x, "WidthPerMille"), 0, 0, 1000, L);
+    p->text_dir = (int32_t)int_or(pj_get(x, "TextDirection"), 0, 0, PD_CELLTEXT_TBRL, L);
 
     {
         const pj_node* ew = pj_get(x, "EdgeWidths");

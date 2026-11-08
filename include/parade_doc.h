@@ -730,7 +730,13 @@ typedef struct {
     pd_sp width;                /**< its preferred width (Word's tcW), for a column the table does not size itself;
                                      0 = automatic */
     int32_t width_pct;          /**< or that in per-mille of the table's width (width 0) */
+    int32_t text_dir;           /**< PD_CELLTEXT_*: its text across, or turned to run up or down the cell */
 } pd_cell_props;
+
+/* which way a cell's text runs (Word's w:textDirection) */
+#define PD_CELLTEXT_LRTB 0      /**< across, lines down the cell */
+#define PD_CELLTEXT_BTLR 1      /**< turned a quarter left: lines run up, the first at the left (btLr) */
+#define PD_CELLTEXT_TBRL 2      /**< turned a quarter right: lines run down, the first at the right (tbRl) */
 
 /** a table row's own properties (Word's w:trPr) */
 typedef struct {

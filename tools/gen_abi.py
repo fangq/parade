@@ -46,7 +46,7 @@ STRUCTS = {
                       "border_sides cell_padding_v direction border_theme style look border_given",
     "pd_row_props": "grid_before grid_after width_before width_after height height_exact split",
     "pd_cell_props": "col_span valign background merge_up min_height border_set border_on border_width border_color "
-                     "edge_width background_theme border_theme width width_pct",
+                     "edge_width background_theme border_theme width width_pct text_dir",
     "pd_theme": "name color major minor major_ea minor_ea major_cs minor_cs",
     "pd_table_style_part": "given has_shading shading shading_theme border_set border_on border_width edge_width "
                            "border_color border_theme para chr",

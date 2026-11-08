@@ -350,6 +350,7 @@ begin
   WriteLn('pd_cell_props.border_theme ', PtrUInt(@v_pd_cell_props.border_theme) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.width ', PtrUInt(@v_pd_cell_props.width) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.width_pct ', PtrUInt(@v_pd_cell_props.width_pct) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.text_dir ', PtrUInt(@v_pd_cell_props.text_dir) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_theme ', SizeOf(pd_theme));
   WriteLn('pd_theme.name ', PtrUInt(@v_pd_theme.name) - PtrUInt(@v_pd_theme));
   WriteLn('pd_theme.color ', PtrUInt(@v_pd_theme.color) - PtrUInt(@v_pd_theme));

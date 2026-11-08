@@ -245,6 +245,9 @@ const
   PD_ROWSPLIT_TALL = 0;
   PD_ROWSPLIT_NEVER = 1;
   PD_ROWSPLIT_ANY = 2;
+  PD_CELLTEXT_LRTB = 0;
+  PD_CELLTEXT_BTLR = 1;
+  PD_CELLTEXT_TBRL = 2;
 
   PD_MAX_TABS = 16;
   PD_TAB_LEFT = 0;
@@ -641,6 +644,7 @@ type
     background_theme, border_theme: UInt32;     { pd_theme_color references, 0 = none }
     width: pd_sp;            { preferred width (Word's tcW), 0 = automatic }
     width_pct: Int32;        { or per-mille of the table's width }
+    text_dir: Int32;         { PD_CELLTEXT_* }
   end;
   Ppd_cell_props = ^pd_cell_props;
 

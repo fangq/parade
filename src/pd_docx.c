@@ -2802,6 +2802,11 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 dx_shd(o, cp.background, cp.background_theme);
             }
 
+            if (cp.text_dir) {
+                pb_puts(o, cp.text_dir == PD_CELLTEXT_BTLR ? "<w:textDirection w:val=\"btLr\"/>" :
+                        "<w:textDirection w:val=\"tbRl\"/>");
+            }
+
             if (cp.valign) {
                 pb_puts(o, cp.valign == 1 ? "<w:vAlign w:val=\"center\"/>" : "<w:vAlign w:val=\"bottom\"/>");
             }
@@ -6100,6 +6105,7 @@ typedef struct {
     pd_row_props row_pr;        /* the row's w:trPr, for the row when its first cell makes it */
     pd_sp cell_w;               /* the cell's w:tcW: twips made sp, or (cell_wpct) per-mille */
     int32_t cell_wpct;
+    int32_t cell_dir;           /* its w:textDirection, PD_CELLTEXT_* */
     uint32_t cell_bg, cell_bg_ref;
     int in_tblpr, in_grid, in_borders, in_mar, in_cb;
     pd_sp t_width, grid[PD_TABLE_MAX_COLS];
@@ -6316,10 +6322,11 @@ static void dw_begin_cell(dw* w) {
             bld_cell_merge_up(b);
         }
 
-        if (w->cell_valign || w->cell_w || w->cell_wpct) {
+        if (w->cell_valign || w->cell_w || w->cell_wpct || w->cell_dir) {
             pd_cell_props cp;
 
             if (pd_doc_cell_props(b->d, bld_container(b), &cp) == PD_OK) {
+                cp.text_dir = w->cell_dir;
                 cp.width = w->cell_w;
                 cp.width_pct = w->cell_w ? 0 : w->cell_wpct;
                 cp.valign = w->cell_valign;
@@ -10315,15 +10322,6 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     mu_attr(&m, "r:id", w->hf_ref[k], sizeof(w->hf_ref[0]));
                 } else if (strcmp(t, "titlePg") == 0) {
                     w->sp.title_page = attr_on(&m);
-                } else if (strcmp(t, "tcW") == 0) {
-                    if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
-                        w->cell_w = twips(attr_int(&m, "w:w", 0));
-                        w->cell_w = w->cell_w > 0 ? w->cell_w : 0;
-                    } else if (strcmp(v, "pct") == 0 && mu_attr(&m, "w:w", v, sizeof(v))) {
-                        double pct = strchr(v, '%') ? atof(v) * 10 : atof(v) / 5;
-
-                        w->cell_wpct = (int32_t)(pct < 0 ? 0 : pct > 1000 ? 1000 : pct);
-                    }
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->sp.page_valign = !strcmp(v, "center") ? 1 : !strcmp(v, "bottom") ? 2 : 0;
                 } else if (strcmp(t, "bidi") == 0) {    /* right to left: its columns from the right */
@@ -10733,6 +10731,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->cell_valign = 0;
                 w->cell_w = 0;
                 w->cell_wpct = 0;
+                w->cell_dir = 0;
                 memset(&w->cell_edges, 0, sizeof(w->cell_edges));
             } else if (strcmp(t, "tcPr") == 0) {
                 w->in_tcpr = m.type == MT_OPEN;
@@ -10741,6 +10740,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->span = attr_int(&m, "w:val", 1);
                 } else if (strcmp(t, "vMerge") == 0) {   /* no value: continues the cell above */
                     w->cell_merge = !(mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "restart") == 0);
+                } else if (strcmp(t, "textDirection") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
+                    w->cell_dir = !strcmp(v, "btLr") ? PD_CELLTEXT_BTLR : !strcmp(v, "tbRl") || !strcmp(v, "tbRlV") ||
+                                  !strcmp(v, "rl") || !strcmp(v, "rlV") ? PD_CELLTEXT_TBRL : PD_CELLTEXT_LRTB;
                 } else if (strcmp(t, "tcW") == 0) {
                     if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
                         w->cell_w = twips(attr_int(&m, "w:w", 0));
