@@ -10359,6 +10359,63 @@ static void test_vertical_section(void) {
     pd_doc_free(d);
 }
 
+/* WordArt along a path: in a square box, "AMZ" arched up goes over the top (A at the left, M at the top middle, Z
+   at the right, its glyphs turned with the arch), arched down under the bottom (M at the bottom middle) */
+static void test_wordart_on_path(void) {
+    static const char* box = "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/>"
+                             "</a:xfrm><a:prstGeom prst=\"rect\"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx>"
+                             "<w:txbxContent><w:p><w:r><w:rPr><w:sz w:val=\"40\"/></w:rPr><w:t>AMZ</w:t></w:r></w:p>"
+                             "</w:txbxContent></wps:txbx><wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" wrap=\"none\">"
+                             "<a:prstTxWarp prst=\"%s\"><a:avLst/></a:prstTxWarp></wps:bodyPr></wps:wsp>";
+    static const char* kinds[2] = { "textArchUp", "textArchDown" };
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {
+        char shapes[2048];
+        pd_doc* d = NULL;
+        pd_layout* L = NULL;
+        int32_t n = 0, k;
+        pd_draw* it;
+        double cx[3] = { 0, 0, 0 }, cy[3] = { 0, 0, 0 };
+        int got[3] = { 0, 0, 0 };
+
+        snprintf(shapes, sizeof(shapes), box, kinds[pass]);
+        it = group_items(shapes, &d, &L, &n);
+
+        if (!it) {
+            CHECK(0);
+            pd_layout_free(L);
+            pd_doc_free(d);
+            continue;
+        }
+
+        for (k = 0; k < n; k++) {   /* the glyphs' paths' middles, and the group's extent from them all */
+            const char* q = it[k].kind == PD_DRAW_PATH ? strchr("AMZ", (int)it[k].text) : NULL;
+
+            if (q && it[k].text) {
+                int i = (int)(q - "AMZ");
+
+                cx[i] = it[k].x + it[k].w / 2.0;
+                cy[i] = it[k].y + it[k].h / 2.0;
+                got[i] = 1;
+            }
+        }
+
+        CHECK(got[0] && got[1] && got[2]);
+
+        if (got[0] && got[1] && got[2]) {
+            CHECK(cx[0] < cx[1] && cx[1] < cx[2]);                     /* read left to right */
+            CHECK(fabs(cy[0] - cy[2]) < PD_PT(20));                   /* the ends level, at the sides */
+            /* the middle over (under) the ends by about half the ellipse's height: a fifth of their span at least */
+            CHECK(pass == 0 ? cy[0] - cy[1] > 0.2 * (cx[2] - cx[0]) : cy[1] - cy[0] > 0.2 * (cx[2] - cx[0]));
+        }
+
+        free(it);
+        pd_layout_free(L);
+        pd_doc_free(d);
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -10475,6 +10532,7 @@ int main(void) {
     test_docx_picture_fill();
     test_docx_shape_effects();
     test_docx_text_in_shapes();
+    test_wordart_on_path();
     test_svg_out();
     test_drawing_png();
     test_docx_canvas_kept();

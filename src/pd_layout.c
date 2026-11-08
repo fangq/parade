@@ -251,14 +251,22 @@ struct pd_layout {
     int32_t dtext_ea;           /* East Asian vertical */
 };
 
-/* WordArt's warps (prstTxWarp) drawn as envelopes: the text's extent stretched between a top and a bottom curve
-   across the box (textCircle and the other warps that set text along a path: not warped) */
+/* WordArt's warps (prstTxWarp): most drawn as envelopes, the text's extent stretched between a top and a bottom curve
+   across the box; those that set text along a path (textArchUp, textArchDown, textCircle, textButton) put it on the
+   ellipse in the box, each point of a glyph as far round as it is along the line and as far in as it is down it */
 static const char* const warp_names[] = {
     "", "textInflate", "textDeflate", "textWave1", "textWave2", "textDoubleWave1", "textSlantUp", "textSlantDown",
     "textTriangle", "textTriangleInverted", "textChevron", "textChevronInverted", "textCanUp", "textCanDown",
     "textArchUp", "textArchDown", "textFadeRight", "textFadeLeft", "textCascadeUp", "textCascadeDown",
-    "textInflateTop", "textInflateBottom", "textDeflateTop", "textDeflateBottom", "textArchUpPour", "textArchDownPour"
+    "textInflateTop", "textInflateBottom", "textDeflateTop", "textDeflateBottom", "textArchUpPour", "textArchDownPour",
+    "textCircle", "textButton"
 };
+
+#define WARP_ARCH_UP   14
+#define WARP_ARCH_DOWN 15
+#define WARP_CIRCLE    26
+#define WARP_BUTTON    27
+#define WARP_ON_PATH(k) ((k) == WARP_ARCH_UP || (k) == WARP_ARCH_DOWN || (k) == WARP_CIRCLE || (k) == WARP_BUTTON)
 
 static int warp_kind(const char* s, size_t n) {
     int k;
@@ -7467,6 +7475,29 @@ static void wg_put(wglyph* g, int32_t fx, int32_t fy) {
 
     u = (px - l->wx0) / (double)(l->wx1 - l->wx0);  /* where in the text's extent, then the same in the envelope */
     v = (py - l->wy0) / (double)(l->wy1 - l->wy0);
+
+    if (WARP_ON_PATH(l->warp)) {    /* along the ellipse in the box: round it as along the line, in as down it */
+        double rx = (l->bx1 - l->bx0) / 2.0, ry = (l->by1 - l->by0) / 2.0, cx = l->bx0 + rx, cy = l->by0 + ry;
+        double th = l->wy1 - l->wy0, a, d;
+
+        th = th > 0.45 * ry ? 0.45 * ry : th;   /* as tall as it is, inside half the ellipse at most */
+
+        if (l->warp == WARP_ARCH_DOWN) {    /* under the middle, left to right, tops toward the middle */
+            a = 3.14159265358979 * (1 - u);
+            d = (1 - v) * th;
+        } else {    /* over the top from the left (a circle: on round), tops outward */
+            a = 3.14159265358979 * (1 + u * (l->warp == WARP_CIRCLE ? 2 : 1));
+            d = v * th;
+        }
+
+        g->xy[2 * g->n] = (pd_sp)lround(cx + (rx - d) * cos(a));
+        g->xy[2 * g->n + 1] = (pd_sp)lround(cy + (ry - d) * sin(a));
+        g->n++;
+        g->cx = fx;
+        g->cy = fy;
+        return;
+    }
+
     warp_curves(l->warp, u < 0 ? 0 : u > 1 ? 1 : u, &t, &b);
     g->xy[2 * g->n] = (pd_sp)lround(l->bx0 + u * (l->bx1 - l->bx0));
     g->xy[2 * g->n + 1] = (pd_sp)lround(l->by0 + (t + v * (b - t)) * (l->by1 - l->by0));
