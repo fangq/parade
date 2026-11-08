@@ -348,6 +348,9 @@ type
     procedure RestoreShapeStep(const S: TParadeShapeStep);
     procedure OnlyShape;
     function ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
+    { the selected shapes' XML changed by one of the format edits (Op), one step of undo }
+    function ShapeFormatOp(Op: Integer; const S1, S2, S3, S4: string; N1, N2: Double; C1, C2: TColor;
+      const Lbl: string): Boolean;
     function ShapeClientRect(const B: array of Double; out R: TRect): Boolean;
     function ShapeDragStart(X, Y: Integer): Boolean;
     procedure ShapeDragMove(X, Y: Integer; Shift: TShiftState);
@@ -469,6 +472,27 @@ type
       lgDashDotDot, sysDashDot, sysDashDotDot) and given arrowheads at its start (Head) and end (Tail): none,
       triangle, stealth, diamond, oval, arrow; '' leaves one as it is. One step of undo }
     function SetShapeLineStyle(const Dash, Head, Tail: string): Boolean;
+    { the selected shapes' fill: a gradient from C1 to C2 (Kind 0: linear, running Angle degrees clockwise from
+      left to right; 1: out from the middle in a circle; 2: in a rectangle), a pattern (Office's prstPattern names:
+      pct10, ltDnDiag, dkHorz, smGrid, ... in Fg on Bg); a solid fill seen through (Percent 0: opaque, 100:
+      clear). Each one step of undo; drawn as Word draws them where Parade's drawing has them }
+    function SetShapeGradient(C1, C2: TColor; Angle: Double; Kind: Integer = 0): Boolean;
+    function SetShapePattern(const Prst: string; Fg, Bg: TColor): Boolean;
+    function SetShapeTransparency(Percent: Double): Boolean;
+    { the selected shapes' effects: a shadow (0 none, 1 outside, below right, 2 outside, all round and soft, 3
+      inside), a glow of a colour RadPt wide (RadPt 0: none), soft edges RadPt wide (0: none); one step of undo each }
+    function SetShapeShadow(Kind: Integer): Boolean;
+    function SetShapeGlow(AColor: TColor; RadPt: Double): Boolean;
+    function SetShapeSoftEdge(RadPt: Double): Boolean;
+    { the outline's ends (Cap: flat, rnd, sq), corners (Join: round, bevel, miter) and strokes (Compound: sng, dbl,
+      thickThin, thinThick, tri); '' leaves one as it is. One step of undo }
+    function SetShapeLineEnds(const Cap, Join, Compound: string): Boolean;
+    { the selected shapes' text: where it sits (Anchor t, ctr, b), how far in from the sides (InsetPt; negative: as
+      it is), whether the shape grows to it or it shrinks to the shape (Autofit none, shape, text), which way it
+      runs (Vert horz, vert, vert270, eaVert), in how many columns (Cols; 0 as it is); '' leaves one as it is. One
+      step of undo }
+    function SetShapeTextOptions(const Anchor: string; InsetPt: Double; const Autofit, Vert: string;
+      Cols: Integer): Boolean;
     { the selected shape's outline: its dash and its arrowheads, as Word has them ('' none given) }
     function ShapeLineStyle(out Dash, Head, Tail: string): Boolean;
     function GroupShapes: Boolean;
@@ -7684,6 +7708,290 @@ begin
     for I := 1 to High(Sids) do
       FShapeMore[I - 1] := Sids[I];
   end;
+end;
+
+procedure SetAttr(var Xml: string; At: Integer; const Name, Value: string); forward;
+
+{ an a:effectLst with one effect replaced (Part '' takes it out), the effects in the order DrawingML has them }
+function EffectWithPart(const Lst, Name, Part: string): string;
+const
+  Order: array[0..7] of string = ('a:blur', 'a:fillOverlay', 'a:glow', 'a:innerShdw', 'a:outerShdw', 'a:prstShdw',
+    'a:reflection', 'a:softEdge');
+var
+  Els: TXmlEls;
+  I, K, R: Integer;
+  Kids: array[0..7] of string;
+  L: string;
+begin
+  L := Lst;
+  if (L = '') or (Copy(L, Length(L) - 1, 2) = '/>') then
+    L := '<a:effectLst></a:effectLst>';
+  Els := XmlElements(L);
+  for I := 0 to 7 do
+    Kids[I] := '';
+  for I := 1 to High(Els) do
+    if Els[I].Parent = 0 then
+      for K := 0 to 7 do
+        if Order[K] = Els[I].Name then
+          Kids[K] := Copy(L, Els[I].A, Els[I].B - Els[I].A);
+  R := -1;
+  for K := 0 to 7 do
+    if Order[K] = Name then
+      R := K;
+  if R >= 0 then
+    Kids[R] := Part;
+  if (Name = 'a:outerShdw') or (Name = 'a:innerShdw') then  { one shadow at a time }
+  begin
+    Kids[3] := IfThen(Name = 'a:innerShdw', Part, '');
+    Kids[4] := IfThen(Name = 'a:outerShdw', Part, '');
+    Kids[5] := '';
+  end;
+  Result := '<a:effectLst>';
+  for I := 0 to 7 do
+    Result := Result + Kids[I];
+  Result := Result + '</a:effectLst>';
+end;
+
+function TParadeEdit.ShapeFormatOp(Op: Integer; const S1, S2, S3, S4: string; N1, N2: Double; C1, C2: TColor;
+  const Lbl: string): Boolean;
+const
+  FillKinds: array[0..5] of string = ('a:noFill', 'a:solidFill', 'a:gradFill', 'a:pattFill', 'a:blipFill',
+    'a:grpFill');
+  AfterFill: array[0..4] of string = ('a:ln', 'a:effectLst', 'a:effectDag', 'a:scene3d', 'a:sp3d');
+var
+  Xml, F, Ln, Lst, Bp, Hex: string;
+  Els: TXmlEls;
+  Sids: TIntegerArray;
+  I, E, Pr, L, B, K, P: Integer;
+  Did: Boolean;
+begin
+  OnlyShape;
+  Result := False;
+  Sids := SelectedShapes;
+  if FReadOnly or (Length(Sids) = 0) or not KeptXml(Xml) then
+    Exit;
+  Did := False;
+  for I := 0 to High(Sids) do
+  begin   { each in the XML as it is now }
+    Els := XmlElements(Xml);
+    E := SidElement(Els, Sids[I]);
+    Pr := PropsOf(Els, E);
+    if (E < 0) or (Pr < 0) then
+      Continue;
+    case Op of
+      0, 1:   { a gradient, a pattern }
+        begin
+          if Op = 0 then
+          begin
+            if Round(N2) = 0 then
+              F := '<a:lin ang="' + IntToStr(Round(N1 * 60000) mod 21600000) + '" scaled="0"/>'
+            else
+              F := '<a:path path="' + IfThen(Round(N2) = 2, 'rect', 'circle') + '"><a:fillToRect l="50000" ' +
+                't="50000" r="50000" b="50000"/></a:path>';
+            F := '<a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:srgbClr val="' + HexRGB(C1) +
+              '"/></a:gs><a:gs pos="100000"><a:srgbClr val="' + HexRGB(C2) + '"/></a:gs></a:gsLst>' + F +
+              '</a:gradFill>';
+          end
+          else
+            F := '<a:pattFill prst="' + S1 + '"><a:fgClr><a:srgbClr val="' + HexRGB(C1) + '"/></a:fgClr><a:bgClr>' +
+              '<a:srgbClr val="' + HexRGB(C2) + '"/></a:bgClr></a:pattFill>';
+          Xml := PutIntoProps(Xml, Els, Pr, FillKinds, AfterFill, F);
+          Did := True;
+        end;
+      2:      { seen through: the solid fill's colour given an alpha }
+        begin
+          L := ChildNamed(Els, Pr, 'a:solidFill');
+          if L < 0 then
+            Continue;
+          F := Copy(Xml, Els[L].A, Els[L].B - Els[L].A);
+          P := Pos('<a:srgbClr val="', F);
+          if P > 0 then
+            Hex := Copy(F, P + 16, 6)
+          else
+            Hex := HexRGB(clBlack);
+          if (P = 0) and (ChildNamed(Els, L, 'a:schemeClr') >= 0) then
+          begin   { a theme colour keeps its link, its alpha replaced }
+            K := ChildNamed(Els, L, 'a:schemeClr');
+            Bp := Copy(Xml, Els[K].A, Els[K].B - Els[K].A);
+            P := Pos('<a:alpha ', Bp);
+            if P > 0 then
+              Delete(Bp, P, PosEx('/>', Bp, P) + 2 - P);
+            if Copy(Bp, Length(Bp) - 1, 2) = '/>' then
+              Bp := Copy(Bp, 1, Length(Bp) - 2) + '></a:schemeClr>';
+            if N1 > 0 then
+              Insert('<a:alpha val="' + IntToStr(Round((100 - Min(100, N1)) * 1000)) + '"/>', Bp,
+                Length(Bp) - Length('</a:schemeClr>') + 1);
+            F := '<a:solidFill>' + Bp + '</a:solidFill>';
+          end
+          else if N1 > 0 then
+            F := '<a:solidFill><a:srgbClr val="' + Hex + '"><a:alpha val="' +
+              IntToStr(Round((100 - Min(100, N1)) * 1000)) + '"/></a:srgbClr></a:solidFill>'
+          else
+            F := '<a:solidFill><a:srgbClr val="' + Hex + '"/></a:solidFill>';
+          Xml := Copy(Xml, 1, Els[L].A - 1) + F + Copy(Xml, Els[L].B, MaxInt);
+          Did := True;
+        end;
+      3:      { an effect: S1 its element, S2 the element (or '') }
+        begin
+          L := ChildNamed(Els, Pr, 'a:effectLst');
+          if L >= 0 then
+            Lst := Copy(Xml, Els[L].A, Els[L].B - Els[L].A)
+          else
+            Lst := '';
+          Lst := EffectWithPart(Lst, S1, S2);
+          if Lst = '<a:effectLst></a:effectLst>' then
+            Lst := '';
+          if L >= 0 then
+            Xml := Copy(Xml, 1, Els[L].A - 1) + Lst + Copy(Xml, Els[L].B, MaxInt)
+          else if Lst <> '' then
+            Xml := PutIntoProps(Xml, Els, Pr, [], ['a:effectDag', 'a:scene3d', 'a:sp3d', 'a:extLst'], Lst);
+          Did := True;
+        end;
+      4:      { the outline's cap, join, compound }
+        begin
+          L := ChildNamed(Els, Pr, 'a:ln');
+          if L < 0 then
+          begin
+            Xml := PutIntoProps(Xml, Els, Pr, [], ['a:effectLst', 'a:effectDag', 'a:scene3d', 'a:sp3d', 'a:extLst'],
+              '<a:ln></a:ln>');
+            Els := XmlElements(Xml);
+            E := SidElement(Els, Sids[I]);
+            Pr := PropsOf(Els, E);
+            L := ChildNamed(Els, Pr, 'a:ln');
+            if L < 0 then
+              Continue;
+          end;
+          Ln := Copy(Xml, Els[L].A, Els[L].B - Els[L].A);
+          if S1 <> '' then
+            SetAttr(Ln, 1, 'cap', S1);
+          if S3 <> '' then
+            SetAttr(Ln, 1, 'cmpd', S3);
+          if S2 <> '' then
+          begin
+            Ln := LnWithPart(Ln, 'a:round', '');
+            Ln := LnWithPart(Ln, 'a:bevel', '');
+            Ln := LnWithPart(Ln, 'a:miter', IfThen(S2 = 'miter', '<a:miter lim="800000"/>', ''));
+            if S2 = 'round' then
+              Ln := LnWithPart(Ln, 'a:round', '<a:round/>')
+            else if S2 = 'bevel' then
+              Ln := LnWithPart(Ln, 'a:bevel', '<a:bevel/>');
+          end;
+          Xml := Copy(Xml, 1, Els[L].A - 1) + Ln + Copy(Xml, Els[L].B, MaxInt);
+          Did := True;
+        end;
+      5:      { the text's body properties }
+        begin
+          B := ChildNamed(Els, E, 'wps:bodyPr');
+          if B < 0 then
+            B := ChildNamed(Els, E, 'a:bodyPr');
+          if B < 0 then
+            Continue;
+          Bp := Copy(Xml, Els[B].A, Els[B].B - Els[B].A);
+          if Copy(Bp, Length(Bp) - 1, 2) = '/>' then
+            Bp := Copy(Bp, 1, Length(Bp) - 2) + '></' + Els[B].Name + '>';
+          if S1 <> '' then
+            SetAttr(Bp, 1, 'anchor', S1);
+          if N1 >= 0 then
+          begin
+            SetAttr(Bp, 1, 'lIns', IntToStr(Round(N1 * 12700)));
+            SetAttr(Bp, 1, 'tIns', IntToStr(Round(N1 * 12700)));
+            SetAttr(Bp, 1, 'rIns', IntToStr(Round(N1 * 12700)));
+            SetAttr(Bp, 1, 'bIns', IntToStr(Round(N1 * 12700)));
+          end;
+          if S3 <> '' then
+            SetAttr(Bp, 1, 'vert', S3);
+          if Round(N2) > 0 then
+            SetAttr(Bp, 1, 'numCol', IntToStr(Round(N2)));
+          if S2 <> '' then
+          begin   { the autofit: its element replaced }
+            for F in ['<a:noAutofit/>', '<a:spAutoFit/>'] do
+            begin
+              P := Pos(F, Bp);
+              if P > 0 then
+                Delete(Bp, P, Length(F));
+            end;
+            P := Pos('<a:normAutofit', Bp);
+            if P > 0 then
+              Delete(Bp, P, PosEx('/>', Bp, P) + 2 - P);
+            if S2 = 'none' then F := '<a:noAutofit/>'
+            else if S2 = 'shape' then F := '<a:spAutoFit/>'
+            else F := '<a:normAutofit/>';
+            P := Pos('>', Bp);
+            Insert(F, Bp, P + 1);
+          end;
+          Xml := Copy(Xml, 1, Els[B].A - 1) + Bp + Copy(Xml, Els[B].B, MaxInt);
+          Did := True;
+        end;
+    end;
+  end;
+  if not Did then
+    Exit;
+  Result := ApplyKeptXml(Xml, Lbl, Sids[0]);
+  if Result then
+  begin
+    SetLength(FShapeMore, Length(Sids) - 1);
+    for I := 1 to High(Sids) do
+      FShapeMore[I - 1] := Sids[I];
+  end;
+end;
+
+function TParadeEdit.SetShapeGradient(C1, C2: TColor; Angle: Double; Kind: Integer): Boolean;
+begin
+  Result := ShapeFormatOp(0, '', '', '', '', Angle, Kind, C1, C2, 'Gradient fill');
+end;
+
+function TParadeEdit.SetShapePattern(const Prst: string; Fg, Bg: TColor): Boolean;
+begin
+  Result := (Prst <> '') and ShapeFormatOp(1, Prst, '', '', '', 0, 0, Fg, Bg, 'Pattern fill');
+end;
+
+function TParadeEdit.SetShapeTransparency(Percent: Double): Boolean;
+begin
+  Result := ShapeFormatOp(2, '', '', '', '', Max(0, Min(100, Percent)), 0, clNone, clNone, 'Transparency');
+end;
+
+function TParadeEdit.SetShapeShadow(Kind: Integer): Boolean;
+begin
+  case Kind of
+    1: Result := ShapeFormatOp(3, 'a:outerShdw', '<a:outerShdw blurRad="50800" dist="38100" dir="2700000" ' +
+        'algn="tl" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="40000"/></a:srgbClr></a:outerShdw>', '',
+        '', 0, 0, clNone, clNone, 'Shadow');
+    2: Result := ShapeFormatOp(3, 'a:outerShdw', '<a:outerShdw blurRad="152400" algn="ctr" rotWithShape="0">' +
+        '<a:srgbClr val="000000"><a:alpha val="35000"/></a:srgbClr></a:outerShdw>', '', '', 0, 0, clNone, clNone,
+        'Shadow');
+    3: Result := ShapeFormatOp(3, 'a:innerShdw', '<a:innerShdw blurRad="63500" dist="50800" dir="13500000">' +
+        '<a:srgbClr val="000000"><a:alpha val="50000"/></a:srgbClr></a:innerShdw>', '', '', 0, 0, clNone, clNone,
+        'Shadow');
+  else
+    Result := ShapeFormatOp(3, 'a:outerShdw', '', '', '', 0, 0, clNone, clNone, 'Shadow');
+  end;
+end;
+
+function TParadeEdit.SetShapeGlow(AColor: TColor; RadPt: Double): Boolean;
+begin
+  if RadPt > 0 then
+    Result := ShapeFormatOp(3, 'a:glow', '<a:glow rad="' + IntToStr(Round(RadPt * 12700)) + '"><a:srgbClr val="' +
+      HexRGB(AColor) + '"><a:alpha val="60000"/></a:srgbClr></a:glow>', '', '', 0, 0, clNone, clNone, 'Glow')
+  else
+    Result := ShapeFormatOp(3, 'a:glow', '', '', '', 0, 0, clNone, clNone, 'Glow');
+end;
+
+function TParadeEdit.SetShapeSoftEdge(RadPt: Double): Boolean;
+begin
+  Result := ShapeFormatOp(3, 'a:softEdge', IfThen(RadPt > 0, '<a:softEdge rad="' + IntToStr(Round(RadPt * 12700)) +
+    '"/>', ''), '', '', 0, 0, clNone, clNone, 'Soft edges');
+end;
+
+function TParadeEdit.SetShapeLineEnds(const Cap, Join, Compound: string): Boolean;
+begin
+  Result := ((Cap <> '') or (Join <> '') or (Compound <> '')) and
+    ShapeFormatOp(4, Cap, Join, Compound, '', 0, 0, clNone, clNone, 'Line ends');
+end;
+
+function TParadeEdit.SetShapeTextOptions(const Anchor: string; InsetPt: Double; const Autofit, Vert: string;
+  Cols: Integer): Boolean;
+begin
+  Result := ShapeFormatOp(5, Anchor, Autofit, Vert, '', InsetPt, Cols, clNone, clNone, 'Text options');
 end;
 
 function TParadeEdit.ShapeLineStyle(out Dash, Head, Tail: string): Boolean;
