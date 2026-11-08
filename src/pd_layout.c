@@ -7545,6 +7545,77 @@ static void wg_cubic(void* u, int32_t ax, int32_t ay, int32_t bx, int32_t by, in
     }
 }
 
+/* a point of a shrunk or warped text box's line where it is drawn (forward), or back from there (inverse): the
+   shrink about the box's corner; an envelope's stretch between its curves; a path warp's way round the ellipse */
+static void shape_pt(const pline* l, int inverse, pd_sp* x, pd_sp* y) {
+    double s = l->fscale / 65536.0;
+
+    if (l->fscale != 65536 && s > 0) {
+        if (inverse) {
+            *x = l->sx + (pd_sp)((*x - l->sx) / s);
+            *y = l->sy + (pd_sp)((*y - l->sy) / s);
+        } else {
+            *x = l->sx + (pd_sp)((*x - l->sx) * s);
+            *y = l->sy + (pd_sp)((*y - l->sy) * s);
+        }
+    }
+
+    if (!l->warp || l->wx1 <= l->wx0 || l->wy1 <= l->wy0 || l->bx1 <= l->bx0 || l->by1 <= l->by0) {
+        return;
+    }
+
+    if (WARP_ON_PATH(l->warp)) {
+        double rx = (l->bx1 - l->bx0) / 2.0, ry = (l->by1 - l->by0) / 2.0, cx = l->bx0 + rx, cy = l->by0 + ry;
+        double th = l->wy1 - l->wy0, u, v, a, d, pi = 3.14159265358979;
+
+        th = th > 0.45 * ry ? 0.45 * ry : th;
+
+        if (!inverse) {
+            u = (*x - l->wx0) / (double)(l->wx1 - l->wx0);
+            v = (*y - l->wy0) / (double)(l->wy1 - l->wy0);
+            a = l->warp == WARP_ARCH_DOWN ? pi * (1 - u) : pi * (1 + u * (l->warp == WARP_CIRCLE ? 2 : 1));
+            d = l->warp == WARP_ARCH_DOWN ? (1 - v) * th : v * th;
+            *x = (pd_sp)lround(cx + (rx - d) * cos(a));
+            *y = (pd_sp)lround(cy + (ry - d) * sin(a));
+            return;
+        }
+
+        a = atan2((*y - cy) / ry, (*x - cx) / rx);  /* -pi..pi */
+        d = (1 - hypot((*x - cx) / rx, (*y - cy) / ry)) * (rx + ry) / 2;
+
+        if (l->warp == WARP_ARCH_DOWN) {
+            u = 1 - (a < 0 ? (a > -pi / 2 ? 0 : pi) : a) / pi;
+            v = th > 0 ? 1 - d / th : 0;
+        } else {
+            a = a < 0 ? a + 2 * pi : a;     /* 0..2pi, the text from pi round */
+            u = (a < pi / 2 ? a + 2 * pi : a) - pi;
+            u /= pi * (l->warp == WARP_CIRCLE ? 2 : 1);
+            v = th > 0 ? d / th : 0;
+        }
+
+        u = u < 0 ? 0 : u > 1 ? 1 : u;
+        *x = l->wx0 + (pd_sp)(u * (l->wx1 - l->wx0));
+        *y = l->wy0 + (pd_sp)(v * (l->wy1 - l->wy0));
+    } else {
+        double u, v, t, b;
+
+        if (!inverse) {
+            u = (*x - l->wx0) / (double)(l->wx1 - l->wx0);
+            v = (*y - l->wy0) / (double)(l->wy1 - l->wy0);
+            warp_curves(l->warp, u < 0 ? 0 : u > 1 ? 1 : u, &t, &b);
+            *x = (pd_sp)lround(l->bx0 + u * (l->bx1 - l->bx0));
+            *y = (pd_sp)lround(l->by0 + (t + v * (b - t)) * (l->by1 - l->by0));
+            return;
+        }
+
+        u = (*x - l->bx0) / (double)(l->bx1 - l->bx0);
+        warp_curves(l->warp, u < 0 ? 0 : u > 1 ? 1 : u, &t, &b);
+        v = b - t > 1e-6 ? ((*y - l->by0) / (double)(l->by1 - l->by0) - t) / (b - t) : 0;
+        *x = l->wx0 + (pd_sp)(u * (l->wx1 - l->wx0));
+        *y = l->wy0 + (pd_sp)(v * (l->wy1 - l->wy0));
+    }
+}
+
 /* the items a shrunk or warped text box's line was drawn with, from N0: shrunk about the box's corner; warped,
    each glyph made a path of its outline through the envelope (drawn as paths: no text to pick out of a PDF) */
 static void shape_items(dlist_t* D, int32_t n0, const pline* l) {
@@ -8037,6 +8108,10 @@ pd_status pd_layout_hit_test(const pd_layout* L, int32_t page, pd_sp x, pd_sp y,
         int64_t dy, dx, dist;
         pd_sp left, right;
 
+        if (l->fscale != 65536 || l->warp) {   /* shrunk or warped: back from where it is drawn */
+            shape_pt(l, 1, &lx, &ly);
+        }
+
         if (l->rot) {
             turn_pt(21600000 - l->rot, l->rx, l->ry, &lx, &ly);
         }
@@ -8117,6 +8192,10 @@ pd_status pd_layout_caret(const pd_layout* L, pd_pos pos, int32_t* page, pd_sp* 
 
                     if (l->rot) {   /* on a turned line: where it is drawn */
                         turn_pt(l->rot, l->rx, l->ry, &px, &py);
+                    }
+
+                    if (l->fscale != 65536 || l->warp) {   /* shrunk or warped: there */
+                        shape_pt(l, 0, &px, &py);
                     }
 
                     if (x) {

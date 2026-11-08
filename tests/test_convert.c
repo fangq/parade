@@ -3991,6 +3991,29 @@ static void test_docx_text_in_shapes(void) {
     CHECK(wavy == 0 && waved == 2);     /* the warped word's glyphs paths, none left as glyphs */
     CHECK(up == 1 && turned == 2);
 
+    {   /* the shrunk box: the caret drawn at its 'z' as shrunk, and a click there finds the 'z' */
+        pd_block_id zp = story_para_with(d, "Zz");
+        pd_sp gx = -1, gy = 0, cx = 0, base = 0, asc, desc;
+        int32_t pg;
+        pd_pos hit;
+
+        for (k = 0; k < n; k++) {
+            if (it[k].kind == PD_DRAW_GLYPH && it[k].text == 'z') {
+                gx = it[k].x;
+                gy = it[k].y;
+            }
+        }
+
+        CHECK(zp != 0 && gx >= 0);
+
+        if (zp && gx >= 0) {
+            CHECK(pd_layout_caret(L, at(zp, 1), &pg, &cx, &base, &asc, &desc) == PD_OK);
+            CHECK(labs((long)(cx - gx)) <= PD_PT(0.5) && labs((long)(base - gy)) <= PD_PT(0.5));
+            CHECK(pd_layout_hit_test(L, 0, gx + PD_PT(1), gy - PD_PT(1), &hit) == PD_OK && hit.block == zp &&
+                  hit.offset == 1);
+        }
+    }
+
     free(it);
     pd_layout_free(L);
     pd_doc_free(d);
