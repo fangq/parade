@@ -3195,7 +3195,8 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
         }
 
         for (k = 0; k < pp->ntabs && k < PD_MAX_TABS; k++) {
-            pb_printf(o, "<w:tab w:val=\"%s\" w:leader=\"%s\" w:pos=\"%d\"/>", al[pp->tabs[k].align & 3],
+            pb_printf(o, "<w:tab w:val=\"%s\" w:leader=\"%s\" w:pos=\"%d\"/>", pp->tabs[k].align == PD_TAB_BAR ? "bar" :
+                      al[pp->tabs[k].align & 3],
                       ld[pp->tabs[k].leader & 3], TW(pp->tabs[k].position));
         }
 
@@ -5200,14 +5201,15 @@ static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr
         pd_tab_stop* ts = &pp->tabs[pp->ntabs];
         char ld[32] = "none";
 
-        if (strcmp(v, "bar") == 0 || strcmp(v, "num") == 0) {
-            return;     /* a vertical bar, a list's own stop: not stops text goes to */
+        if (strcmp(v, "num") == 0) {
+            return;     /* a list's own stop: not one text goes to */
         }
 
         pp->mask |= PD_PP_TABS;
         ts->position = twips(attr_int(m, "w:pos", 0));
         ts->align = strcmp(v, "clear") == 0 ? -1 : strcmp(v, "center") == 0 ? PD_TAB_CENTER : strcmp(v, "right") == 0 ||
-                    strcmp(v, "end") == 0 ? PD_TAB_RIGHT : strcmp(v, "decimal") == 0 ? PD_TAB_DECIMAL : PD_TAB_LEFT;
+                    strcmp(v, "end") == 0 ? PD_TAB_RIGHT : strcmp(v, "decimal") == 0 ? PD_TAB_DECIMAL :
+                    strcmp(v, "bar") == 0 ? PD_TAB_BAR : PD_TAB_LEFT;
         mu_attr(m, "w:leader", ld, sizeof(ld));
         ts->leader = strcmp(ld, "dot") == 0 || strcmp(ld, "middleDot") == 0 ? PD_LEADER_DOT :
                      strcmp(ld, "hyphen") == 0 ? PD_LEADER_HYPHEN : strcmp(ld, "underscore") == 0 ||

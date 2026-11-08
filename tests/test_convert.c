@@ -5194,6 +5194,85 @@ static void test_docx_line_rules(void) {
     }
 }
 
+/* the rules (PD_DRAW_RULE) on page 0 whose left edge is at x, at most n of their heights into h; how many */
+static int rules_at(pd_doc* d, pd_sp x, pd_sp* h, int n) {
+    pd_layout* L = NULL;
+    int32_t cnt = 0, k, c = 0;
+    pd_draw* it;
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &cnt) == PD_OK && (it = (pd_draw*)malloc(((size_t)cnt + 1) *
+                    sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, cnt, &cnt);
+
+        for (k = 0; k < cnt; k++) {
+            if (it[k].kind == PD_DRAW_RULE && it[k].x == x) {
+                if (c < n) {
+                    h[c] = it[k].h;
+                }
+
+                c++;
+            }
+        }
+
+        free(it);
+    }
+
+    pd_layout_free(L);
+    return c;
+}
+
+/* A bar tab is a vertical rule through each line of its paragraph at the stop (it was dropped), and is written
+   back as one; the tab stop after it still takes the text. */
+static void test_docx_bar_tab(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:tabs><w:tab w:val=\"bar\" w:pos=\"2880\"/>"
+                    "<w:tab w:val=\"left\" w:pos=\"4320\"/></w:tabs></w:pPr><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t><w:br/>"
+                    "<w:t>C</w:t></w:r></w:p></w:body></w:document>",
+                    NULL);
+    pd_doc* back = NULL;
+    pd_sp h[4];
+    buf_t b;
+    int pass;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+    free(b.p);
+
+    for (pass = 0; pass < 2 && have_layout_font(); pass++) {
+        pd_doc* x = pass ? back : d;
+        pd_sp lo, hi;
+        pd_layout* L = NULL;
+
+        if (!x) {
+            continue;
+        }
+
+        /* the margin is 1in: the bar 2in into the column, half a point wide, down both lines */
+        CHECK(rules_at(x, PD_PT(72 + 144) - PD_PT(1) / 4, h, 4) == 2 && h[0] > PD_PT(10) && h[1] > PD_PT(10));
+        pd_doc_set_font_resolver(x, layout_resolver, NULL);
+
+        if (pd_layout_new(x, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+            CHECK(glyph_span(L, 'B', &lo, &hi) && lo == PD_PT(72 + 216));   /* B at the 3in stop, past the bar */
+        }
+
+        pd_layout_free(L);
+    }
+
+    pd_doc_free(back);
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -5879,6 +5958,7 @@ int main(void) {
     test_docx_endnotes();
     test_docx_text_small();
     test_docx_line_rules();
+    test_docx_bar_tab();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

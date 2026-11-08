@@ -3837,7 +3837,7 @@ int pd_doc_tabs_ok(const pd_para_props* pp) {
     }
 
     for (i = 0; i < pp->ntabs; i++) {
-        if (pp->tabs[i].align < PD_TAB_LEFT || pp->tabs[i].align > PD_TAB_DECIMAL ||
+        if (pp->tabs[i].align < PD_TAB_LEFT || pp->tabs[i].align > PD_TAB_BAR ||
                 pp->tabs[i].leader < PD_LEADER_NONE || pp->tabs[i].leader > PD_LEADER_UNDERSCORE) {
             return 0;
         }

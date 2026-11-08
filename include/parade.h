@@ -293,7 +293,9 @@ typedef enum {
     PD_TAB_LEFT = 0,            /**< text after the tab starts at the stop */
     PD_TAB_CENTER = 1,          /**< ... is centred on it */
     PD_TAB_RIGHT = 2,           /**< ... ends at it */
-    PD_TAB_DECIMAL = 3          /**< ... has its decimal point at it */
+    PD_TAB_DECIMAL = 3,         /**< ... has its decimal point at it */
+    PD_TAB_BAR = 4              /**< not a stop text goes to: a vertical rule through the paragraph's lines there
+                                     (Word's bar tab; a document paragraph's, pd_para_set_tabs takes none) */
 } pd_tab_align;
 
 typedef enum {

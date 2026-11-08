@@ -4976,6 +4976,22 @@ static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, 
 static void emit_para_boxes(dlist_t* D, const ppage* p) {
     int32_t i = 0, j, k;
 
+    for (i = 0; i < p->n; i++) {    /* bar tabs: a rule down each line of the paragraph, at the stop */
+        const pline* l = &p->lines[i];
+
+        for (k = 0; l->pc && l->line >= 0 && k < l->pc->pp.ntabs && k < PD_MAX_TABS; k++) {
+            if (l->pc->pp.tabs[k].align == PD_TAB_BAR) {
+                pd_sp x = l->pc->pp.direction == PD_DIR_RTL ? l->ox + l->pc->width - l->pc->pp.tabs[k].position :
+                          l->ox + l->pc->pp.tabs[k].position;
+
+                emit_rect(D, x - PD_PT(1) / 4, l->top, PD_PT(1) / 2, l->bottom - l->top, 0xFF000000u, l->pc->block,
+                          l->region);
+            }
+        }
+    }
+
+    i = 0;
+
     while (i < p->n) {
         const pline* l = &p->lines[i];
         const pd_para_props* pp;
