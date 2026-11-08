@@ -3456,7 +3456,7 @@ pd_status pd_doc_insert_inline(pd_doc* d, pd_pos at, const pd_inline* obj, pd_po
             obj->title_len < 0 || (obj->title_len && !obj->title) || obj->alt_len < 0 || (obj->alt_len && !obj->alt) ||
             (obj->kind == PD_INLINE_FOOTNOTE && (!pd_doc_blk(d, obj->target) ||
                     d->tab[obj->target]->kind != PD_BLOCK_STORY)) ||
-            (obj->kind == PD_INLINE_FIELD && (obj->field < PD_FIELD_PAGE || obj->field > PD_FIELD_DATE)) ||
+            (obj->kind == PD_INLINE_FIELD && (obj->field < PD_FIELD_PAGE || obj->field > PD_FIELD_KEPT)) ||
             obj->source_len < 0 || (obj->source_len && !obj->source)) {
         return PD_ERR_ARG;
     }

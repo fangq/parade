@@ -5486,6 +5486,80 @@ static void test_docx_text_boxes(void) {
     pd_doc_free(d);
 }
 
+#define FLD(ins, res) "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\">" ins \
+    "</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>" res "</w:t></w:r>" \
+    "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
+
+/* Fields nest (IF { PAGE } = 1 broke the outer field, shown "1 1"); a field Parade does not compute keeps its
+   instruction and Word's result, shown and written back as a field; dates follow their \@ picture; document
+   properties, IF and = are worked out when read; STYLEREF "Heading 1" is a running head. */
+static void test_docx_nested_fields(void) {
+    pd_doc* d = docx_doc(
+                    "docProps/core.xml",
+                    "<cp:coreProperties xmlns:cp=\"cp\" xmlns:dc=\"dc\" xmlns:dcterms=\"dcterms\"><dc:title>MyTitle</dc:title>"
+                    "<dcterms:modified>2026-10-06T03:40:00Z</dcterms:modified></cp:coreProperties>",
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:r><w:t>A:</w:t></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>"
+                    "<w:r><w:instrText xml:space=\"preserve\"> IF </w:instrText></w:r>" FLD(" PAGE ", "1")
+                    "<w:r><w:instrText xml:space=\"preserve\"> = 1 \"first\" \"other\" </w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>first</w:t></w:r>"
+                    "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
+                    "<w:p><w:r><w:t>B:</w:t></w:r>" FLD(" DOCPROPERTY Title ", "old") "</w:p>"
+                    "<w:p><w:r><w:t>C:</w:t></w:r>" FLD(" IF \"a\" = \"a\" \"yes\" \"no\" ", "no") "</w:p>"
+                    "<w:p><w:r><w:t>D:</w:t></w:r>" FLD(" = 2+3*4 ", "0") "</w:p>"
+                    "<w:p><w:r><w:t>E:</w:t></w:r>" FLD(" MERGEFIELD Name ", "Kept") "</w:p>"
+                    "<w:p><w:r><w:t>F:</w:t></w:r>" FLD(" SAVEDATE \\@ \"dddd, MMMM d, yyyy\" ", "x") "</w:p>"
+                    "<w:p><w:r><w:t>G:</w:t></w:r><w:fldSimple w:instr=\" DATE \\@ &quot;yyyy&quot; \"><w:r><w:t>z</w:t></w:r>"
+                    "</w:fldSimple></w:p>"
+                    "<w:p><w:r><w:t>H:</w:t></w:r>" FLD(" STYLEREF \"Heading 1\" ", "q") "</w:p>"
+                    "</w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        char shown[600];
+        const char* g;
+        pd_block_id p;
+        pd_inline o;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            break;
+        }
+
+        p = pd_doc_next_paragraph(d, 0);
+        CHECK(pd_doc_inline_at(d, at(p, 2), &o) == PD_OK && o.kind == PD_INLINE_FIELD && o.field == PD_FIELD_KEPT &&
+              o.source_len > 4 && strstr(o.source, "\xEF\xBF\xB9 PAGE \xEF\xBF\xBA" "1\xEF\xBF\xBB"));     /* PAGE in IF */
+
+        if (!have_layout_font()) {
+            continue;
+        }
+
+        layout_text(d, 0, shown, sizeof(shown));
+        CHECK(strstr(shown, "A:firstB:MyTitleC:yesD:14E:KeptF:Tuesday,October6,2026G:") != NULL);
+        g = strstr(shown, "G:");
+        CHECK(g && g[2] >= '2' && g[2] <= '9' && g[5] >= '0' && g[5] <= '9' && g[6] == 'H');
+    }
+
+    {
+        /* written back as fields, the nested one inside the IF's code */
+        buf_t b = { NULL, 0 };
+        char* xml;
+
+        CHECK(d && pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        xml = docx_part(&b, "word/document.xml");
+        CHECK(strstr(xml, "<w:instrText xml:space=\"preserve\"> IF </w:instrText></w:r><w:r><w:fldChar "
+                     "w:fldCharType=\"begin\"/>") && strstr(xml, "MERGEFIELD Name") &&
+              strstr(xml, "STYLEREF &quot;Heading 1&quot;"));
+        free(xml);
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -6174,6 +6248,7 @@ int main(void) {
     test_docx_bar_tab();
     test_docx_drop_cap();
     test_docx_text_boxes();
+    test_docx_nested_fields();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

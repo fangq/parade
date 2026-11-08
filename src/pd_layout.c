@@ -31,6 +31,7 @@
  */
 
 #include <math.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -297,7 +298,8 @@ static int body_field(void* user, const blk* b, const dinline* q, char* buf, siz
     const pd_inline* o = &q->obj;
 
     if (o->kind == PD_INLINE_FOOTNOTE || (o->kind == PD_INLINE_FIELD && (o->field == PD_FIELD_SEQ ||
-                                          o->field == PD_FIELD_REF_NUMBER))) {
+                                          o->field == PD_FIELD_REF_NUMBER || o->field == PD_FIELD_DATE ||
+                                          o->field == PD_FIELD_KEPT))) {
         field_text(L, NULL, b, q, buf, cap);
         return 1;
     }
@@ -4059,6 +4061,150 @@ static pd_sp emit_text(const pd_layout* L, dlist_t* D, const char* text, const p
     return end;
 }
 
+/* a date in a Word date picture: d dd ddd dddd, M MM MMM MMMM, yy yyyy, h hh H HH, m mm, s ss, AM/PM am/pm,
+   'quoted' text as it is; wd is the day of the week, 0 Sunday */
+static void date_picture(const char* pic, int y, int mo, int day, int wd, int hh, int mi, int ss, char* buf,
+                         size_t cap) {
+    static const char* const months[12] = { "January", "February", "March", "April", "May", "June", "July",
+                                            "August", "September", "October", "November", "December"
+                                          };
+    static const char* const days[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                                         "Saturday"
+                                       };
+    size_t o = 0;
+
+    buf[0] = '\0';
+
+    while (*pic && o + 1 < cap) {
+        char c = *pic;
+        int n = 1;
+        char t[32];
+
+        if (c == '\'') {   /* literal text */
+            for (pic++; *pic && *pic != '\'' && o + 1 < cap; pic++) {
+                buf[o++] = *pic;
+            }
+
+            pic += *pic == '\'';
+            continue;
+        }
+
+        if (!strncmp(pic, "AM/PM", 5) || !strncmp(pic, "am/pm", 5)) {
+            snprintf(t, sizeof(t), "%s", hh < 12 ? (c == 'A' ? "AM" : "am") : (c == 'A' ? "PM" : "pm"));
+            n = 5;
+        } else if (c == 'd' || c == 'D' || c == 'M' || c == 'y' || c == 'Y' || c == 'h' || c == 'H' || c == 'm' ||
+                   c == 's' || c == 'S') {
+            while (pic[n] == c) {
+                n++;
+            }
+
+            if (c == 'd' || c == 'D') {
+                n > 3 ? snprintf(t, sizeof(t), "%s", days[wd]) : n == 3 ? snprintf(t, sizeof(t), "%.3s", days[wd]) :
+                snprintf(t, sizeof(t), n == 2 ? "%02d" : "%d", day);
+            } else if (c == 'M') {
+                n > 3 ? snprintf(t, sizeof(t), "%s", months[mo - 1]) : n == 3 ? snprintf(t, sizeof(t), "%.3s",
+                        months[mo - 1]) : snprintf(t, sizeof(t), n == 2 ? "%02d" : "%d", mo);
+            } else if (c == 'y' || c == 'Y') {
+                snprintf(t, sizeof(t), n >= 3 ? "%04d" : "%02d", n >= 3 ? y : y % 100);
+            } else if (c == 'h') {
+                snprintf(t, sizeof(t), n >= 2 ? "%02d" : "%d", hh % 12 ? hh % 12 : 12);
+            } else if (c == 'H') {
+                snprintf(t, sizeof(t), n >= 2 ? "%02d" : "%d", hh);
+            } else if (c == 'm') {
+                snprintf(t, sizeof(t), n >= 2 ? "%02d" : "%d", mi);
+            } else {
+                snprintf(t, sizeof(t), n >= 2 ? "%02d" : "%d", ss);
+            }
+        } else {
+            t[0] = c;
+            t[1] = '\0';
+        }
+
+        o += (size_t)snprintf(buf + o, cap - o, "%s", t);
+        o = o < cap ? o : cap - 1;
+        pic += n;
+    }
+}
+
+/* a date field's value: now (DATE, TIME; SOURCE_DATE_EPOCH when it is set, for output that does not change), or
+   the document's created (CREATEDATE) or modified (SAVEDATE, PRINTDATE) metadata, in the instruction's picture */
+void pd_date_field(const pd_doc* d, const char* instr, int32_t n, char* buf, size_t cap) {
+    char ins[256], pic[96] = "", word[16] = "";
+    const char* p, *q;
+    int y = 0, mo = 1, day = 1, hh = 0, mi = 0, ss = 0, k = 0, a, m;
+
+    snprintf(ins, sizeof(ins), "%.*s", n > 0 ? (int)(n < 255 ? n : 255) : 0, instr ? instr : "");
+
+    for (p = ins; *p == ' '; p++) {
+    }
+
+    while (k < 15 && p[k] && p[k] != ' ' && p[k] != '\\') {
+        word[k] = p[k];
+        k++;
+    }
+
+    word[k] = '\0';
+
+    if ((p = strstr(ins, "\\@")) != NULL) {    /* the picture, quoted or a word */
+        for (p += 2; *p == ' '; p++) {
+        }
+
+        q = *p == '"' ? strchr(p + 1, '"') : p + strcspn(p, " \\");
+        p += *p == '"';
+        snprintf(pic, sizeof(pic), "%.*s", q && q > p ? (int)(q - p) : 0, p);
+    }
+
+    if (!pic[0]) {
+        snprintf(pic, sizeof(pic), "%s", !strcmp(word, "TIME") ? "h:mm am/pm" : "M/d/yyyy");
+    }
+
+    if (!strcmp(word, "CREATEDATE") || !strcmp(word, "SAVEDATE") || !strcmp(word, "PRINTDATE")) {
+        size_t yl = 0;
+        const char* yml = pd_doc_metadata(d, &yl), *key = word[0] == 'C' ? "created:" : "modified:", *e;
+        size_t kl = strlen(key);
+
+        for (p = yml; p && p < yml + yl; p = e + 1) {
+            e = memchr(p, '\n', (size_t)(yml + yl - p));
+            e = e ? e : yml + yl;
+
+            if ((size_t)(e - p) > kl && !strncmp(p, key, kl)) {
+                for (p += kl; *p == ' ' || *p == '"' || *p == '\''; p++) {
+                }
+
+                sscanf(p, "%d-%d-%dT%d:%d:%d", &y, &mo, &day, &hh, &mi, &ss);
+                break;
+            }
+        }
+
+        if (y <= 0) {   /* not said: Word shows nothing */
+            buf[0] = '\0';
+            return;
+        }
+    } else {
+        const char* env = getenv("SOURCE_DATE_EPOCH");
+        time_t now = env && *env ? (time_t)strtoll(env, NULL, 10) : time(NULL);
+        struct tm* tm = env && *env ? gmtime(&now) : localtime(&now);
+
+        if (!tm) {
+            buf[0] = '\0';
+            return;
+        }
+
+        y = tm->tm_year + 1900;
+        mo = tm->tm_mon + 1;
+        day = tm->tm_mday;
+        hh = tm->tm_hour;
+        mi = tm->tm_min;
+        ss = tm->tm_sec;
+    }
+
+    mo = mo < 1 ? 1 : mo > 12 ? 12 : mo;
+    a = (14 - mo) / 12;     /* the day of the week (0 Sunday), the Gregorian calendar's */
+    m = mo + 12 * a - 2;
+    k = y - a;
+    date_picture(pic, y, mo, day, (day + k + k / 4 - k / 100 + k / 400 + 31 * m / 12) % 7, hh, mi, ss, buf, cap);
+}
+
 static void field_text(const pd_layout* L, const ppage* p, const blk* b, const dinline* q, char* buf, size_t cap) {
     const pd_inline* o = &q->obj;
     int32_t v;
@@ -4071,6 +4217,13 @@ static void field_text(const pd_layout* L, const ppage* p, const blk* b, const d
     }
 
     switch (o->field) {
+        case PD_FIELD_DATE:
+            pd_date_field(L->doc, o->source, o->source_len, buf, cap);
+            break;
+
+        case PD_FIELD_KEPT:     /* its result is the text after it */
+            break;
+
         case PD_FIELD_PAGE:
             snprintf(buf, cap, "%s", p->label);
             break;

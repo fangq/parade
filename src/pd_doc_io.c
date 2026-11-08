@@ -38,7 +38,7 @@ static const char* const inline_names[] = { "image", "equation", "field", "footn
                                             "user", "raw", "control", "ruby"
                                           };
 static const char* const field_names[] = { "page", "pages", "sectionpage", "refnumber", "refpage", "seq",
-                                           "heading", "date"
+                                           "heading", "date", "kept"
                                          };
 static const char* const num_names[] = { "bullet", "decimal", "loweralpha", "upperalpha", "lowerroman",
                                          "upperroman", "none", "decimalzero", "ordinal", "circled",

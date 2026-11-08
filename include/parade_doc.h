@@ -546,7 +546,12 @@ typedef enum {
     PD_FIELD_REF_PAGE = 4,      /**< page of the target */
     PD_FIELD_SEQ = 5,           /**< counter in a named sequence ("Figure", "Table", "Equation") */
     PD_FIELD_HEADING = 6,       /**< text of the current heading at a level (running heads) */
-    PD_FIELD_DATE = 7
+    PD_FIELD_DATE = 7,          /**< a date: Word's instruction in source -- DATE and TIME now, CREATEDATE, SAVEDATE
+                                     and PRINTDATE the metadata's created and modified -- in its \@ picture
+                                     ("dddd, MMMM d, yyyy"; none: M/d/yyyy) */
+    PD_FIELD_KEPT = 8           /**< a field Parade does not compute: its instruction in source -- a field nested in
+                                     it as U+FFF9 instruction U+FFFA result U+FFFB -- and Word's last result the text up
+                                     to the next KEPT field with no source, which ends it; no size of its own */
 } pd_field_kind;
 
 typedef struct {
