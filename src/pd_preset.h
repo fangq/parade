@@ -7,7 +7,16 @@
 #define PD_PRESET_MAXPATH 16
 #define PD_PRESET_MAXPT 4096
 
-/* a preset's paths flattened in its box (0..w by 0..h): each path's points (NAN pairs between its rings) */
+#define PD_PRESET_MAXCMD 1024
+
+/* a path command: m, l, c (two control points and the end, from where the path is), z */
+typedef struct {
+    char op;
+    double p[6];
+} pd_preset_cmd;
+
+/* a preset's paths flattened in its box (0..w by 0..h): each path's points (NAN pairs between its rings), and
+   its commands with the curves as they are */
 typedef struct {
     int npath;
     struct {
@@ -15,9 +24,12 @@ typedef struct {
         int closed;         /* a ring of it closed */
         char fill[16];      /* norm, none, darken, darkenLess, lighten, lightenLess */
         int stroke;         /* outlined */
+        int cstart, cn;     /* its commands in c */
     } path[PD_PRESET_MAXPATH];
     double xy[2 * PD_PRESET_MAXPT];
     int n;
+    pd_preset_cmd c[PD_PRESET_MAXCMD];
+    int nc;
 } pd_preset_flat;
 
 /* whether NAME is one of Office's presets */

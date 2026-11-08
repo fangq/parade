@@ -432,6 +432,15 @@ int pd_preset_flatten(const char* name, double w, double h, const char* adj, pd_
 
         F->path[i].start = F->n;
         F->path[i].closed = 0;
+        F->path[i].cstart = F->nc;
+
+        for (k = O.path[i].start; k < O.path[i].start + O.path[i].n && F->nc < PD_PRESET_MAXCMD; k++) {
+            F->c[F->nc].op = O.c[k].op;
+            memcpy(F->c[F->nc].p, O.c[k].p, sizeof(F->c[0].p));
+            F->nc++;
+        }
+
+        F->path[i].cn = F->nc - F->path[i].cstart;
         snprintf(F->path[i].fill, sizeof(F->path[i].fill), "%s", O.path[i].fill);
         F->path[i].stroke = O.path[i].stroke;
 

@@ -391,6 +391,8 @@ int main(void) {
     printf("pd_draw.clip_points %zu\n", offsetof(pd_draw, clip_points));
     printf("pd_draw.clip_npoints %zu\n", offsetof(pd_draw, clip_npoints));
     printf("pd_draw.style %zu\n", offsetof(pd_draw, style));
+    printf("pd_draw.curve %zu\n", offsetof(pd_draw, curve));
+    printf("pd_draw.ncurve %zu\n", offsetof(pd_draw, ncurve));
     printf("pd_path_style %zu\n", sizeof(pd_path_style));
     printf("pd_path_style.dash_count %zu\n", offsetof(pd_path_style, dash_count));
     printf("pd_path_style.dash %zu\n", offsetof(pd_path_style, dash));

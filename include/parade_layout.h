@@ -83,6 +83,8 @@ typedef enum {
 #define PD_PATH_CLOSED 1        /**< the last point of each ring joins its first */
 #define PD_PATH_BREAK  INT32_MIN /**< a point (PD_PATH_BREAK, PD_PATH_BREAK) ends one ring and starts the next:
                                       rings filled together, non-zero winding, so holes stay holes */
+#define PD_PATH_CUBIC  (INT32_MIN + 1)  /**< in a path's curve: (PD_PATH_CUBIC, 0), then a cubic Bezier's two control
+                                             points and its end, from where the path is */
 
 #define PD_CAP_FLAT    0        /**< a stroke's ends square at its end points */
 #define PD_CAP_ROUND   1        /**< half a disc past each end */
@@ -128,6 +130,11 @@ typedef struct {
     const pd_sp* clip_points;   /**< images: shown only inside this polygon (x, y pairs on the page, as paths' are) */
     int32_t clip_npoints;
     const pd_path_style* style; /**< paths: dashes, caps, joins, ...; NULL for none (valid as points are) */
+    const pd_sp* curve;         /**< paths: the same rings with their curves as curves (x, y pairs; PD_PATH_BREAK
+                                     pairs between rings, a PD_PATH_CUBIC pair before each cubic's three points), for
+                                     output that draws curves; NULL: points is all there is. points stays the path
+                                     made of short chords, for hit testing and hosts that draw polygons */
+    int32_t ncurve;             /**< paths: pairs in curve */
 } pd_draw;
 
 #define PD_FLIP_H 1             /**< mirrored left to right */

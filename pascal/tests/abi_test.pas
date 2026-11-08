@@ -427,6 +427,8 @@ begin
   WriteLn('pd_draw.clip_points ', PtrUInt(@v_pd_draw.clip_points) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.clip_npoints ', PtrUInt(@v_pd_draw.clip_npoints) - PtrUInt(@v_pd_draw));
   WriteLn('pd_draw.style ', PtrUInt(@v_pd_draw.style) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.curve ', PtrUInt(@v_pd_draw.curve) - PtrUInt(@v_pd_draw));
+  WriteLn('pd_draw.ncurve ', PtrUInt(@v_pd_draw.ncurve) - PtrUInt(@v_pd_draw));
   WriteLn('pd_path_style ', SizeOf(pd_path_style));
   WriteLn('pd_path_style.dash_count ', PtrUInt(@v_pd_path_style.dash_count) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_path_style.dash ', PtrUInt(@v_pd_path_style.dash) - PtrUInt(@v_pd_path_style));

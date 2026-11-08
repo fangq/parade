@@ -333,6 +333,7 @@ const
   PD_DRAW_LINK = 4;
   PD_DRAW_PATH = 5;
   PD_PATH_CLOSED = 1;
+  PD_PATH_CUBIC = Low(Int32) + 1;
   PD_CAP_FLAT = 0;
   PD_CAP_ROUND = 1;
   PD_CAP_SQUARE = 2;
@@ -730,6 +731,8 @@ type
     clip_points: Ppd_sp;     { images: shown only inside this polygon }
     clip_npoints: Int32;
     style: Ppd_path_style;   { paths: dashes, caps, joins; nil for none }
+    curve: Ppd_sp;           { paths: the rings with their curves (PD_PATH_CUBIC before a cubic's 3 points) }
+    ncurve: Int32;
   end;
   Ppd_draw = ^pd_draw;
 

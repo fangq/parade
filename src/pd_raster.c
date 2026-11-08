@@ -1009,18 +1009,20 @@ static double rc_sub(pd_sp v, pd_sp o, int32_t scale) {
     return (double)(((int64_t)v - o) * scale / (1 << 24));
 }
 
-/* a path's rings in subpixels relative to (ox, oy) subpixels: each ring given to fn */
+/* a path's rings in subpixels relative to (ox, oy) subpixels: each ring given to fn. A curve is flattened here,
+   each cubic into chords about a tenth of a pixel off it */
 static void rc_rings(const pd_draw* a, pd_sp x0, pd_sp y0, int32_t scale, double ox, double oy,
                      void (*fn)(void*, const double*, int32_t), void* user) {
-    double* xy = (double*)malloc(((size_t)a->npoints + 1) * 2 * sizeof(double));
-    int32_t i, n = 0;
+    const pd_sp* pts = a->curve && a->ncurve >= 2 ? a->curve : a->points;
+    int32_t np = a->curve && a->ncurve >= 2 ? a->ncurve : a->npoints, i, n = 0, cap = np + 16;
+    double* xy = (double*)malloc((size_t)cap * 2 * sizeof(double));
 
     if (!xy) {
         return;
     }
 
-    for (i = 0; i <= a->npoints; i++) {
-        if (i == a->npoints || a->points[2 * i] == PD_PATH_BREAK) {
+    for (i = 0; i <= np; i++) {
+        if (i == np || pts[2 * i] == PD_PATH_BREAK) {
             if (n) {
                 fn(user, xy, n);
             }
@@ -1029,8 +1031,61 @@ static void rc_rings(const pd_draw* a, pd_sp x0, pd_sp y0, int32_t scale, double
             continue;
         }
 
-        xy[2 * n] = rc_sub(a->points[2 * i], x0, scale) - ox;
-        xy[2 * n + 1] = rc_sub(a->points[2 * i + 1], y0, scale) - oy;
+        if (pts[2 * i] == PD_PATH_CUBIC) {
+            double p[8], dev;
+            int32_t k, steps;
+
+            if (n == 0 || i + 3 >= np) {
+                break;
+            }
+
+            p[0] = xy[2 * n - 2];
+            p[1] = xy[2 * n - 1];
+
+            for (k = 1; k <= 3; k++) {
+                p[2 * k] = rc_sub(pts[2 * (i + k)], x0, scale) - ox;
+                p[2 * k + 1] = rc_sub(pts[2 * (i + k) + 1], y0, scale) - oy;
+            }
+
+            dev = fabs(p[0] - 2 * p[2] + p[4]) + fabs(p[1] - 2 * p[3] + p[5]) + fabs(p[2] - 2 * p[4] + p[6]) +
+                  fabs(p[3] - 2 * p[5] + p[7]);
+            steps = 1 + (int32_t)sqrt(dev / 32);
+            steps = steps > 256 ? 256 : steps;
+
+            if (n + steps >= cap) {
+                double* m = (double*)realloc(xy, (size_t)(cap = n + steps + np + 16) * 2 * sizeof(double));
+
+                if (!m) {
+                    break;
+                }
+
+                xy = m;
+            }
+
+            for (k = 1; k <= steps; k++) {
+                double t = (double)k / steps, u = 1 - t;
+
+                xy[2 * n] = u * u * u * p[0] + 3 * u * u * t * p[2] + 3 * u * t * t * p[4] + t * t * t * p[6];
+                xy[2 * n + 1] = u * u * u * p[1] + 3 * u * u * t * p[3] + 3 * u * t * t * p[5] + t * t * t * p[7];
+                n++;
+            }
+
+            i += 3;
+            continue;
+        }
+
+        if (n >= cap) {
+            double* m = (double*)realloc(xy, (size_t)(cap = n + np + 16) * 2 * sizeof(double));
+
+            if (!m) {
+                break;
+            }
+
+            xy = m;
+        }
+
+        xy[2 * n] = rc_sub(pts[2 * i], x0, scale) - ox;
+        xy[2 * n + 1] = rc_sub(pts[2 * i + 1], y0, scale) - oy;
         n++;
     }
 

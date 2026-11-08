@@ -655,6 +655,47 @@ static void sb_rings(sbuf* c, const pd_sp* pts, int32_t n, int closed, int64_t H
     }
 }
 
+/* a path item's rings: from its curve where it has one (m, l, c), else its points */
+static void sb_path(sbuf* c, const pd_draw* a, int closed, int64_t H) {
+    int32_t q, first;
+
+    if (!a->curve || a->ncurve < 2) {
+        sb_rings(c, a->points, a->npoints, closed, H);
+        return;
+    }
+
+    for (q = 0, first = 1; q < a->ncurve; q++) {
+        const pd_sp* p = &a->curve[2 * q];
+
+        if (p[0] == PD_PATH_BREAK) {
+            if (closed && !first) {
+                sb_fmt(c, "h ");
+            }
+
+            first = 1;
+        } else if (p[0] == PD_PATH_CUBIC && !first && q + 3 < a->ncurve) {
+            int k;
+
+            for (k = 1; k <= 3; k++) {
+                sb_num(c, p[2 * k]);
+                sb_num(c, H - p[2 * k + 1]);
+            }
+
+            sb_fmt(c, "c ");
+            q += 3;
+        } else if (p[0] != PD_PATH_CUBIC) {
+            sb_num(c, p[0]);
+            sb_num(c, H - p[1]);
+            sb_fmt(c, first ? "m " : "l ");
+            first = 0;
+        }
+    }
+
+    if (closed && !first) {
+        sb_fmt(c, "h ");
+    }
+}
+
 static uint32_t mix_rgb(uint32_t a, uint32_t b, double t) {
     int k;
     uint32_t o = 0;
@@ -676,7 +717,7 @@ static void sb_gradient(sbuf* c, const pd_draw* a, int64_t H) {
     int i, k;
 
     sb_fmt(c, "q ");
-    sb_rings(c, a->points, a->npoints, 1, H);
+    sb_path(c, a, 1, H);
     sb_fmt(c, "W n ");
 
     if (a->grad == 2) {     /* from the outside in: fill2 there, fill at the middle */
@@ -1603,7 +1644,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                     }
 
                     (void)first;
-                    sb_rings(&c, a->points, a->npoints, (a->path_flags & PD_PATH_CLOSED) != 0, (int64_t)pi.height);
+                    sb_path(&c, a, (a->path_flags & PD_PATH_CLOSED) != 0, (int64_t)pi.height);
                     sb_fmt(&c, fill && stroke ? "B" : fill ? "f" : "S");
                     sb_fmt(&c, stroke && a->style ? " Q\n" : "\n");
 

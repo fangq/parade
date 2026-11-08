@@ -128,7 +128,10 @@ turns into display-list paths, the same for the screen and for PDF.
 
 - **Geometry**: Office's preset shapes from their ECMA definitions, and
   freeforms (custGeom) with lines, curves and arcs (arcTo), each path in
-  its own coordinate space, filled and outlined as it says.
+  its own coordinate space, filled and outlined as it says. Curves stay
+  cubic Beziers in the display list (`pd_draw.curve`, beside the chords
+  in `points` that hit testing uses): PDF draws them with `c`, the
+  rasterizer flattens them to a tenth of a pixel as it draws.
 - **Outlines**: dashes (the preset patterns and custom ones), round,
   square or flat ends, round, bevelled or mitred corners, compound lines
   (double, thick-thin, thin-thick, triple) and arrowheads (triangle,

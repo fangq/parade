@@ -7899,10 +7899,7 @@ static int dw_arrow_type(const char* v) {
 #define DW_CG_MAXCMD 2048
 #define DW_CG_MAXPATH 16
 typedef struct {
-    struct {
-        char op;
-        double p[6];
-    } c[DW_CG_MAXCMD];
+    pd_preset_cmd c[DW_CG_MAXCMD];
     int nc;
     struct {
         int start, n;
@@ -7980,6 +7977,76 @@ static int dw_cust_flat(const dw_cust* C, int i, double* xy, int cap, int* close
 #undef CG_PUT
 
     return n;
+}
+
+/* Path commands (m, l, c, z) as a drawing resource's curve, ",\"cv\":[...]": the points mapped by sm from the box
+   at (bx0, by0), scaled gx, gy; a PD_PATH_BREAK pair between rings and a PD_PATH_CUBIC pair before each cubic's
+   three points */
+static void dw_put_cv(pd_buf* o, const pd_preset_cmd* c, int n, const dxform* sm, double bx0, double by0, double gx,
+                      double gy) {
+    double cx = 0, cy = 0, sx = 0, sy = 0, qx, qy;
+    int k, q, ring = 0, first = 1;
+
+#define CV_PT(X, Y) do { fr_pt(sm, bx0 + (X) * gx, by0 + (Y) * gy, &qx, &qy); \
+                         pb_printf(o, "%s%d,%d", first ? "" : ",", (int)emu_sp(qx), (int)emu_sp(qy)); first = 0; } while (0)
+    pb_puts(o, ",\"cv\":[");
+
+    for (k = 0; k < n; k++) {
+        if (c[k].op == 'm') {
+            if (ring) {
+                pb_printf(o, "%s%d,%d", first ? "" : ",", (int)INT32_MIN, (int)INT32_MIN);
+                first = 0;
+            }
+
+            ring = 1;
+            sx = cx = c[k].p[0];
+            sy = cy = c[k].p[1];
+            CV_PT(cx, cy);
+        } else if (c[k].op == 'l' || c[k].op == 'c') {
+            if (!ring) {    /* drawing on from a closed ring: a new one from where that began */
+                if (!first) {
+                    pb_printf(o, ",%d,%d", (int)INT32_MIN, (int)INT32_MIN);
+                }
+
+                ring = 1;
+                CV_PT(cx, cy);
+            }
+
+            if (c[k].op == 'c') {
+                pb_printf(o, ",%d,0", (int)INT32_MIN + 1);
+
+                for (q = 0; q < 3; q++) {
+                    CV_PT(c[k].p[2 * q], c[k].p[2 * q + 1]);
+                }
+
+                cx = c[k].p[4];
+                cy = c[k].p[5];
+            } else {
+                cx = c[k].p[0];
+                cy = c[k].p[1];
+                CV_PT(cx, cy);
+            }
+        } else if (c[k].op == 'z') {
+            cx = sx;
+            cy = sy;
+        }
+    }
+#undef CV_PT
+
+    pb_putc(o, ']');
+}
+
+/* whether path commands have a curve among them */
+static int dw_has_curve(const pd_preset_cmd* c, int n) {
+    int k;
+
+    for (k = 0; k < n; k++) {
+        if (c[k].op == 'c') {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 /* A Word drawing canvas (wpc) or group (wpg) as one picture: its pictures,
@@ -8592,10 +8659,16 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                             }
                         }
 
-                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s}", pf->path[i].closed && pfl,
+                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s", pf->path[i].closed && pfl,
                                   (unsigned)pfl, (unsigned)pln, (int)emu_sp(lwd),
                                   pfl && !strcmp(pf->path[i].fill, "norm") ? fx : "", pln ? lx : "",
                                   pln && !pf->path[i].closed ? ax : "");
+
+                        if (!cam && dw_has_curve(pf->c + pf->path[i].cstart, pf->path[i].cn)) {
+                            dw_put_cv(&o, pf->c + pf->path[i].cstart, pf->path[i].cn, &sm, bx0, by0, 1, 1);
+                        }
+
+                        pb_putc(&o, '}');
                     }
 
                     f = l = 0;
@@ -8633,9 +8706,15 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                             }
                         }
 
-                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s}", closed, (unsigned)pfl,
+                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s", closed, (unsigned)pfl,
                                   (unsigned)pln, (int)emu_sp(lwd), pfl && !strcmp(cg->path[i].fill, "norm") ? fx : "",
                                   pln ? lx : "", pln && !closed ? ax : "");
+
+                        if (!cam && dw_has_curve(cg->c + cg->path[i].start, cg->path[i].n)) {  /* its curves as such */
+                            dw_put_cv(&o, cg->c + cg->path[i].start, cg->path[i].n, &sm, bx0, by0, gx, gy);
+                        }
+
+                        pb_putc(&o, '}');
                     }
 
                     f = l = 0;

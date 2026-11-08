@@ -4988,10 +4988,81 @@ static void emit_compound(dlist_t* D, const pd_sp* xy, int32_t n, int closed, ui
     free(q);
 }
 
+/* The path just made (D->d[D->n - 1], if made from n0 on) given its curve: n pairs on the page in the curve
+   encoding (PD_PATH_BREAK, PD_PATH_CUBIC) */
+static void path_curve(dlist_t* D, int32_t n0, const pd_sp* cv, int32_t n) {
+    pd_draw* a;
+
+    if (D->n <= n0 || n < 2 || D->d[D->n - 1].kind != PD_DRAW_PATH ||
+            grow((void**)&D->pts, &D->cappts, (int64_t)D->npts + 2 * n, sizeof(pd_sp))) {
+        return;
+    }
+
+    a = &D->d[D->n - 1];
+    memcpy(D->pts + D->npts, cv, (size_t)n * 2 * sizeof(pd_sp));
+    a->curve = (const pd_sp*)(intptr_t)(D->npts + 1);
+    a->ncurve = n;
+    D->npts += 2 * n;
+}
+
+/* an item's curve ("cv": the drawing's coordinates, the same encoding) on the path just made, mapped as its
+   points are: x + v * sx, y + v * sy */
+static void item_curve(dlist_t* D, int32_t n0, const pj_node* it, pd_sp x, pd_sp y, double sx, double sy) {
+    const pj_node* cv = pj_get(it, "cv"), *q;
+    pd_sp* xy;
+    int32_t k = 0, n = cv ? cv->n / 2 : 0;
+    int cubic = 0;
+
+    if (n < 2 || !(xy = (pd_sp*)malloc((size_t)n * 2 * sizeof(pd_sp)))) {
+        return;
+    }
+
+    for (q = cv->child; q && k < 2 * n; q = q->next, k++) {
+        int64_t v = pj_int_or(q, 0);
+
+        if (!(k & 1)) {
+            cubic = v == PD_PATH_CUBIC;
+        }
+
+        xy[k] = v == PD_PATH_BREAK || (cubic && !(k & 1)) ? (pd_sp)v : cubic ? 0 :
+                (k & 1) ? y + (pd_sp)(v * sy) : x + (pd_sp)(v * sx);
+    }
+
+    path_curve(D, n0, xy, k / 2);
+    free(xy);
+}
+
+/* an ellipse's curve, four quarter-turn cubics, on the path just made */
+static void ellipse_curve(dlist_t* D, int32_t n0, pd_sp x, pd_sp y, pd_sp w, pd_sp h) {
+    const double kk = 0.5522847498307936;   /* 4/3 (sqrt 2 - 1) */
+    double cx = x + w / 2.0, cy = y + h / 2.0, rx = w / 2.0, ry = h / 2.0;
+    pd_sp cv[2 * 17];
+    int q, n = 0;
+
+    cv[n++] = (pd_sp)lround(cx + rx);
+    cv[n++] = (pd_sp)lround(cy);
+
+    for (q = 0; q < 4; q++) {   /* clockwise on the page from the right, as the polygon goes */
+        double a0 = q * 1.5707963267948966, a1 = a0 + 1.5707963267948966;
+
+        cv[n++] = PD_PATH_CUBIC;
+        cv[n++] = 0;
+        cv[n++] = (pd_sp)lround(cx + rx * (cos(a0) - kk * sin(a0)));
+        cv[n++] = (pd_sp)lround(cy + ry * (sin(a0) + kk * cos(a0)));
+        cv[n++] = (pd_sp)lround(cx + rx * (cos(a1) + kk * sin(a1)));
+        cv[n++] = (pd_sp)lround(cy + ry * (sin(a1) - kk * cos(a1)));
+        cv[n++] = (pd_sp)lround(cx + rx * cos(a1));
+        cv[n++] = (pd_sp)lround(cy + ry * sin(a1));
+    }
+
+    path_curve(D, n0, cv, n / 2);
+}
+
 /* A drawing item's path (page points xy, n of them): its shadow (a shape's always, a path's when it is filled),
    fill, gradient, then its outline -- dashed, compound, with arrowheads -- as the item says */
 static void emit_item_path(dlist_t* D, const pj_node* it, pd_sp* xy, int32_t n, int closed, uint32_t fill,
-                           uint32_t line, pd_sp lw, double sx, double sy, int shape, pd_block_id block, int32_t region) {
+                           uint32_t line, pd_sp lw, pd_sp ox, pd_sp oy, double sx, double sy, int shape, pd_block_id block,
+                           int32_t region) {
     int cmpd = (int)pj_int_or(pj_get(it, "cmpd"), 0);
     arrowhead hd[2];
     int32_t n0;
@@ -5012,10 +5083,16 @@ static void emit_item_path(dlist_t* D, const pj_node* it, pd_sp* xy, int32_t n, 
 
     if (line && lw > 0 && cmpd >= 1 && cmpd <= 4) {
         emit_path(D, xy, n, closed, fill, 0, 0, block, region);
+        item_curve(D, n0, it, ox, oy, sx, sy);
         item_grad(D, n0, it);
         emit_compound(D, xy, n, closed, line, lw, cmpd, it, block, region);
     } else {
         emit_path(D, xy, n, closed, fill, line, lw, block, region);
+
+        if (!hd[0].type && !hd[1].type) {   /* (a line cut back for its arrowheads: its chords) */
+            item_curve(D, n0, it, ox, oy, sx, sy);
+        }
+
         item_grad(D, n0, it);
         item_style(D, n0, it);
     }
@@ -5139,19 +5216,26 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                 }
 
                 if (item_styled(it)) {
-                    emit_item_path(D, it, xy, 64, 1, fill, line, lw, sx, sy, 1, block, region);
+                    n0 = D->n;
+                    emit_item_path(D, it, xy, 64, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
+
+                    if (D->n > n0 && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].npoints == 64) {
+                        ellipse_curve(D, D->n - 1, ix, iy, iw, ih);
+                    }
+
                     continue;
                 }
 
                 item_shadow(D, it, xy, 64, sx, sy, block, region);
                 n0 = D->n;
                 emit_path(D, xy, 64, 1, fill, line, lw, block, region);
+                ellipse_curve(D, n0, ix, iy, iw, ih);
                 item_grad(D, n0, it);
             } else if (pj_get(it, "gk") || pj_get(it, "shd") || item_styled(it)) {
                 /* a box with a gradient, a shadow or a styled outline: as a path */
                 pd_sp xy[8] = { ix, iy, ix + iw, iy, ix + iw, iy + ih, ix, iy + ih };
 
-                emit_item_path(D, it, xy, 4, 1, fill, line, lw, sx, sy, 1, block, region);
+                emit_item_path(D, it, xy, 4, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
             } else {            /* a box: its fill, then its edges */
                 if (fill) {
                     emit_rect(D, ix, iy, iw, ih, fill, block, region);
@@ -5183,7 +5267,7 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
             if (xy) {
                 emit_item_path(D, it, xy, n, (int)pj_int_or(pj_get(it, "closed"), 0),
                                (uint32_t)pj_int_or(pj_get(it, "fill"), 0), (uint32_t)pj_int_or(pj_get(it, "line"), 0),
-                               lw > PD_SP_PER_PT / 8 ? lw : PD_SP_PER_PT / 8, sx, sy, 0, block, region);
+                               lw > PD_SP_PER_PT / 8 ? lw : PD_SP_PER_PT / 8, x, y, sx, sy, 0, block, region);
                 free(xy);
             }
         }
@@ -5743,6 +5827,14 @@ static void turn_items(dlist_t* D, int32_t n0, const pline* l) {
                 a.w = x1 - x0;
                 a.h = y1 - y0;
             }
+
+            for (k = 0; a.curve && k < a.ncurve; k++) {     /* its curve with it */
+                pd_sp* p = D->pts + ((intptr_t)a.curve - 1) + 2 * k;
+
+                if (p[0] != PD_PATH_BREAK && p[0] != PD_PATH_CUBIC) {
+                    turn_pt(l->rot, l->rx, l->ry, &p[0], &p[1]);
+                }
+            }
         }
 
         D->d[i] = a;
@@ -5819,6 +5911,7 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
             if (D.d[i].kind == PD_DRAW_PATH) {
                 D.d[i].points = D.pts + (intptr_t)D.d[i].points;
                 D.d[i].style = D.d[i].style ? D.sty + ((intptr_t)D.d[i].style - 1) : NULL;
+                D.d[i].curve = D.d[i].curve ? D.pts + ((intptr_t)D.d[i].curve - 1) : NULL;
             } else if (D.d[i].kind == PD_DRAW_IMAGE && D.d[i].clip_npoints) {
                 D.d[i].clip_points = D.pts + (intptr_t)D.d[i].clip_points;
             }

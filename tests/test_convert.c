@@ -3356,6 +3356,92 @@ static void test_docx_line_styles(void) {
     pd_doc_free(d);
 }
 
+/* Curves kept as curves: a freeform's arc (two quarter-turn cubics) and an ellipse (four) reach the display list as
+   cubic Beziers beside their chords; the PDF draws them with c, and the rasterizer fills from the curve. */
+static void test_docx_curves(void) {
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, disc = -1, ell = -1;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm>"
+                      "<a:custGeom><a:pathLst><a:path w=\"1000\" h=\"1000\"><a:moveTo><a:pt x=\"0\" y=\"500\"/></a:moveTo>"
+                      "<a:arcTo wR=\"500\" hR=\"500\" stAng=\"10800000\" swAng=\"10800000\"/><a:close/></a:path></a:pathLst>"
+                      "</a:custGeom><a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill><a:ln><a:noFill/></a:ln></wps:spPr>"
+                      "<wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"317500\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"ellipse\"/><a:solidFill><a:srgbClr val=\"0000FF\"/></a:solidFill>"
+                      "<a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>", &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        disc = it[k].kind == PD_DRAW_PATH && it[k].fill == 0xFF00FF00u ? k : disc;
+        ell = it[k].kind == PD_DRAW_PATH && it[k].fill == 0xFF0000FFu ? k : ell;
+    }
+
+    CHECK(disc >= 0 && ell >= 0);
+
+    if (disc >= 0 && ell >= 0) {
+        const pd_draw* a = &it[disc];
+        int32_t cubics = 0;
+
+        for (k = 0; a->curve && k < a->ncurve; k++) {
+            cubics += a->curve[2 * k] == PD_PATH_CUBIC;
+        }
+
+        /* from the diameter's left end, two cubics, the last ending at its right end 100 pt along */
+        CHECK(a->curve && cubics == 2 && a->ncurve == 9);
+        CHECK(a->curve && a->curve[0] == a->points[0] && a->curve[1] == a->points[1] &&
+              llabs((long long)a->curve[16] - (a->curve[0] + PD_PT(100))) <= 2 && llabs((long long)a->curve[17] - a->curve[1]) <= 2);
+        CHECK(it[ell].curve && it[ell].ncurve == 17 && it[ell].npoints == 64);
+
+        if (a->curve) {     /* the rasterizer fills from the curve: given only a stub of chords, the arc's top is there */
+            pd_draw b = *a;
+            pd_sp stub[4] = { a->points[0], a->points[1], a->points[0] + 1, a->points[1] };
+            int32_t W = 4 * 110, H = 4 * 60;
+            uint8_t* px = (uint8_t*)calloc((size_t)W * H, 4);
+
+            b.points = stub;
+            b.npoints = 2;
+
+            if (px) {
+                CHECK(pd_draw_render(&b, 1, a->points[0] - PD_PT(5), a->points[1] - PD_PT(55), 4 << 16, px, W, H, W * 4) ==
+                      PD_OK);
+                CHECK(px[((4 * 15) * W + 4 * 55) * 4 + 3] == 255 && px[((4 * 15) * W + 4 * 55) * 4 + 1] == 255);
+                CHECK(px[((4 * 15) * W + 4 * 10) * 4 + 3] == 0);    /* outside the circle, inside its box */
+                free(px);
+            }
+        }
+    }
+
+    {   /* the PDF draws the arc and the ellipse with six curveto operators */
+        pd_pdf_options opt;
+        buf_t b;
+        const char* p;
+        int cs = 0;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+
+        for (p = b.p; p && (p = strstr(p, " c ")) != NULL; p++) {
+            cs++;
+        }
+
+        CHECK(cs == 6);
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -5845,6 +5931,7 @@ int main(void) {
     test_docx_canvas_3d();
     test_docx_custgeom_paths();
     test_docx_line_styles();
+    test_docx_curves();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();
