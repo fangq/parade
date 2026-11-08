@@ -9987,21 +9987,39 @@ static void test_wrap_outline(void) {
 
 /* a row of exact height cuts its text off at its edge, as Word does: a line that mostly fits is still there (a
    form's 12pt rows of 10pt text), and a cell merged down over exact rows has all of them to fill */
-static void test_docx_exact_rows_keep_text(void) {
-    char out[4096];
-    pd_doc* d = docx_doc("word/document.xml",
-                         "<w:document xmlns:w=\"w\"><w:body><w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"dxa\"/>"
-                         "</w:tblPr><w:tblGrid><w:gridCol w:w=\"2500\"/><w:gridCol w:w=\"2500\"/></w:tblGrid>"
-                         "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"240\"/></w:trPr>"
-                         "<w:tc><w:p><w:r><w:rPr><w:sz w:val=\"22\"/></w:rPr><w:t>Source of Support</w:t></w:r></w:p></w:tc>"
-                         "<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr><w:p><w:r><w:rPr><w:sz w:val=\"20\"/>"
-                         "</w:rPr><w:t>Upper</w:t></w:r></w:p><w:p><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr>"
-                         "<w:t>Lower</w:t></w:r></w:p></w:tc></w:tr>"
-                         "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"240\"/></w:trPr><w:tc><w:p/></w:tc>"
-                         "<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc></w:tr>"
-                         "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"40\"/></w:trPr><w:tc><w:p><w:r>"
-                         "<w:t>Hidden</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr>"
-                         "</w:tbl><w:p/></w:body></w:document>", NULL);
+static void exact_rows_case(int in_box) {
+    char out[4096], doc[8192];
+    const char* tbl = "<w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"dxa\"/>"
+                      "</w:tblPr><w:tblGrid><w:gridCol w:w=\"2500\"/><w:gridCol w:w=\"2500\"/></w:tblGrid>"
+                      "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"240\"/></w:trPr>"
+                      "<w:tc><w:p><w:r><w:rPr><w:sz w:val=\"22\"/></w:rPr><w:t>Source of Support</w:t></w:r></w:p></w:tc>"
+                      "<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr><w:p><w:r><w:rPr><w:sz w:val=\"20\"/>"
+                      "</w:rPr><w:t>Upper</w:t></w:r></w:p><w:p><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr>"
+                      "<w:t>Lower</w:t></w:r></w:p></w:tc></w:tr>"
+                      "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"240\"/></w:trPr><w:tc><w:p/></w:tc>"
+                      "<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc></w:tr>"
+                      "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"40\"/></w:trPr><w:tc><w:p><w:r>"
+                      "<w:t>Hidden</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr>"
+                      "</w:tbl>";
+    pd_doc* d;
+
+    if (in_box) {   /* in a floating text box: the table laid out in the float */
+        snprintf(doc, sizeof(doc), "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wps=\"wps\"><w:body>"
+                 "<w:p><w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" simplePos=\"0\" "
+                 "relativeHeight=\"1\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\">"
+                 "<wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\"><wp:posOffset>0</wp:posOffset>"
+                 "</wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset></wp:positionV>"
+                 "<wp:extent cx=\"3810000\" cy=\"1270000\"/><wp:wrapTopAndBottom/><wp:docPr id=\"1\" name=\"T\"/>"
+                 "<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
+                 "<wps:wsp><wps:cNvSpPr txBox=\"1\"/><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"3810000\" "
+                 "cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx><w:txbxContent>%s<w:p/>"
+                 "</w:txbxContent></wps:txbx><wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/></wps:wsp>"
+                 "</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p></w:body></w:document>", tbl);
+    } else {
+        snprintf(doc, sizeof(doc), "<w:document xmlns:w=\"w\"><w:body>%s<w:p/></w:body></w:document>", tbl);
+    }
+
+    d = docx_doc("word/document.xml", doc, NULL);
 
     CHECK(d != NULL);
 
@@ -10013,6 +10031,11 @@ static void test_docx_exact_rows_keep_text(void) {
     }
 
     pd_doc_free(d);
+}
+
+static void test_docx_exact_rows_keep_text(void) {
+    exact_rows_case(0);
+    exact_rows_case(1);
 }
 
 /* Text on both sides of a float in the middle of the column (wrapSquare bothSides): beside it each row of the
