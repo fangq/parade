@@ -5008,8 +5008,10 @@ static void test_pptx_ole(void) {
     pd_doc_free(d);
 }
 
+static pd_doc* pptx_again(const pd_doc* d, buf_t* out);
+
 /* a chart on a slide: drawn where its frame is, its part and its workbook kept; one in a group where the group
-   draws it */
+   draws it. Written as a .pptx, each a graphic frame of the chart's part where it was */
 static void test_pptx_chart(void) {
 #define PCHART(id, x, y, cx, cy, rid) "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"" id "\" name=\"Chart\"/>" \
     "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"" x "\" y=\"" y "\"/><a:ext cx=\"" cx \
@@ -5052,6 +5054,47 @@ static void test_pptx_chart(void) {
         CHECK(o.width == PD_PT(k ? 200 : 300) && o.height == PD_PT(k ? 100 : 200));
         CHECK(js && strstr(js, "\"chart\":") && strstr(js, "\"data\":") && count_of(js, "\"shape\":\"rect\"") >= 3);
         free(js);
+    }
+
+    if (d) {    /* written as a .pptx: each chart a frame of its part (and its workbook), where it was, read again */
+        buf_t b;
+        pd_doc* back = pptx_again(d, &b);
+        size_t n = 0;
+        char* part = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide1.xml", &n) : NULL;
+        char* rels = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/charts/_rels/chart1.xml.rels", &n) :
+                     NULL;
+        char* xlsx = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n,
+                                             "ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx", &n) : NULL;
+
+        CHECK(part && count_of(part, "<c:chart ") == 2 && strstr(part, "<a:off x=\"1270000\" y=\"635000\"/>"));
+        CHECK(rels && strstr(rels, "Target=\"../embeddings/Microsoft_Excel_Worksheet1.xlsx\"") && xlsx &&
+              n == 13 && !memcmp(xlsx, "PK-not-really", 13));
+        CHECK(back != NULL);
+
+        for (k = 0; back && k < 2; k++) {
+            pd_block_id fl = pd_doc_child(back, pd_doc_child(back, pd_doc_root(back), 0), 1 + k);
+            pd_float_props fp;
+            pd_inline o;
+            char* js = NULL;
+
+            memset(&o, 0, sizeof(o));
+            CHECK(pd_doc_float_props(back, fl, &fp) == PD_OK && llabs(fp.offset_x - PD_PT(k ? 400 : 100)) <= PD_PT(1) &&
+                  llabs(fp.offset_y - PD_PT(k ? 300 : 50)) <= PD_PT(1) && fp.offset_from == PD_FROM_PAGE);
+
+            if (pd_doc_inline_at(back, at(pd_doc_child(back, fl, 0), 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE) {
+                js = drawing_json(back, o.resource);
+            }
+
+            CHECK(llabs(o.width - PD_PT(k ? 200 : 300)) <= PD_PT(1) && llabs(o.height - PD_PT(k ? 100 : 200)) <= PD_PT(1));
+            CHECK(js && strstr(js, "\"chart\":") && strstr(js, "\"data\":") && count_of(js, "\"shape\":\"rect\"") >= 3);
+            free(js);
+        }
+
+        free(part);
+        free(rels);
+        free(xlsx);
+        free(b.p);
+        pd_doc_free(back);
     }
 
     pd_doc_free(d);
