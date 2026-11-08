@@ -9,8 +9,10 @@
  * each a PNG resource of the document. Coordinates go through the
  * metafile's window and viewport mapping and its world transform to the
  * picture's frame. EMF+ records (in comments) are skipped: Office writes
- * the plain EMF records beside them. Clipping, raster operations other
- * than copying, and hatched brushes (filled solid) are not modelled.
+ * the plain EMF records beside them. Clipping to rectangles (a clip
+ * rectangle, a region's bounds, a clip path's bounds) is followed: fills
+ * cut to it, outlines cut segment by segment, text outside it left out;
+ * raster operations other than copying are not modelled.
  */
 
 #include <math.h>
@@ -47,6 +49,8 @@ typedef struct {
     int text_align;
     double cx, cy;              /* current position, logical */
     int poly_fill;
+    int clip;                   /* drawing clipped to (clip_x0, clip_y0)-(clip_x1, clip_y1), drawing units */
+    double clip_x0, clip_y0, clip_x1, clip_y1;
 } gstate;
 
 typedef struct {
@@ -138,7 +142,7 @@ static void sep(mf* M) {
 }
 
 /* a polygon or polyline (drawing units), with the pen and brush in use; NAN pairs part rings */
-static void out_path(mf* M, const double* xy, int n, int closed, int fill, int stroke) {
+static void out_path_raw(mf* M, const double* xy, int n, int closed, int fill, int stroke) {
     uint32_t fc = fill && !M->g.brush.null && M->g.brush.kind == 2 ? M->g.brush.color : 0;
     uint32_t lc = stroke && !M->g.pen.null && M->g.pen.kind == 1 ? M->g.pen.color : 0;
     double lw = M->g.pen.width > 0 ? map_len(M, M->g.pen.width) : 0.5 * 65536;    /* 0: a hairline */
@@ -192,6 +196,233 @@ static void out_path(mf* M, const double* xy, int n, int closed, int fill, int s
     }
 
     pb_putc(M->o, '}');
+}
+
+/* a ring (n points) cut to the clip rectangle (Sutherland-Hodgman), into out (room for 2 n + 8 points); its
+   points */
+static int clip_ring(const gstate* g, const double* in, int n, double* out) {
+    double* a = (double*)malloc((size_t)(2 * n + 8) * 2 * sizeof(double)), *b, *t;
+    int na = n, nb, e, i;
+
+    if (!a) {
+        return 0;
+    }
+
+    b = (double*)malloc((size_t)(2 * n + 8) * 2 * sizeof(double));
+
+    if (!b) {
+        free(a);
+        return 0;
+    }
+
+    memcpy(a, in, (size_t)n * 2 * sizeof(double));
+
+    for (e = 0; e < 4 && na > 0; e++) {     /* left, right, top, bottom */
+        nb = 0;
+
+        for (i = 0; i < na; i++) {
+            const double* p = a + 2 * i, *q = a + 2 * ((i + 1) % na);
+            double vp = e == 0 ? p[0] - g->clip_x0 : e == 1 ? g->clip_x1 - p[0] : e == 2 ? p[1] - g->clip_y0 :
+                        g->clip_y1 - p[1];
+            double vq = e == 0 ? q[0] - g->clip_x0 : e == 1 ? g->clip_x1 - q[0] : e == 2 ? q[1] - g->clip_y0 :
+                        g->clip_y1 - q[1];
+
+            if (vp >= 0) {
+                b[2 * nb] = p[0];
+                b[2 * nb + 1] = p[1];
+                nb++;
+            }
+
+            if ((vp >= 0) != (vq >= 0) && nb < 2 * n + 8) {
+                double tt = vp / (vp - vq);
+
+                b[2 * nb] = p[0] + (q[0] - p[0]) * tt;
+                b[2 * nb + 1] = p[1] + (q[1] - p[1]) * tt;
+                nb++;
+            }
+        }
+
+        t = a;
+        a = b;
+        b = t;
+        na = nb;
+    }
+
+    memcpy(out, a, (size_t)na * 2 * sizeof(double));
+    free(a);
+    free(b);
+    return na;
+}
+
+/* a segment cut to the clip rectangle (Liang-Barsky): 0 when none of it is inside */
+static int clip_seg(const gstate* g, double* x0, double* y0, double* x1, double* y1) {
+    double t0 = 0, t1 = 1, dx = *x1 - *x0, dy = *y1 - *y0;
+    double p[4] = { -dx, dx, -dy, dy }, q[4] = { *x0 - g->clip_x0, g->clip_x1 - *x0, *y0 - g->clip_y0, g->clip_y1 - *y0 };
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        if (p[i] == 0) {
+            if (q[i] < 0) {
+                return 0;
+            }
+        } else {
+            double r = q[i] / p[i];
+
+            if (p[i] < 0) {
+                t0 = r > t0 ? r : t0;
+            } else {
+                t1 = r < t1 ? r : t1;
+            }
+        }
+    }
+
+    if (t0 > t1) {
+        return 0;
+    }
+
+    *x1 = *x0 + dx * t1;
+    *y1 = *y0 + dy * t1;
+    *x0 = *x0 + dx * t0;
+    *y0 = *y0 + dy * t0;
+    return 1;
+}
+
+/* a polygon or polyline as out_path_raw draws it, cut to the clip rectangle when there is one: the fill ring by
+   ring, the outline segment by segment (the clip's edges are not drawn) */
+static void out_path(mf* M, const double* xy, int n, int closed, int fill, int stroke) {
+    const gstate* g = &M->g;
+    double* out;
+    int i, start, no = 0;
+
+    if (!g->clip || n < 2) {
+        out_path_raw(M, xy, n, closed, fill, stroke);
+        return;
+    }
+
+    if (!(out = (double*)malloc((size_t)(3 * n + 16) * 2 * sizeof(double)))) {
+        return;
+    }
+
+    if (fill && closed) {   /* each ring cut, NAN pairs between them again */
+        for (start = 0; start < n;) {
+            int end = start, k;
+
+            while (end < n && !isnan(xy[2 * end])) {
+                end++;
+            }
+
+            if (end - start >= 3) {
+                double* ring = (double*)malloc((size_t)(2 * (end - start) + 8) * 2 * sizeof(double));
+
+                if (ring) {
+                    k = clip_ring(g, xy + 2 * start, end - start, ring);
+
+                    if (k >= 3) {
+                        if (no > 0) {
+                            out[2 * no] = out[2 * no + 1] = NAN;
+                            no++;
+                        }
+
+                        memcpy(out + 2 * no, ring, (size_t)k * 2 * sizeof(double));
+                        no += k;
+                    }
+
+                    free(ring);
+                }
+            }
+
+            start = end + 1;
+        }
+
+        if (no >= 3) {
+            out_path_raw(M, out, no, 1, 1, 0);
+        }
+    }
+
+    if (stroke) {   /* the outline: its runs of segments inside, each a polyline */
+        for (start = 0; start < n;) {
+            int end = start;
+
+            while (end < n && !isnan(xy[2 * end])) {
+                end++;
+            }
+
+            no = 0;
+
+            for (i = start; i < end - 1 + (closed && end - start > 2); i++) {
+                const double* p = xy + 2 * i, *q = xy + 2 * (i + 1 < end ? i + 1 : start);
+                double x0 = p[0], y0 = p[1], x1 = q[0], y1 = q[1];
+
+                if (!clip_seg(g, &x0, &y0, &x1, &y1)) {
+                    if (no >= 2) {
+                        out_path_raw(M, out, no, 0, 0, 1);
+                    }
+
+                    no = 0;
+                    continue;
+                }
+
+                if (no > 0 && (fabs(out[2 * no - 2] - x0) > 0.5 || fabs(out[2 * no - 1] - y0) > 0.5)) {
+                    if (no >= 2) {  /* re-entered elsewhere: a new run */
+                        out_path_raw(M, out, no, 0, 0, 1);
+                    }
+
+                    no = 0;
+                }
+
+                if (no == 0) {
+                    out[0] = x0;
+                    out[1] = y0;
+                    no = 1;
+                }
+
+                if (no < 3 * n + 15) {
+                    out[2 * no] = x1;
+                    out[2 * no + 1] = y1;
+                    no++;
+                }
+            }
+
+            if (no >= 2) {
+                out_path_raw(M, out, no, 0, 0, 1);
+            }
+
+            start = end + 1;
+        }
+    }
+
+    free(out);
+}
+
+/* the clip rectangle narrowed to (x0, y0)-(x1, y1), drawing units (Copy: replaced) */
+static void clip_to(mf* M, double x0, double y0, double x1, double y1, int copy) {
+    gstate* g = &M->g;
+    double t;
+
+    if (x1 < x0) {
+        t = x0;
+        x0 = x1;
+        x1 = t;
+    }
+
+    if (y1 < y0) {
+        t = y0;
+        y0 = y1;
+        y1 = t;
+    }
+
+    if (g->clip && !copy) {
+        x0 = x0 > g->clip_x0 ? x0 : g->clip_x0;
+        y0 = y0 > g->clip_y0 ? y0 : g->clip_y0;
+        x1 = x1 < g->clip_x1 ? x1 : g->clip_x1;
+        y1 = y1 < g->clip_y1 ? y1 : g->clip_y1;
+    }
+
+    g->clip = 1;
+    g->clip_x0 = x0;
+    g->clip_y0 = y0;
+    g->clip_x1 = x1 > x0 ? x1 : x0;
+    g->clip_y1 = y1 > y0 ? y1 : y0;
 }
 
 /* the path being built, or straight out: points in logical units */
@@ -616,6 +847,12 @@ static void out_text(mf* M, double x, double y, const unsigned char* s, size_t n
 
     map_pt(M, x, y, &ox, &oy);
     sz = map_len(M, em);
+
+    if (M->g.clip && (ox < M->g.clip_x0 - 1 || ox > M->g.clip_x1 + 1 || oy < M->g.clip_y0 - 1 ||
+                      oy > M->g.clip_y1 + sz)) {
+        return;     /* its reference point outside the clip: cut off */
+    }
+
     sep(M);
     pb_puts(M->o, "{\"label\":");
 
@@ -1218,6 +1455,61 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
 
                 break;
 
+            case 30:    /* INTERSECTCLIPRECT: a rectangle, logical units */
+                if (size >= 24) {
+                    double ax, ay, bx, by;
+
+                    map_pt(M, s32(r + 8), s32(r + 12), &ax, &ay);
+                    map_pt(M, s32(r + 16), s32(r + 20), &bx, &by);
+                    clip_to(M, ax, ay, bx, by, 0);
+                }
+
+                break;
+
+            case 75:    /* EXTSELECTCLIPRGN: a region (its bounds, device units), or none */
+                if (size >= 16) {
+                    uint32_t cb = u32(r + 8), mode = u32(r + 12);
+
+                    if (cb == 0 || size < 16 + 32) {
+                        if (mode == 5) {    /* RGN_COPY of nothing: unclipped */
+                            M->g.clip = 0;
+                        }
+                    } else {
+                        const unsigned char* rh = r + 16;   /* RGNDATAHEADER: size, type, count, size, bounds */
+                        double ax = (s32(rh + 16) - M->fx0) * M->fsx, ay = (s32(rh + 20) - M->fy0) * M->fsy;
+                        double bx = (s32(rh + 24) - M->fx0) * M->fsx, by = (s32(rh + 28) - M->fy0) * M->fsy;
+
+                        if (mode == 5 || mode == 1) {   /* RGN_COPY, RGN_AND */
+                            clip_to(M, ax, ay, bx, by, mode == 5);
+                        }
+                    }
+                }
+
+                break;
+
+            case 67:    /* SELECTCLIPPATH: the path's bounds */
+                if (M->npp > 0) {
+                    double ax = 1e300, ay = 1e300, bx = -1e300, by = -1e300;
+                    int q;
+
+                    for (q = 0; q < M->npp; q++) {
+                        if (!isnan(M->pp[2 * q])) {
+                            ax = M->pp[2 * q] < ax ? M->pp[2 * q] : ax;
+                            ay = M->pp[2 * q + 1] < ay ? M->pp[2 * q + 1] : ay;
+                            bx = M->pp[2 * q] > bx ? M->pp[2 * q] : bx;
+                            by = M->pp[2 * q + 1] > by ? M->pp[2 * q + 1] : by;
+                        }
+                    }
+
+                    if (bx >= ax) {
+                        clip_to(M, ax, ay, bx, by, size >= 12 && u32(r + 8) == 5);
+                    }
+
+                    M->npp = 0;
+                }
+
+                break;
+
             case 59:    /* BEGINPATH */
                 M->in_path = 1;
                 M->npp = 0;
@@ -1472,6 +1764,15 @@ static void wmf_play(mf* M, const unsigned char* p, size_t n) {
                     free(all);
                 }
 
+                break;
+            }
+
+            case 0x0416: {  /* INTERSECTCLIPRECT bottom, right, top, left */
+                double ax, ay, bx, by;
+
+                map_pt(M, P16(3), P16(2), &ax, &ay);
+                map_pt(M, P16(1), P16(0), &bx, &by);
+                clip_to(M, ax, ay, bx, by, 0);
                 break;
             }
 

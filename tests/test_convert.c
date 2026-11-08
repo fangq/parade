@@ -6390,6 +6390,88 @@ static void test_emf_shapes(void) {
     pd_doc_free(d);
 }
 
+/* A metafile that clips (as MATLAB's do, to the axes): a rectangle clip from 20 to 80; a green square from 0 to 100
+   filled only inside it; a line across from 0 to 100 drawn only from 20 to 80; a clip narrowed inside SaveDC and
+   given back by RestoreDC; a label outside the clip left out */
+static void test_emf_clip(void) {
+    buf_t e = { NULL, 0 };
+    uint32_t hdr[20];
+    pd_doc* d;
+    pd_res_id r, src;
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t len = 0;
+    char* js, item[8192];
+    double U = 25 / 25.4 * 72 * 65536 / 100;   /* a logical unit, sp */
+
+    memset(hdr, 0, sizeof(hdr));
+    hdr[2] = 99; hdr[3] = 99;
+    hdr[6] = 2500; hdr[7] = 2500;
+    hdr[8] = 0x464D4520u;
+    hdr[9] = 0x10000; hdr[12] = 4;
+    hdr[16] = 100; hdr[17] = 100;
+    hdr[18] = 25; hdr[19] = 25;
+    emr(&e, 1, hdr, 20);
+    {
+        uint32_t clip[4] = { 20, 20, 80, 80 }, brush[4] = { 0, 0x0000FF00, 0 }, sel1[1] = { 1 }, sq[4] = { 0, 0, 100, 100 };
+        uint32_t pen[5] = { 2, 0, 1, 0, 0x000000FF }, sel2[1] = { 2 };
+        uint32_t line[4 + 1 + 4] = { 0, 0, 100, 100, 2, 0, 50, 100, 50 };
+        uint32_t save[1] = { 0 }, inner[4] = { 50, 50, 60, 60 }, restore[1] = { (uint32_t)-1 }, small[4] = { 10, 10, 30, 30 };
+
+        emr(&e, 30, clip, 4);       /* INTERSECTCLIPRECT */
+        brush[0] = 1;
+        {
+            uint32_t b2[4] = { 1, 0, 0x0000FF00, 0 };
+
+            emr(&e, 39, b2, 4);     /* CREATEBRUSHINDIRECT: green */
+        }
+        emr(&e, 37, sel1, 1);
+        emr(&e, 43, sq, 4);         /* RECTANGLE 0..100 */
+        emr(&e, 38, pen, 5);        /* CREATEPEN: red */
+        emr(&e, 37, sel2, 1);
+        emr(&e, 4, line, 9);        /* POLYLINE (0,50)-(100,50) */
+        emr(&e, 33, save, 0);       /* SAVEDC */
+        emr(&e, 30, inner, 4);
+        emr(&e, 34, restore, 1);    /* RESTOREDC -1: the 20..80 clip again */
+        {
+            uint32_t b3[4] = { 4, 0, 0x00FF0000, 0 }, sel4[1] = { 4 };
+
+            emr(&e, 39, b3, 4);     /* blue */
+            emr(&e, 37, sel4, 1);
+        }
+        emr(&e, 43, small, 4);      /* RECTANGLE 10..30: inside from 20 */
+        (void)brush;
+    }
+    emr(&e, 14, hdr, 3);
+
+    pd_doc_new(&d);
+    CHECK(pd_doc_add_resource(d, "image/x-emf", e.p, e.n, &src) == PD_OK);
+    r = pd_metafile_drawing(d, (const unsigned char*)e.p, e.n, src);
+    CHECK(r != 0 && pd_doc_resource(d, r, &mime, &data, &len) == PD_OK);
+    js = (char*)malloc(len + 1);
+
+    if (js && r) {
+        memcpy(js, data, len);
+        js[len] = '\0';
+        /* the green square: its corners at the clip's, none at the square's own */
+        CHECK(item_with(js, "\"fill\":4278255360", item, sizeof(item)));
+        CHECK(item_has_pt(item, (long)(20 * U), (long)(20 * U)) && item_has_pt(item, (long)(80 * U), (long)(80 * U)));
+        CHECK(!item_has_pt(item, 0, 0) && !item_has_pt(item, (long)(100 * U), (long)(100 * U)));
+        /* the red line: from 20 to 80 */
+        CHECK(item_with(js, "\"line\":4294901760", item, sizeof(item)));
+        CHECK(item_has_pt(item, (long)(20 * U), (long)(50 * U)) && item_has_pt(item, (long)(80 * U), (long)(50 * U)));
+        CHECK(!item_has_pt(item, 0, (long)(50 * U)));
+        /* the blue square after RestoreDC: cut by the 20..80 clip, not the 50..60 one */
+        CHECK(item_with(js, "\"fill\":4278190335", item, sizeof(item)));
+        CHECK(item_has_pt(item, (long)(20 * U), (long)(20 * U)) && item_has_pt(item, (long)(30 * U), (long)(30 * U)));
+        CHECK(!item_has_pt(item, (long)(10 * U), (long)(10 * U)));
+    }
+
+    free(js);
+    free(e.p);
+    pd_doc_free(d);
+}
+
 /* A small EMF made here: a red-filled rectangle, a polygon with a hole
    drawn as a path, a line of text, a mask-and-picture pair of bitmaps
    (only the picture shows) and a white "nothing" blit that must not cover
@@ -10367,6 +10449,7 @@ int main(void) {
     test_docx_drawings();
     printf("EMF pictures\n");
     test_emf();
+    test_emf_clip();
     test_emf_shapes();
     printf("docx equations\n");
     test_docx_omml();
