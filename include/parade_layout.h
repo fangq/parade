@@ -146,7 +146,15 @@ typedef struct {
                                              (100000ths) going from alpha0 at pos0 to alpha1 at pos1 ... */
     int32_t refl_pos0, refl_pos1;   /**< ... (100000ths of the shape's height down from the mirror line) */
     pd_sp refl_blur, refl_dist;     /**< blurred; the mirror line this far below the shape */
+    pd_sp bevel_width;          /**< a bevel round the fill's edge this wide (0: none), lit from bevel_light */
+    int32_t bevel_light;        /**< where the light comes from, 60000ths of a degree clockwise from the right
+                                     (Office's top left rig: 225 degrees) */
+    int32_t bevel_kind;         /**< PD_BEVEL_*: its profile */
 } pd_path_style;
+
+#define PD_BEVEL_ROUND  0       /**< a rounded rise (circle, softRound, convex, relaxedInset, ...) */
+#define PD_BEVEL_ANGLE  1       /**< a flat slope, sharply lit (angle, slope, coolSlant, hardEdge, cross) */
+#define PD_BEVEL_GROOVE 2       /**< a rim cut in (divot, riblet, artDeco): lit from the other side too */
 
 #define PD_PATTERN_CELL 49152   /**< a pattern cell's side, sp */
 

@@ -3812,7 +3812,7 @@ static void test_docx_shape_effects(void) {
     size_t sl = 0;
     pd_doc* d = NULL;
     pd_layout* L = NULL;
-    int32_t n = 0, k, sh = -1, gl = -1, so = -1, in = -1, re = -1, rb = -1;
+    int32_t n = 0, k, sh = -1, gl = -1, so = -1, in = -1, re = -1, rb = -1, bv = -1;
     pd_draw* it;
     uint8_t rgb[3];
 
@@ -3825,8 +3825,11 @@ static void test_docx_shape_effects(void) {
                            "<a:innerShdw blurRad=\"25400\" dist=\"76200\" dir=\"2700000\"><a:srgbClr val=\"000000\"/></a:innerShdw>");
     sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1905000, 0, "rect", "FF0000",
                            "<a:reflection stA=\"100000\" endA=\"0\" endPos=\"50000\" dist=\"0\"/>");
-    snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1905000, 1016000, "rect", "FF0000",
-             "<a:reflection blurRad=\"76200\" stA=\"100000\" endA=\"0\" endPos=\"50000\" dist=\"0\"/>");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1905000, 1016000, "rect", "FF0000",
+                           "<a:reflection blurRad=\"76200\" stA=\"100000\" endA=\"0\" endPos=\"50000\" dist=\"0\"/>");
+    snprintf(shapes + sl, sizeof(shapes) - sl, sp, 0, 1905000, "rect", "808080",
+             "</a:effectLst><a:scene3d><a:camera prst=\"orthographicFront\"/><a:lightRig rig=\"threePt\" dir=\"tl\"/>"
+             "</a:scene3d><a:sp3d><a:bevelT w=\"76200\" h=\"25400\"/></a:sp3d><a:effectLst>");
     it = group_items(shapes, &d, &L, &n);
 
     if (!it) {
@@ -3844,6 +3847,7 @@ static void test_docx_shape_effects(void) {
         in = st && st->inner_color ? k : in;
         re = st && st->refl_alpha0 && !st->refl_blur ? k : re;
         rb = st && st->refl_alpha0 && st->refl_blur ? k : rb;
+        bv = st && st->bevel_width ? k : bv;
     }
 
     CHECK(sh >= 0 && gl >= 0 && so >= 0 && in >= 0 && re >= 0);
@@ -3877,6 +3881,24 @@ static void test_docx_shape_effects(void) {
         /* blurred 6 pt: it spills past the box's side, where the sharp one leaves nothing */
         CHECK(alpha_at(&it[re], it[re].x + it[re].w + PD_PT(2), it[re].y + it[re].h + PD_PT(4), NULL) == 0);
         CHECK(rb >= 0 && alpha_at(&it[rb], it[rb].x + it[rb].w + PD_PT(2), it[rb].y + it[rb].h + PD_PT(4), NULL) > 0);
+        /* a bevel lit from the top left: its top and left edges lighter than the grey, the bottom and right darker,
+           the middle the grey itself */
+        CHECK(bv >= 0);
+
+        if (bv >= 0) {
+            uint8_t top[3], left[3], bottom[3], right[3], mid[3];
+            const pd_draw* b = &it[bv];
+
+            CHECK(b->style->bevel_width == PD_PT(6) && b->style->bevel_light == 225 * 60000);
+            alpha_at(b, b->x + PD_PT(25), b->y + PD_PT(2), top);
+            alpha_at(b, b->x + PD_PT(2), b->y + PD_PT(25), left);
+            alpha_at(b, b->x + PD_PT(25), b->y + b->h - PD_PT(2), bottom);
+            alpha_at(b, b->x + b->w - PD_PT(2), b->y + PD_PT(25), right);
+            alpha_at(b, b->x + PD_PT(25), b->y + PD_PT(25), mid);
+            CHECK(top[0] > mid[0] + 20 && left[0] > mid[0] + 20);
+            CHECK(bottom[0] + 20 < mid[0] && right[0] + 20 < mid[0]);
+            CHECK(mid[0] >= 0x7C && mid[0] <= 0x84);
+        }
     }
 
     {
@@ -3893,7 +3915,7 @@ static void test_docx_shape_effects(void) {
             pics += !memcmp(b.p + k, "/BitsPerComponent 8 /SMask ", 27);
         }
 
-        CHECK(pics == 6);   /* shadow, glow, the softened fill, the inner shadow, the two reflections */
+        CHECK(pics == 7);   /* shadow, glow, the softened fill, the inner shadow, the two reflections, the bevel */
         free(b.p);
     }
 

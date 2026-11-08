@@ -831,6 +831,9 @@ type
     soft_edge: pd_sp;
     refl_alpha0, refl_alpha1, refl_pos0, refl_pos1: Int32;   { a reflection (alpha0 0: none) }
     refl_blur, refl_dist: pd_sp;
+    bevel_width: pd_sp;      { a bevel round the edge (0 none) }
+    bevel_light: Int32;      { the light's direction, 60000ths of a degree }
+    bevel_kind: Int32;       { PD_BEVEL_* }
   end;
   Ppd_path_style = ^pd_path_style;
 

@@ -579,6 +579,12 @@ type
     { the selected object (a picture or a drawing) made W by H (sp) -- a canvas given that much room, its shapes
       not stretched; one step of undo }
     function ResizeObject(W, H: pd_sp): Boolean;
+    { the selected picture (not a drawing) cut down on each side, as Word's Crop: percentages of the picture
+      (left, top, right, bottom); what is shown keeps its scale, so the object shrinks by what is cut off (and
+      grows back by what is restored). False for a drawing or with none selected; one step of undo. PictureCrop
+      reads them; ResetPicture: no crop, the size it had before any }
+    function PictureCrop(out L, T, R, B: Double): Boolean;
+    function SetPictureCrop(L, T, R, B: Double): Boolean;
     { the document made a page to draw on: landscape, no margins, the page a canvas (a drawing canvas in front of
       the text, as big as the page), ready to draw in; what is not to be undone, and not a change }
     function StartCanvasPage: Boolean;
@@ -8749,6 +8755,55 @@ begin
   end;
   Changed;
   GoToSlide(ToIndex);
+end;
+
+function TParadeEdit.PictureCrop(out L, T, R, B: Double): Boolean;
+var
+  O: pd_inline;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+begin
+  L := 0; T := 0; R := 0; B := 0;
+  Result := FShapeOn and (FShapeSid < 0) and (pd_doc_inline_at(FDoc, FShapeAt, O) = PD_OK) and
+    (O.kind = PD_INLINE_IMAGE) and (pd_doc_resource(FDoc, O.resource, @Mime, @Data, @Len) = PD_OK) and
+    (Pos('image/', StrPas(Mime)) = 1);
+  if Result then
+  begin
+    L := O.crop[0] / 1000; T := O.crop[1] / 1000; R := O.crop[2] / 1000; B := O.crop[3] / 1000;
+  end;
+end;
+
+function TParadeEdit.SetPictureCrop(L, T, R, B: Double): Boolean;
+var
+  O: pd_inline;
+  Keep: array[0..2] of string;
+  P: pd_pos;
+  OL, OT, OR_, OB, KX, KY: Double;
+begin
+  Result := False;
+  P := FShapeAt;
+  if FReadOnly or not PictureCrop(OL, OT, OR_, OB) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
+    Exit;
+  L := EnsureRange(L, 0, 99); T := EnsureRange(T, 0, 99); R := EnsureRange(R, 0, 99); B := EnsureRange(B, 0, 99);
+  if (L + R >= 99) or (T + B >= 99) then
+    Exit;
+  KX := (100 - L - R) / (100 - OL - OR_);   { the part shown, now over before: the picture's scale kept }
+  KY := (100 - T - B) / (100 - OT - OB);
+  KeepInlineText(O, Keep);
+  O.crop[0] := Round(L * 1000); O.crop[1] := Round(T * 1000);
+  O.crop[2] := Round(R * 1000); O.crop[3] := Round(B * 1000);
+  O.width := Max(PD_SP_PER_PT, Round(O.width * KX));
+  O.height := Max(PD_SP_PER_PT, Round(O.height * KY));
+  PushShapeStep('Crop', P);
+  pd_doc_begin_group(FDoc, 'Crop');
+  pd_doc_delete(FDoc, PdRange(P, PdPos(P.block, P.offset + 3)), nil);
+  Result := pd_doc_insert_inline(FDoc, P, O, nil) = PD_OK;
+  pd_doc_end_group(FDoc);
+  FShapeOn := True;
+  FShapeAt := P;
+  FShapeSid := -1;
+  Changed;
 end;
 
 function TParadeEdit.ResizeObject(W, H: pd_sp): Boolean;

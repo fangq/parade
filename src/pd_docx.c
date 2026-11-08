@@ -9892,6 +9892,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int arrow_w[2] = { 2, 2 }, arrow_len[2] = { 2, 2 };  /* head, tail: 1 sm, 2 med, 3 lg */
     int dash[8], ndash = 0, lcap = 0, ljoin = 0, lcmpd = 0;   /* the outline's dashes, ends, corners, lines */
     long long ext_h = 0, adj1 = -1;                     /* extrusion depth; a preset's first adjustment */
+    double bev_w = 0;                                   /* a top bevel's width (EMU), its profile, the light's way */
+    int bev_kind = 0, bev_light = 225;
     char prst[32] = "";                                 /* the shape's preset, for one whose corners its adjustments move */
     uint32_t ext_clr = 0, patt_fg = 0, patt_bg = 0, cv_bg = 0, cv_line = 0;
     int in_extclr = 0, in_patt = 0, patt_part = 0, patt_pct = 50, in_cvbg = 0, in_cvwhole = 0;
@@ -10180,6 +10182,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             grad_kind = grad_ang = in_grad = in_shd = has_shd = 0;
             shd_blur = 0;
             shd_algn = 7;
+            bev_w = 0;
+            bev_kind = 0;
+            bev_light = 225;
             in_ish = has_ish = in_glow = soft = has_refl = 0;
             glow_rad = 0;
             ngst = grad_sc = have_patt = 0;
@@ -10476,6 +10481,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
                     if (soft > 0 && fl < sizeof(fx)) {
                         fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"soft\":%d", (int)emu_sp(soft * fs));
+                    }
+
+                    if (bev_w > 0 && fl < sizeof(fx)) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"bev\":[%d,%d,%d]", (int)emu_sp(bev_w * fs),
+                                               bev_light * 60000, bev_kind);
                     }
 
                     if (has_refl && refl[1] > 0 && fl < sizeof(fx)) {
@@ -10933,9 +10943,23 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
             continue;
         } else if (in_sppr && !strcmp(t, "bevelT") && open) {
-            /* a top bevel raises the face by its height: counted with the depth (its rounding is not drawn) */
+            /* a top bevel raises the face by its height (counted with the depth), and is drawn round its edge */
             if (ext_h > 0 && mu_attr(&g, "h", v, sizeof(v))) {
                 ext_h += atoll(v);
+            }
+
+            bev_w = mu_attr(&g, "w", v, sizeof(v)) ? atof(v) : 76200;
+            bev_kind = !mu_attr(&g, "prst", v, sizeof(v)) ? 0 : !strcmp(v, "angle") || !strcmp(v, "slope") ||
+                       !strcmp(v, "coolSlant") || !strcmp(v, "hardEdge") || !strcmp(v, "cross") ? 1 :
+                       !strcmp(v, "divot") || !strcmp(v, "riblet") || !strcmp(v, "artDeco") ? 2 : 0;
+            continue;
+        } else if (in_sppr && !strcmp(t, "lightRig") && open && mu_attr(&g, "dir", v, sizeof(v))) {
+            /* where the light is: the edges facing it lit, those away from it dark */
+            static const char* dirs[8] = { "r", "br", "b", "bl", "l", "tl", "t", "tr" };
+            int q;
+
+            for (q = 0; q < 8; q++) {
+                bev_light = !strcmp(v, dirs[q]) ? q * 45 : bev_light;
             }
 
             continue;

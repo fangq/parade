@@ -469,6 +469,9 @@ int main(void) {
     printf("pd_path_style.refl_pos1 %zu\n", offsetof(pd_path_style, refl_pos1));
     printf("pd_path_style.refl_blur %zu\n", offsetof(pd_path_style, refl_blur));
     printf("pd_path_style.refl_dist %zu\n", offsetof(pd_path_style, refl_dist));
+    printf("pd_path_style.bevel_width %zu\n", offsetof(pd_path_style, bevel_width));
+    printf("pd_path_style.bevel_light %zu\n", offsetof(pd_path_style, bevel_light));
+    printf("pd_path_style.bevel_kind %zu\n", offsetof(pd_path_style, bevel_kind));
     printf("pd_markup_item %zu\n", sizeof(pd_markup_item));
     printf("pd_markup_item.kind %zu\n", offsetof(pd_markup_item, kind));
     printf("pd_markup_item.id %zu\n", offsetof(pd_markup_item, id));

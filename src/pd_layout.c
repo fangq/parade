@@ -6062,11 +6062,12 @@ static void item_pattern(dlist_t* D, int32_t n0, const pj_node* it) {
    start alpha, end alpha, start, end (100000ths), distance] */
 static void item_effects(dlist_t* D, int32_t i, const pj_node* it, double sx, double sy) {
     const pj_node* o = pj_get(it, "osh"), *in = pj_get(it, "ish"), *gl = pj_get(it, "glow"), *rf = pj_get(it, "refl");
+    const pj_node* bv = pj_get(it, "bev");
     double sc = (sx + sy) / 2;
     pd_path_style* st;
     pd_draw* a;
 
-    if (i < 0 || i >= D->n || D->d[i].kind != PD_DRAW_PATH || !(o || in || gl || rf || pj_get(it, "soft")) ||
+    if (i < 0 || i >= D->n || D->d[i].kind != PD_DRAW_PATH || !(o || in || gl || rf || bv || pj_get(it, "soft")) ||
             (st = path_style(D, i)) == NULL) {
         return;
     }
@@ -6111,6 +6112,12 @@ static void item_effects(dlist_t* D, int32_t i, const pj_node* it, double sx, do
         st->refl_dist = (pd_sp)(pj_int_or(pj_at(rf, 5), 0) * sc);
     }
 
+    if (bv && bv->n >= 3) {
+        st->bevel_width = (pd_sp)(pj_int_or(pj_at(bv, 0), 0) * sc);
+        st->bevel_light = (int32_t)pj_int_or(pj_at(bv, 1), 225 * 60000);
+        st->bevel_kind = (int32_t)pj_int_or(pj_at(bv, 2), 0);
+    }
+
     st->shadow_color = st->shadow_color && !(st->shadow_color >> 24) ? st->shadow_color | 0xFF000000u : st->shadow_color;
     st->inner_color = st->inner_color && !(st->inner_color >> 24) ? st->inner_color | 0xFF000000u : st->inner_color;
     st->glow_color = st->glow_color && !(st->glow_color >> 24) ? st->glow_color | 0xFF000000u : st->glow_color;
@@ -6119,7 +6126,7 @@ static void item_effects(dlist_t* D, int32_t i, const pj_node* it, double sx, do
 /* whether an item asks for more than a plain path or box can draw */
 static int item_fancy(const pj_node* it) {
     return pj_get(it, "gk") || pj_get(it, "shd") || pj_get(it, "patt") || pj_get(it, "bimg") || pj_get(it, "osh") ||
-           pj_get(it, "ish") || pj_get(it, "glow") || pj_get(it, "soft") || pj_get(it, "refl");
+           pj_get(it, "ish") || pj_get(it, "glow") || pj_get(it, "soft") || pj_get(it, "refl") || pj_get(it, "bev");
 }
 
 /* An item's gradient on the path just made: "f2" its other colour, "gk" 1 linear, 2 radial, "ga" its angle (what

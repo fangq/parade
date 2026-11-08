@@ -507,6 +507,9 @@ begin
   WriteLn('pd_path_style.refl_pos1 ', PtrUInt(@v_pd_path_style.refl_pos1) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_path_style.refl_blur ', PtrUInt(@v_pd_path_style.refl_blur) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_path_style.refl_dist ', PtrUInt(@v_pd_path_style.refl_dist) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.bevel_width ', PtrUInt(@v_pd_path_style.bevel_width) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.bevel_light ', PtrUInt(@v_pd_path_style.bevel_light) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.bevel_kind ', PtrUInt(@v_pd_path_style.bevel_kind) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_markup_item ', SizeOf(pd_markup_item));
   WriteLn('pd_markup_item.kind ', PtrUInt(@v_pd_markup_item.kind) - PtrUInt(@v_pd_markup_item));
   WriteLn('pd_markup_item.id ', PtrUInt(@v_pd_markup_item.id) - PtrUInt(@v_pd_markup_item));

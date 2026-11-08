@@ -1222,7 +1222,8 @@ static void rc_warp(const uint8_t* m, uint8_t* out, int32_t w, int32_t h, double
 }
 
 static int rc_has_effects(const pd_path_style* st) {
-    return st && (st->shadow_color || st->inner_color || st->glow_color || st->soft_edge > 0 || st->refl_alpha0 > 0);
+    return st && (st->shadow_color || st->inner_color || st->glow_color || st->soft_edge > 0 || st->refl_alpha0 > 0 ||
+                  st->bevel_width > 0);
 }
 
 int pd_draw_effects(const pd_draw* a) {
@@ -1233,7 +1234,8 @@ int pd_draw_effects(const pd_draw* a) {
     }
 
     return (a->fill && (st->shadow_color || st->glow_color) ? PD_LAYER_UNDER : 0) |
-           (a->fill && st->soft_edge > 0 ? PD_LAYER_BODY : 0) | (a->fill && st->inner_color ? PD_LAYER_INNER : 0) |
+           (a->fill && st->soft_edge > 0 ? PD_LAYER_BODY : 0) |
+           (a->fill && (st->inner_color || st->bevel_width > 0) ? PD_LAYER_INNER : 0) |
            (st->refl_alpha0 > 0 ? PD_LAYER_REFL : 0);
 }
 
@@ -1480,6 +1482,47 @@ static pd_status rc_item(const pd_draw* a, int layers, pd_sp x0, pd_sp y0, int32
             rc_paint_mask(u, w, h, px0, py0, &paint, rgba, stride);
             free(u);
         }
+    }
+
+    if ((layers & PD_LAYER_INNER) && a->fill && st && st->bevel_width > 0) {
+        /* a bevel: the edge band shaded by how it faces the light -- the slope of the shape's mask blurred over
+           the bevel's width, set against the light's way; white where it faces it, black where it turns away */
+        uint8_t* u = (uint8_t*)malloc((size_t)w * (size_t)h * 3);
+        int32_t r = (int32_t)(st->bevel_width * k / (st->bevel_kind == PD_BEVEL_ANGLE ? 4 : 2.5) + 0.5);
+        double th = st->bevel_light / 60000.0 * 3.141592653589793 / 180, lx = cos(th), ly = sin(th);
+        double gain = 255.0 / (r > 0 ? r : 1) * (st->bevel_kind == PD_BEVEL_ANGLE ? 1.6 : 1.1);
+        int32_t x, y;
+
+        if (u && r > 0) {
+            uint8_t* lit = u + (size_t)w * h, *dark = lit + (size_t)w * h;
+
+            memcpy(u, m, (size_t)w * (size_t)h);
+            rc_blur(u, w, h, r);
+
+            for (y = 0; y < h; y++) {
+                for (x = 0; x < w; x++) {
+                    size_t p = (size_t)y * w + x;
+                    double gx = (x + 1 < w ? u[p + 1] : u[p]) - (x > 0 ? u[p - 1] : u[p]);
+                    double gy = (y + 1 < h ? u[p + w] : u[p]) - (y > 0 ? u[p - w] : u[p]);
+                    double f = -(gx * lx + gy * ly) / 2 * gain / 255;  /* +: the slope rises toward the light */
+
+                    if (st->bevel_kind == PD_BEVEL_GROOVE && u[p] > 128) {
+                        f = -f;     /* cut in: the inner half lit the other way */
+                    }
+
+                    f = f > 1 ? 1 : f < -1 ? -1 : f;
+                    lit[p] = (uint8_t)(f > 0 ? f * 200 * m[p] / 255 : 0);
+                    dark[p] = (uint8_t)(f < 0 ? -f * 150 * m[p] / 255 : 0);
+                }
+            }
+
+            paint.color = 0xFFFFFFFFu;
+            rc_paint_mask(lit, w, h, px0, py0, &paint, rgba, stride);
+            paint.color = 0xFF000000u;
+            rc_paint_mask(dark, w, h, px0, py0, &paint, rgba, stride);
+        }
+
+        free(u);
     }
 
     if ((layers & PD_LAYER_STROKE) && hw > 0) {
