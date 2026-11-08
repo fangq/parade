@@ -50,6 +50,11 @@ typedef struct {
     int nst, next_st;
     char link[16];              /* the hyperlink the text is in: its relationship id, "" none */
     pd_numbers nb;              /* the numbers fields and notes show */
+    struct {
+        pd_res_id chart, data;  /* the chart's part, its workbook (0 none) */
+        char rid[64], link[512];    /* the workbook's relationship id in the part, a linked one's file */
+    } charts[64];
+    int ncharts;
 } pw;
 
 /* ---- small things ---- */
@@ -1408,6 +1413,111 @@ static void put_canvas(pw* P, pd_res_id res) {
     pj_free(jd);
 }
 
+/* a chart drawing (one read from a chart part): its number in the package (its part kept the first time), 0 none */
+static int chart_of(pw* P, const pj_node* root) {
+    pd_res_id cres = (pd_res_id)jn(root, "chart");
+    const pj_node* n;
+    int i;
+
+    if (!cres) {
+        return 0;
+    }
+
+    for (i = 0; i < P->ncharts; i++) {
+        if (P->charts[i].chart == cres) {
+            return i + 1;
+        }
+    }
+
+    if (P->ncharts >= 64) {
+        return 0;
+    }
+
+    memset(&P->charts[P->ncharts], 0, sizeof(P->charts[0]));
+    P->charts[P->ncharts].chart = cres;
+    P->charts[P->ncharts].data = (pd_res_id)jn(root, "data");
+    n = pj_get(root, "dataRid");
+    snprintf(P->charts[P->ncharts].rid, sizeof(P->charts[0].rid), "%.*s", n && n->type == PJ_STR ? (int)n->len : 0,
+             n && n->type == PJ_STR ? n->s : "");
+    n = pj_get(root, "dataLink");
+    snprintf(P->charts[P->ncharts].link, sizeof(P->charts[0].link), "%.*s", n && n->type == PJ_STR ? (int)n->len : 0,
+             n && n->type == PJ_STR ? n->s : "");
+    return ++P->ncharts;
+}
+
+/* what else a canvas page holds, in front of its canvas: charts and pictures placed from the page's corner, each
+   where it is (a chart a graphic frame of its part, as PowerPoint has it) */
+static void put_floats(pw* P, pd_block_id sec) {
+    pd_block_info si, bi;
+    int32_t k;
+
+    pd_doc_block_info(P->d, sec, &si);
+
+    for (k = 1; k < si.child_count; k++) {
+        pd_block_id fl = pd_doc_child(P->d, sec, k);
+        pd_float_props fp;
+        pd_inline ob;
+        pd_pos at;
+        const char* mime;
+        const void* data;
+        size_t len;
+        long long x, y, cx, cy;
+
+        if (pd_doc_block_info(P->d, fl, &bi) != PD_OK || bi.kind != PD_BLOCK_FLOAT ||
+                pd_doc_float_props(P->d, fl, &fp) != PD_OK || fp.offset_from != PD_FROM_PAGE) {
+            continue;
+        }
+
+        at.block = pd_doc_child(P->d, fl, 0);
+        at.offset = 0;
+
+        if (!at.block || pd_doc_inline_at(P->d, at, &ob) != PD_OK || ob.kind != PD_INLINE_IMAGE ||
+                pd_doc_resource(P->d, ob.resource, &mime, &data, &len) != PD_OK) {
+            continue;
+        }
+
+        x = EMU(fp.offset_x);
+        y = EMU(fp.offset_y);
+        cx = EMU(ob.width);
+        cy = EMU(ob.height);
+
+        if (!strcmp(mime, PD_DRAWING_MIME)) {
+            pj_doc* jd = pj_parse(data, len, 0, NULL);
+            int no = jd ? chart_of(P, pj_root(jd)) : 0;
+
+            pj_free(jd);
+
+            if (!no) {
+                continue;
+            }
+
+            P->nrel++;
+            pb_printf(&P->rels, "<Relationship Id=\"rId%d\" Type=\"%schart\" Target=\"../charts/chart%d.xml\"/>",
+                      P->nrel, REL, no);
+            pb_printf(P->o, "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"%d\" name=\"Chart %d\"/>"
+                      "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"%lld\" y=\"%lld\"/>"
+                      "<a:ext cx=\"%lld\" cy=\"%lld\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas."
+                      "openxmlformats.org/drawingml/2006/chart\"><c:chart xmlns:c=\"http://schemas.openxmlformats.org/"
+                      "drawingml/2006/chart\" r:id=\"rId%d\"/></a:graphicData></a:graphic></p:graphicFrame>", P->next_id,
+                      P->next_id, x, y, cx, cy, P->nrel);
+            P->next_id++;
+        } else {
+            int rid = pic_rel(P, ob.resource);
+
+            if (!rid) {
+                continue;
+            }
+
+            pb_printf(P->o, "<p:pic><p:nvPicPr><p:cNvPr id=\"%d\" name=\"Picture %d\"/><p:cNvPicPr/><p:nvPr/>"
+                      "</p:nvPicPr><p:blipFill><a:blip r:embed=\"rId%d\"/><a:stretch><a:fillRect/></a:stretch>"
+                      "</p:blipFill><p:spPr><a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>", P->next_id,
+                      P->next_id, rid, x, y, cx, cy);
+            P->next_id++;
+        }
+    }
+}
+
 /* a section that is no canvas: one text box inside its margins with its text */
 static void put_text_slide(pw* P, pd_block_id sec) {
     pd_section_props sp;
@@ -1514,6 +1624,8 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
             "<Default Extension=\"wmf\" ContentType=\"image/x-wmf\"/>"
             "<Default Extension=\"bmp\" ContentType=\"image/bmp\"/>"
             "<Default Extension=\"tiff\" ContentType=\"image/tiff\"/>"
+            "<Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml."
+            "sheet\"/>"
             "<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "presentationml.presentation.main+xml\"/>"
             "<Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-"
@@ -1538,10 +1650,6 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
                   "officedocument.presentationml.slide+xml\"/>", s + 1);
     }
 
-    pb_puts(&ct, "</Types>");
-    zadd(z, "[Content_Types].xml", &ct, &err);
-    pb_free(&ct);
-
     /* the slides */
     for (s = 0; s < nslides && !err; s++) {
         pd_block_id sec = pd_doc_child(d, pd_doc_root(d), s);
@@ -1561,6 +1669,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
 
         if (cv) {
             put_canvas(P, cv);
+            put_floats(P, sec);
         } else {
             put_text_slide(P, sec);
         }
@@ -1579,6 +1688,52 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         pb_free(&b);
         pb_free(&P->rels);
         pb_free(&slide);
+    }
+
+    for (i = 0; i < P->ncharts && !err; i++) {     /* the charts' parts, and the workbooks they come from */
+        const char* mime;
+        const void* data;
+        size_t len;
+
+        if (pd_doc_resource(d, P->charts[i].chart, &mime, &data, &len) != PD_OK) {
+            err = 1;
+            break;
+        }
+
+        snprintf(name, sizeof(name), "ppt/charts/chart%d.xml", i + 1);
+
+        if (pd_zipw_add(z, name, data, len)) {
+            err = 1;
+        }
+
+        if (P->charts[i].rid[0] && (P->charts[i].data || P->charts[i].link[0])) {
+            pb_puts(&b, DECL);
+            pb_puts(&b, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                    "<Relationship Id=\"");
+            escs(&b, P->charts[i].rid);
+
+            if (P->charts[i].data) {
+                pb_printf(&b, "\" Type=\"%spackage\" Target=\"../embeddings/Microsoft_Excel_Worksheet%d.xlsx\"/>", REL,
+                          i + 1);
+            } else {
+                pb_printf(&b, "\" Type=\"%soleObject\" Target=\"", REL);
+                escs(&b, P->charts[i].link);
+                pb_puts(&b, "\" TargetMode=\"External\"/>");
+            }
+
+            pb_puts(&b, "</Relationships>");
+            snprintf(name, sizeof(name), "ppt/charts/_rels/chart%d.xml.rels", i + 1);
+            zadd(z, name, &b, &err);
+            pb_free(&b);
+
+            if (P->charts[i].data && pd_doc_resource(d, P->charts[i].data, &mime, &data, &len) == PD_OK) {
+                snprintf(name, sizeof(name), "ppt/embeddings/Microsoft_Excel_Worksheet%d.xlsx", i + 1);
+
+                if (pd_zipw_add(z, name, data, len)) {
+                    err = 1;
+                }
+            }
+        }
     }
 
     for (i = 0; i < P->nmedia && !err; i++) {  /* the pictures */
@@ -1693,6 +1848,15 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
               "Target=\"docProps/app.xml\"/></Relationships>", DECL, REL, REL);
     zadd(z, "_rels/.rels", &b, &err);
     pb_free(&b);
+
+    for (i = 0; i < P->ncharts; i++) {
+        pb_printf(&ct, "<Override PartName=\"/ppt/charts/chart%d.xml\" ContentType=\"application/vnd.openxmlformats-"
+                  "officedocument.drawingml.chart+xml\"/>", i + 1);
+    }
+
+    pb_puts(&ct, "</Types>");
+    zadd(z, "[Content_Types].xml", &ct, &err);
+    pb_free(&ct);
     pd_zipw_finish(z);
     pd_numbers_free(&P->nb);
     free(P);
