@@ -1866,6 +1866,26 @@ static void dx_comment_bounds(dxo* x, pd_block_id p) {
 
 /* one run of text, inside w:ins or w:del when it is a tracked change */
 /* the w:ins or w:del a tracked change's runs go in, opened: its kind (PD_REV_*), 0 when it is none */
+/* a change said where it applies, as an empty w:ins or w:del (a paragraph mark's, a row's) or, given el, the
+   opening of that element (w:pPrChange), each with its author and date */
+static void dx_rev_mark(dxo* x, pd_rev_id rev, const char* el) {
+    pd_revision rv;
+
+    if (!rev || pd_doc_revision_get(x->d, rev, &rv) != PD_OK) {
+        return;
+    }
+
+    pb_printf(x->o, "<w:%s w:id=\"%d\" w:author=\"", el ? el : rv.kind == PD_REV_DELETE ? "del" : "ins", ++x->nrev);
+    xesc(x->o, rv.author, strlen(rv.author));
+
+    if (rv.date[0]) {
+        pb_puts(x->o, "\" w:date=\"");
+        xesc(x->o, rv.date, strlen(rv.date));
+    }
+
+    pb_puts(x->o, el ? "\">" : "\"/>");
+}
+
 /* a tracked insertion or deletion opened round runs: its kind, 8 more for a move (moveFrom, moveTo, in a range
    of the move's name), 0 none (a formatting change is in the run's rPr) */
 static int dx_rev_open(dxo* x, pd_rev_id rev) {
@@ -2663,8 +2683,34 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
         dx_ppr_tail(o, &dp, dp.mask, x->hyph_auto, &sp);
     }
 
+    {
+        /* its mark inserted or deleted */
+        pd_para_attrs pat;
+
+        if (pd_doc_para_attrs(x->d, p, &pat) == PD_OK && pat.mark_rev) {
+            pb_puts(o, "<w:rPr>");
+            dx_rev_mark(x, pat.mark_rev, NULL);
+            pb_puts(o, "</w:rPr>");
+        }
+    }
+
     if (extra_ppr) {
         pb_puts(o, extra_ppr);
+    }
+
+    {
+        /* its properties changed: what they were */
+        pd_para_attrs pat;
+        pd_revision rv;
+
+        if (pd_doc_para_attrs(x->d, p, &pat) == PD_OK && pat.format_rev &&
+                pd_doc_revision_get(x->d, pat.format_rev, &rv) == PD_OK && rv.kind == PD_REV_FORMAT) {
+            dx_rev_mark(x, pat.format_rev, "pPrChange");
+            pb_puts(o, "<w:pPr>");
+            dx_ppr_head(o, &rv.old_para, rv.old_para.mask);
+            dx_ppr_tail(o, &rv.old_para, rv.old_para.mask, x->hyph_auto, NULL);
+            pb_puts(o, "</w:pPr></w:pPrChange>");
+        }
     }
 
     pb_puts(o, "</w:pPr>");
@@ -2920,7 +2966,8 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 minh = rp.height;
             }
 
-            if (minh > 0 || r < tp.header_rows || rp.grid_before || rp.grid_after || rp.split == PD_ROWSPLIT_NEVER) {
+            if (minh > 0 || r < tp.header_rows || rp.grid_before || rp.grid_after || rp.split == PD_ROWSPLIT_NEVER ||
+                    rp.revision) {
                 pb_puts(o, "<w:trPr>");
 
                 if (rp.grid_before) {
@@ -2949,6 +2996,10 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
                 if (r < tp.header_rows) {
                     pb_puts(o, "<w:tblHeader/>");
+                }
+
+                if (rp.revision) {  /* the row inserted or deleted */
+                    dx_rev_mark(x, rp.revision, NULL);
                 }
 
                 pb_puts(o, "</w:trPr>");
@@ -7349,6 +7400,10 @@ typedef struct {
     pd_char_props old_cp;
     char chg_author[64], chg_date[32];
     pd_rev_id fmt_rev;          /* the run's formatting change */
+    int in_pprchg;              /* in a paragraph's w:pPrChange: its old w:pPr */
+    dprops old_pr;
+    pd_rev_id mark_rev, para_fmt_rev, row_rev;  /* the paragraph mark's change, the paragraph's formatting's, the
+                                                   row's insertion or deletion */
     char move_name[32][40];     /* the moves' names (moveFromRangeStart, moveToRangeStart), numbered from 1 */
     int nmove, move_cur;
     int link_depth[16], nlinks;
@@ -7608,8 +7663,11 @@ static void dw_row_begin(dw* w) {
     bld_row_begin(b, w->row_header);
     w->pend_row = 0;
 
+    w->row_pr.revision = w->row_rev;
+
     if (b->ntables >= 1 && b->ntables <= 8 && b->table[b->ntables - 1] && (w->row_pr.grid_before ||
-            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after || w->row_pr.height_exact || w->row_pr.split)) {
+            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after || w->row_pr.height_exact || w->row_pr.split ||
+            w->row_pr.revision)) {
         pd_doc_set_row_props(b->d, b->row[b->ntables - 1], &w->row_pr);
     }
 }
@@ -12983,6 +13041,58 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
+        if (open && strcmp(t, "pPrChange") == 0 && w->in_ppr && !w->in_mrpr && !w->in_pprchg) {
+            /* the paragraph's properties changed: what it had, in the w:pPr inside */
+            w->in_pprchg = m.type == MT_OPEN;
+            memset(&w->old_pr, 0, sizeof(w->old_pr));
+            w->chg_author[0] = w->chg_date[0] = '\0';
+            mu_attr(&m, "w:author", w->chg_author, sizeof(w->chg_author));
+            mu_attr(&m, "w:date", w->chg_date, sizeof(w->chg_date));
+            continue;
+        }
+
+        if (w->in_pprchg) {
+            if (m.type == MT_CLOSE && strcmp(t, "pPrChange") == 0) {
+                pd_revision rv;
+
+                memset(&rv, 0, sizeof(rv));
+                rv.kind = PD_REV_FORMAT;
+                memcpy(rv.author, w->chg_author, sizeof(rv.author));
+                memcpy(rv.date, w->chg_date, sizeof(rv.date));
+                rv.old_para = w->old_pr.pp;
+                rv.old_para.mask &= ~PD_PP_NEXT_STYLE;
+                w->in_pprchg = 0;
+
+                if (pd_doc_revision_add(X->b->d, &rv, &w->para_fmt_rev) != PD_OK) {
+                    w->para_fmt_rev = 0;
+                }
+            } else if (open && strcmp(t, "pPr") != 0) {
+                ppr_elem(X, &m, t, &w->old_pr);
+            }
+
+            continue;
+        }
+
+        if (open && (w->in_mrpr || w->in_trpr) && (!strcmp(t, "ins") || !strcmp(t, "del") || !strcmp(t, "moveTo") ||
+                !strcmp(t, "moveFrom"))) {
+            pd_revision rv;     /* the paragraph mark, or the row, inserted or deleted */
+
+            memset(&rv, 0, sizeof(rv));
+            rv.kind = t[0] == 'd' || !strcmp(t, "moveFrom") ? PD_REV_DELETE : PD_REV_INSERT;
+            mu_attr(&m, "w:author", rv.author, sizeof(rv.author));
+            mu_attr(&m, "w:date", rv.date, sizeof(rv.date));
+
+            if (pd_doc_revision_add(X->b->d, &rv, w->in_mrpr ? &w->mark_rev : &w->row_rev) != PD_OK) {
+                *(w->in_mrpr ? &w->mark_rev : &w->row_rev) = 0;
+            }
+
+            if (m.type == MT_OPEN) {
+                w->skip = 1;
+            }
+
+            continue;
+        }
+
         if (open && (!strcmp(t, "moveFromRangeStart") || !strcmp(t, "moveToRangeStart"))) {
             int k;      /* a move's two ends share its name: their revisions its number */
 
@@ -13059,6 +13169,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->ilvl = 0;
                 memset(&w->ppr, 0, sizeof(w->ppr));
                 memset(&w->frm, 0, sizeof(w->frm));
+                w->mark_rev = w->para_fmt_rev = 0;
                 memset(&w->mcp, 0, sizeof(w->mcp));
                 w->mstyle[0] = '\0';
                 w->in_mrpr = 0;
@@ -13587,6 +13698,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->row_header = 0;
                 memset(&w->row_pr, 0, sizeof(w->row_pr));
                 w->row_pr.split = PD_ROWSPLIT_ANY;  /* Word breaks a row where the page ends, unless told not to */
+                w->row_rev = 0;
 
                 if (w->ntab >= 1 && w->ntab <= 8) {
                     w->tabs[w->ntab - 1].row++;
@@ -13685,6 +13797,16 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         /* closing tags */
         if (strcmp(t, "p") == 0 && w->in_p) {
             dw_begin_para(w);   /* an empty paragraph is still one */
+
+            if ((w->mark_rev || w->para_fmt_rev) && X->b->para) {  /* its mark's and its properties' changes */
+                pd_para_attrs at;
+
+                if (pd_doc_para_attrs(X->b->d, X->b->para, &at) == PD_OK) {
+                    at.mark_rev = w->mark_rev;
+                    at.format_rev = w->para_fmt_rev;
+                    pd_doc_set_para_attrs(X->b->d, X->b->para, &at);
+                }
+            }
 
             if (w->mcp.mask || w->mstyle[0]) {  /* sized by its mark */
                 pd_char_props keep = w->rcp;

@@ -1559,7 +1559,12 @@ static void props_apply(pd_sync* s, const YTransaction* t, blk* b, const char* j
             }
         }
 
-        if ((b = pd_doc_blk(d, id)) != NULL && memcmp(&at, &b->st.at, sizeof(at)) != 0) {
+        if ((b = pd_doc_blk(d, id)) != NULL) {     /* its tracked changes are not shared: this replica's stay */
+            at.mark_rev = b->st.at.mark_rev;
+            at.format_rev = b->st.at.format_rev;
+        }
+
+        if (b && memcmp(&at, &b->st.at, sizeof(at)) != 0) {
             pd_doc_set_para_attrs(d, id, &at);
         }
     } else if ((x = pj_get(r, "B")) != NULL) {

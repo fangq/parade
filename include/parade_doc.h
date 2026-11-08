@@ -831,6 +831,8 @@ typedef struct {
     int32_t height_exact;       /**< 1: exactly height tall, what its cells hold beyond that cut off (Word's
                                      hRule="exact"); such a row is never broken */
     int32_t split;              /**< PD_ROWSPLIT_*: whether it may be broken across columns and pages */
+    pd_rev_id revision;         /**< the row inserted or deleted, a tracked change (accepting a deletion or rejecting
+                                     an insertion removes it); 0 none */
 } pd_row_props;
 
 /* where a table row may break */
@@ -996,6 +998,9 @@ typedef struct {
     char div_class[32];         /**< a named block it is in (Markdown's ::: warning, HTML's <div class>): a run of
                                      paragraphs with one name is one block; "!note" etc. are GitHub's alerts,
                                      block quotes of a kind. UTF-8, "" = none */
+    pd_rev_id mark_rev;         /**< its paragraph mark inserted or deleted (a tracked change: accepting a deletion,
+                                     or rejecting an insertion, joins it with the next paragraph); 0 none */
+    pd_rev_id format_rev;       /**< its paragraph properties changed: a PD_REV_FORMAT whose old_para they were; 0 none */
 } pd_para_attrs;
 
 PD_API pd_status pd_doc_para_attrs(const pd_doc* doc, pd_block_id paragraph, pd_para_attrs* out);
@@ -1127,6 +1132,8 @@ typedef struct {
                                      where it went sharing this number (Word's moveFrom, moveTo); 0 not a move */
     pd_char_props old;          /**< PD_REV_FORMAT: the direct formatting the text had before (masked); rejecting
                                      the change gives it back */
+    pd_para_props old_para;     /**< PD_REV_FORMAT of a paragraph (pd_para_attrs.format_rev): the direct paragraph
+                                     properties it had before (masked) */
 } pd_revision;
 
 PD_API pd_status pd_doc_revision_add(pd_doc* doc, const pd_revision* rev, pd_rev_id* out);

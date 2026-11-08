@@ -532,14 +532,6 @@ type
   end;
   Ppd_theme = ^pd_theme;
 
-  pd_revision = record
-    kind: Int32;
-    author: array[0..63] of AnsiChar;
-    date: array[0..31] of AnsiChar;
-    move: Int32;              { a moved text's number, its deletion and insertion; 0 not a move }
-    old: pd_char_props;       { PD_REV_FORMAT: the direct formatting it had }
-  end;
-  Ppd_revision = ^pd_revision;
 
   pd_comment = record
     author: array[0..63] of AnsiChar;
@@ -592,6 +584,16 @@ type
   end;
   Ppd_para_props = ^pd_para_props;
 
+  pd_revision = record
+    kind: Int32;
+    author: array[0..63] of AnsiChar;
+    date: array[0..31] of AnsiChar;
+    move: Int32;              { a moved text's number, its deletion and insertion; 0 not a move }
+    old: pd_char_props;       { PD_REV_FORMAT: the direct formatting it had }
+    old_para: pd_para_props;  { a paragraph's PD_REV_FORMAT: the properties it had }
+  end;
+  Ppd_revision = ^pd_revision;
+
   pd_list_level = record
     format, start: Int32;
     text: array[0..31] of AnsiChar;
@@ -633,6 +635,8 @@ type
     lang: array[0..31] of AnsiChar;
     cont: Int32;              { a later block of the list item above }
     div_class: array[0..31] of AnsiChar;   { a named block it is in: ::: name, <div class> }
+    mark_rev: pd_rev_id;      { its paragraph mark inserted or deleted }
+    format_rev: pd_rev_id;    { its properties changed: a PD_REV_FORMAT with old_para }
   end;
   Ppd_para_attrs = ^pd_para_attrs;
 
@@ -737,6 +741,7 @@ type
     height: pd_sp;                      { with height_exact: the row's height }
     height_exact: Int32;                { 1: exactly that tall, its cells' content cut off there }
     split: Int32;                       { PD_ROWSPLIT_* }
+    revision: pd_rev_id;                { the row inserted or deleted }
   end;
 
   { what a table style says of a part's cells (PD_TPART_*), and of their text }

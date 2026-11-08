@@ -381,6 +381,11 @@ static void save_rev(pj_writer* w, const pd_revision* r) {
     if (r->kind == PD_REV_FORMAT) {
         pj_key(w, "Old");
         save_cp(w, &r->old);
+
+        if (r->old_para.mask) {
+            pj_key(w, "OldPara");
+            save_pp(w, &r->old_para);
+        }
     }
 
     pj_obj_end(w);
@@ -425,10 +430,16 @@ typedef struct {
     int32_t nused;
     uint32_t maxid;
     int exact;          /* ids as they are (deltas) */
+    uint32_t* rmap;     /* old revision id -> saved id */
 } saver;
 
 static uint32_t fmt_id(const saver* sv, pd_format_id f) {
     return sv->exact ? f : f ? sv->fmap[f] : 0;
+}
+
+/* a revision a block names (a paragraph mark's, a row's), as saved */
+static uint32_t rev_id(const saver* sv, pd_rev_id r) {
+    return sv->exact || !sv->rmap ? r : (int32_t)r <= sv->d->nrevs ? sv->rmap[r] : 0;
 }
 
 static void collect(saver* sv, const blk* b) {
@@ -447,6 +458,33 @@ static void collect(saver* sv, const blk* b) {
 
     for (i = 0; i < b->nkids; i++) {
         collect(sv, sv->d->tab[b->kids[i]]);
+    }
+}
+
+/* the revisions blocks name, numbered after those of the formats, in reading order */
+static void collect_revs(const pd_doc* d, const blk* b, uint32_t* rmap, uint32_t* nrev) {
+    pd_rev_id r3[3] = { 0, 0, 0 };
+    int32_t q;
+
+    if (!b) {
+        return;
+    }
+
+    if (b->kind == PD_BLOCK_PARAGRAPH) {
+        r3[0] = b->st.at.mark_rev;
+        r3[1] = b->st.at.format_rev;
+    } else if (b->kind == PD_BLOCK_ROW) {
+        r3[2] = b->st.row.revision;
+    }
+
+    for (q = 0; q < 3; q++) {
+        if (r3[q] && (int32_t)r3[q] <= d->nrevs && !rmap[r3[q]]) {
+            rmap[r3[q]] = ++*nrev;
+        }
+    }
+
+    for (q = 0; q < b->nkids; q++) {
+        collect_revs(d, d->tab[b->kids[q]], rmap, nrev);
     }
 }
 
@@ -492,9 +530,18 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "EmptyFormat", fmt_id(sv, s->empty_format));
             }
 
-            if (s->at.quote_depth || s->at.task || s->at.loose || s->at.lang[0] || s->at.cont || s->at.div_class[0]) {
+            if (s->at.quote_depth || s->at.task || s->at.loose || s->at.lang[0] || s->at.cont || s->at.div_class[0] ||
+                    rev_id(sv, s->at.mark_rev) || rev_id(sv, s->at.format_rev)) {
                 pj_key(w, "Attrs");
                 pj_obj_begin(w);
+
+                if (rev_id(sv, s->at.mark_rev)) {
+                    put_int(w, "MarkRevision", rev_id(sv, s->at.mark_rev));
+                }
+
+                if (rev_id(sv, s->at.format_rev)) {
+                    put_int(w, "FormatRevision", rev_id(sv, s->at.format_rev));
+                }
 
                 if (s->at.quote_depth) {
                     put_int(w, "QuoteDepth", s->at.quote_depth);
@@ -884,9 +931,14 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
         case PD_BLOCK_ROW: {
             const pd_row_props* p = &s->row;
 
-            if (p->grid_before || p->grid_after || p->width_before || p->width_after || p->height_exact || p->split) {
+            if (p->grid_before || p->grid_after || p->width_before || p->width_after || p->height_exact || p->split ||
+                    rev_id(sv, p->revision)) {
                 pj_key(w, "Row");
                 pj_obj_begin(w);
+
+                if (rev_id(sv, p->revision)) {
+                    put_int(w, "Revision", rev_id(sv, p->revision));
+                }
 
                 if (p->grid_before || p->width_before) {
                     put_int(w, "GridBefore", p->grid_before);
@@ -1273,6 +1325,14 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
         }
     }
 
+    if (!exact && rmap) {   /* then those blocks name: paragraph marks, paragraph formatting, rows */
+        collect_revs(d, d->tab[PD_ROOT_ID], rmap, &nrev);
+
+        for (i = 0; i < sr->nkids; i++) {
+            collect_revs(d, d->tab[sr->kids[i]], rmap, &nrev);
+        }
+    }
+
     for (i = 1; i <= d->nrevs && exact; i++) {
         rmap[i] = ++nrev;
     }
@@ -1316,7 +1376,7 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
     }
 
     pj_arr_end(&w);
-    free(rmap);
+    sv.rmap = rmap;     /* for the blocks' revisions, below */
 
     pj_key(&w, "Lists");
     pj_arr_begin(&w);
@@ -1373,6 +1433,7 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
     st = pj_finish(&w) ? PD_ERR_IO : PD_OK;
     free(sv.fmap);
     free(sv.order);
+    free(sv.rmap);
     return st;
 }
 
@@ -1648,6 +1709,10 @@ static void load_rev(const pj_node* c, pd_revision* rv, loader* L) {
     if (rv->kind == PD_REV_FORMAT && pj_get(c, "Old")) {
         load_cp(pj_get(c, "Old"), &rv->old, L);
     }
+
+    if (rv->kind == PD_REV_FORMAT && pj_get(c, "OldPara")) {
+        load_pp(pj_get(c, "OldPara"), &rv->old_para, L);
+    }
 }
 
 static void load_theme(loader* L, const pj_node* x, pd_theme* t) {
@@ -1811,6 +1876,8 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
         copy_name(pj_get(x, "Language"), s->at.lang, sizeof(s->at.lang), L);
         s->at.cont = (int32_t)int_or(pj_get(x, "Continues"), 0, 0, 1, L);
         copy_name(pj_get(x, "Div"), s->at.div_class, sizeof(s->at.div_class), L);
+        s->at.mark_rev = (pd_rev_id)int_or(pj_get(x, "MarkRevision"), 0, 0, d->nrevs, L);
+        s->at.format_rev = (pd_rev_id)int_or(pj_get(x, "FormatRevision"), 0, 0, d->nrevs, L);
     }
 
     x = pj_get(o, "Text");
@@ -2108,6 +2175,7 @@ static void load_row(loader* L, const pj_node* o, pd_row_props* p) {
     p->height = (pd_sp)int_or(pj_get(x, "Height"), 0, 0, SP_MAX, L);
     p->height_exact = (int32_t)int_or(pj_get(x, "HeightExact"), 0, 0, 1, L);
     p->split = (int32_t)int_or(pj_get(x, "Split"), PD_ROWSPLIT_TALL, PD_ROWSPLIT_TALL, PD_ROWSPLIT_ANY, L);
+    p->revision = (pd_rev_id)int_or(pj_get(x, "Revision"), 0, 0, L->d->nrevs, L);
 }
 
 static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {

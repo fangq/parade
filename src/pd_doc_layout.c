@@ -30,7 +30,7 @@ pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
         return PD_ERR_FORMAT;
     }
 
-    pd_doc_markup_props(d, cp);
+    pd_doc_markup_props(d, para, cp);
 
     f = resolve_font(d, cp);
 
