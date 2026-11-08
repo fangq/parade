@@ -4677,6 +4677,7 @@ typedef struct {
     int nbuiltin;
     uint32_t theme_clr[12];     /* the theme's colours: dk1 lt1 dk2 lt2 accent1..6 hlink folHlink */
     pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
+    pd_sp page_w, page_h, margin_right, margin_top, margin_bottom;  /* ... and for VML shapes placed in it */
     struct {                    /* bookmarks read: where they are */
         char name[32];
         pd_block_id para;
@@ -6221,6 +6222,11 @@ typedef struct {
     long long posv_off;
     pd_res_id drawing_res;      /* a group or canvas made into a drawing resource */
     int in_vml;                 /* inside w:object or w:pict: a VML picture */
+    char vml_style[400];        /* its shape's style (size, position), for one with text */
+    char art[128], art_font[64];    /* WordArt: v:textpath's string and font */
+    uint32_t vml_fill;          /* the shape's fillcolor (0: none said) */
+    int vml_opacity;            /* v:fill's opacity, per-mille */
+    int vml_wrap;               /* w10:wrap: -1 not said, else a pd_wrap (LEFT for square, NONE topAndBottom) */
     int math_para;              /* the paragraph opens with display math (m:oMathPara) */
     const char* tbx;            /* a floating text box's content, in the part being read */
     size_t tbn;
@@ -6231,6 +6237,7 @@ typedef struct {
         int wrap, has_off, off_from;
         const char* tbx;        /* a text box: its w:txbxContent, read into the float */
         size_t tbn;
+        char* own;              /* tbx made here (WordArt's text as a paragraph), freed once read */
         pd_rev_id rev;          /* inserted or deleted with its anchor */
     } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
     int npend_fl;
@@ -7193,6 +7200,183 @@ static pd_rev_id deleted_rev(const dxi* X, pd_rev_id rev) {
     return rev && pd_doc_revision_get(X->b->d, rev, &rv) == PD_OK && rv.kind == PD_REV_DELETE ? rev : 0;
 }
 
+static long long vml_length(const char* style, const char* prop);
+static void dw_floats(dw* w);
+
+/* a property of a VML style ("mso-position-horizontal:center"), its value into out; 0 when it has none */
+static int vml_prop(const char* style, const char* prop, char* out, size_t cap) {
+    const char* p = style;
+    size_t n = strlen(prop), k = 0;
+
+    while ((p = strstr(p, prop)) != NULL) {
+        if ((p == style || p[-1] == ';' || p[-1] == ' ') && p[n] == ':') {
+            for (p += n + 1; *p == ' ' || *p == '"' || *p == '\''; p++) {
+            }
+
+            while (*p && *p != ';' && *p != '"' && *p != '\'' && k + 1 < cap) {
+                out[k++] = *p++;
+            }
+
+            out[k] = '\0';
+            return 1;
+        }
+
+        p += n;
+    }
+
+    return 0;
+}
+
+/* a VML colour: #rrggbb, #rgb or a name (with Word's " [n]" index after it), as 0xFFRRGGBB; black if unknown */
+static uint32_t vml_color(const char* v) {
+    static const struct {
+        const char* n;
+        uint32_t c;
+    } names[] = {
+        { "black", 0x000000 }, { "white", 0xFFFFFF }, { "silver", 0xC0C0C0 }, { "gray", 0x808080 },
+        { "red", 0xFF0000 }, { "green", 0x008000 }, { "blue", 0x0000FF }, { "yellow", 0xFFFF00 },
+        { "navy", 0x000080 }, { "maroon", 0x800000 }, { "purple", 0x800080 }, { "teal", 0x008080 },
+        { "olive", 0x808000 }, { "lime", 0x00FF00 }, { "aqua", 0x00FFFF }, { "fuchsia", 0xFF00FF }
+    };
+    size_t i;
+
+    if (v[0] == '#' && strlen(v) >= 7) {
+        return 0xFF000000u | (uint32_t)strtoul(v + 1, NULL, 16);
+    }
+
+    if (v[0] == '#' && strlen(v) >= 4) {
+        uint32_t c = (uint32_t)strtoul(v + 1, NULL, 16);
+
+        return 0xFF000000u | ((c >> 8) & 15) * 0x110000u | ((c >> 4) & 15) * 0x1100u | (c & 15) * 0x11u;
+    }
+
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (!strncmp(v, names[i].n, strlen(names[i].n))) {
+            return 0xFF000000u | names[i].c;
+        }
+    }
+
+    return 0xFF000000u;
+}
+
+/* A VML shape with text -- a text box (v:textbox) or WordArt (v:textpath, a header's watermark) -- as a
+   float like a DrawingML text box's: as big as its style says, where it puts it when it is absolutely
+   positioned (from the margin, the page or the text, centred where it says), the text round it as w10:wrap
+   says, else over it (under it, at a negative z-index); in the line when it is not positioned. WordArt's
+   string becomes a paragraph of its font and fill (made lighter by the fill's opacity), as big as fits. */
+static void dw_vml_float(dw* w) {
+    dxi* X = w->X;
+    const char* st = w->vml_style;
+    char v[64];
+    long long cx = vml_length(st, "width"), cy = vml_length(st, "height");
+    int k, absolute = vml_prop(st, "position", v, sizeof(v)) && !strcmp(v, "absolute");
+    pd_sp colw = X->page_w - X->margin_left - X->margin_right;
+
+    if (cx <= 0 || cy <= 0 || w->npend_fl >= 8) {
+        return;
+    }
+
+    k = w->npend_fl++;
+    memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+    w->pend_fl[k].w = (pd_sp)(cx * 65536 / 12700);
+    w->pend_fl[k].h = (pd_sp)(cy * 65536 / 12700);
+    w->pend_fl[k].rev = deleted_rev(X, w->rev);
+
+    if (!absolute) {
+        w->pend_fl[k].wrap = PD_WRAP_NONE;
+    } else {
+        char ha[16] = "", hr[16] = "", va[16] = "", vr[16] = "";
+        pd_sp ox = (pd_sp)((vml_length(st, "margin-left") + vml_length(st, "left")) * 65536 / 12700);
+        pd_sp oy = (pd_sp)((vml_length(st, "margin-top") + vml_length(st, "top")) * 65536 / 12700);
+
+        vml_prop(st, "mso-position-horizontal", ha, sizeof(ha));
+        vml_prop(st, "mso-position-horizontal-relative", hr, sizeof(hr));
+        vml_prop(st, "mso-position-vertical", va, sizeof(va));
+        vml_prop(st, "mso-position-vertical-relative", vr, sizeof(vr));
+
+        if (w->vml_wrap >= 0) {
+            w->pend_fl[k].wrap = w->vml_wrap == PD_WRAP_LEFT && !strcmp(ha, "right") ? PD_WRAP_RIGHT : w->vml_wrap;
+        } else {
+            w->pend_fl[k].wrap = vml_prop(st, "z-index", v, sizeof(v)) && atol(v) < 0 ? PD_WRAP_BEHIND : PD_WRAP_FRONT;
+        }
+
+        if (!strcmp(hr, "page")) {
+            ox -= X->margin_left;
+        }
+
+        if (!strcmp(ha, "center") && colw > 0) {
+            ox = (colw - w->pend_fl[k].w) / 2;
+        } else if (!strcmp(ha, "right") && colw > 0) {
+            ox = colw - w->pend_fl[k].w;
+        }
+
+        w->pend_fl[k].has_off = 1;
+        w->pend_fl[k].off_x = ox;
+        w->pend_fl[k].off_from = !strcmp(vr, "page") ? PD_FROM_PAGE : !strcmp(vr, "margin") ? PD_FROM_MARGIN :
+                                 PD_FROM_PARAGRAPH;
+
+        if (!strcmp(va, "center") && X->page_h > 0) {
+            oy = ((w->pend_fl[k].off_from == PD_FROM_PAGE ? X->page_h : X->page_h - X->margin_top - X->margin_bottom) -
+                  w->pend_fl[k].h) / 2;
+            w->pend_fl[k].off_from = w->pend_fl[k].off_from == PD_FROM_PAGE ? PD_FROM_PAGE : PD_FROM_MARGIN;
+        }
+
+        w->pend_fl[k].off_y = oy;
+    }
+
+    if (w->tbx) {
+        w->pend_fl[k].tbx = w->tbx;
+        w->pend_fl[k].tbn = w->tbn;
+    } else {    /* WordArt: its string as a paragraph */
+        pd_buf o;
+        uint32_t c = w->vml_fill ? w->vml_fill : 0xFF000000u;
+        int op = w->vml_opacity < 0 ? 0 : w->vml_opacity > 1000 ? 1000 : w->vml_opacity, r, g, bl;
+        size_t i, chars = 0;
+        long long hp;
+
+        for (i = 0; w->art[i]; i++) {
+            chars += ((unsigned char)w->art[i] & 0xC0) != 0x80;
+        }
+
+        /* as tall as the shape, or as wide, a character 0.6 em */
+        hp = cy * 2 / 12700;
+        hp = chars && cx * 2 * 10 / (12700 * 6 * (long long)chars) < hp ? cx * 2 * 10 / (12700 * 6 * (long long)chars) :
+             hp;
+        hp = hp < 2 ? 2 : hp > 3276 ? 3276 : hp;
+        r = ((int)((c >> 16) & 255) * op + 255 * (1000 - op) + 500) / 1000;
+        g = ((int)((c >> 8) & 255) * op + 255 * (1000 - op) + 500) / 1000;
+        bl = ((int)(c & 255) * op + 255 * (1000 - op) + 500) / 1000;
+        memset(&o, 0, sizeof(o));
+        pb_puts(&o, "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:rPr>");
+
+        if (w->art_font[0]) {
+            pb_puts(&o, "<w:rFonts w:ascii=\"");
+            xesc(&o, w->art_font, strlen(w->art_font));
+            pb_puts(&o, "\" w:hAnsi=\"");
+            xesc(&o, w->art_font, strlen(w->art_font));
+            pb_puts(&o, "\"/>");
+        }
+
+        pb_printf(&o, "<w:color w:val=\"%02X%02X%02X\"/><w:sz w:val=\"%d\"/></w:rPr><w:t xml:space=\"preserve\">", r, g,
+                  bl, (int)hp);
+        xesc(&o, w->art, strlen(w->art));
+        pb_puts(&o, "</w:t></w:r></w:p>");
+
+        if (o.p) {
+            w->pend_fl[k].own = o.p;
+            w->pend_fl[k].tbx = o.p;
+            w->pend_fl[k].tbn = o.n;
+        } else {
+            w->npend_fl--;
+            return;
+        }
+    }
+
+    if (!w->started) {
+        dw_floats(w);
+    }
+}
+
 /* A frame's paragraph read: the float it is in placed as its framePr says -- a drop cap beside the lines of
    text it spans (in the margin left of them for "margin"), a frame where its x and y put it, the text round it
    unless it says not -- and as wide as it says, else as its text (each character taken as 0.6 em, a drop cap's
@@ -7289,6 +7473,8 @@ static void dw_floats(dw* w) {
             dw_parse(w->X, w->pend_fl[k].tbx, w->pend_fl[k].tbn, 1);
             w->X->float_rev = outer;
             w->X->depth--;
+            free(w->pend_fl[k].own);
+            w->pend_fl[k].own = NULL;
             bld_end_para(b);
             b->cp = keep;
             bld_float_end(b);
@@ -10266,9 +10452,10 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
-        if (m.type == MT_OPEN && w->in_drawing && w->anchor && !w->tbx && strcmp(t, "txbxContent") == 0 &&
+        if (m.type == MT_OPEN && (w->in_drawing || w->in_vml) && !w->tbx && strcmp(t, "txbxContent") == 0 &&
                 X->depth < 3) {
-            /* a floating text box: its paragraphs become a float's, read once the anchoring paragraph ends */
+            /* a text box (floating or in the line, DrawingML's or VML's): its paragraphs become a float's, read
+               once the anchoring paragraph ends */
             pd_markup g;
             int depth = 1;
             size_t end = 0;
@@ -10520,6 +10707,11 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->sp.gutter = w->sp.gutter < 0 ? 0 : w->sp.gutter;
                     w->X->margin_left = w->sp.margin_left;  /* for the pictures of its headers, read next */
                     w->sp.margin_right = twips(attr_int(&m, "w:right", 1440));
+                    w->X->margin_right = w->sp.margin_right;
+                    w->X->margin_top = w->sp.margin_top;
+                    w->X->margin_bottom = w->sp.margin_bottom;
+                    w->X->page_w = w->sp.page_width;
+                    w->X->page_h = w->sp.page_height;
                     w->sp.header_distance = twips(attr_int(&m, "w:header", 720));
                     w->sp.footer_distance = twips(attr_int(&m, "w:footer", 720));
                 } else if (strcmp(t, "headerReference") == 0 || strcmp(t, "footerReference") == 0) {
@@ -10672,9 +10864,29 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->in_vml = 1;
                 w->blip[0] = '\0';
                 w->cx = w->cy = 0;
-            } else if (w->in_vml && strcmp(t, "shape") == 0 && w->cx == 0 && mu_attr(&m, "style", v, sizeof(v))) {
-                w->cx = vml_length(v, "width");
-                w->cy = vml_length(v, "height");
+                w->vml_style[0] = w->art[0] = w->art_font[0] = '\0';
+                w->vml_fill = 0;
+                w->vml_opacity = 1000;
+                w->vml_wrap = -1;
+                w->tbx = NULL;
+                w->tbn = 0;
+            } else if (w->in_vml && (strcmp(t, "shape") == 0 || strcmp(t, "rect") == 0 || strcmp(t, "roundrect") == 0 ||
+                                     strcmp(t, "oval") == 0) && !w->vml_style[0] &&
+                       mu_attr(&m, "style", w->vml_style, sizeof(w->vml_style))) {
+                w->cx = w->cx ? w->cx : vml_length(w->vml_style, "width");
+                w->cy = w->cy ? w->cy : vml_length(w->vml_style, "height");
+
+                if (mu_attr(&m, "fillcolor", v, sizeof(v))) {
+                    w->vml_fill = vml_color(v);
+                }
+            } else if (w->in_vml && strcmp(t, "textpath") == 0 && mu_attr(&m, "string", w->art, sizeof(w->art))) {
+                if (mu_attr(&m, "style", v, sizeof(v))) {
+                    vml_prop(v, "font-family", w->art_font, sizeof(w->art_font));
+                }
+            } else if (w->in_vml && strcmp(t, "fill") == 0 && mu_attr(&m, "opacity", v, sizeof(v))) {
+                w->vml_opacity = strchr(v, 'f') ? (int)(atof(v) * 1000 / 65536) : (int)(atof(v) * 1000);
+            } else if (w->in_vml && strcmp(t, "wrap") == 0 && mu_attr(&m, "type", v, sizeof(v))) {
+                w->vml_wrap = !strcmp(v, "topAndBottom") ? PD_WRAP_NONE : !strcmp(v, "none") ? -1 : PD_WRAP_LEFT;
             } else if (w->in_vml && strcmp(t, "imagedata") == 0 && !w->blip[0]) {
                 mu_attr(&m, "r:id", w->blip, sizeof(w->blip));
             } else if (w->in_drawing && strcmp(t, "chart") == 0 && !w->drawing_res && mu_attr(&m, "r:id", v, sizeof(v))) {
@@ -11051,8 +11263,11 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->anchor = 0;      /* in the line, as Word shows an object */
                 w->drawing_res = 0;
                 dw_image(w);
+            } else if (w->tbx || w->art[0]) {
+                dw_vml_float(w);    /* a text box, WordArt */
             }
 
+            w->tbx = NULL;
             w->in_vml = 0;
             w->blip[0] = '\0';
         } else if (strcmp(t, "drawing") == 0) {
@@ -11078,6 +11293,22 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 if (w->posv_para <= 1 && (w->started || !w->posv_para)) {
                     w->pend_fl[k].off_y = 0;    /* from a paragraph only when it is the one after it */
                 }
+                w->pend_fl[k].tbx = w->tbx;
+                w->pend_fl[k].tbn = w->tbn;
+
+                if (!w->started) {
+                    dw_floats(w);
+                }
+            } else if (w->in_drawing && w->tbx && !w->anchor && w->cx > 0 && !w->blip[0] && !w->drawing_res &&
+                       w->npend_fl < 8) {
+                /* a text box in the line: its own block where it is, as wide as it is */
+                int k = w->npend_fl++;
+
+                memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+                w->pend_fl[k].w = (pd_sp)(w->cx * 65536 / 12700);
+                w->pend_fl[k].h = (pd_sp)(w->cy * 65536 / 12700);
+                w->pend_fl[k].wrap = PD_WRAP_NONE;
+                w->pend_fl[k].rev = deleted_rev(X, w->rev);
                 w->pend_fl[k].tbx = w->tbx;
                 w->pend_fl[k].tbn = w->tbn;
 
@@ -11130,6 +11361,10 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             bld_table_end(X->b);
             w->ntab -= w->ntab > 0;
         }
+    }
+
+    for (tk = 0; tk < w->npend_fl; tk++) {
+        free(w->pend_fl[tk].own);
     }
 
     free(w);

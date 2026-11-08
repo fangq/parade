@@ -5423,6 +5423,69 @@ static void test_docx_drop_cap(void) {
     pd_doc_free(d);
 }
 
+/* Text boxes that lost their text: a DrawingML text box in the line (wp:inline), a VML text box (v:textbox in a
+   w:pict) and VML WordArt (v:textpath, a header's watermark) are floats holding their text, laid out and written
+   back (as text boxes). The watermark is centred on the page's text area, in the fill made lighter by its
+   opacity (silver at half: E0E0E0). */
+static void test_docx_text_boxes(void) {
+    pd_doc* d = docx_doc(
+                    "word/_rels/document.xml.rels",
+                    "<Relationships xmlns=\"r\"><Relationship Id=\"rId1\" Type=\"t/header\" Target=\"header1.xml\"/>"
+                    "</Relationships>",
+                    "word/header1.xml",
+                    "<w:hdr xmlns:w=\"w\" xmlns:v=\"v\"><w:p><w:r><w:pict><v:shape style=\"position:absolute;margin-left:0;"
+                    "margin-top:0;width:400pt;height:100pt;rotation:315;z-index:-251657216;mso-position-horizontal:center;"
+                    "mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin\" "
+                    "fillcolor=\"silver\" stroked=\"f\"><v:fill opacity=\".5\"/><v:textpath style=\"font-family:&quot;Calibri&quot;;"
+                    "font-size:1pt\" string=\"DRAFT\"/></v:shape></w:pict></w:r></w:p></w:hdr>",
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\" xmlns:r=\"r\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wps=\"wps\" xmlns:v=\"v\" "
+                    "xmlns:w10=\"w10\"><w:body>"
+                    "<w:p><w:r><w:t>Before.</w:t></w:r></w:p>"
+                    "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"1828800\" cy=\"457200\"/><wp:docPr id=\"1\" name=\"T\"/>"
+                    "<a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>Inline</w:t></w:r></w:p>"
+                    "</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
+                    "<w:p><w:r><w:pict><v:shape style=\"position:absolute;margin-left:0;margin-top:0;width:144pt;height:36pt;"
+                    "z-index:1\"><v:textbox><w:txbxContent><w:p><w:r><w:t>Legacy</w:t></w:r></w:p></w:txbxContent></v:textbox>"
+                    "<w10:wrap type=\"square\"/></v:shape></w:pict></w:r><w:r><w:t>After.</w:t></w:r></w:p>"
+                    "<w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId1\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/>"
+                    "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" "
+                    "w:footer=\"720\"/></w:sectPr></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        char shown[512];
+        pd_section_props sp;
+        pd_block_id fl, p;
+        pd_float_props fp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            break;
+        }
+
+        CHECK(pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp) == PD_OK && sp.header);
+        fl = pd_doc_child(d, sp.header, 0);
+        p = pd_doc_child(d, fl, 0);
+        CHECK(pd_doc_float_props(d, fl, &fp) == PD_OK && fp.wrap == PD_WRAP_BEHIND && fp.width == PD_PT(400));
+        CHECK(chars_at(d, p, 0).color == 0xFFE0E0E0u);
+
+        if (pass == 0) {    /* centred on the text area: the page 612 x 792pt, 1in margins */
+            CHECK(fp.offset_x == PD_PT(34) && fp.offset_y == PD_PT(274) && fp.offset_from == PD_FROM_MARGIN);
+        }
+
+        if (have_layout_font()) {
+            layout_text(d, -1, shown, sizeof(shown));
+            CHECK(strstr(shown, "DRAFT") && strstr(shown, "Inline") && strstr(shown, "Legacy") &&
+                  strstr(shown, "After."));
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -6110,6 +6173,7 @@ int main(void) {
     test_docx_line_rules();
     test_docx_bar_tab();
     test_docx_drop_cap();
+    test_docx_text_boxes();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");
