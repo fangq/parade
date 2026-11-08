@@ -7224,6 +7224,138 @@ static void test_cell_width(void) {
     pd_doc_free(d);
 }
 
+/* a chart's items (pd_chart_items) for a plot area's XML, as a NUL-terminated string (malloc'ed) */
+static char* chart_of(const char* plot) {
+    static const uint32_t theme[12] = { 0xFF000000u, 0xFFFFFFFFu, 0xFF44546Au, 0xFFE7E6E6u, 0xFF4472C4u, 0xFFED7D31u,
+                                        0xFFA5A5A5u, 0xFFFFC000u, 0xFF5B9BD5u, 0xFF70AD47u, 0xFF0563C1u, 0xFF954F72u
+                                      };
+    char xml[16384];
+    pd_buf o;
+
+    memset(&o, 0, sizeof(o));
+    snprintf(xml, sizeof(xml), "<c:chartSpace xmlns:c=\"c\" xmlns:a=\"a\"><c:chart><c:autoTitleDeleted val=\"1\"/>"
+             "<c:plotArea>%s</c:plotArea></c:chart></c:chartSpace>", plot);
+
+    if (!pd_chart_items(xml, strlen(xml), PD_PT(400), PD_PT(300), theme, "Calibri", &o)) {
+        pb_free(&o);
+        return NULL;
+    }
+
+    pb_putc(&o, '\0');
+    return o.p;
+}
+
+/* a series of three values (or, with x and sz, a bubble's x, y and size) */
+static void chart_ser(char* out, size_t cap, int idx, const char* v, const char* extra) {
+    double a, b, c;
+
+    sscanf(v, "%lf %lf %lf", &a, &b, &c);
+    snprintf(out, cap, "<c:ser><c:idx val=\"%d\"/><c:order val=\"%d\"/>%s<c:cat><c:strRef><c:strCache>"
+             "<c:pt idx=\"0\"><c:v>A</c:v></c:pt><c:pt idx=\"1\"><c:v>B</c:v></c:pt><c:pt idx=\"2\"><c:v>C</c:v></c:pt>"
+             "</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:pt idx=\"0\"><c:v>%g</c:v></c:pt>"
+             "<c:pt idx=\"1\"><c:v>%g</c:v></c:pt><c:pt idx=\"2\"><c:v>%g</c:v></c:pt></c:numCache></c:numRef></c:val>"
+             "</c:ser>", idx, idx, extra, a, b, c);
+}
+
+/* charts drawn as what they are: a radar's rings and spokes, a stock chart's high-low lines and up and down bars,
+   bubbles as big as their sizes, a second value axis with a scale of its own at the right, a linear trendline */
+static void test_chart_kinds(void) {
+    char s1[2048], s2[2048], s3[2048], s4[2048], plot[12000], *js;
+
+    /* radar: three categories, two rings (steps of 5 to 10), three spokes, a closed line per series */
+    chart_ser(s1, sizeof(s1), 0, "4 8 6", "");
+    snprintf(plot, sizeof(plot), "<c:radarChart><c:radarStyle val=\"marker\"/>%s<c:axId val=\"1\"/><c:axId val=\"2\"/>"
+             "</c:radarChart><c:catAx><c:axId val=\"1\"/></c:catAx><c:valAx><c:axId val=\"2\"/></c:valAx>", s1);
+    js = chart_of(plot);
+    CHECK(js && strstr(js, "\"label\":\"A\"") && strstr(js, "\"label\":\"C\""));
+    CHECK(js && count_of(js, "\"closed\":1") >= 2 + 1);     /* rings, then the series' line */
+    CHECK(js && count_of(js, "\"shape\":\"rect\"") == 0);   /* nothing drawn as a column */
+    free(js);
+    snprintf(plot, sizeof(plot), "<c:radarChart><c:radarStyle val=\"filled\"/>%s</c:radarChart><c:valAx/>", s1);
+    js = chart_of(plot);
+    CHECK(js && strstr(js, "\"closed\":1,\"fill\":4282675908") != NULL);  /* filled in the first accent */
+    free(js);
+
+    /* stock: open, high, low, close; up and down bars: two up (white), one down (black) */
+    chart_ser(s1, sizeof(s1), 0, "10 20 30", "");
+    chart_ser(s2, sizeof(s2), 1, "25 35 40", "");
+    chart_ser(s3, sizeof(s3), 2, "5 15 20", "");
+    chart_ser(s4, sizeof(s4), 3, "20 30 25", "");
+    snprintf(plot, sizeof(plot), "<c:stockChart>%s%s%s%s<c:hiLowLines/><c:upDownBars><c:gapWidth val=\"150\"/>"
+             "</c:upDownBars></c:stockChart><c:catAx/><c:valAx/>", s1, s2, s3, s4);
+    js = chart_of(plot);
+    CHECK(js && count_of(js, "\"shape\":\"rect\"") == 3);
+    CHECK(js && count_of(js, "\"fill\":4294967295,\"line\":4278190080") == 2 &&
+          count_of(js, "\"fill\":4278190080,\"line\":4278190080") == 1);
+    CHECK(js && count_of(js, "\"closed\":0,\"fill\":0,\"line\":4278190080,\"lw\":49152") == 3);   /* high-low lines */
+    free(js);
+
+    /* bubbles: sizes 1 and 4: radii one and two to one */
+    snprintf(plot, sizeof(plot), "<c:bubbleChart><c:ser><c:idx val=\"0\"/><c:xVal><c:numRef><c:numCache>"
+             "<c:pt idx=\"0\"><c:v>1</c:v></c:pt><c:pt idx=\"1\"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:xVal>"
+             "<c:yVal><c:numRef><c:numCache><c:pt idx=\"0\"><c:v>2</c:v></c:pt><c:pt idx=\"1\"><c:v>4</c:v></c:pt>"
+             "</c:numCache></c:numRef></c:yVal><c:bubbleSize><c:numRef><c:numCache><c:pt idx=\"0\"><c:v>1</c:v></c:pt>"
+             "<c:pt idx=\"1\"><c:v>4</c:v></c:pt></c:numCache></c:numRef></c:bubbleSize></c:ser></c:bubbleChart>"
+             "<c:valAx/><c:valAx/>");
+    js = chart_of(plot);
+    CHECK(js != NULL);
+
+    if (js) {   /* the circles: their widths from the first two points of each 32-point path */
+        const char* p = js;
+        double r[2] = { 0, 0 };
+        int n = 0;
+
+        while (n < 2 && (p = strstr(p, "{\"path\":[")) != NULL) {
+            int x0, y0, k, cnt = 1;
+            const char* q = p + 9;
+
+            sscanf(q, "%d,%d", &x0, &y0);
+
+            for (k = 0; q[k] && q[k] != ']'; k++) {
+                cnt += q[k] == ',';
+            }
+
+            if (cnt == 64) {    /* 32 points */
+                int x16, y16, i2;
+                const char* z = q;
+
+                for (i2 = 0; i2 < 32; i2++) {
+                    z = strchr(z, ',') + 1;
+                }
+
+                sscanf(z, "%d,%d", &x16, &y16);
+                r[n++] = (x0 - x16) / 2.0;
+            }
+
+            p += 9;
+        }
+
+        CHECK(n == 2 && r[0] > 0 && fabs(r[1] / r[0] - 2) < 0.05);
+    }
+
+    free(js);
+
+    /* a second value axis: the line's values (hundreds) on a scale of their own at the right */
+    chart_ser(s1, sizeof(s1), 0, "1 2 3", "");
+    chart_ser(s2, sizeof(s2), 1, "100 300 500", "<c:trendline><c:trendlineType val=\"linear\"/></c:trendline>");
+    snprintf(plot, sizeof(plot), "<c:barChart><c:barDir val=\"col\"/>%s<c:axId val=\"1\"/><c:axId val=\"2\"/>"
+             "</c:barChart><c:lineChart>%s<c:axId val=\"3\"/><c:axId val=\"4\"/></c:lineChart><c:catAx><c:axId val=\"1\"/>"
+             "</c:catAx><c:valAx><c:axId val=\"2\"/><c:axPos val=\"l\"/></c:valAx><c:catAx><c:axId val=\"3\"/>"
+             "<c:delete val=\"1\"/></c:catAx><c:valAx><c:axId val=\"4\"/><c:axPos val=\"r\"/></c:valAx>", s1, s2);
+    js = chart_of(plot);
+    CHECK(js && strstr(js, "\"label\":\"500\"") != NULL && strstr(js, "\"label\":\"3\"") != NULL);
+
+    if (js) {   /* the line reaches the top of the plot: its 500 is the scale's top, not off a 0..3 scale */
+        const char* p = strstr(js, "\"label\":\"500\"");
+        int lx = 0;
+
+        CHECK(p && sscanf(strstr(p, "\"x\":") + 4, "%d", &lx) == 1 && lx > PD_PT(330));     /* at the right */
+        CHECK(count_of(js, "\"lw\":147456") >= 1 && count_of(js, "\"lw\":98304") == 1);  /* the line, the trend */
+    }
+
+    free(js);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -7303,6 +7435,7 @@ int main(void) {
     test_docx_font_table();
     test_docx_controls();
     test_docx_charts();
+    test_chart_kinds();
     test_docx_east_asian();
     test_docx_shading_edges();
     test_docx_group_textbox_table();

@@ -9,11 +9,14 @@
  * labels outside the plot area, gridlines at a "nice" step.
  *
  * Drawn: bar and column charts (clustered, stacked, 100% stacked), line
- * and area charts, pie and doughnut charts, scatter charts; series and
- * point colours from the part or the theme's accent cycle; data labels;
- * axis titles (horizontal); number formats (#,##0.00, 0%, General). Not
- * drawn: 3-D perspective (a 3-D chart is drawn flat), secondary axes (all
- * groups share the primary one), trendlines, error bars, rotated text.
+ * and area charts, pie and doughnut charts, scatter and bubble charts,
+ * radar charts (lines, markers, filled), stock charts (high-low lines,
+ * closes, up and down bars); a secondary value axis at the right with a
+ * scale of its own; linear trendlines; series and point colours from the
+ * part or the theme's accent cycle; data labels; axis titles
+ * (horizontal); number formats (#,##0.00, 0%, General). Not drawn: 3-D
+ * perspective (a 3-D chart is drawn flat), other trendlines, error bars,
+ * rotated text, the newer chart types (chartex: waterfall, treemap, ...).
  */
 
 #include <math.h>
@@ -26,13 +29,17 @@
 #define CH_MAX_PT 512
 #define CH_MAX_GRP 4
 
-enum { CT_NONE, CT_BAR, CT_LINE, CT_AREA, CT_PIE, CT_DOUGHNUT, CT_SCATTER };
+enum { CT_NONE, CT_BAR, CT_LINE, CT_AREA, CT_PIE, CT_DOUGHNUT, CT_SCATTER, CT_BUBBLE, CT_RADAR, CT_STOCK };
+#define XY_TYPE(t) ((t) == CT_SCATTER || (t) == CT_BUBBLE)    /* values along both axes */
 enum { CG_CLUSTERED, CG_STACKED, CG_PERCENT };
 
 typedef struct {
     char name[96];
     double v[CH_MAX_PT], x[CH_MAX_PT];  /* values; a scatter's x */
-    unsigned char has[CH_MAX_PT], hasx[CH_MAX_PT];
+    double bsz[CH_MAX_PT];              /* a bubble's size */
+    unsigned char has[CH_MAX_PT], hasx[CH_MAX_PT], hasb[CH_MAX_PT];
+    int trend;                          /* a linear trendline */
+    uint32_t trend_line;
     int n;                              /* points: one past the highest index */
     uint32_t fill, line;                /* 0: not said */
     uint32_t pt_fill[64];               /* c:dPt, by index */
@@ -44,6 +51,10 @@ typedef struct {
 typedef struct {
     int type, horiz, grouping, gap, overlap, vary, hole, first_angle, labels, percent_labels, lines, smooth;
     int marker;                         /* the group's c:marker (line charts) */
+    int filled;                         /* a radar's areas filled */
+    int hilo, updown;                   /* a stock chart's high-low lines, up and down bars */
+    int bubble_scale;                   /* percent */
+    int ax[2], nax;                     /* its axes' ids: category (or x), value */
     cser* ser;
     int nser;
 } cgrp;
@@ -64,6 +75,10 @@ typedef struct {
     int grid, val_deleted, cat_deleted;
     int has_min, has_max;
     double vmin, vmax;
+    int nvax;                           /* value axes read */
+    int sec_id, sec_del, sec_has_min, sec_has_max;  /* the secondary value axis (at the right) */
+    double sec_min, sec_max;
+    char sec_fmt[48], sec_title[96];
     pd_sp base;                         /* the text's size */
     const uint32_t* theme;
 } chart;
@@ -79,7 +94,7 @@ static int is_group(const char* t, int* type) {
     } g[] = { { "barChart", CT_BAR }, { "bar3DChart", CT_BAR }, { "lineChart", CT_LINE }, { "line3DChart", CT_LINE },
         { "areaChart", CT_AREA }, { "area3DChart", CT_AREA }, { "pieChart", CT_PIE }, { "pie3DChart", CT_PIE },
         { "ofPieChart", CT_PIE }, { "doughnutChart", CT_DOUGHNUT }, { "scatterChart", CT_SCATTER },
-        { "bubbleChart", CT_SCATTER }, { "stockChart", CT_LINE }, { "radarChart", CT_LINE }
+        { "bubbleChart", CT_BUBBLE }, { "stockChart", CT_STOCK }, { "radarChart", CT_RADAR }
     };
     size_t i;
 
@@ -128,7 +143,11 @@ static int read_chart(chart* C, const char* xml, size_t n, cser* store) {
     cpath P;
     cgrp* g = NULL;
     cser* s = NULL;
-    int nstore = 0, pt = -1, dpt = -1, lvl = -1, in_title = 0, in_axis = 0, ty;
+    int nstore = 0, pt = -1, dpt = -1, lvl = -1, in_title = 0, in_axis = 0, ty, sec = 0, ax_id = -1;
+    int a_del = -1, a_hmin = 0, a_hmax = 0;     /* the value axis being read, kept until its position is known */
+    int ncax = 0;                               /* category axes read: a second one is the secondary group's */
+    double a_min = 0, a_max = 0;
+    char a_fmt[48] = "";
     uint32_t* clr = NULL;           /* the colour being read, for its modifiers */
     int clr_depth = 0;
     char v[128];
@@ -152,7 +171,28 @@ static int read_chart(chart* C, const char* xml, size_t n, cser* store) {
             } else if (!strcmp(t, "title")) {
                 in_title = 0;
             } else if (!strcmp(t, "valAx") || !strcmp(t, "catAx") || !strcmp(t, "dateAx") || !strcmp(t, "serAx")) {
+                if (!strcmp(t, "valAx") && sec) {     /* the secondary one */
+                    C->sec_id = ax_id;
+                    C->sec_del = a_del > 0;
+                    C->sec_has_min = a_hmin;
+                    C->sec_min = a_min;
+                    C->sec_has_max = a_hmax;
+                    C->sec_max = a_max;
+                    snprintf(C->sec_fmt, sizeof(C->sec_fmt), "%s", a_fmt);
+                } else if (!strcmp(t, "valAx")) {   /* the primary one (the last such, as before) */
+                    C->val_deleted = a_del >= 0 ? a_del : C->val_deleted;
+                    C->has_min = a_hmin ? 1 : C->has_min;
+                    C->vmin = a_hmin ? a_min : C->vmin;
+                    C->has_max = a_hmax ? 1 : C->has_max;
+                    C->vmax = a_hmax ? a_max : C->vmax;
+
+                    if (a_fmt[0]) {
+                        snprintf(C->fmt, sizeof(C->fmt), "%s", a_fmt);
+                    }
+                }
+
                 in_axis = 0;
+                sec = 0;
             } else if (!strcmp(t, "dPt")) {
                 dpt = -1;
             } else if (!strcmp(t, "lvl")) {
@@ -181,6 +221,8 @@ static int read_chart(chart* C, const char* xml, size_t n, cser* store) {
             if (!strcmp(here, "t") && in_title && !in_axis) {
                 append(C->title, sizeof(C->title), txt.p, txt.n);
                 C->has_title = 1;
+            } else if (!strcmp(here, "t") && in_title && in_axis == 'v' && sec) {
+                append(C->sec_title, sizeof(C->sec_title), txt.p, txt.n);
             } else if (!strcmp(here, "t") && in_title && in_axis == 'v') {
                 append(C->val_title, sizeof(C->val_title), txt.p, txt.n);
             } else if (!strcmp(here, "t") && in_title && in_axis == 'c') {
@@ -191,7 +233,7 @@ static int read_chart(chart* C, const char* xml, size_t n, cser* store) {
                 if (inside(&P, "tx") && !inside(&P, "cat") && !inside(&P, "val")) {
                     snprintf(s->name, sizeof(s->name), "%.*s", (int)txt.n, txt.p);
                 } else if (pt >= 0 && pt < CH_MAX_PT && (inside(&P, "cat") || inside(&P, "xVal")) &&
-                           g && g->type != CT_SCATTER) {
+                           g && !XY_TYPE(g->type)) {
                     if (lvl <= 0) {
                         snprintf(C->cat[pt], sizeof(C->cat[pt]), "%.*s", (int)txt.n, txt.p);
                     } else if (lvl == 1) {
@@ -203,6 +245,9 @@ static int read_chart(chart* C, const char* xml, size_t n, cser* store) {
                     s->x[pt] = strtod(txt.p, NULL);
                     s->hasx[pt] = 1;
                     snprintf(C->cat[pt], sizeof(C->cat[pt]), "%.*s", (int)txt.n, txt.p);
+                } else if (pt >= 0 && pt < CH_MAX_PT && inside(&P, "bubbleSize")) {
+                    s->bsz[pt] = strtod(txt.p, NULL);
+                    s->hasb[pt] = 1;
                 } else if (pt >= 0 && pt < CH_MAX_PT && (inside(&P, "val") || inside(&P, "yVal"))) {
                     s->v[pt] = strtod(txt.p, NULL);
                     s->has[pt] = 1;
@@ -232,6 +277,22 @@ static int read_chart(chart* C, const char* xml, size_t n, cser* store) {
             g->marker = -1;
             g->ser = store + nstore;
             g->lines = 1;
+            g->bubble_scale = 100;
+            g->hilo = ty == CT_STOCK ? 0 : 0;
+        } else if (!strcmp(t, "axId") && g && !s && g->nax < 2 && mu_attr(&m, "val", v, sizeof(v)) &&
+                   is_group(parent(&P, m.type == MT_OPEN ? 1 : 0), &ty)) {
+            g->ax[g->nax++] = atoi(v);
+        } else if (!strcmp(t, "radarStyle") && g && mu_attr(&m, "val", v, sizeof(v))) {
+            g->filled = !strcmp(v, "filled");
+            g->marker = !strcmp(v, "marker") ? 1 : g->marker;
+        } else if (!strcmp(t, "hiLowLines") && g) {
+            g->hilo = 1;
+        } else if (!strcmp(t, "upDownBars") && g) {
+            g->updown = 1;
+        } else if (!strcmp(t, "bubbleScale") && g && mu_attr(&m, "val", v, sizeof(v))) {
+            g->bubble_scale = atoi(v) > 0 && atoi(v) <= 300 ? atoi(v) : 100;
+        } else if (!strcmp(t, "trendlineType") && s && mu_attr(&m, "val", v, sizeof(v))) {
+            s->trend = !strcmp(v, "linear");
         } else if (!strcmp(t, "ser") && g && nstore < CH_MAX_SER) {
             s = &store[nstore++];
             memset(s, 0, sizeof(*s));
@@ -287,28 +348,40 @@ static int read_chart(chart* C, const char* xml, size_t n, cser* store) {
             C->title_deleted = !strcmp(v, "1") || !strcmp(v, "true");
         } else if (!strcmp(t, "valAx")) {
             in_axis = 'v';
+            sec = 0;
+            ax_id = -1;
+            a_del = -1;
+            a_hmin = a_hmax = 0;
+            a_fmt[0] = '\0';
+            C->nvax++;
+        } else if (!strcmp(t, "axId") && in_axis == 'v' && !g && mu_attr(&m, "val", v, sizeof(v))) {
+            ax_id = atoi(v);
+        } else if (!strcmp(t, "axPos") && in_axis == 'v' && C->nvax > 1 && mu_attr(&m, "val", v, sizeof(v)) &&
+                   (v[0] == 'r' || v[0] == 't')) {
+            sec = 1;    /* a second value axis, at the right (or the top of a bar chart) */
         } else if (!strcmp(t, "catAx") || !strcmp(t, "dateAx") || !strcmp(t, "serAx")) {
             in_axis = 'c';
+            ncax++;
         } else if (!strcmp(t, "delete") && in_axis && mu_attr(&m, "val", v, sizeof(v))) {
             int del = !strcmp(v, "1") || !strcmp(v, "true");
 
-            if (in_axis == 'v') {
-                C->val_deleted = del;
-            } else {
+            if (in_axis == 'v') {   /* which one is learnt from its position, after this */
+                a_del = del;
+            } else if (ncax <= 1) {
                 C->cat_deleted = del;
             }
-        } else if (!strcmp(t, "majorGridlines") && in_axis == 'v') {
+        } else if (!strcmp(t, "majorGridlines") && in_axis == 'v' && !sec) {
             C->grid = 1;
         } else if (!strcmp(t, "numFmt") && s && inside(&P, "dLbls") && mu_attr(&m, "formatCode", v, sizeof(v))) {
             snprintf(s->fmt, sizeof(s->fmt), "%.47s", v);
         } else if (!strcmp(t, "numFmt") && in_axis == 'v' && mu_attr(&m, "formatCode", v, sizeof(v))) {
-            snprintf(C->fmt, sizeof(C->fmt), "%.47s", v);
+            snprintf(a_fmt, sizeof(a_fmt), "%.47s", v);
         } else if (!strcmp(t, "min") && in_axis == 'v' && mu_attr(&m, "val", v, sizeof(v))) {
-            C->vmin = strtod(v, NULL);
-            C->has_min = 1;
+            a_min = strtod(v, NULL);
+            a_hmin = 1;
         } else if (!strcmp(t, "max") && in_axis == 'v' && mu_attr(&m, "val", v, sizeof(v))) {
-            C->vmax = strtod(v, NULL);
-            C->has_max = 1;
+            a_max = strtod(v, NULL);
+            a_hmax = 1;
         } else if ((!strcmp(t, "x") || !strcmp(t, "y") || !strcmp(t, "w") || !strcmp(t, "h")) &&
                    !strcmp(parent(&P, m.type == MT_OPEN ? 1 : 0), "manualLayout") && mu_attr(&m, "val", v, sizeof(v)) &&
                    !inside(&P, "dLbl") && !inside(&P, "dLbls") && !inside(&P, "title") && !inside(&P, "trendlineLbl")) {
@@ -358,6 +431,10 @@ static int read_chart(chart* C, const char* xml, size_t n, cser* store) {
                 } else if (!inside(&P, "dPt")) {
                     tgt = in_ln ? &s->line : &s->fill;
                 }
+            }
+
+            if (s && inside(&P, "trendline") && inside(&P, "ln") && inside(&P, "solidFill")) {
+                tgt = &s->trend_line;
             }
 
             if (tgt && (inside(&P, "solidFill") || (inside(&P, "gradFill") && !*tgt))) {
@@ -683,6 +760,134 @@ static void draw_pie(const chart* C, const cgrp* g, cout* w, double px, double p
     }
 }
 
+/* a radar chart: a spoke for each category clockwise from the top, rings at the value axis's steps, each series a
+   closed line through its values (filled, or with markers, as the group says) */
+static void draw_radar(const chart* C, const cgrp* g, cout* w, double px, double py, double pw, double ph, int k0) {
+    double cx = px + pw / 2, cy = py + ph / 2, r, lo = 0, hi = 0, a, b, step, t, sz = (double)C->base;
+    int nc = ncats(C), i, j, q, any = 0;
+    const uint32_t grid = 0xFFD9D9D9u, ink = 0xFF595959u;
+    char txt[64];
+
+    if (nc < 3) {
+        return;
+    }
+
+    for (j = 0; j < g->nser; j++) {
+        for (q = 0; q < g->ser[j].n && q < nc; q++) {
+            if (g->ser[j].has[q]) {
+                hi = !any || g->ser[j].v[q] > hi ? g->ser[j].v[q] : hi;
+                lo = !any || g->ser[j].v[q] < lo ? g->ser[j].v[q] : lo;
+                any = 1;
+            }
+        }
+    }
+
+    if (!any) {
+        return;
+    }
+
+    nice(lo > 0 ? 0 : lo, hi, &a, &b, &step);
+    a = C->has_min ? C->vmin : a;
+    b = C->has_max ? C->vmax : b;
+
+    if (b <= a) {
+        return;
+    }
+
+    for (i = 0, t = 0; i < nc; i++) {
+        t = text_w(C->cat[i], C->base) > t ? text_w(C->cat[i], C->base) : t;
+    }
+
+    r = (pw - 2 * t < ph - 2.6 * sz ? pw - 2 * t : ph - 2.6 * sz) / 2;
+
+    if (r < sz) {
+        return;
+    }
+
+    while ((b - a) / step * sz * 1.3 > r && step < (b - a)) {     /* no more rings than their labels have room */
+        double mag = pow(10, floor(log10(step))), nrm = step / mag;
+
+        step = (nrm < 1.5 ? 2 : nrm < 3 ? 5 : 10) * mag;
+        b = C->has_max ? b : ceil(b / step - 1e-9) * step;
+    }
+
+#define RX(q, v) (cx + r * ((v) - a) / (b - a) * sin(2 * 3.141592653589793 * (q) / nc))
+#define RY(q, v) (cy - r * ((v) - a) / (b - a) * cos(2 * 3.141592653589793 * (q) / nc))
+
+    for (t = a + step; t <= b + step * 1e-6; t += step) {     /* the rings */
+        double xy[2 * CH_MAX_PT];
+
+        for (q = 0; q < nc; q++) {
+            xy[2 * q] = RX(q, t);
+            xy[2 * q + 1] = RY(q, t);
+        }
+
+        path(w, xy, nc, 1, 0, grid, PD_SP_PER_PT * 0.75);
+    }
+
+    for (q = 0; q < nc; q++) {    /* the spokes, and the categories at their ends */
+        double xy[4] = { cx, cy, RX(q, b), RY(q, b) }, ex = RX(q, b), ey = RY(q, b);
+
+        path(w, xy, 2, 0, 0, grid, PD_SP_PER_PT * 0.75);
+        label(w, C->cat[q], ex + (ex > cx + 1 ? sz * 0.4 : ex < cx - 1 ? -sz * 0.4 : 0),
+              ey + (ey < cy - 1 ? -sz * 0.4 : ey > cy + 1 ? sz * 1.1 : sz * 0.35), C->base,
+              ex > cx + 1 ? 0 : ex < cx - 1 ? 2 : 1, ink, 0);
+    }
+
+    if (!C->val_deleted) {     /* the values up the first spoke */
+        for (t = a; t <= b + step * 1e-6; t += step) {
+            fmt_num(fabs(t) < step * 1e-9 ? 0 : t, C->fmt, txt, sizeof(txt));
+            label(w, txt, cx - sz * 0.3, RY(0, t) + sz * 0.35, C->base, 2, ink, 0);
+        }
+    }
+
+    for (j = 0; j < g->nser; j++) {
+        const cser* s = &g->ser[j];
+        double xy[2 * CH_MAX_PT];
+        int n = 0, marks = s->marker >= 0 ? s->marker : g->marker > 0;
+        uint32_t line = ser_line(C, s, k0 + j);
+
+        for (q = 0; q < nc; q++) {
+            double v = q < s->n && s->has[q] ? s->v[q] : a;
+
+            v = v < a ? a : v > b ? b : v;
+            xy[2 * n] = RX(q, v);
+            xy[2 * n + 1] = RY(q, v);
+            n++;
+        }
+
+        if (g->filled) {
+            path(w, xy, n, 1, ser_fill(C, s, k0 + j), 0, 0);
+        } else {
+            path(w, xy, n, 1, 0, line, PD_SP_PER_PT * 2.25);
+        }
+
+        for (q = 0; marks && !g->filled && q < n; q++) {
+            double rr = sz * 0.3, m[8] = { xy[2 * q] - rr, xy[2 * q + 1], xy[2 * q], xy[2 * q + 1] - rr,
+                                           xy[2 * q] + rr, xy[2 * q + 1], xy[2 * q], xy[2 * q + 1] + rr
+                                         };
+
+            path(w, m, 4, 1, line, line, PD_SP_PER_PT * 0.75);
+        }
+    }
+
+#undef RX
+#undef RY
+}
+
+/* a circle of radius r about (x, y) */
+static void circle(cout* w, double x, double y, double r, uint32_t fill, uint32_t line, double lw) {
+    double xy[2 * 32];
+    int i;
+
+    for (i = 0; i < 32; i++) {
+        xy[2 * i] = x + r * cos(2 * 3.141592653589793 * i / 32);
+        xy[2 * i + 1] = y + r * sin(2 * 3.141592653589793 * i / 32);
+    }
+
+    path(w, xy, 32, 1, fill, line, lw);
+}
+
 /* a name in one line, or two split at the last space that leaves the first within cap */
 static void wrap2(const char* s, double cap, pd_sp sz, char* a, char* b, size_t n) {
     const char* sp = NULL, *p;
@@ -717,7 +922,8 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
     cser* store = (cser*)calloc(CH_MAX_SER, sizeof(cser));
     cout w;
     double pad, px, py, pw, ph, lo = 0, hi = 0, a, b, step, sz, t;
-    int i, j, k, nc, horiz = 0, any = 0, pie = 0, scatter = 0, nleg = 0;
+    int i, j, k, nc, horiz = 0, any = 0, pie = 0, scatter = 0, nleg = 0, any2 = 0, has_sec = 0;
+    double lo2 = 0, hi2 = 0, sa = 0, sb = 1, step2 = 1, ca, cb;
     double xlo = 0, xhi = 0, xa = 0, xb = 1, xstep = 1;
     const uint32_t grid = 0xFFD9D9D9u, axis = 0xFFBFBFBFu, ink = 0xFF595959u;
     char txt[64];
@@ -744,7 +950,7 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
 
     nc = ncats(C);
     pie = C->grp[0].type == CT_PIE || C->grp[0].type == CT_DOUGHNUT;
-    scatter = C->grp[0].type == CT_SCATTER;
+    scatter = XY_TYPE(C->grp[0].type);
     horiz = C->grp[0].type == CT_BAR && C->grp[0].horiz;
     sz = (double)C->base;
     w.o = o;
@@ -788,7 +994,8 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
                     const cser* s = &C->grp[i].ser[j];
 
                     names[nleg] = s->name[0] ? s->name : "Series";
-                    cols[nleg++] = C->grp[i].type == CT_LINE || C->grp[i].type == CT_SCATTER ? ser_line(C, s, k) :
+                    cols[nleg++] = (C->grp[i].type == CT_LINE || C->grp[i].type == CT_SCATTER ||
+                                    (C->grp[i].type == CT_RADAR && !C->grp[i].filled)) ? ser_line(C, s, k) :
                                    ser_fill(C, s, k);
                 }
             }
@@ -892,9 +1099,49 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
         return o->n > start;
     }
 
+    if (C->grp[0].type == CT_RADAR) {
+        draw_radar(C, &C->grp[0], &w, px, py, pw, ph, 0);
+        free(C);
+        free(store);
+        return o->n > start;
+    }
+
+    for (i = 0; i < C->ngrp; i++) {     /* a group on the secondary value axis has a scale of its own */
+        has_sec |= C->sec_id && C->grp[i].nax == 2 && C->grp[i].ax[1] == C->sec_id && !XY_TYPE(C->grp[i].type) &&
+                   !horiz && C->grp[i].type != CT_PIE && C->grp[i].type != CT_DOUGHNUT;
+    }
+
     /* the value scale: over every series, stacked ones summed, from zero */
     for (i = 0; i < C->ngrp; i++) {
         const cgrp* g = &C->grp[i];
+        int on2 = has_sec && g->nax == 2 && g->ax[1] == C->sec_id;
+
+        if (on2) {  /* its own scale: over its values, stacked or not */
+            for (k = 0; k < nc; k++) {
+                double pos = 0, neg = 0;
+
+                for (j = 0; j < g->nser; j++) {
+                    const cser* s = &g->ser[j];
+
+                    if (k < s->n && s->has[k]) {
+                        if (g->grouping != CG_CLUSTERED) {
+                            pos += s->v[k] > 0 ? s->v[k] : 0;
+                            neg += s->v[k] < 0 ? s->v[k] : 0;
+                        } else {
+                            hi2 = !any2 || s->v[k] > hi2 ? s->v[k] : hi2;
+                            lo2 = !any2 || s->v[k] < lo2 ? s->v[k] : lo2;
+                        }
+
+                        any2 = 1;
+                    }
+                }
+
+                hi2 = pos > hi2 ? pos : hi2;
+                lo2 = neg < lo2 ? neg : lo2;
+            }
+
+            continue;
+        }
 
         for (k = 0; k < nc; k++) {
             double pos = 0, neg = 0;
@@ -952,6 +1199,17 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
         snprintf(C->fmt, sizeof(C->fmt), "0%%");
     }
 
+    if (has_sec && any2) {
+        lo2 = lo2 > 0 ? 0 : lo2;
+        hi2 = hi2 < 0 ? 0 : hi2;
+        nice(C->sec_has_min ? C->sec_min : lo2, C->sec_has_max ? C->sec_max : hi2, &sa, &sb, &step2);
+        sa = C->sec_has_min ? C->sec_min : sa;
+        sb = C->sec_has_max ? C->sec_max : sb;
+        sb = sb <= sa ? sa + 1 : sb;
+    } else {
+        has_sec = 0;
+    }
+
     if (scatter) {
         nice(xlo < 0 ? xlo : (xlo > 0 && xlo < (xhi - xlo) ? 0 : xlo), xhi, &xa, &xb, &xstep);
     }
@@ -1002,6 +1260,17 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
             px += left;
             pw -= left;
             ph -= bottom;
+
+            if (has_sec && !C->sec_del) {   /* the secondary axis's labels at the right */
+                double w2 = 0;
+
+                for (t = sa; t <= sb + step2 * 1e-6; t += step2) {
+                    fmt_num(t, C->sec_fmt, txt, sizeof(txt));
+                    w2 = text_w(txt, C->base) > w2 ? text_w(txt, C->base) : w2;
+                }
+
+                pw -= w2 + sz * 0.8;
+            }
         }
     }
 
@@ -1046,7 +1315,9 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
         return o->n > start;
     }
 
-#define VY(v) (py + ph * (b - (v)) / (b - a))   /* a value's place: up a column chart, along a bar chart */
+    ca = a;
+    cb = b;
+#define VY(v) (py + ph * (cb - (v)) / (cb - ca))   /* a value's place: up a column chart, along a bar chart */
 #define VX(v) (px + pw * ((v) - a) / (b - a))
 #define XX(v) (px + pw * ((v) - xa) / (xb - xa))
 
@@ -1070,6 +1341,17 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
             if (!C->val_deleted) {
                 label(&w, txt, px - sz * 0.5, VY(t) + sz * 0.35, C->base, 2, ink, 0);
             }
+        }
+    }
+
+    if (has_sec && !C->sec_del) {
+        for (t = sa; t <= sb + step2 * 1e-6; t += step2) {
+            fmt_num(fabs(t) < step2 * 1e-9 ? 0 : t, C->sec_fmt, txt, sizeof(txt));
+            label(&w, txt, px + pw + sz * 0.5, py + ph * (sb - t) / (sb - sa) + sz * 0.35, C->base, 0, ink, 0);
+        }
+
+        if (C->sec_title[0]) {
+            label(&w, C->sec_title, W - pad, py - sz * 0.8, C->base, 2, ink, 1);
         }
     }
 
@@ -1134,6 +1416,7 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
     for (i = 0, k = 0; i < C->ngrp; i++) {
         const cgrp* g = &C->grp[i];
         double slot = (horiz ? ph : pw) / (nc ? nc : 1);
+        int on2 = has_sec && g->nax == 2 && g->ax[1] == C->sec_id;
         double groupw = slot / (1 + g->gap / 100.0), stack_pos[CH_MAX_PT], stack_neg[CH_MAX_PT], sum[CH_MAX_PT];
         int nb = g->grouping == CG_CLUSTERED ? (g->nser ? g->nser : 1) : 1;
         double ov = g->grouping == CG_CLUSTERED ? g->overlap / 100.0 : 0, barw = groupw / (nb - (nb - 1) * ov);
@@ -1141,6 +1424,39 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
         memset(stack_pos, 0, sizeof(stack_pos));
         memset(stack_neg, 0, sizeof(stack_neg));
         memset(sum, 0, sizeof(sum));
+        ca = on2 ? sa : a;
+        cb = on2 ? sb : b;
+
+        if (g->type == CT_RADAR) {  /* drawn alone above; in a combination, not at all */
+            k += g->nser;
+            continue;
+        }
+
+        if (g->type == CT_STOCK && g->nser >= 3) {  /* high-low lines, the close; open and close as bars */
+            int op = g->nser >= 4 ? 0 : -1, hiS = g->nser >= 4 ? 1 : 0, loS = hiS + 1, clS = hiS + 2;
+            int q;
+
+            for (q = 0; q < nc; q++) {
+                const cser* sh = &g->ser[hiS], *sl = &g->ser[loS], *sc = &g->ser[clS];
+                double x = px + slot * (q + 0.5);
+
+                if (q < sh->n && q < sl->n && sh->has[q] && sl->has[q]) {
+                    vline(&w, x, VY(sh->v[q]), VY(sl->v[q]), 0xFF000000u, PD_SP_PER_PT * 0.75);
+                }
+
+                if (op >= 0 && g->updown && q < g->ser[op].n && q < sc->n && g->ser[op].has[q] && sc->has[q]) {
+                    double o1 = g->ser[op].v[q], c1 = sc->v[q], bw = slot * 0.4;
+
+                    box(&w, x - bw / 2, VY(o1 > c1 ? o1 : c1), bw, VY(o1 > c1 ? c1 : o1) - VY(o1 > c1 ? o1 : c1),
+                        c1 >= o1 ? 0xFFFFFFFFu : 0xFF000000u, 0xFF000000u, PD_SP_PER_PT * 0.75);
+                } else if (q < sc->n && sc->has[q]) {   /* the close: a tick to the right */
+                    hline(&w, x, x + slot * 0.15, VY(sc->v[q]), 0xFF000000u, PD_SP_PER_PT * 1.5);
+                }
+            }
+
+            k += g->nser;
+            continue;
+        }
 
         for (j = 0; j < g->nser; j++) {
             for (int q = 0; q < nc && q < g->ser[j].n; q++) {
@@ -1230,6 +1546,22 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
                 xy[np++] = xy[0];
                 xy[np++] = base;
                 path(&w, xy, np / 2, 1, fill, 0, 0);
+            } else if (g->type == CT_BUBBLE) {   /* each point a circle, its area as its size */
+                double bmax = 0, rmax = (pw < ph ? pw : ph) * 0.125 * g->bubble_scale / 100;
+                int jj, qq;
+
+                for (jj = 0; jj < g->nser; jj++) {
+                    for (qq = 0; qq < g->ser[jj].n; qq++) {
+                        bmax = g->ser[jj].hasb[qq] && g->ser[jj].bsz[qq] > bmax ? g->ser[jj].bsz[qq] : bmax;
+                    }
+                }
+
+                for (q = 0; q < np / 2; q++) {
+                    double bs = s->hasb[at[q]] ? s->bsz[at[q]] : bmax;
+                    double rr = bmax > 0 && bs > 0 ? rmax * sqrt(bs / bmax) : sz * 0.3;
+
+                    circle(&w, xy[2 * q], xy[2 * q + 1], rr, fill, 0, 0);
+                }
             } else if (g->type == CT_LINE || scatter) {
                 int marks = s->marker >= 0 ? s->marker : g->marker != 0;
 
@@ -1249,6 +1581,50 @@ int pd_chart_items(const char* xml, size_t n, pd_sp W, pd_sp H, const uint32_t* 
                 for (q = 0; labels && q < np / 2; q++) {
                     fmt_num(s->v[at[q]], s->fmt[0] ? s->fmt : C->fmt, txt, sizeof(txt));
                     label(&w, txt, xy[2 * q], xy[2 * q + 1] - sz * 0.6, C->base, 1, ink, 0);
+                }
+            }
+
+            if (s->trend) {     /* a linear trendline: least squares over the points, across the plot */
+                double sx = 0, sy = 0, sxx = 0, sxy = 0, cnt = 0, x0, x1, m2, c2, tl[4];
+
+                for (q = 0; q < nc && q < s->n; q++) {
+                    double xv = scatter ? (s->hasx[q] ? s->x[q] : q + 1) : q + 1;
+
+                    if (s->has[q]) {
+                        sx += xv;
+                        sy += s->v[q];
+                        sxx += xv * xv;
+                        sxy += xv * s->v[q];
+                        cnt++;
+                    }
+                }
+
+                if (cnt >= 2 && cnt * sxx - sx * sx != 0) {
+                    m2 = (cnt * sxy - sx * sy) / (cnt * sxx - sx * sx);
+                    c2 = (sy - m2 * sx) / cnt;
+                    x0 = scatter ? xa : 0.5;
+                    x1 = scatter ? xb : nc + 0.5;
+                    if (m2 != 0) {  /* kept to the plot: where it leaves the value scale */
+                        double xlo2 = (ca - c2) / m2, xhi2 = (cb - c2) / m2;
+
+                        if (xlo2 > xhi2) {
+                            double sw = xlo2;
+
+                            xlo2 = xhi2;
+                            xhi2 = sw;
+                        }
+
+                        x0 = x0 < xlo2 ? xlo2 : x0;
+                        x1 = x1 > xhi2 ? xhi2 : x1;
+                    }
+
+                    if (x1 > x0) {
+                        tl[0] = scatter ? XX(x0) : px + slot * (x0 - 0.5);
+                        tl[1] = VY(c2 + m2 * x0);
+                        tl[2] = scatter ? XX(x1) : px + slot * (x1 - 0.5);
+                        tl[3] = VY(c2 + m2 * x1);
+                        path(&w, tl, 2, 0, 0, s->trend_line ? s->trend_line : line, PD_SP_PER_PT * 1.5);
+                    }
                 }
             }
         }
