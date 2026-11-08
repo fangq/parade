@@ -879,6 +879,49 @@ static void pdf_grad_content(pdfw* w, sbuf* c, preslist* R, const pd_draw* a, co
     sb_fmt(c, "Q\n");
 }
 
+/* A pattern fill as a tiling pattern: its 8 by 8 cells (3/4 pt each) in the foreground over the background, the
+   tiles counted from the page's top left corner as the rasterizer counts them; its object */
+static int32_t pdf_pattern(pdfw* w, const pd_path_style* st, int64_t H, int compress) {
+    sbuf m;
+    char dict[256], hs[32];
+    int32_t obj = new_obj(w);
+    int r, x;
+
+    memset(&m, 0, sizeof(m));
+
+    if (st->pattern_bg) {
+        sb_rgb(&m, st->pattern_bg, "rg");
+        sb_fmt(&m, "0 0 6 6 re f ");
+    }
+
+    sb_rgb(&m, st->pattern_fg, "rg");
+
+    for (r = 0; r < 8; r++) {   /* each row's runs of set cells, row 0 at the top */
+        for (x = 0; x < 8; x++) {
+            int e = x;
+
+            if (!((st->pattern_bits[r] >> (7 - x)) & 1)) {
+                continue;
+            }
+
+            while (e + 1 < 8 && ((st->pattern_bits[r] >> (7 - e - 1)) & 1)) {
+                e++;
+            }
+
+            sb_fmt(&m, "%.2f %.2f %.2f 0.75 re ", x * 0.75, 6 - (r + 1) * 0.75, (e - x + 1) * 0.75);
+            x = e;
+        }
+    }
+
+    sb_fmt(&m, "f");
+    num(hs, sizeof(hs), H);
+    snprintf(dict, sizeof(dict), "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 6 6] /XStep 6 "
+             "/YStep 6 /Matrix [1 0 0 1 0 %s] /Resources << >>", hs);
+    stream_obj(w, obj, dict, m.p ? m.p : "", m.n, compress);
+    free(m.p);
+    return obj;
+}
+
 /* A path's gradient fill: as it is, or, with see-through stops, under a soft mask of their alphas (a form drawing
    the same gradient in grays, its luminosity the mask) */
 static void pdf_gradient(pdfw* w, sbuf* c, preslist* R, const pd_draw* a, const pd_gradient* g, int64_t W, int64_t H,
@@ -1726,6 +1769,24 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
 
                     if (ga >= 0) {
                         sb_fmt(&c, "q /GA%d gs ", ga);
+                    }
+
+                    if (fill && !hasg && a->style && a->style->pattern) {   /* a pattern: filled on its own */
+                        int32_t pt = pdf_pattern(&w, a->style, (int64_t)pi.height, opt->compress);
+
+                        res_add(&R, 'P', pt);
+                        sb_fmt(&c, "q /Pattern cs /Pt%d scn ", (int)pt);
+                        sb_path(&c, a, 1, (int64_t)pi.height);
+                        sb_fmt(&c, "f Q\n");
+                        fill = 0;
+
+                        if (!stroke) {
+                            if (ga >= 0) {
+                                sb_fmt(&c, "Q\n");
+                            }
+
+                            continue;
+                        }
                     }
 
                     if (hasg) {     /* a gradient: drawn on its own, then the outline */

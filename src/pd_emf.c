@@ -19,6 +19,7 @@
 #include <string.h>
 #include "pd_conv.h"
 #include "pd_internal.h"
+#include "pd_preset.h"
 
 #define MAX_OBJ 1024
 
@@ -28,6 +29,7 @@ typedef struct {
     int null;                   /* a null pen or brush */
     double width;               /* pens: logical units */
     uint32_t style;             /* pens: PS_ dash, end cap and join bits */
+    int hatch;                  /* brushes: HS_ + 1 when hatched, else 0 */
     double height;              /* fonts: logical units; < 0 character height */
     int weight, italic;
     char face[64];
@@ -40,6 +42,8 @@ typedef struct {
     double m[6];                /* world transform: x' = m0 x + m2 y + m4, y' = m1 x + m3 y + m5 */
     gobj pen, brush, font;
     uint32_t text_color;
+    uint32_t bk_color;          /* behind a hatch, when bk_mode is OPAQUE (2) */
+    int bk_mode;
     int text_align;
     double cx, cy;              /* current position, logical */
     int poly_fill;
@@ -157,6 +161,16 @@ static void out_path(mf* M, const double* xy, int n, int closed, int fill, int s
 
     pb_printf(M->o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d", closed, (unsigned)fc, (unsigned)lc,
               (int)(lw < 1 ? 1 : lw));
+
+    if (fc && M->g.brush.hatch) {   /* a hatched brush: the pattern Office has for it, over the background */
+        static const char* hs[6] = { "horz", "vert", "dnDiag", "upDiag", "cross", "diagCross" };
+        unsigned char b[8];
+
+        if (pd_pattern_bits(hs[M->g.brush.hatch - 1], b)) {
+            pb_printf(M->o, ",\"patt\":[%d,%d,%d,%d,%d,%d,%d,%d],\"pfg\":%u,\"pbg\":%u", b[0], b[1], b[2], b[3], b[4],
+                      b[5], b[6], b[7], (unsigned)fc, (unsigned)(M->g.bk_mode == 2 ? M->g.bk_color : 0));
+        }
+    }
 
     if (lc) {   /* the pen's dashes (as GDI's, in line widths), ends and corners */
         static const char* dash[5] = { "", "300000,100000", "100000,100000", "300000,100000,100000,100000",
@@ -614,6 +628,8 @@ static void state_init(gstate* g) {
     g->brush.kind = 2;
     g->brush.color = 0xFFFFFFFFu;
     g->text_color = 0xFF000000u;
+    g->bk_color = 0xFFFFFFFFu;
+    g->bk_mode = 2;
 }
 
 static void select_stock(mf* M, uint32_t ih) {
@@ -746,6 +762,14 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
 
             case 24:    /* SETTEXTCOLOR */
                 if (size >= 12) { M->g.text_color = colorref(u32(r + 8)); }
+                break;
+
+            case 25:    /* SETBKCOLOR */
+                if (size >= 12) { M->g.bk_color = colorref(u32(r + 8)); }
+                break;
+
+            case 18:    /* SETBKMODE */
+                if (size >= 12) { M->g.bk_mode = (int)u32(r + 8); }
                 break;
 
             case 19:    /* SETPOLYFILLMODE */
@@ -889,6 +913,7 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
                     o->kind = 2;
                     o->null = u32(r + 12) == 1;
                     o->color = colorref(u32(r + 16));
+                    o->hatch = u32(r + 12) == 2 && size >= 24 && u32(r + 20) <= 5 ? (int)u32(r + 20) + 1 : 0;
                 }
 
                 break;
@@ -1229,6 +1254,14 @@ static void wmf_play(mf* M, const unsigned char* p, size_t n) {
             case 0x0000:    /* EOF */
                 return;
 
+            case 0x0201:    /* SETBKCOLOR */
+                M->g.bk_color = colorref((uint32_t)(uint16_t)P16(0) | ((uint32_t)(uint16_t)P16(1) << 16));
+                break;
+
+            case 0x0102:    /* SETBKMODE */
+                M->g.bk_mode = P16(0);
+                break;
+
             case 0x020B:    /* SETWINDOWORG y, x */
                 M->g.woy = P16(0);
                 M->g.wox = P16(1);
@@ -1372,6 +1405,7 @@ static void wmf_play(mf* M, const unsigned char* p, size_t n) {
                     o->kind = 2;
                     o->null = P16(0) == 1;
                     o->color = colorref((uint32_t)(uint16_t)P16(1) | ((uint32_t)(uint16_t)P16(2) << 16));
+                    o->hatch = P16(0) == 2 && (uint16_t)P16(3) <= 5 ? P16(3) + 1 : 0;
                 }
 
                 break;

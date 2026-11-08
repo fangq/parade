@@ -8091,6 +8091,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int grad_kind = 0, grad_ang = 0, in_grad = 0, in_shd = 0, has_shd = 0;
     int ngst = 0, gst_pos[PD_MAX_STOPS], grad_sc = 0, grad_path = 1, grad_rws = 1, gft[4] = { 50000, 50000, 50000, 50000 };
     uint32_t gst_clr[PD_MAX_STOPS];     /* a gradient's stops, as listed; scaled; its path; turned with the shape */
+    unsigned char patt_bits[8];         /* a pattern fill's bitmap, if it is one Office has (have_patt) */
+    int have_patt = 0;
     double shd_dist = 0, shd_dir = 0;
     char gprst[32] = "";            /* a picture's geometry, when it is not a rectangle (it is cut to that shape) */
     uint32_t fill = 0, line = 0, sfill = 0, sline = 0, *cur_clr = NULL;
@@ -8341,7 +8343,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             memset(crop, 0, sizeof(crop));
             fill2 = shd_clr = 0;
             grad_kind = grad_ang = in_grad = in_shd = has_shd = 0;
-            ngst = grad_sc = 0;
+            ngst = grad_sc = have_patt = 0;
             grad_path = grad_rws = 1;
             gft[0] = gft[1] = gft[2] = gft[3] = 50000;
             gprst[0] = '\0';
@@ -8556,6 +8558,14 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         snprintf(ax, sizeof(ax), ",\"he\":[%d,%d,%d],\"te\":[%d,%d,%d]", head_arrow, arrow_w[0],
                                  arrow_len[0], tail_arrow, arrow_w[1], arrow_len[1]);
                     }
+                }
+
+                if (have_patt && have_fill && !grad_kind) {     /* the pattern itself, its colours mixed in fill */
+                    size_t fl = strlen(fx);
+
+                    snprintf(fx + fl, sizeof(fx) - fl, ",\"patt\":[%d,%d,%d,%d,%d,%d,%d,%d],\"pfg\":%u,\"pbg\":%u",
+                             patt_bits[0], patt_bits[1], patt_bits[2], patt_bits[3], patt_bits[4], patt_bits[5],
+                             patt_bits[6], patt_bits[7], (unsigned)patt_fg, (unsigned)patt_bg);
                 }
 
                 if (has_shd && shd_dist > 0) {
@@ -9022,6 +9032,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 patt_fg = 0xFF000000u;
                 patt_bg = 0xFFFFFFFFu;
                 patt_pct = 50;
+
+                have_patt = mu_attr(&g, "prst", v, sizeof(v)) && pd_pattern_bits(v, patt_bits);
 
                 if (mu_attr(&g, "prst", v, sizeof(v)) && !strncmp(v, "pct", 3)) {
                     patt_pct = atoi(v + 3);

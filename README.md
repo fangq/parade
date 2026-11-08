@@ -143,6 +143,9 @@ turns into display-list paths, the same for the screen and for PDF.
   from an inner rectangle (fillToRect) in circles or rectangles. PDF uses
   shadings (axial, radial; a stitching function for more than two
   stops) under a soft mask when stops are see-through.
+- **Patterns**: Office's 54 pattern fills (pct5 ... zigZag) and metafile
+  hatched brushes as 8-by-8 bitmaps of 3/4 pt cells, tiled from the
+  page's corner; PDF fills with a tiling pattern.
 - **Rasterizer**: `pd_draw_render` draws display-list paths into an RGBA
   image with Parade's integer coverage rasterizer, so a host gets the
   library's pixels rather than drawing styles itself.

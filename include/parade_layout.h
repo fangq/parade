@@ -111,7 +111,14 @@ typedef struct {
     int32_t stop_pos[PD_MAX_STOPS];     /**< where along it, 0 at its start to 100000 at its end */
     pd_sp grad_x0, grad_y0, grad_x1, grad_y1;       /**< on the page, as PD_GRAD_* says */
     pd_sp grad_bx0, grad_by0, grad_bx1, grad_by1;
+    int32_t pattern;            /**< the fill a pattern: pattern_bits in pattern_fg on pattern_bg (0: clear) */
+    uint32_t pattern_fg, pattern_bg;
+    uint8_t pattern_bits[8];    /**< 8 rows of 8 cells, top first, the high bit leftmost, a set bit the foreground;
+                                     a cell 3/4 pt square (a pixel at 96 dpi), the cells counted from the page's
+                                     top left corner */
 } pd_path_style;
+
+#define PD_PATTERN_CELL 49152   /**< a pattern cell's side, sp */
 
 typedef struct {
     int32_t kind;               /**< pd_draw_kind */

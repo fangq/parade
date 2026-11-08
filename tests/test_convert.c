@@ -3536,6 +3536,74 @@ static void test_docx_gradients(void) {
     pd_doc_free(d);
 }
 
+/* A pattern fill (Office's dark downward diagonal, red on white): its 8-by-8 bitmap reaches the display list, the
+   rasterizer tiles it cell by cell from the page's corner, and the PDF fills with a tiling pattern. */
+static void test_docx_pattern_fill(void) {
+    static const uint8_t dk[8] = { 0xCC, 0x66, 0x33, 0x99, 0xCC, 0x66, 0x33, 0x99 };
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, pat = -1;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:pattFill prst=\"dkDnDiag\"><a:fgClr><a:srgbClr val=\"FF0000\"/></a:fgClr>"
+                      "<a:bgClr><a:srgbClr val=\"FFFFFF\"/></a:bgClr></a:pattFill><a:ln><a:noFill/></a:ln></wps:spPr>"
+                      "<wps:bodyPr/></wps:wsp>", &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        pat = it[k].kind == PD_DRAW_PATH && it[k].style && it[k].style->pattern ? k : pat;
+    }
+
+    CHECK(pat >= 0);
+
+    if (pat >= 0) {
+        const pd_draw* a = &it[pat];
+        pd_sp tile = 8 * PD_PATTERN_CELL, x0 = a->x / tile * tile + tile, y0 = a->y / tile * tile + tile;
+        int32_t W = 48, H = 48, cx, cy, bad = 0;
+        uint8_t* px = (uint8_t*)calloc((size_t)W * H, 4);
+
+        CHECK(!memcmp(a->style->pattern_bits, dk, 8) && a->style->pattern_fg == 0xFFFF0000u &&
+              a->style->pattern_bg == 0xFFFFFFFFu);
+
+        if (px) {   /* 4 pixels a point, a cell 3 pixels: two tiles, from a tile's corner inside the box */
+            CHECK(pd_draw_render(a, 1, x0, y0, 4 << 16, px, W, H, W * 4) == PD_OK);
+
+            for (cy = 0; cy < 16; cy++) {
+                for (cx = 0; cx < 16; cx++) {
+                    const uint8_t* q = px + ((size_t)(3 * cy + 1) * W + (size_t)(3 * cx + 1)) * 4;
+                    int on = (dk[cy & 7] >> (7 - (cx & 7))) & 1;
+
+                    bad += !(q[0] == 255 && q[3] == 255 && (on ? q[1] == 0 : q[1] == 255));
+                }
+            }
+
+            CHECK(bad == 0);
+            free(px);
+        }
+    }
+
+    {
+        pd_pdf_options opt;
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "/PatternType 1 /PaintType 1") && strstr(b.p, "/Pattern cs /Pt"));
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -6027,6 +6095,7 @@ int main(void) {
     test_docx_line_styles();
     test_docx_curves();
     test_docx_gradients();
+    test_docx_pattern_fill();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();

@@ -446,6 +446,10 @@ begin
   WriteLn('pd_path_style.grad_by0 ', PtrUInt(@v_pd_path_style.grad_by0) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_path_style.grad_bx1 ', PtrUInt(@v_pd_path_style.grad_bx1) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_path_style.grad_by1 ', PtrUInt(@v_pd_path_style.grad_by1) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.pattern ', PtrUInt(@v_pd_path_style.pattern) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.pattern_fg ', PtrUInt(@v_pd_path_style.pattern_fg) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.pattern_bg ', PtrUInt(@v_pd_path_style.pattern_bg) - PtrUInt(@v_pd_path_style));
+  WriteLn('pd_path_style.pattern_bits ', PtrUInt(@v_pd_path_style.pattern_bits) - PtrUInt(@v_pd_path_style));
   WriteLn('pd_markup_item ', SizeOf(pd_markup_item));
   WriteLn('pd_markup_item.kind ', PtrUInt(@v_pd_markup_item.kind) - PtrUInt(@v_pd_markup_item));
   WriteLn('pd_markup_item.id ', PtrUInt(@v_pd_markup_item.id) - PtrUInt(@v_pd_markup_item));

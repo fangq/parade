@@ -57,7 +57,7 @@ STRUCTS = {
     "pd_draw": "kind x y w h glyph font size color resource block offset region text scale points npoints path_flags "
                "line_width fill clip_x clip_y clip_w clip_h fill2 grad grad_angle rotation flip clip_points clip_npoints style curve ncurve",
     "pd_path_style": "dash_count dash cap join grad_kind nstops stop_color stop_pos grad_x0 grad_y0 grad_x1 grad_y1 "
-                     "grad_bx0 grad_by0 grad_bx1 grad_by1",
+                     "grad_bx0 grad_by0 grad_bx1 grad_by1 pattern pattern_fg pattern_bg pattern_bits",
     "pd_markup_item": "kind id range x y top bottom color",
     "pd_pdf_options": "compress outlines title author",
 }

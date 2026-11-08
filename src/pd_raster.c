@@ -965,11 +965,22 @@ static void rc_dashed(canvas* c, const double* xy, int32_t n, int closed, double
 typedef struct {
     uint32_t color;             /* 0xAARRGGBB */
     const pd_gradient* grad;    /* or a gradient, */
+    const pd_path_style* pat;   /* or a pattern, */
     pd_sp x0, y0;               /* pixels mapped back to the page: x0 + (x + 1/2) / scale */
     int32_t scale;
 } rpaint;
 
 static uint32_t rp_color(const rpaint* p, int32_t x, int32_t y) {
+    if (p->pat) {   /* the pattern's cell under the pixel's middle, the cells counted from the page's corner */
+        int64_t k = ((int64_t)1 << 32) / p->scale;     /* sp a subpixel, in 1/256 */
+        int64_t px = p->x0 + (((int64_t)x * ONE + ONE / 2) * k >> 8), py = p->y0 + (((int64_t)y * ONE + ONE / 2) * k >> 8);
+        int64_t cx = px >= 0 ? px / PD_PATTERN_CELL : (px - PD_PATTERN_CELL + 1) / PD_PATTERN_CELL;
+        int64_t cy = py >= 0 ? py / PD_PATTERN_CELL : (py - PD_PATTERN_CELL + 1) / PD_PATTERN_CELL;
+        uint32_t c = (p->pat->pattern_bits[cy & 7] >> (7 - (cx & 7))) & 1 ? p->pat->pattern_fg : p->pat->pattern_bg;
+
+        return c && !(c >> 24) ? c | 0xFF000000u : c;
+    }
+
     if (p->grad) {
         double k = 16777216.0 / p->scale;   /* sp a subpixel: 2^24 / scale */
 
@@ -1209,8 +1220,10 @@ pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, in
                 rc_rings(a, x0, y0, scale, (double)px0 * ONE, (double)py0 * ONE, rc_ring, &J);
                 paint.color = a->fill;
                 paint.grad = pd_draw_gradient(a, &grad) ? &grad : NULL;
+                paint.pat = st && st->pattern ? st : NULL;
                 rc_composite(&c, px0, py0, &paint, rgba, stride);
                 paint.grad = NULL;
+                paint.pat = NULL;
             }
 
             if (hw > 0) {

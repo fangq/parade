@@ -4734,11 +4734,31 @@ static pd_path_style* path_style(dlist_t* D, int32_t i) {
     return &D->sty[D->nsty - 1];
 }
 
+/* an item's pattern fill ("patt": its 8 rows, "pfg", "pbg" its colours) on the path just made */
+static void item_pattern(dlist_t* D, int32_t n0, const pj_node* it) {
+    const pj_node* pt = pj_get(it, "patt"), *q;
+    pd_path_style* st;
+    int k;
+
+    if (D->n > n0 && pt && pt->n == 8 && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].fill &&
+            (st = path_style(D, D->n - 1)) != NULL) {
+        st->pattern = 1;
+        st->pattern_fg = (uint32_t)pj_int_or(pj_get(it, "pfg"), 0xFF000000LL);
+        st->pattern_bg = (uint32_t)pj_int_or(pj_get(it, "pbg"), 0);
+
+        for (q = pt->child, k = 0; q && k < 8; q = q->next, k++) {
+            st->pattern_bits[k] = (uint8_t)pj_int_or(q, 0);
+        }
+    }
+}
+
 /* An item's gradient on the path just made: "f2" its other colour, "gk" 1 linear, 2 radial, "ga" its angle (what
    a host drawing two colours reads); and where the item has them, its stops ("gs": position in 100000ths, colour,
    ...), "gsc" a linear one's angle scaled with the box, "gp" a radial one's path (1 circle, 2 rectangle, 3 the
    shape, drawn as a rectangle) and "gft" its inner rectangle (fillToRect: insets in 100000ths of the box) */
 static void item_grad(dlist_t* D, int32_t n0, const pj_node* it) {
+    item_pattern(D, n0, it);
+
     if (D->n > n0 && pj_get(it, "gk") && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].fill) {
         pd_draw* a = &D->d[D->n - 1];
         const pj_node* gs = pj_get(it, "gs"), *q;
@@ -5320,7 +5340,7 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                 emit_path(D, xy, 64, 1, fill, line, lw, block, region);
                 ellipse_curve(D, n0, ix, iy, iw, ih);
                 item_grad(D, n0, it);
-            } else if (pj_get(it, "gk") || pj_get(it, "shd") || item_styled(it)) {
+            } else if (pj_get(it, "gk") || pj_get(it, "shd") || pj_get(it, "patt") || item_styled(it)) {
                 /* a box with a gradient, a shadow or a styled outline: as a path */
                 pd_sp xy[8] = { ix, iy, ix + iw, iy, ix + iw, iy + ih, ix, iy + ih };
 

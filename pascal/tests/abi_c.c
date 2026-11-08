@@ -410,6 +410,10 @@ int main(void) {
     printf("pd_path_style.grad_by0 %zu\n", offsetof(pd_path_style, grad_by0));
     printf("pd_path_style.grad_bx1 %zu\n", offsetof(pd_path_style, grad_bx1));
     printf("pd_path_style.grad_by1 %zu\n", offsetof(pd_path_style, grad_by1));
+    printf("pd_path_style.pattern %zu\n", offsetof(pd_path_style, pattern));
+    printf("pd_path_style.pattern_fg %zu\n", offsetof(pd_path_style, pattern_fg));
+    printf("pd_path_style.pattern_bg %zu\n", offsetof(pd_path_style, pattern_bg));
+    printf("pd_path_style.pattern_bits %zu\n", offsetof(pd_path_style, pattern_bits));
     printf("pd_markup_item %zu\n", sizeof(pd_markup_item));
     printf("pd_markup_item.kind %zu\n", offsetof(pd_markup_item, kind));
     printf("pd_markup_item.id %zu\n", offsetof(pd_markup_item, id));
