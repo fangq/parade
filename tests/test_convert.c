@@ -9301,6 +9301,36 @@ static void test_wrap_outline(void) {
     pd_doc_free(d);
 }
 
+/* a row of exact height cuts its text off at its edge, as Word does: a line that mostly fits is still there (a
+   form's 12pt rows of 10pt text), and a cell merged down over exact rows has all of them to fill */
+static void test_docx_exact_rows_keep_text(void) {
+    char out[4096];
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:body><w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"dxa\"/>"
+                         "</w:tblPr><w:tblGrid><w:gridCol w:w=\"2500\"/><w:gridCol w:w=\"2500\"/></w:tblGrid>"
+                         "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"240\"/></w:trPr>"
+                         "<w:tc><w:p><w:r><w:rPr><w:sz w:val=\"22\"/></w:rPr><w:t>Source of Support</w:t></w:r></w:p></w:tc>"
+                         "<w:tc><w:tcPr><w:vMerge w:val=\"restart\"/></w:tcPr><w:p><w:r><w:rPr><w:sz w:val=\"20\"/>"
+                         "</w:rPr><w:t>Upper</w:t></w:r></w:p><w:p><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr>"
+                         "<w:t>Lower</w:t></w:r></w:p></w:tc></w:tr>"
+                         "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"240\"/></w:trPr><w:tc><w:p/></w:tc>"
+                         "<w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc></w:tr>"
+                         "<w:tr><w:trPr><w:trHeight w:hRule=\"exact\" w:val=\"40\"/></w:trPr><w:tc><w:p><w:r>"
+                         "<w:t>Hidden</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr>"
+                         "</w:tbl><w:p/></w:body></w:document>", NULL);
+
+    CHECK(d != NULL);
+
+    if (d && have_layout_font()) {
+        CHECK(layout_text(d, -1, out, sizeof(out)) >= 1);
+        CHECK(strstr(out, "SourceofSupport") != NULL);      /* an 11pt line in a 12pt row (no glyph for a space) */
+        CHECK(strstr(out, "Upper") && strstr(out, "Lower"));    /* two lines in a cell over two 12pt rows */
+        CHECK(strstr(out, "Hidden") == NULL);                /* a 2pt row shows none of a 12pt line */
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9320,6 +9350,7 @@ int main(void) {
     test_docx_lists();
     test_docx_num_formats();
     test_docx_kept_parts();
+    test_docx_exact_rows_keep_text();
     printf("docx headers and footers\n");
     test_docx_headers();
     printf("docx tables\n");

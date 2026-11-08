@@ -1251,7 +1251,8 @@ static void place_stack(pd_layout* L, pd_block_id container, pd_sp width, int32_
 }
 
 /* the lines of a container whose tops are in [lo, hi) of it (a slice of a table row), or with whole, those
-   wholly above hi (a row of exact height): placed with the container's top at y */
+   that end no more than a quarter of their height below hi (a row of exact height: Word cuts the text at the
+   cell's edge, so a line mostly inside it is still read): placed with the container's top at y */
 static void place_stack_clip(pd_layout* L, pd_block_id container, pd_sp width, int32_t page, pd_sp x, pd_sp y,
                              pd_sp lo, pd_sp hi, int whole, int32_t region) {
     pd_block_id ids[512];
@@ -1273,7 +1274,8 @@ static void place_stack_clip(pd_layout* L, pd_block_id container, pd_sp width, i
         }
 
         for (k = 0; k < c->nlines; k++) {
-            if (whole ? py + c->top[k + 1] <= hi : py + c->top[k] >= lo && py + c->top[k] < hi) {
+            if (whole ? py + c->top[k] + (c->top[k + 1] - c->top[k]) * 3 / 4 <= hi :
+                    py + c->top[k] >= lo && py + c->top[k] < hi) {
                 add_line(L, page, c, k, x, y + py, region);
             }
         }
@@ -2806,14 +2808,27 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
             if (!cell->st.cell.merge_up && cell->st.cell.text_dir) {
                 place_turned(L, cell, page, cx, ry, cw, rowh[r], pad, padv, region);
             } else if (!cell->st.cell.merge_up) {
+                pd_sp spanh = rowh[r];  /* a cell merged down: the rows it covers are its height */
+                int32_t rr;
+
+                for (rr = r + 1; rr < t->nkids; rr++) {
+                    const blk* below = cell_over(d, &T, d->tab[t->kids[rr]], c);
+
+                    if (!below || !below->st.cell.merge_up) {
+                        break;
+                    }
+
+                    spanh += rowh[rr];
+                }
+
                 ch = stack_walk(L, cell->id, inner, 0, 0, 0, 0, 0, st);
                 off = cell->st.cell.valign == 1 ? (rowh[r] - 2 * padv - ch) / 2 : cell->st.cell.valign == 2 ?
                       rowh[r] - 2 * padv - ch : 0;
                 off = off > 0 ? off : 0;
 
-                if (row->st.row.height_exact && ch > rowh[r] - 2 * padv) {     /* what does not fit is cut off */
-                    place_stack_clip(L, cell->id, inner, page, cx + pad, ry + padv + off, 0, rowh[r] - 2 * padv - off,
-                                     1, region);
+                if (row->st.row.height_exact && ch > spanh - 2 * padv) {     /* what does not fit is cut off */
+                    place_stack_clip(L, cell->id, inner, page, cx + pad, ry + padv + off, 0, spanh - padv - off, 1,
+                                     region);
                 } else {
                     stack_walk(L, cell->id, inner, 1, page, cx + pad, ry + padv + off, region, st);
                 }
