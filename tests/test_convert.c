@@ -4342,6 +4342,41 @@ static void test_pptx_chart(void) {
 #undef PCHART
 }
 
+/* a placeholder with nothing of its own takes its layout placeholder's geometry, fill, outline and text box (its warp,
+   its columns), and its master placeholder's style (its text's colour from the style's font) */
+static void test_pptx_ph_inherit(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"B\"/><p:cNvSpPr/>"
+                         "<p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>"
+                         PP("Inherits") "</p:txBody></p:sp>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>",
+                         "ppt/slideLayouts/slideLayout1.xml", "<p:sldLayout xmlns:p=\"p\" xmlns:a=\"a\"><p:cSld><p:spTree>"
+                         "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"B\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/>"
+                         "</p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1270000\" y=\"1270000\"/><a:ext cx=\"2540000\" "
+                         "cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr "
+                         "val=\"FF0000\"/></a:solidFill><a:ln w=\"25400\"><a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill>"
+                         "</a:ln></p:spPr><p:txBody><a:bodyPr numCol=\"2\"><a:prstTxWarp prst=\"textArchUp\"><a:avLst/>"
+                         "</a:prstTxWarp></a:bodyPr><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:sldLayout>",
+                         "ppt/slideLayouts/_rels/slideLayout1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../slideMasters/slideMaster1.xml\"/></Relationships>",
+                         "ppt/slideMasters/slideMaster1.xml", "<p:sldMaster xmlns:p=\"p\" xmlns:a=\"a\"><p:cSld><p:spTree>"
+                         "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"B\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/>"
+                         "</p:nvPr></p:nvSpPr><p:spPr/><p:style><a:lnRef idx=\"0\"><a:srgbClr val=\"000000\"/></a:lnRef>"
+                         "<a:fillRef idx=\"0\"><a:srgbClr val=\"000000\"/></a:fillRef><a:effectRef idx=\"0\"><a:srgbClr "
+                         "val=\"000000\"/></a:effectRef><a:fontRef idx=\"minor\"><a:srgbClr val=\"0000FF\"/></a:fontRef>"
+                         "</p:style><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:sldMaster>",
+                         NULL);
+    char* js = d ? slide_json(d, 0) : NULL;
+    pd_block_id p = d ? story_para_with(d, "Inherits") : 0;
+
+    CHECK(js && strstr(js, "\"shape\":\"ellipse\",\"x\":6553600,\"y\":6553600,\"w\":13107200,\"h\":6553600,"
+                       "\"fill\":4294901760,\"line\":4278255360,\"lw\":131072"));
+    CHECK(js && strstr(js, "numCol=\\\"2\\\"") && strstr(js, "<a:prstTxWarp prst=\\\"textArchUp\\\">"));
+    CHECK(p && (chars_at(d, p, 0).color & 0xFFFFFFu) == 0x0000FFu);
+    free(js);
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5886,6 +5921,7 @@ int main(void) {
     test_pptx_picture_bullet();
     test_pptx_ole();
     test_pptx_chart();
+    test_pptx_ph_inherit();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

@@ -1425,6 +1425,20 @@ static void put_with_media(pd_buf* o, const conv* C, const ppart* pt, const char
 
 static void put_tree(conv* C, ppart* pt, int tree, int skip_ph);
 
+/* a shape's style (p:style: its theme line, fill, effect and font): its own, else its layout placeholder's, else its
+   master's */
+static xref shape_style(const conv* C, const xdoc* d, int sp, int lsp, int msp) {
+    xref r = { d, xd_kid(d, sp, "style") };
+
+    if (r.n < 0 && lsp >= 0 && (r.n = xd_kid(&C->layout->x, lsp, "style")) >= 0) {
+        r.d = &C->layout->x;
+    } else if (r.n < 0 && msp >= 0 && (r.n = xd_kid(&C->master->x, msp, "style")) >= 0) {
+        r.d = &C->master->x;
+    }
+
+    return r;
+}
+
 /* a text body as a text box's content: its paragraphs, each with what its level takes from the list styles */
 static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, int msp) {
     const xdoc* d = &pt->x;
@@ -1443,8 +1457,12 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
     T.title = kind == 1;
     T.scale = na >= 0 ? xd_int(d, na, "fontScale", 100000) / 100000.0 : 1;
     T.spacing = na >= 0 ? 1 - xd_int(d, na, "lnSpcReduction", 0) / 100000.0 : 1;
-    fr = xd_path(d, sp, "style/fontRef");
-    T.font_colour = fr >= 0 && d->v[fr].kid >= 0 ? colour_of(C->P, d, d->v[fr].kid) : -1;
+    {
+        xref sty = shape_style(C, d, sp, lsp, msp);
+
+        fr = sty.n >= 0 ? xd_kid(sty.d, sty.n, "fontRef") : -1;
+        T.font_colour = fr >= 0 && sty.d->v[fr].kid >= 0 ? colour_of(C->P, sty.d, sty.d->v[fr].kid) : -1;
+    }
     /* the list styles, nearest first: its own, its layout placeholder's, its master's, the master's styles for
        its kind, the presentation's */
     ds[nn] = d;
@@ -1515,11 +1533,30 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
     pb_puts(C->o, "</w:txbxContent></wps:txbx>");
 }
 
+/* one of a set of spPr children that stand for one another (the fills; the geometries) under N, -1 none */
+static int sppr_one(const xdoc* d, int n, const char* const* names, int nn) {
+    int k, q;
+
+    for (k = n >= 0 ? d->v[n].kid : -1; k >= 0; k = d->v[k].next) {
+        for (q = 0; q < nn; q++) {
+            if (!strcmp(d->v[k].name, names[q])) {
+                return k;
+            }
+        }
+    }
+
+    return -1;
+}
+
 /* a text body's bodyPr: its own attributes, else its placeholders' */
 static void put_bodypr(conv* C, const xdoc* d, int tx, int lsp, int msp) {
     static const char* names[] = { "lIns", "tIns", "rIns", "bIns", "anchor", "wrap", "vert", "anchorCtr", "rot",
-                                   "upright"
+                                   "upright", "numCol", "spcCol", "rtlCol", "vertOverflow", "horzOverflow"
                                  };
+    static const char* const fits[3] = { "normAutofit", "spAutoFit", "noAutofit" }, *const warps[1] = { "prstTxWarp" };
+    static const char* const* const sets[2] = { warps, fits };
+    static const int nset[2] = { 1, 3 };
+    int q;
     int k, bp = tx >= 0 ? xd_kid(d, tx, "bodyPr") : -1;
     int lb = lsp >= 0 ? xd_path(&C->layout->x, lsp, "txBody/bodyPr") : -1;
     int mb = msp >= 0 ? xd_path(&C->master->x, msp, "txBody/bodyPr") : -1;
@@ -1535,7 +1572,24 @@ static void put_bodypr(conv* C, const xdoc* d, int tx, int lsp, int msp) {
         }
     }
 
-    pb_puts(C->o, "/>");
+    pb_putc(C->o, '>');
+
+    for (q = 0; q < 2; q++) {   /* its warp and how it fits: its own, else its placeholders' */
+        int e = sppr_one(d, bp, sets[q], nset[q]);
+        const xdoc* from = d;
+
+        if (e < 0 && lb >= 0 && (e = sppr_one(&C->layout->x, lb, sets[q], nset[q])) >= 0) {
+            from = &C->layout->x;
+        } else if (e < 0 && mb >= 0 && (e = sppr_one(&C->master->x, mb, sets[q], nset[q])) >= 0) {
+            from = &C->master->x;
+        }
+
+        if (e >= 0) {
+            xd_raw(C->o, from, e);
+        }
+    }
+
+    pb_puts(C->o, "</wps:bodyPr>");
 }
 
 static int has_text(const xdoc* d, int tx) {
@@ -1552,16 +1606,23 @@ static int has_text(const xdoc* d, int tx) {
     return 0;
 }
 
-/* a shape's spPr: its own, with where it is and its geometry from its placeholders when it has not its own */
+/* a shape's spPr: its own, with where it is, its geometry, fill, outline and effects from its placeholders (its
+   layout's, else its master's) when it has not its own */
 static int put_sppr(conv* C, ppart* pt, int sp, int lsp, int msp, const char* el, int widen) {
+    static const char* const fills[6] = { "noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill" };
+    static const char* const geoms[2] = { "prstGeom", "custGeom" }, *const lns[1] = { "ln" };
+    static const char* const effs[2] = { "effectLst", "effectDag" };
+    static const char* const* const sets[4] = { geoms, fills, lns, effs };
+    static const int nset[4] = { 2, 6, 1, 2 };
     const xdoc* d = &pt->x;
-    int spr = xd_kid(d, sp, "spPr"), xf = xd_kid(d, spr, "xfrm"), k, geom = 0;
+    int spr = xd_kid(d, sp, "spPr"), xf = xd_kid(d, spr, "xfrm"), k, q;
+    int lspr = lsp >= 0 ? xd_kid(&C->layout->x, lsp, "spPr") : -1, mspr = msp >= 0 ? xd_kid(&C->master->x, msp, "spPr") : -1;
     xref pxf = { d, xf };
 
-    if (xf < 0 && lsp >= 0 && (k = xd_path(&C->layout->x, lsp, "spPr/xfrm")) >= 0) {
+    if (xf < 0 && lsp >= 0 && (k = xd_kid(&C->layout->x, lspr, "xfrm")) >= 0) {
         pxf.d = &C->layout->x;
         pxf.n = k;
-    } else if (xf < 0 && msp >= 0 && (k = xd_path(&C->master->x, msp, "spPr/xfrm")) >= 0) {
+    } else if (xf < 0 && msp >= 0 && (k = xd_kid(&C->master->x, mspr, "xfrm")) >= 0) {
         pxf.d = &C->master->x;
         pxf.n = k;
     }
@@ -1590,31 +1651,42 @@ static int put_sppr(conv* C, ppart* pt, int sp, int lsp, int msp, const char* el
         xd_raw(C->o, pxf.d, pxf.n);
     }
 
-    for (k = spr >= 0 ? d->v[spr].kid : -1; k >= 0; k = d->v[k].next) {
-        if (!strcmp(d->v[k].name, "xfrm")) {
-            continue;
+    /* the geometry, the fill, the outline, the effects, in that order: its own, else its placeholders' */
+    for (q = 0; q < 4; q++) {
+        const ppart* from = pt;
+        int e = sppr_one(d, spr, sets[q], nset[q]);
+
+        if (e < 0 && lspr >= 0 && (e = sppr_one(&C->layout->x, lspr, sets[q], nset[q])) >= 0) {
+            from = C->layout;
+        } else if (e < 0 && mspr >= 0 && (e = sppr_one(&C->master->x, mspr, sets[q], nset[q])) >= 0) {
+            from = C->master;
         }
 
-        geom |= !strcmp(d->v[k].name, "prstGeom") || !strcmp(d->v[k].name, "custGeom");
-
-        if (!geom && (!strcmp(d->v[k].name, "solidFill") || !strcmp(d->v[k].name, "noFill") ||
-                      !strcmp(d->v[k].name, "gradFill") || !strcmp(d->v[k].name, "blipFill") ||
-                      !strcmp(d->v[k].name, "pattFill") || !strcmp(d->v[k].name, "ln"))) {
-            pb_puts(C->o, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");     /* the geometry goes first */
-            geom = 1;
-        }
-
-        if (!strcmp(d->v[k].name, "blipFill")) {
+        if (e < 0 && q == 0) {
+            pb_puts(C->o, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+        } else if (e >= 0 && !strcmp(from->x.v[e].name, "blipFill")) {
             pb_puts(C->o, "<a:blipFill>");
-            put_with_media(C->o, C, pt, d->s + d->v[k].ia, d->v[k].ib - d->v[k].ia);
+            put_with_media(C->o, C, from, from->x.s + from->x.v[e].ia, from->x.v[e].ib - from->x.v[e].ia);
             pb_puts(C->o, "</a:blipFill>");
-        } else {
-            xd_raw_mapped(C->P, C->o, d, k);
+        } else if (e >= 0) {
+            xd_raw_mapped(C->P, C->o, &from->x, e);
         }
     }
 
-    if (!geom) {
-        pb_puts(C->o, "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>");
+    for (k = spr >= 0 ? d->v[spr].kid : -1; k >= 0; k = d->v[k].next) {    /* the rest of its own (3-D) */
+        int known = !strcmp(d->v[k].name, "xfrm");
+
+        for (q = 0; q < 4 && !known; q++) {
+            int i;
+
+            for (i = 0; i < nset[q]; i++) {
+                known |= !strcmp(d->v[k].name, sets[q][i]);
+            }
+        }
+
+        if (!known) {
+            xd_raw_mapped(C->P, C->o, d, k);
+        }
     }
 
     pb_printf(C->o, "</%s>", el);
@@ -2245,15 +2317,16 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
     if (!strcmp(el, "sp") && xd_path(d, n, "spPr/blipFill/blip") >= 0) {
         put_blip_shape(C, pt, n, lsp, msp);     /* a shape filled with a picture: the picture */
     } else if (!strcmp(el, "sp")) {
-        int tx = xd_kid(d, n, "txBody"), st = xd_kid(d, n, "style"), cn = xd_path(d, n, "nvSpPr/cNvSpPr");
+        int tx = xd_kid(d, n, "txBody"), cn = xd_path(d, n, "nvSpPr/cNvSpPr");
         size_t mark = C->o->n;
         int widen = 0, spr = xd_kid(d, n, "spPr");
         char wr[16] = "", al[16] = "";
+        xref sty = shape_style(C, d, n, lsp, msp);
 
         /* text not to wrap (wrap="none"), in a box with no fill or outline of its own: the box made wide */
         if (tx >= 0 && (xd_attr(d, xd_kid(d, tx, "bodyPr"), "wrap", wr, sizeof(wr)) ||
                         (lsp >= 0 && xd_attr(&C->layout->x, xd_path(&C->layout->x, lsp, "txBody/bodyPr"), "wrap", wr,
-                                             sizeof(wr)))) && !strcmp(wr, "none") && st < 0 &&
+                                             sizeof(wr)))) && !strcmp(wr, "none") && sty.n < 0 &&
                 xd_kid(d, spr, "solidFill") < 0 && xd_kid(d, spr, "gradFill") < 0 && xd_kid(d, spr, "blipFill") < 0 &&
                 (xd_kid(d, spr, "ln") < 0 || xd_path(d, spr, "ln/noFill") >= 0)) {
             xd_attr(d, xd_path(d, tx, "p/pPr"), "algn", al, sizeof(al));
@@ -2270,8 +2343,8 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
             return;
         }
 
-        if (st >= 0) {
-            put_renamed(C->P, C->o, d, st, "wps:style");
+        if (sty.n >= 0) {
+            put_renamed(C->P, C->o, sty.d, sty.n, "wps:style");
         }
 
         if (tx >= 0 && has_text(d, tx)) {
