@@ -1822,7 +1822,7 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     }
 
     REQUIRE(x->type == PJ_OBJ);
-    p->col_span = (int32_t)int_or(pj_get(x, "ColumnSpan"), 1, 1, PD_TABLE_MAX_COLS, L);
+    p->col_span = (int32_t)int_or(pj_get(x, "ColumnSpan"), 1, 1, PD_TABLE_MAX_GRID, L);
     p->valign = (int32_t)int_or(pj_get(x, "VerticalAlign"), 0, 0, 2, L);
     p->background = (uint32_t)int_or(pj_get(x, "Background"), 0, 0, 0xFFFFFFFFLL, L);
     p->merge_up = (int32_t)int_or(pj_get(x, "MergeUp"), 0, 0, 1, L);

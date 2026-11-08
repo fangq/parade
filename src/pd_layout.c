@@ -155,7 +155,7 @@ typedef struct {                /* a table: column grid and header rows */
     pd_block_id block;
     int32_t ncols, header_rows;
     pd_sp x, width;             /* offset in the column, total width */
-    pd_sp colx[PD_TABLE_MAX_COLS + 1];
+    pd_sp* colx;                /* ncols + 1 column edges, malloc'ed */
     int32_t* hdr_item;          /* vitem index of each header row */
     pd_sp* rowh;                /* every row's height, for cells merged across rows */
     int32_t nrows;
@@ -1432,7 +1432,7 @@ static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd
 static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
     const pd_doc* d = L->doc;
     const pd_table_props* tp = &t->st.tp;
-    pd_sp mn[PD_TABLE_MAX_COLS], mx[PD_TABLE_MAX_COLS], w[PD_TABLE_MAX_COLS], avail, fixed = 0;
+    pd_sp* mn, *mx, *w, avail, fixed = 0;
     int64_t smin = 0, smax = 0;
     int32_t r, k, c, pass, nauto = 0;
     pd_sp pad = tp->cell_padding;
@@ -1455,14 +1455,20 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
         T->ncols = cols > T->ncols ? cols : T->ncols;
     }
 
-    T->ncols = T->ncols > PD_TABLE_MAX_COLS ? PD_TABLE_MAX_COLS : T->ncols;
+    T->ncols = T->ncols > PD_TABLE_MAX_GRID ? PD_TABLE_MAX_GRID : T->ncols;
 
     if (T->ncols == 0) {
         return;
     }
 
-    memset(mn, 0, sizeof(mn));
-    memset(mx, 0, sizeof(mx));
+    if ((T->colx = (pd_sp*)calloc((size_t)T->ncols * 4 + 1, sizeof(pd_sp))) == NULL) {
+        T->ncols = 0;   /* no memory: no table */
+        return;
+    }
+
+    mn = T->colx + T->ncols + 1;    /* scratch after the edges, given back with them */
+    mx = mn + T->ncols;
+    w = mx + T->ncols;
 
     /* single-column cells first, then spanning cells widen the columns they cover */
     for (pass = 0; pass < 2; pass++) {
@@ -1583,11 +1589,13 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
     }
 
     if (T.header_rows > 0 && (T.hdr_item = (int32_t*)malloc((size_t)T.header_rows * sizeof(int32_t))) == NULL) {
+        free(T.colx);
         return PD_ERR_NOMEM;
     }
 
     if (grow((void**)&F->tb, &F->captb, (int64_t)F->ntb + 1, sizeof(ptable))) {
         free(T.hdr_item);
+        free(T.colx);
         return PD_ERR_NOMEM;
     }
 
@@ -1985,6 +1993,7 @@ static pd_status rebuild_flow(filler* F) {
 
     for (i = 0; i < F->ntb; i++) {
         free(F->tb[i].hdr_item);
+        free(F->tb[i].colx);
         free(F->tb[i].rowh);
     }
 
@@ -2200,17 +2209,18 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
     const pd_doc* d = L->doc;
     ptable T;
     pd_sp pad = t->st.tp.cell_padding, padv = t->st.tp.cell_padding_v >= 0 ? t->st.tp.cell_padding_v : pad, h = 0;
-    pd_sp rowh[256];
+    pd_sp* rowh;
     int32_t r, k, c;
 
     table_grid(L, t, width, &T);
     T.block = t->id;
 
-    if (T.ncols == 0 || t->nkids == 0) {
+    if (T.ncols == 0 || t->nkids == 0 || (rowh = (pd_sp*)calloc((size_t)t->nkids, sizeof(pd_sp))) == NULL) {
+        free(T.colx);
         return 0;
     }
 
-    for (r = 0; r < t->nkids && r < 256; r++) {     /* each row: its tallest cell */
+    for (r = 0; r < t->nkids; r++) {    /* each row: its tallest cell */
         const blk* row = d->tab[t->kids[r]];
 
         rowh[r] = 0;
@@ -2229,6 +2239,8 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
             ch = stack_walk(L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, 0, 0, 0, 0, 0, st);
 
             if (ch < 0) {
+                free(rowh);
+                free(T.colx);
                 return -1;
             }
 
@@ -2241,10 +2253,12 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
     }
 
     if (!draw) {
+        free(rowh);
+        free(T.colx);
         return h;
     }
 
-    for (r = 0, h = 0; r < t->nkids && r < 256; r++) {
+    for (r = 0, h = 0; r < t->nkids; r++) {
         const blk* row = d->tab[t->kids[r]];
         const blk* next = r + 1 < t->nkids ? d->tab[t->kids[r + 1]] : NULL;
         const blk* prev = r > 0 ? d->tab[t->kids[r - 1]] : NULL;
@@ -2306,6 +2320,8 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
         h += rowh[r];
     }
 
+    free(rowh);
+    free(T.colx);
     return h;
 }
 
@@ -3640,6 +3656,7 @@ static pd_status paginate(pd_layout* L) {
 
         for (i = 0; i < F.ntb; i++) {
             free(F.tb[i].hdr_item);
+            free(F.tb[i].colx);
             free(F.tb[i].rowh);
         }
 

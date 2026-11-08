@@ -90,8 +90,10 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
 - Footnotes: a line carries the bodies of the notes it marks; the column
   keeps room for them at its bottom, under a 2in rule (TeX insertions).
   The note opens with its raised number.
-- Tables: automatic column widths from the cells' narrowest and widest
-  content (CSS-style; fixed widths and column spans honoured), cell
+- Tables: any number of columns (up to 4096; fixed widths for the first
+  64, Word's limit being 63), automatic column widths from the cells'
+  narrowest and widest content (CSS-style; fixed widths and column spans
+  honoured), cell
   padding, borders, backgrounds and vertical alignment. Rows are
   unbreakable boxes; columns break between rows and header rows repeat at
   the top of every continuation.

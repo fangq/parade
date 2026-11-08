@@ -664,7 +664,8 @@ typedef enum {
                                      line longer or shorter to avoid bad pages (Mittelbach) */
 } pd_page_breaking;
 
-#define PD_TABLE_MAX_COLS 32
+#define PD_TABLE_MAX_COLS 64     /**< fixed widths a table holds (Word's tables have at most 63 columns) */
+#define PD_TABLE_MAX_GRID 4096   /**< columns a table's grid may have; those past col_width's are automatic */
 
 typedef struct {
     pd_sp width;                /**< 0 = automatic: from the content, at most the text column */
@@ -710,7 +711,7 @@ typedef struct {
 #define PD_TBORDER_INSIDE_V (1 << 5)
 
 typedef struct {
-    int32_t col_span;           /**< columns this cell covers, >= 1 */
+    int32_t col_span;           /**< columns this cell covers, 1 to PD_TABLE_MAX_GRID */
     int32_t valign;             /**< 0 top, 1 middle, 2 bottom */
     uint32_t background;        /**< 0xAARRGGBB, 0 = none */
     int32_t merge_up;           /**< 1 = continues the cell above it (a vertical merge, Word's vMerge, HTML's

@@ -822,7 +822,7 @@ void bld_cell_begin(pd_bld* b, int32_t col_span, uint32_t background) {
         pd_cell_props cp;
 
         pd_doc_cell_props(b->d, cell, &cp);
-        cp.col_span = col_span < 1 ? 1 : col_span > PD_TABLE_MAX_COLS ? PD_TABLE_MAX_COLS : col_span;
+        cp.col_span = col_span < 1 ? 1 : col_span > PD_TABLE_MAX_GRID ? PD_TABLE_MAX_GRID : col_span;
         cp.background = background;
         pd_doc_set_cell_props(b->d, cell, &cp);
     }
