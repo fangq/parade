@@ -2098,6 +2098,38 @@ static void put_blip_shape(conv* C, ppart* pt, int sp, int lsp, int msp) {
     pb_puts(C->o, "</pic:spPr></pic:pic>");
 }
 
+/* an embedded object (an OLE object: a worksheet, an equation, a document) as the picture of it its frame keeps (the
+   oleObj's pic, of whichever of its alternatives has one), where the frame is */
+static void put_ole(conv* C, ppart* pt, int gf, int gd) {
+    const xdoc* d = &pt->x;
+    int k, pic = -1, bf, xf = xd_kid(d, gf, "xfrm");
+
+    for (k = gd; k < d->nv && d->v[k].a < d->v[gd].b && pic < 0; k++) {
+        if (!strcmp(d->v[k].name, "oleObj")) {
+            pic = xd_kid(d, k, "pic");
+        }
+    }
+
+    if (pic < 0 || (bf = xd_kid(d, pic, "blipFill")) < 0 || (xf < 0 && (xf = xd_path(d, pic, "spPr/xfrm")) < 0)) {
+        return;
+    }
+
+    pb_puts(C->o, "<pic:pic><pic:nvPicPr>");
+    put_nvpr(C, d, gf, "nvGraphicFramePr/cNvPr", "pic:cNvPr");
+    pb_puts(C->o, "<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill>");
+    put_with_media(C->o, C, pt, d->s + d->v[bf].ia, d->v[bf].ib - d->v[bf].ia);
+    pb_puts(C->o, "</pic:blipFill><pic:spPr><a:xfrm");
+
+    if (d->v[xf].alen) {
+        pb_putc(C->o, ' ');
+        pb_put(C->o, d->v[xf].attrs, d->v[xf].alen);
+    }
+
+    pb_putc(C->o, '>');
+    xd_inner(C->o, d, xf);
+    pb_puts(C->o, "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>");
+}
+
 static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
     const xdoc* d = &pt->x;
     const char* el = d->v[n].name;
@@ -2224,6 +2256,8 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
             put_table(C, pt, n, tbl);
         } else if (gd >= 0 && xd_kid(d, gd, "relIds") >= 0) {
             put_smartart(C, pt, n);
+        } else if (gd >= 0) {
+            put_ole(C, pt, n, gd);
         }
     } else if (!strcmp(el, "AlternateContent")) {   /* what a newer PowerPoint has: its fallback */
         int fb = xd_kid(d, n, "Fallback"), k;

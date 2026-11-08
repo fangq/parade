@@ -4267,6 +4267,31 @@ static void test_pptx_picture_bullet(void) {
     pd_doc_free(d);
 }
 
+/* an embedded object (a worksheet, here) drawn as the picture its frame keeps of it, from whichever alternative has
+   one, where the frame is */
+static void test_pptx_ole(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("",
+                         "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"60\" name=\"Ole\"/><p:cNvGraphicFramePr/><p:nvPr/>"
+                         "</p:nvGraphicFramePr><p:xfrm><a:off x=\"254000\" y=\"508000\"/><a:ext cx=\"1270000\" "
+                         "cy=\"635000\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/"
+                         "presentationml/2006/ole\"><mc:AlternateContent xmlns:mc=\"mc\"><mc:Choice Requires=\"v\">"
+                         "<p:oleObj spid=\"_x0000_s1\" name=\"Worksheet\" r:id=\"rIdO\" progId=\"Excel.Sheet.12\"><p:embed/>"
+                         "</p:oleObj></mc:Choice><mc:Fallback><p:oleObj name=\"Worksheet\" r:id=\"rIdO\" "
+                         "progId=\"Excel.Sheet.12\"><p:embed/><p:pic><p:nvPicPr><p:cNvPr id=\"0\" name=\"\"/><p:cNvPicPr/>"
+                         "<p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rIdI\"/><a:stretch><a:fillRect/></a:stretch>"
+                         "</p:blipFill><p:spPr><a:xfrm><a:off x=\"254000\" y=\"508000\"/><a:ext cx=\"1270000\" "
+                         "cy=\"635000\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"
+                         "</p:oleObj></mc:Fallback></mc:AlternateContent></a:graphicData></a:graphic></p:graphicFrame>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdI\" "
+                         "Target=\"../media/i.png\"/><Relationship Id=\"rIdO\" Target=\"../embeddings/o.bin\"/></Relationships>",
+                         "ppt/media/i.png", "tests/data/rgba.png", NULL);
+    char* js = d ? slide_json(d, 0) : NULL;
+
+    CHECK(js && strstr(js, "\"x\":1310720,\"y\":2621440,\"w\":6553600,\"h\":3276800}"));  /* 20, 40; 100 by 50 */
+    free(js);
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5809,6 +5834,7 @@ int main(void) {
     test_pptx_one_slide();
     test_pptx_autonum();
     test_pptx_picture_bullet();
+    test_pptx_ole();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();
