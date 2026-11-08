@@ -146,6 +146,9 @@ turns into display-list paths, the same for the screen and for PDF.
 - **Patterns**: Office's 54 pattern fills (pct5 ... zigZag) and metafile
   hatched brushes as 8-by-8 bitmaps of 3/4 pt cells, tiled from the
   page's corner; PDF fills with a tiling pattern.
+- **Picture fills**: a shape's blipFill stretched into its fillRect or
+  tiled (offset, scale, alignment, mirrored tiles), cropped by its
+  srcRect, each picture an image item cut to the shape's outline.
 - **Rasterizer**: `pd_draw_render` draws display-list paths into an RGBA
   image with Parade's integer coverage rasterizer, so a host gets the
   library's pixels rather than drawing styles itself.

@@ -5167,17 +5167,126 @@ static void ellipse_curve(dlist_t* D, int32_t n0, pd_sp x, pd_sp y, pd_sp w, pd_
     path_curve(D, n0, cv, n / 2);
 }
 
+/* A shape filled with a picture ("bimg"): the picture stretched over its box inset by "bfr" (fillRect, 100000ths of
+   the box), or tiled ("btile": offset x, y on the page, scale x, y in 100000ths of its own size, flip 1 across
+   2 down, alignment 0..8 tl..br), cropped by "bcrop" (srcRect); each picture cut to the shape's first ring */
+static void item_picture_fill(const pd_layout* L, dlist_t* D, const pj_node* it, const pd_sp* xy, int32_t n,
+                              pd_block_id block, int32_t region) {
+    const pj_node* tl = pj_get(it, "btile"), *fr = pj_get(it, "bfr"), *cr = pj_get(it, "bcrop");
+    pd_res_id res = (pd_res_id)pj_int_or(pj_get(it, "bimg"), 0);
+    pd_sp x0 = INT32_MAX, y0 = INT32_MAX, x1 = INT32_MIN, y1 = INT32_MIN, tw, th, ox, oy;
+    double cl = pj_int_or(pj_at(cr, 0), 0) / 100000.0, ct = pj_int_or(pj_at(cr, 1), 0) / 100000.0;
+    double cr2 = pj_int_or(pj_at(cr, 2), 0) / 100000.0, cb = pj_int_or(pj_at(cr, 3), 0) / 100000.0;
+    int32_t i, ring, tx, ty;
+    pd_draw a;
+
+    for (ring = 0; ring < n && xy[2 * ring] != PD_PATH_BREAK; ring++) {
+        x0 = xy[2 * ring] < x0 ? xy[2 * ring] : x0;
+        x1 = xy[2 * ring] > x1 ? xy[2 * ring] : x1;
+        y0 = xy[2 * ring + 1] < y0 ? xy[2 * ring + 1] : y0;
+        y1 = xy[2 * ring + 1] > y1 ? xy[2 * ring + 1] : y1;
+    }
+
+    if (!res || ring < 3 || x1 <= x0 || y1 <= y0 || cl + cr2 >= 0.999 || ct + cb >= 0.999) {
+        return;
+    }
+
+    memset(&a, 0, sizeof(a));
+    a.kind = PD_DRAW_IMAGE;
+    a.resource = res;
+    a.block = block;
+    a.region = region;
+
+    if (!tl) {          /* stretched over the box less its fillRect */
+        double l = pj_int_or(pj_at(fr, 0), 0) / 100000.0, t = pj_int_or(pj_at(fr, 1), 0) / 100000.0;
+        double r = pj_int_or(pj_at(fr, 2), 0) / 100000.0, b = pj_int_or(pj_at(fr, 3), 0) / 100000.0;
+
+        ox = x0 + (pd_sp)((x1 - x0) * l);
+        oy = y0 + (pd_sp)((y1 - y0) * t);
+        tw = (pd_sp)((x1 - x0) * (1 - l - r));
+        th = (pd_sp)((y1 - y0) * (1 - t - b));
+        tx = ty = 1;
+    } else {            /* tiles of its own size, scaled, placed by the alignment and offset */
+        pd_inline o;
+        pd_sp nw = 0, nh = 0;
+        int al = (int)pj_int_or(pj_at(tl, 5), 0);
+
+        memset(&o, 0, sizeof(o));
+        o.resource = res;
+        pd_doc_image_size(L->doc, &o, &nw, &nh);
+        tw = (pd_sp)(nw * (1 - cl - cr2) * pj_int_or(pj_at(tl, 2), 100000) / 100000.0);
+        th = (pd_sp)(nh * (1 - ct - cb) * pj_int_or(pj_at(tl, 3), 100000) / 100000.0);
+
+        if (tw < PD_PT(1) || th < PD_PT(1)) {
+            return;
+        }
+
+        ox = x0 + (x1 - x0 - tw) * (al % 3) / 2 + (pd_sp)pj_int_or(pj_at(tl, 0), 0);
+        oy = y0 + (y1 - y0 - th) * (al / 3) / 2 + (pd_sp)pj_int_or(pj_at(tl, 1), 0);
+        tx = (int32_t)(((int64_t)ox - x0 + tw - 1) / tw);     /* tiles back to the box's left and top */
+        ty = (int32_t)(((int64_t)oy - y0 + th - 1) / th);
+        ox -= tx * tw;
+        oy -= ty * th;
+        tx = (int32_t)(((int64_t)x1 - ox + tw - 1) / tw);
+        ty = (int32_t)(((int64_t)y1 - oy + th - 1) / th);
+
+        if ((int64_t)tx * ty > 1024) {  /* too fine to draw tile by tile: stretched once */
+            tx = ty = 1;
+            ox = x0;
+            oy = y0;
+            tw = x1 - x0;
+            th = y1 - y0;
+        }
+    }
+
+    for (i = 0; i < tx * ty; i++) {
+        int32_t col = i % tx, row = i / tx, flip = (int32_t)pj_int_or(pj_at(tl, 4), 0), k;
+
+        if (tw <= 0 || th <= 0 || grow((void**)&D->pts, &D->cappts, (int64_t)D->npts + 2 * ring, sizeof(pd_sp))) {
+            return;
+        }
+
+        a.clip_x = ox + col * tw;   /* the tile; the whole picture larger when it is cropped, shown in the tile */
+        a.clip_y = oy + row * th;
+        a.clip_w = tw;
+        a.clip_h = th;
+        a.w = (pd_sp)(tw / (1 - cl - cr2));
+        a.h = (pd_sp)(th / (1 - ct - cb));
+        a.x = a.clip_x - (pd_sp)(cl * a.w);
+        a.y = a.clip_y - (pd_sp)(ct * a.h);
+        a.flip = ((flip & 1) && (col & 1) ? PD_FLIP_H : 0) | ((flip & 2) && (row & 1) ? PD_FLIP_V : 0);
+
+        if (a.clip_x >= x1 || a.clip_y >= y1 || a.clip_x + tw <= x0 || a.clip_y + th <= y0) {
+            continue;
+        }
+
+        for (k = 0; k < 2 * ring; k++) {
+            D->pts[D->npts + k] = xy[k];
+        }
+
+        a.clip_points = (const pd_sp*)(intptr_t)D->npts;
+        a.clip_npoints = ring;
+        D->npts += 2 * ring;
+        emit(D, &a);
+    }
+}
+
 /* A drawing item's path (page points xy, n of them): its shadow (a shape's always, a path's when it is filled),
    fill, gradient, then its outline -- dashed, compound, with arrowheads -- as the item says */
-static void emit_item_path(dlist_t* D, const pj_node* it, pd_sp* xy, int32_t n, int closed, uint32_t fill,
-                           uint32_t line, pd_sp lw, pd_sp ox, pd_sp oy, double sx, double sy, int shape, pd_block_id block,
-                           int32_t region) {
+static void emit_item_path(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp* xy, int32_t n, int closed,
+                           uint32_t fill, uint32_t line, pd_sp lw, pd_sp ox, pd_sp oy, double sx, double sy, int shape,
+                           pd_block_id block, int32_t region) {
     int cmpd = (int)pj_int_or(pj_get(it, "cmpd"), 0);
     arrowhead hd[2];
     int32_t n0;
 
     if (fill || shape) {
         item_shadow(D, it, xy, n, sx, sy, block, region);
+    }
+
+    if (fill && pj_get(it, "bimg")) {   /* a picture fill: the picture, then the outline over it */
+        item_picture_fill(L, D, it, xy, n, block, region);
+        fill = 0;
     }
 
     hd[0].type = hd[1].type = 0;
@@ -5324,9 +5433,9 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                     xy[2 * k + 1] = iy + (pd_sp)(ih / 2.0 * (1 + sin(t)));
                 }
 
-                if (item_styled(it)) {
+                if (item_styled(it) || pj_get(it, "bimg")) {
                     n0 = D->n;
-                    emit_item_path(D, it, xy, 64, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
+                    emit_item_path(L, D, it, xy, 64, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
 
                     if (D->n > n0 && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].npoints == 64) {
                         ellipse_curve(D, D->n - 1, ix, iy, iw, ih);
@@ -5340,11 +5449,11 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                 emit_path(D, xy, 64, 1, fill, line, lw, block, region);
                 ellipse_curve(D, n0, ix, iy, iw, ih);
                 item_grad(D, n0, it);
-            } else if (pj_get(it, "gk") || pj_get(it, "shd") || pj_get(it, "patt") || item_styled(it)) {
+            } else if (pj_get(it, "gk") || pj_get(it, "shd") || pj_get(it, "patt") || pj_get(it, "bimg") || item_styled(it)) {
                 /* a box with a gradient, a shadow or a styled outline: as a path */
                 pd_sp xy[8] = { ix, iy, ix + iw, iy, ix + iw, iy + ih, ix, iy + ih };
 
-                emit_item_path(D, it, xy, 4, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
+                emit_item_path(L, D, it, xy, 4, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
             } else {            /* a box: its fill, then its edges */
                 if (fill) {
                     emit_rect(D, ix, iy, iw, ih, fill, block, region);
@@ -5374,7 +5483,7 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
             }
 
             if (xy) {
-                emit_item_path(D, it, xy, n, (int)pj_int_or(pj_get(it, "closed"), 0),
+                emit_item_path(L, D, it, xy, n, (int)pj_int_or(pj_get(it, "closed"), 0),
                                (uint32_t)pj_int_or(pj_get(it, "fill"), 0), (uint32_t)pj_int_or(pj_get(it, "line"), 0),
                                lw > PD_SP_PER_PT / 8 ? lw : PD_SP_PER_PT / 8, x, y, sx, sy, 0, block, region);
                 free(xy);

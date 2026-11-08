@@ -8092,6 +8092,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int ngst = 0, gst_pos[PD_MAX_STOPS], grad_sc = 0, grad_path = 1, grad_rws = 1, gft[4] = { 50000, 50000, 50000, 50000 };
     uint32_t gst_clr[PD_MAX_STOPS];     /* a gradient's stops, as listed; scaled; its path; turned with the shape */
     unsigned char patt_bits[8];         /* a pattern fill's bitmap, if it is one Office has (have_patt) */
+    int in_bfill = 0, bf_tile = 0, bf_rect[4] = { 0, 0, 0, 0 }, bf_tl[6] = { 0, 0, 100000, 100000, 0, 0 };
+    char bf_blip[64] = "";              /* a shape's picture fill: stretched into its fillRect, or tiled */
     int have_patt = 0;
     double shd_dist = 0, shd_dir = 0;
     char gprst[32] = "";            /* a picture's geometry, when it is not a rectangle (it is cut to that shape) */
@@ -8344,6 +8346,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             fill2 = shd_clr = 0;
             grad_kind = grad_ang = in_grad = in_shd = has_shd = 0;
             ngst = grad_sc = have_patt = 0;
+            in_bfill = bf_tile = 0;
+            bf_blip[0] = '\0';
+            memset(bf_rect, 0, sizeof(bf_rect));
             grad_path = grad_rws = 1;
             gft[0] = gft[1] = gft[2] = gft[3] = 50000;
             gprst[0] = '\0';
@@ -8557,6 +8562,32 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     if (head_arrow || tail_arrow) {
                         snprintf(ax, sizeof(ax), ",\"he\":[%d,%d,%d],\"te\":[%d,%d,%d]", head_arrow, arrow_w[0],
                                  arrow_len[0], tail_arrow, arrow_w[1], arrow_len[1]);
+                    }
+                }
+
+                if (bf_blip[0] && have_fill && fill == 0x01FFFFFFu) {   /* a picture fill: the picture, cut to the shape */
+                    pd_res_id r = dw_resource(X, bf_blip);
+                    size_t fl = strlen(fx);
+                    int seen = 0, q;
+
+                    for (q = 0; q < nrel; q++) {
+                        seen |= !strcmp(rel_id[q], bf_blip);
+                    }
+
+                    if (r && !seen && nrel < 64) {  /* by its id: the XML kept names it so */
+                        snprintf(rel_id[nrel], sizeof(rel_id[0]), "%.23s", bf_blip);
+                        rel_res[nrel++] = r;
+                    } else if (r && !seen) {
+                        rel_ok = 0;
+                    }
+
+                    if (r && bf_tile) {
+                        snprintf(fx + fl, sizeof(fx) - fl, ",\"bimg\":%d,\"btile\":[%d,%d,%d,%d,%d,%d],\"bcrop\":[%d,%d,%d,%d]",
+                                 (int)r, (int)emu_sp(bf_tl[0] * FR->sx), (int)emu_sp(bf_tl[1] * FR->sy), bf_tl[2], bf_tl[3],
+                                 bf_tl[4], bf_tl[5], crop[0], crop[1], crop[2], crop[3]);
+                    } else if (r) {
+                        snprintf(fx + fl, sizeof(fx) - fl, ",\"bimg\":%d,\"bfr\":[%d,%d,%d,%d],\"bcrop\":[%d,%d,%d,%d]",
+                                 (int)r, bf_rect[0], bf_rect[1], bf_rect[2], bf_rect[3], crop[0], crop[1], crop[2], crop[3]);
                     }
                 }
 
@@ -9473,7 +9504,41 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (in_sppr && !in_ln && !strcmp(t, "noFill")) {
             have_fill = 1;
             fill = 0;
-        } else if (kind == 1 && !strcmp(t, "srcRect")) {    /* cropped: by how much of each side */
+        } else if (kind == 2 && in_sppr && !in_ln && !strcmp(t, "blipFill")) {
+            in_bfill = g.type == MT_OPEN;
+
+            if (open && !have_fill) {   /* filled with a picture: a clear fill the layout puts it in */
+                have_fill = 1;
+                fill = 0x01FFFFFFu;
+            }
+        } else if (in_bfill && !strcmp(t, "blip") && open) {
+            mu_attr(&g, "r:embed", bf_blip, sizeof(bf_blip));
+        } else if (in_bfill && !strcmp(t, "fillRect") && open) {
+            static const char* sides[4] = { "l", "t", "r", "b" };
+            int q;
+
+            for (q = 0; q < 4; q++) {
+                bf_rect[q] = mu_attr(&g, sides[q], v, sizeof(v)) ? atoi(v) : 0;
+            }
+        } else if (in_bfill && !strcmp(t, "tile") && open) {
+            bf_tile = 1;
+            bf_tl[0] = mu_attr(&g, "tx", v, sizeof(v)) ? atoi(v) : 0;
+            bf_tl[1] = mu_attr(&g, "ty", v, sizeof(v)) ? atoi(v) : 0;
+            bf_tl[2] = mu_attr(&g, "sx", v, sizeof(v)) ? atoi(v) : 100000;
+            bf_tl[3] = mu_attr(&g, "sy", v, sizeof(v)) ? atoi(v) : 100000;
+            bf_tl[4] = mu_attr(&g, "flip", v, sizeof(v)) ? (!strcmp(v, "x") ? 1 : !strcmp(v, "y") ? 2 : !strcmp(v, "xy") ? 3 :
+                       0) : 0;
+            bf_tl[5] = 0;   /* tl t tr l ctr r bl b br: across 0 1 2, down 0 3 6 */
+
+            if (mu_attr(&g, "algn", v, sizeof(v))) {
+                static const char* al[9] = { "tl", "t", "tr", "l", "ctr", "r", "bl", "b", "br" };
+                int q;
+
+                for (q = 0; q < 9; q++) {
+                    bf_tl[5] = !strcmp(v, al[q]) ? q : bf_tl[5];
+                }
+            }
+        } else if ((kind == 1 || in_bfill) && !strcmp(t, "srcRect")) {    /* cropped: by how much of each side */
             static const char* sides[4] = { "l", "t", "r", "b" };
             int q;
 

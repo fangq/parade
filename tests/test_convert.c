@@ -3604,6 +3604,86 @@ static void test_docx_pattern_fill(void) {
     pd_doc_free(d);
 }
 
+/* Shapes filled with a picture: an ellipse with the picture stretched over it and cut to its outline, and a box
+   tiled with the picture at half its size (64 by 40 pixels: 24 pt by 15 pt) from its top left corner. The display
+   list has the pictures, each shown only inside its shape, the outlines over them; the PDF draws them clipped. */
+static void test_docx_picture_fill(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpg=\"wpg\" xmlns:wps=\"wps\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"2540000\"/><a:graphic><a:graphicData>"
+        "<wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/>"
+        "<a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"2540000\" cy=\"2540000\"/></a:xfrm></wpg:grpSpPr>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"ellipse\"/><a:blipFill><a:blip r:embed=\"rId5\"/><a:stretch><a:fillRect/></a:stretch>"
+        "</a:blipFill><a:ln w=\"12700\"><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></a:ln></wps:spPr>"
+        "<wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"1270000\"/><a:ext cx=\"1270000\" cy=\"762000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:blipFill><a:blip r:embed=\"rId5\"/><a:tile tx=\"0\" ty=\"0\" sx=\"50000\" "
+        "sy=\"50000\" algn=\"tl\"/></a:blipFill><a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>", NULL);
+    pd_layout* L = NULL;
+    pd_draw* it = NULL;
+    int32_t n = 0, k, stretched = 0, tiles = 0, outline = -1, first = -1;
+
+    if (!d || !have_layout_font()) {
+        pd_doc_free(d);
+        return;
+    }
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &n) == PD_OK &&
+            (it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, n, &n);
+    }
+
+    for (k = 0; it && k < n; k++) {
+        if (it[k].kind == PD_DRAW_IMAGE && it[k].resource && it[k].clip_npoints == 64) {
+            stretched++;
+            first = first < 0 ? k : first;
+            CHECK(it[k].w == PD_PT(100) && it[k].h == PD_PT(50) && it[k].clip_w == PD_PT(100));
+        } else if (it[k].kind == PD_DRAW_IMAGE && it[k].resource && it[k].clip_npoints == 4) {
+            tiles++;
+            CHECK(it[k].clip_w == PD_PT(24) && it[k].clip_h == PD_PT(15));
+        } else if (it[k].kind == PD_DRAW_PATH && it[k].color == 0xFFFF0000u) {
+            outline = k;
+            CHECK(it[k].fill == 0);     /* the picture, not a colour, inside */
+        }
+    }
+
+    /* the picture once in the ellipse; tiles 5 across (100 pt) and 4 down (60 pt); the outline drawn after */
+    CHECK(stretched == 1 && tiles == 20 && outline > first && first >= 0);
+
+    if (L) {
+        pd_pdf_options opt;
+        buf_t b;
+        const char* p;
+        int dos = 0;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+
+        for (p = b.p; p && (p = strstr(p, "W n ")) != NULL; p++) {  /* each picture cut to its shape */
+            dos++;
+        }
+
+        CHECK(dos >= 21 && b.p && strstr(b.p, "/Im0 Do"));
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -6096,6 +6176,7 @@ int main(void) {
     test_docx_curves();
     test_docx_gradients();
     test_docx_pattern_fill();
+    test_docx_picture_fill();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();
