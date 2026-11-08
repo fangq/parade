@@ -10560,6 +10560,70 @@ static void test_docx_linked_textboxes(void) {
     pd_doc_free(d);
 }
 
+/* a picture placed down the page by alignment (wp:positionV wp:align center, from the page): its middle at the
+   page's, 72 pt high on a 792 pt page, so its top at 360 pt; still so after a .docx */
+static void test_docx_float_valign(void) {
+    static const char* doc =
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body><w:p><w:r><w:drawing>"
+        "<wp:anchor distT=\"114300\" distB=\"114300\" distL=\"114300\" distR=\"114300\" simplePos=\"0\" relativeHeight=\"1\" "
+        "behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/>"
+        "<wp:positionH relativeFrom=\"column\"><wp:align>left</wp:align></wp:positionH><wp:positionV relativeFrom=\"page\">"
+        "<wp:align>center</wp:align></wp:positionV><wp:extent cx=\"914400\" cy=\"914400\"/><wp:wrapSquare wrapText=\"right\"/>"
+        "<wp:docPr id=\"1\" name=\"P\"/><a:graphic><a:graphicData uri=\"pic\"><pic:pic><pic:blipFill><a:blip r:embed=\"rId1\"/>"
+        "</pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"914400\" cy=\"914400\"/></a:xfrm>"
+        "</pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r><w:r><w:t>Text.</w:t></w:r></w:p>"
+        "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" "
+        "w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>";
+    pd_doc* d = docx_doc("word/_rels/document.xml.rels",
+                         "<Relationships xmlns=\"r\"><Relationship Id=\"rId1\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                         "</Relationships>", "word/media/image1.png", "tests/data/rgba.png", "word/document.xml", doc, NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 2 && have_layout_font(); pass++) {
+        pd_layout* L = NULL;
+        pd_draw* it;
+        int32_t n = 0, k, found = 0;
+
+        pd_doc_set_font_resolver(d, layout_resolver, NULL);
+        CHECK(pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK);
+        pd_layout_page_items(L, 0, NULL, 0, &n);
+        it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+        pd_layout_page_items(L, 0, it, n, &n);
+
+        for (k = 0; k < n; k++) {
+            if (it[k].kind == PD_DRAW_IMAGE) {
+                found = 1;
+                CHECK(labs((long)(it[k].y - PD_PT(360))) <= PD_PT(2));
+            }
+        }
+
+        CHECK(found);
+        free(it);
+        pd_layout_free(L);
+
+        if (pass == 0) {
+            buf_t b = { 0 };
+            unsigned char* x;
+            size_t xn;
+            pd_doc* t = NULL;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            x = pd_zip_get((const unsigned char*)b.p, b.n, "word/document.xml", &xn);
+            CHECK(x && strstr((char*)x, "<wp:positionV relativeFrom=\"page\"><wp:align>center</wp:align>") &&
+                  strstr((char*)x, "distT=\"114300\""));
+            free(x);
+            CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &t) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = t;
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -10678,6 +10742,7 @@ int main(void) {
     test_docx_text_in_shapes();
     test_wordart_on_path();
     test_docx_linked_textboxes();
+    test_docx_float_valign();
     test_svg_out();
     test_drawing_png();
     test_docx_canvas_kept();

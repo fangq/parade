@@ -2804,6 +2804,14 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                    second pass when that is not known yet */
                 pd_sp ay, abs_y = f->fp.offset_y + (f->fp.offset_from == PD_FROM_MARGIN ? F->sp->margin_top : 0);
 
+                if (f->fp.valign) {     /* at the top, middle or bottom of the page or of its margins */
+                    pd_sp a0 = f->fp.offset_from == PD_FROM_MARGIN ? F->sp->margin_top : 0;
+                    pd_sp a1 = F->sp->page_height - (f->fp.offset_from == PD_FROM_MARGIN ? F->sp->margin_bottom : 0);
+
+                    abs_y = f->fp.valign == PD_FALIGN_TOP ? a0 : f->fp.valign == PD_FALIGN_CENTER ?
+                            a0 + (a1 - a0 - f->h) / 2 : a1 - f->h;
+                }
+
                 if (fly_get(F->L, b->id, &ay)) {
                     f->fp.offset_y = abs_y - ay;
                 } else {
@@ -2825,7 +2833,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             } else if (f->fp.wrap != PD_WRAP_NONE) {
                 /* lower down: the text beside it from there; higher (over the text before it): the text after its
                    anchor beside what is left of it */
-                pd_sp rem = f->h + f->fp.gap + (f->fp.offset_y < 0 ? f->fp.offset_y : 0);
+                pd_sp rem = f->h + (f->fp.gap_v > 0 ? f->fp.gap_v : f->fp.gap) + (f->fp.offset_y < 0 ? f->fp.offset_y : 0);
 
                 push(F, VI_FLOAT, 0, 0, NULL, 0, b->id);
                 F->wrap_rem = rem > 0 ? rem : 0;

@@ -678,7 +678,14 @@ typedef struct {
                                      story, the first box's (chain_seq 0), what does not fit in one going on in the
                                      next by chain_seq; the others hold nothing of their own */
     int32_t chain_seq;
+    int32_t valign;             /**< with offset_from PAGE or MARGIN: PD_FALIGN_* down that area instead of offset_y */
+    pd_sp gap_v;                /**< space between it and the text above and below (0: gap) */
 } pd_float_props;
+
+#define PD_FALIGN_NONE   0
+#define PD_FALIGN_TOP    1
+#define PD_FALIGN_CENTER 2
+#define PD_FALIGN_BOTTOM 3
 
 /* a float that is a Word frame: paragraphs with a framePr rather than a text box */
 #define PD_FRAME_NONE   0

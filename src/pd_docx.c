@@ -786,6 +786,18 @@ static void dx_vml_fallback(dxo* x, const void* data, size_t len, long long cx, 
                             const pd_float_props* fp);
 static int dx_ref_name(const pd_doc* d, pd_block_id para, char* out, size_t cap);
 
+/* a float's place down the page as wp:positionV has it: aligned there, or at its offset */
+static const char* dx_vpos(char* buf, size_t cap, const pd_float_props* fp) {
+    if (fp->valign && fp->offset_from != PD_FROM_PARAGRAPH) {
+        snprintf(buf, cap, "<wp:align>%s</wp:align>", fp->valign == PD_FALIGN_CENTER ? "center" :
+                 fp->valign == PD_FALIGN_BOTTOM ? "bottom" : "top");
+    } else {
+        snprintf(buf, cap, "<wp:posOffset>%lld</wp:posOffset>", EMU(fp->offset_y));
+    }
+
+    return buf;
+}
+
 /* A float's wrapping as Word's wrap element, into b: none (over or under), top and bottom, square on the side
    it leaves or both, or tight round its outline */
 static const char* dx_wrap(char* b, size_t cap, const pd_float_props* fp, int off) {
@@ -828,7 +840,7 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
                 strcmp(mime, "application/vnd.parade.drawing+json") == 0;
     pd_res_id pic = ob->resource;
     int m;
-    char wb[2048];
+    char wb[2048], vp[64];
     char crop[96] = "";
 
     int chart = 0, wpc = 0;
@@ -898,10 +910,10 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
         long long gap = EMU(fp->gap);
         int off = (fp->placement & PD_PLACE_OFFSET) && fp->wrap != PD_WRAP_NONE;
 
-        pb_printf(o, "<w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"%lld\" distR=\"%lld\" "
+        pb_printf(o, "<w:drawing><wp:anchor distT=\"%lld\" distB=\"%lld\" distL=\"%lld\" distR=\"%lld\" "
                   "simplePos=\"0\" relativeHeight=\"%d\" behindDoc=\"%d\" locked=\"0\" layoutInCell=\"1\" "
                   "allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\">",
-                  gap, gap, x->docpr, fp->wrap == PD_WRAP_BEHIND);
+                  EMU(fp->gap_v), EMU(fp->gap_v), gap, gap, x->docpr, fp->wrap == PD_WRAP_BEHIND);
 
         if (off) {
             pb_printf(o, "<wp:posOffset>%lld</wp:posOffset>", EMU(fp->offset_x));
@@ -911,10 +923,10 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
         }
 
         /* at an offset, which side the text is on says which side the picture is */
-        pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"%s\"><wp:posOffset>%lld</wp:posOffset>"
-                  "</wp:positionV><wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s",
+        pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"%s\">%s</wp:positionV><wp:extent cx=\"%lld\" "
+                  "cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s",
                   fp->offset_from == PD_FROM_PAGE ? "page" : fp->offset_from == PD_FROM_MARGIN ? "margin" : "paragraph",
-                  EMU(fp->offset_y), cx, cy, dx_wrap(wb, sizeof(wb), fp, off));
+                  dx_vpos(vp, sizeof(vp), fp), cx, cy, dx_wrap(wb, sizeof(wb), fp, off));
     }
 
     if (group) {    /* Word keeps a group in markup it alone reads, and says so: after the run's opening */
@@ -1756,17 +1768,17 @@ static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp) {
     long long cx = EMU(w), cy = EMU(fp->height > 0 ? fp->height : dx_block_height(x, fl, w)), gap = EMU(fp->gap);
     int off = (fp->placement & PD_PLACE_OFFSET) && fp->wrap != PD_WRAP_NONE;
     int32_t i;
-    char wb[2048];
+    char wb[2048], vp[64];
 
     if (pd_doc_block_info(x->d, fl, &fi) != PD_OK) {
         return;
     }
 
     x->docpr++;
-    pb_printf(o, "<w:r><mc:AlternateContent><mc:Choice Requires=\"wps\"><w:drawing><wp:anchor distT=\"0\" distB=\"0\" "
-              "distL=\"%lld\" distR=\"%lld\" simplePos=\"0\" relativeHeight=\"%d\" behindDoc=\"%d\" locked=\"0\" "
-              "layoutInCell=\"1\" allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\">",
-              gap, gap, x->docpr, fp->wrap == PD_WRAP_BEHIND);
+    pb_printf(o, "<w:r><mc:AlternateContent><mc:Choice Requires=\"wps\"><w:drawing><wp:anchor distT=\"%lld\" "
+              "distB=\"%lld\" distL=\"%lld\" distR=\"%lld\" simplePos=\"0\" relativeHeight=\"%d\" behindDoc=\"%d\" "
+              "locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH "
+              "relativeFrom=\"column\">", EMU(fp->gap_v), EMU(fp->gap_v), gap, gap, x->docpr, fp->wrap == PD_WRAP_BEHIND);
 
     if (off) {
         pb_printf(o, "<wp:posOffset>%lld</wp:posOffset>", EMU(fp->offset_x));
@@ -1775,14 +1787,14 @@ static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp) {
                   "center");
     }
 
-    pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"%s\"><wp:posOffset>%lld</wp:posOffset></wp:positionV>"
+    pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"%s\">%s</wp:positionV>"
               "<wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s"
               "<wp:docPr id=\"%d\" name=\"Text Box %d\"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData "
               "uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\"><wps:wsp><wps:cNvSpPr txBox=\"1\"/>"
               "<wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\">"
               "<a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>",
               fp->offset_from == PD_FROM_PAGE ? "page" : fp->offset_from == PD_FROM_MARGIN ? "margin" : "paragraph",
-              EMU(fp->offset_y), cx, cy, dx_wrap(wb, sizeof(wb), fp, off), x->docpr, x->docpr, cx, cy);
+              dx_vpos(vp, sizeof(vp), fp), cx, cy, dx_wrap(wb, sizeof(wb), fp, off), x->docpr, x->docpr, cx, cy);
 
     if (fp->chain && fp->chain_seq > 0) {   /* a linked box: the chain's text goes on in it, none of its own */
         pb_printf(o, "<wps:linkedTxbx id=\"%d\" seq=\"%d\"/>", (int)fp->chain, (int)fp->chain_seq);
@@ -2898,7 +2910,16 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                       "center");
         }
 
-        pb_printf(o, " w:tblpY=\"%d\"/>", TW(fp.offset_y));
+        if (fp.gap_v > 0) {
+            pb_printf(o, " w:topFromText=\"%d\" w:bottomFromText=\"%d\"", TW(fp.gap_v), TW(fp.gap_v));
+        }
+
+        if (fp.valign && fp.offset_from != PD_FROM_PARAGRAPH) {
+            pb_printf(o, " w:tblpYSpec=\"%s\"/>", fp.valign == PD_FALIGN_CENTER ? "center" :
+                      fp.valign == PD_FALIGN_BOTTOM ? "bottom" : "top");
+        } else {
+            pb_printf(o, " w:tblpY=\"%d\"/>", TW(fp.offset_y));
+        }
     }
 
     if (tp.width_pct > 0) {
@@ -7454,6 +7475,8 @@ typedef struct {
     int32_t crop[4];            /* the picture's a:srcRect: l, t, r, b in 100000ths */
     long long cx, cy;
     int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
+    int posv_align, in_valign;  /* its wp:positionV's wp:align: PD_FALIGN_* (0: an offset) */
+    long long dist_v;           /* its distT, distB: the larger */
     int posh_page, posh_has_off;    /* its offset is from the page's edge; it has one */
     int behind;                 /* behindDoc: under the text, when the text takes no notice of it */
     int in_posv, in_voffset, posv_para;     /* its offset down: from its paragraph (or line), not the page */
@@ -7484,6 +7507,8 @@ typedef struct {
         int npoly;              /* its wrap polygon (wrapTight, wrapThrough), points in 21600ths of its box */
         int32_t poly[2 * PD_WRAP_POLY_MAX];
         int chain, chain_seq, linked;   /* a linked text box: its chain, its place, and no text of its own */
+        int valign;             /* PD_FALIGN_* down the page or margin */
+        pd_sp gap_v;            /* above and below it */
     }* pend_fl;                 /* floats anchored in a paragraph already under way: after it */
     int npend_fl, cappend_fl;
     int wrap_mode;              /* the drawing's wrapText: PD_WRAPSIDE_* */
@@ -7700,6 +7725,14 @@ static int dw_tblp(dw* w, const pd_markup* at, pd_float_props* fp) {
             fp->offset_y = y;
             fp->offset_from = !mu_attr(&q, "w:vertAnchor", v, sizeof(v)) || !strcmp(v, "margin") ? PD_FROM_MARGIN :
                               !strcmp(v, "page") ? PD_FROM_PAGE : PD_FROM_PARAGRAPH;
+
+            if (mu_attr(&q, "w:tblpYSpec", v, sizeof(v)) && fp->offset_from != PD_FROM_PARAGRAPH) {
+                fp->valign = !strcmp(v, "center") ? PD_FALIGN_CENTER : !strcmp(v, "bottom") || !strcmp(v, "outside") ?
+                             PD_FALIGN_BOTTOM : PD_FALIGN_TOP;     /* down the page or margin, not an offset */
+            }
+
+            fp->gap_v = twips(attr_int(&q, "w:topFromText", 0)) > twips(attr_int(&q, "w:bottomFromText", 0)) ?
+                        twips(attr_int(&q, "w:topFromText", 0)) : twips(attr_int(&q, "w:bottomFromText", 0));
             strcpy(fp->sequence, "Table");
             return 1;
         }
@@ -8846,6 +8879,9 @@ static void dw_floats(dw* w) {
             fp.wrap_mode = fp.wrap == PD_WRAP_LEFT || fp.wrap == PD_WRAP_RIGHT ? w->pend_fl[k].wrap_mode : 0;
             fp.npoly = fp.wrap_mode || fp.wrap == PD_WRAP_LEFT || fp.wrap == PD_WRAP_RIGHT ? w->pend_fl[k].npoly : 0;
             memcpy(fp.poly, w->pend_fl[k].poly, sizeof(fp.poly));
+
+            fp.valign = w->pend_fl[k].valign;
+            fp.gap_v = w->pend_fl[k].gap_v;
 
             if (w->pend_fl[k].chain) {  /* linked: a box of its height, the chain's text going on through it */
                 fp.chain = w->pend_fl[k].chain;
@@ -11711,6 +11747,8 @@ static void dw_image(dw* w) {
         w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
         w->pend_fl[k].off_y = (pd_sp)(w->posv_off * 65536 / 12700);
         w->pend_fl[k].off_from = w->posv_para >= 2 ? w->posv_para - 1 : 0;   /* from the page, its margin */
+        w->pend_fl[k].valign = w->posv_para >= 2 ? w->posv_align : 0;
+        w->pend_fl[k].gap_v = (pd_sp)(w->dist_v * 65536 / 12700);
 
         if (w->posv_para <= 1 && (w->started || !w->posv_para)) {
             w->pend_fl[k].off_y = 0;    /* from a paragraph only when it is the one after it */
@@ -12895,6 +12933,17 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
+        if (m.type == MT_TEXT && w->in_valign) {
+            char tv[32];
+            size_t tn = m.tlen < sizeof(tv) - 1 ? m.tlen : sizeof(tv) - 1;
+
+            memcpy(tv, m.text, tn);
+            tv[tn] = '\0';
+            w->posv_align = strstr(tv, "center") ? PD_FALIGN_CENTER : strstr(tv, "bottom") || strstr(tv, "outside") ?
+                            PD_FALIGN_BOTTOM : PD_FALIGN_TOP;
+            continue;
+        }
+
         if (m.type == MT_TEXT && (w->in_align || w->in_offset)) {
             char tv[32];
             size_t tn = m.tlen < sizeof(tv) - 1 ? m.tlen : sizeof(tv) - 1;
@@ -13563,6 +13612,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->npoly = w->in_poly = 0;
                 w->in_posv = w->in_voffset = w->posv_para = 0;
                 w->posv_off = 0;
+                w->posv_align = w->in_valign = 0;
+                w->dist_v = 0;
                 w->drawing_res = 0;
                 w->tbx = NULL;
                 w->tbn = 0;
@@ -13607,6 +13658,11 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->anchor = 1;
                 w->behind = mu_attr(&m, "behindDoc", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
                 w->dist = atoll(mu_attr(&m, "distL", v, sizeof(v)) ? v : "0");
+                w->dist_v = atoll(mu_attr(&m, "distT", v, sizeof(v)) ? v : "0");
+
+                if (mu_attr(&m, "distB", v, sizeof(v)) && atoll(v) > w->dist_v) {
+                    w->dist_v = atoll(v);
+                }
 
                 if (mu_attr(&m, "distR", v, sizeof(v)) && atoll(v) > w->dist) {
                     w->dist = atoll(v);
@@ -13651,6 +13707,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                                !strcmp(v, "topMargin") ? 3 : 0;
             } else if (w->in_posv && strcmp(t, "posOffset") == 0) {
                 w->in_voffset = m.type == MT_OPEN;
+            } else if (w->in_posv && strcmp(t, "align") == 0) {
+                w->in_valign = m.type == MT_OPEN;
             } else if (w->in_posh && strcmp(t, "align") == 0) {
                 w->in_align = m.type == MT_OPEN;
             } else if (w->in_posh && strcmp(t, "posOffset") == 0) {
@@ -14091,6 +14149,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
                 w->pend_fl[k].off_y = (pd_sp)(w->posv_off * 65536 / 12700);
                 w->pend_fl[k].off_from = w->posv_para >= 2 ? w->posv_para - 1 : 0;   /* from the page, its margin */
+                w->pend_fl[k].valign = w->posv_para >= 2 ? w->posv_align : 0;
+                w->pend_fl[k].gap_v = (pd_sp)(w->dist_v * 65536 / 12700);
 
                 if (w->posv_para <= 1 && (w->started || !w->posv_para)) {
                     w->pend_fl[k].off_y = 0;    /* from a paragraph only when it is the one after it */

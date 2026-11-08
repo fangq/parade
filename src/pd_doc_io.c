@@ -1008,6 +1008,14 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "ChainSeq", p->chain_seq);
             }
 
+            if (p->valign) {
+                put_int(w, "VAlign", p->valign);
+            }
+
+            if (p->gap_v) {
+                put_int(w, "GapV", p->gap_v);
+            }
+
             if (p->npoly) {
                 int64_t q[2 * PD_WRAP_POLY_MAX];
                 int k;
@@ -2264,6 +2272,8 @@ static void load_float(loader* L, const pj_node* o, pd_float_props* p) {
     p->height = (pd_sp)int_or(pj_get(x, "Height"), 0, 0, PD_PT(20000), L);
     p->chain = (int32_t)int_or(pj_get(x, "Chain"), 0, 0, 1000000, L);
     p->chain_seq = (int32_t)int_or(pj_get(x, "ChainSeq"), 0, 0, 1000000, L);
+    p->valign = (int32_t)int_or(pj_get(x, "VAlign"), 0, 0, PD_FALIGN_BOTTOM, L);
+    p->gap_v = (pd_sp)int_or(pj_get(x, "GapV"), 0, 0, PD_PT(1000), L);
 
     {
         const pj_node* q = pj_get(x, "WrapPolygon");
