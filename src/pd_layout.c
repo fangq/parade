@@ -1958,7 +1958,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             }
 
             push(F, VI_GLUE, gl, 0, NULL, 0, 0);
-            gs = F->gap_skip - gl;
+            gs = F->gap_h > 0 ? F->gap_skip - gl : 0;     /* counted down only while there is such a float */
 
             for (k = 0; k < pc->nlines; k++) {
                 pd_line ln;
@@ -1986,7 +1986,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 }
             }
 
-            F->gap_skip = gs - pc->height;
+            F->gap_skip = F->gap_h > 0 ? gs - pc->height : 0;
 
             if (F->wrap_rem > 0) {  /* what is left of the float below this paragraph, and of the text above it */
                 F->wrap_rem = skip >= pc->height ? rem : rem - (pc->height - skip);
