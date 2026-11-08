@@ -683,9 +683,14 @@ static void hx_cell_content(hx* x, pd_block_id cell) {
 /* whether the cell of a row starting at grid column col continues the one above */
 static int hx_merges_at(const hx* x, pd_block_id row, int32_t col) {
     pd_block_info ri;
+    pd_row_props rp;
     int32_t c, at = 0;
 
     pd_doc_block_info(x->d, row, &ri);
+
+    if (pd_doc_row_props(x->d, row, &rp) == PD_OK) {
+        at = rp.grid_before;
+    }
 
     for (c = 0; c < ri.child_count && at <= col; c++) {
         pd_cell_props cp;
@@ -714,6 +719,7 @@ static void hx_table(hx* x, pd_block_id t) {
     for (r = 0; r < ti.child_count; r++) {
         pd_block_id row = pd_doc_child(x->d, t, r);
         pd_block_info ri;
+        pd_row_props rp;
         int head = r < tp.header_rows;
 
         if (r == 0 && head) {
@@ -723,8 +729,13 @@ static void hx_table(hx* x, pd_block_id t) {
         }
 
         pd_doc_block_info(x->d, row, &ri);
+        pd_doc_row_props(x->d, row, &rp);
         pb_puts(x->o, "<tr>");
-        col = 0;
+        col = rp.grid_before;
+
+        if (rp.grid_before > 0) {   /* the grid columns it leaves empty: a cell of nothing */
+            pb_printf(x->o, "<td colspan=\"%d\" style=\"border:none\"></td>", (int)rp.grid_before);
+        }
 
         for (c = 0; c < ri.child_count; c++) {
             pd_block_id cell = pd_doc_child(x->d, row, c);

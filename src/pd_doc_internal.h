@@ -52,6 +52,7 @@ typedef struct {
     pd_section_props sp;
     pd_table_props tp;
     pd_cell_props cell;
+    pd_row_props row;
     pd_para_attrs at;           /* paragraphs */
 } bstate;
 

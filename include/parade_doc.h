@@ -729,6 +729,14 @@ typedef struct {
     uint32_t border_theme;      /**< pd_theme_color reference of border_color, 0 = none */
 } pd_cell_props;
 
+/** a table row's own properties (Word's w:trPr) */
+typedef struct {
+    int32_t grid_before;        /**< grid columns left empty before its first cell (Word's gridBefore) */
+    int32_t grid_after;         /**< and after its last (gridAfter) */
+    pd_sp width_before;         /**< the empty columns' width before, at least (w:wBefore), 0 = unsaid */
+    pd_sp width_after;          /**< and after (w:wAfter) */
+} pd_row_props;
+
 /* ------------------------------------------------------------------ */
 /* Table styles                                                       */
 /* ------------------------------------------------------------------ */
@@ -830,6 +838,7 @@ PD_API pd_status pd_doc_section_props(const pd_doc* doc, pd_block_id section, pd
 PD_API void      pd_section_props_init(pd_section_props* props);
 PD_API pd_status pd_doc_table_props(const pd_doc* doc, pd_block_id table, pd_table_props* out);
 PD_API pd_status pd_doc_cell_props(const pd_doc* doc, pd_block_id cell, pd_cell_props* out);
+PD_API pd_status pd_doc_row_props(const pd_doc* doc, pd_block_id row, pd_row_props* out);
 /** automatic width and columns, 4pt padding, 0.4pt black rules, no header rows */
 PD_API void      pd_table_props_init(pd_table_props* props);
 
@@ -952,6 +961,7 @@ PD_API pd_status pd_doc_set_float_props(pd_doc* doc, pd_block_id flt, const pd_f
 PD_API pd_status pd_doc_set_section_props(pd_doc* doc, pd_block_id section, const pd_section_props* props);
 PD_API pd_status pd_doc_set_table_props(pd_doc* doc, pd_block_id table, const pd_table_props* props);
 PD_API pd_status pd_doc_set_cell_props(pd_doc* doc, pd_block_id cell, const pd_cell_props* props);
+PD_API pd_status pd_doc_set_row_props(pd_doc* doc, pd_block_id row, const pd_row_props* props);
 PD_API pd_status pd_doc_set_break(pd_doc* doc, pd_block_id brk, pd_break_kind kind);
 
 /* ------------------------------------------------------------------ */

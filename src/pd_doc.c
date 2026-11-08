@@ -2054,6 +2054,17 @@ pd_status pd_doc_table_props(const pd_doc* d, pd_block_id id, pd_table_props* ou
     return PD_OK;
 }
 
+pd_status pd_doc_row_props(const pd_doc* d, pd_block_id id, pd_row_props* out) {
+    blk* b = pd_doc_blk(d, id);
+
+    if (!b || b->kind != PD_BLOCK_ROW || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = b->st.row;
+    return PD_OK;
+}
+
 pd_status pd_doc_cell_props(const pd_doc* d, pd_block_id id, pd_cell_props* out) {
     blk* b = pd_doc_blk(d, id);
 
@@ -3937,6 +3948,14 @@ pd_status pd_doc_set_cell_props(pd_doc* d, pd_block_id id, const pd_cell_props* 
              cp->merge_up <= 1 && cp->min_height >= 0 && cp->border_width >= 0 && cp->edge_width[0] >= 0 && cp->edge_width[1] >= 0 &&
              cp->edge_width[2] >= 0 && cp->edge_width[3] >= 0 && (cp->border_set & ~15) == 0 &&
              (cp->border_on & ~cp->border_set) == 0, b->st.cell = *cp);
+}
+
+pd_status pd_doc_set_row_props(pd_doc* d, pd_block_id id, const pd_row_props* rp) {
+    blk* b = d ? pd_doc_blk(d, id) : NULL;
+
+    BLOCK_OP("Row", b && b->kind == PD_BLOCK_ROW && rp && rp->grid_before >= 0 &&
+             rp->grid_before < PD_TABLE_MAX_GRID && rp->grid_after >= 0 && rp->grid_after < PD_TABLE_MAX_GRID &&
+             rp->width_before >= 0 && rp->width_after >= 0, b->st.row = *rp);
 }
 
 pd_status pd_doc_set_break(pd_doc* d, pd_block_id id, pd_break_kind kind) {

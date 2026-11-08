@@ -291,6 +291,11 @@ int main(void) {
     printf("pd_table_props.style %zu\n", offsetof(pd_table_props, style));
     printf("pd_table_props.look %zu\n", offsetof(pd_table_props, look));
     printf("pd_table_props.border_given %zu\n", offsetof(pd_table_props, border_given));
+    printf("pd_row_props %zu\n", sizeof(pd_row_props));
+    printf("pd_row_props.grid_before %zu\n", offsetof(pd_row_props, grid_before));
+    printf("pd_row_props.grid_after %zu\n", offsetof(pd_row_props, grid_after));
+    printf("pd_row_props.width_before %zu\n", offsetof(pd_row_props, width_before));
+    printf("pd_row_props.width_after %zu\n", offsetof(pd_row_props, width_after));
     printf("pd_cell_props %zu\n", sizeof(pd_cell_props));
     printf("pd_cell_props.col_span %zu\n", offsetof(pd_cell_props, col_span));
     printf("pd_cell_props.valign %zu\n", offsetof(pd_cell_props, valign));

@@ -1296,6 +1296,11 @@ static void cell_minmax(pd_layout* L, pd_block_id cell, pd_sp* mn, pd_sp* mx) {
     }
 }
 
+/* the grid column of a row's first cell: after those it leaves empty (Word's gridBefore) */
+static int32_t row_c0(const blk* row) {
+    return row && row->kind == PD_BLOCK_ROW ? row->st.row.grid_before : 0;
+}
+
 /* the cells of a row: column index, span and the column count they cover */
 static int32_t cell_span(const ptable* T, const blk* cell, int32_t col) {
     int32_t span = cell->st.cell.col_span < 1 ? 1 : cell->st.cell.col_span;
@@ -1304,7 +1309,7 @@ static int32_t cell_span(const ptable* T, const blk* cell, int32_t col) {
 
 /* the cell of a row that starts at a grid column, NULL if none does */
 static const blk* cell_at(const pd_doc* d, const ptable* T, const blk* row, int32_t col) {
-    int32_t k, c = 0;
+    int32_t k, c = row_c0(row);
 
     for (k = 0; row && k < row->nkids && c < T->ncols; k++) {
         const blk* cell = d->tab[row->kids[k]];
@@ -1367,7 +1372,7 @@ static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd
         return NULL;
     }
 
-    for (k = 0, c = 0; k < row->nkids && c < T->ncols; k++) {  /* the tallest cell */
+    for (k = 0, c = row_c0(row); k < row->nkids && c < T->ncols; k++) {  /* the tallest cell */
         const blk* cell = d->tab[row->kids[k]];
         int32_t span = cell_span(T, cell, c);
         pd_sp inner = T->colx[c + span] - T->colx[c] - 2 * pad;
@@ -1382,7 +1387,7 @@ static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd
         c += span;
     }
 
-    for (k = 0, c = 0; best >= 0 && k < row->nkids && c < T->ncols; k++) {
+    for (k = 0, c = row_c0(row); best >= 0 && k < row->nkids && c < T->ncols; k++) {
         const blk* cell = d->tab[row->kids[k]];
         int32_t span = cell_span(T, cell, c);
         pd_sp inner = T->colx[c + span] - T->colx[c] - 2 * pad;
@@ -1399,7 +1404,7 @@ static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd
         pd_sp at = padv + lb[i];
         int ok = at > 0 && at < rowh;
 
-        for (k = 0, c = 0; ok && k < row->nkids && c < T->ncols; k++) {
+        for (k = 0, c = row_c0(row); ok && k < row->nkids && c < T->ncols; k++) {
             const blk* cell = d->tab[row->kids[k]];
             int32_t span = cell_span(T, cell, c);
             pd_sp inner = T->colx[c + span] - T->colx[c] - 2 * pad;
@@ -1427,6 +1432,27 @@ static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd
     return cuts;
 }
 
+/* columns c to c + span - 1 widened, evenly, until together they are at least a wide at narrowest, b at widest */
+static void widen(pd_sp* mn, pd_sp* mx, int32_t c, int32_t span, pd_sp a, pd_sp b) {
+    int64_t have_mn = 0, have_mx = 0;
+    int32_t j;
+
+    for (j = c; j < c + span; j++) {
+        have_mn += mn[j];
+        have_mx += mx[j];
+    }
+
+    for (j = c; j < c + span; j++) {
+        if (a > have_mn) {
+            mn[j] += (pd_sp)((a - have_mn) / span);
+        }
+
+        if (b > have_mx) {
+            mx[j] += (pd_sp)((b - have_mx) / span);
+        }
+    }
+}
+
 /* A table's grid in a column colw wide: its columns' widths (natural, or as the table says), where it sits, its
    header rows. T->hdr_item and T->rowh are left for the caller. */
 static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
@@ -1434,7 +1460,7 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
     const pd_table_props* tp = &t->st.tp;
     pd_sp* mn, *mx, *w, avail, fixed = 0;
     int64_t smin = 0, smax = 0;
-    int32_t r, k, c, pass, nauto = 0;
+    int32_t r, k, c, j, pass, nauto = 0;
     pd_sp pad = tp->cell_padding;
 
     memset(T, 0, sizeof(*T));
@@ -1445,7 +1471,7 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
 
     for (r = 0; r < t->nkids; r++) {    /* grid width: the widest row */
         const blk* row = d->tab[t->kids[r]];
-        int32_t cols = 0;
+        int32_t cols = row->st.row.grid_before + row->st.row.grid_after;
 
         for (k = 0; k < row->nkids; k++) {
             int32_t sp = d->tab[row->kids[k]]->st.cell.col_span;
@@ -1475,9 +1501,9 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
         for (r = 0; r < t->nkids; r++) {
             const blk* row = d->tab[t->kids[r]];
 
-            for (k = 0, c = 0; k < row->nkids && c < T->ncols; k++) {
+            for (k = 0, c = row_c0(row); k < row->nkids && c < T->ncols; k++) {
                 const blk* cell = d->tab[row->kids[k]];
-                int32_t span = cell_span(T, cell, c), j;
+                int32_t span = cell_span(T, cell, c);
                 pd_sp a, b;
 
                 if ((span == 1) != (pass == 0) || cell->st.cell.merge_up) {
@@ -1493,25 +1519,20 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
                     mn[c] = a > mn[c] ? a : mn[c];
                     mx[c] = b > mx[c] ? b : mx[c];
                 } else {
-                    int64_t have_mn = 0, have_mx = 0;
-
-                    for (j = c; j < c + span; j++) {
-                        have_mn += mn[j];
-                        have_mx += mx[j];
-                    }
-
-                    for (j = c; j < c + span; j++) {
-                        if (a > have_mn) {
-                            mn[j] += (pd_sp)((a - have_mn) / span);
-                        }
-
-                        if (b > have_mx) {
-                            mx[j] += (pd_sp)((b - have_mx) / span);
-                        }
-                    }
+                    widen(mn, mx, c, span, a, b);
                 }
 
                 c += span;
+            }
+
+            if (pass == 1 && row->st.row.grid_before > 0 && row->st.row.width_before > 0) {
+                j = row->st.row.grid_before < T->ncols ? row->st.row.grid_before : T->ncols;
+                widen(mn, mx, 0, j, row->st.row.width_before, row->st.row.width_before);
+            }
+
+            if (pass == 1 && row->st.row.grid_after > 0 && row->st.row.width_after > 0 && c < T->ncols) {
+                j = row->st.row.grid_after < T->ncols - c ? row->st.row.grid_after : T->ncols - c;
+                widen(mn, mx, c, j, row->st.row.width_after, row->st.row.width_after);
             }
         }
     }
@@ -1620,7 +1641,7 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
         for (r = 0; r < t->nkids; r++) {
             const blk* row = d->tab[t->kids[r]];
 
-            for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
+            for (k = 0, c = row_c0(row); k < row->nkids && c < T.ncols; k++) {
                 const blk* cell = d->tab[row->kids[k]];
                 int32_t span = cell_span(&T, cell, c), down = merge_rows(d, &T, t, r, c), j;
                 pd_sp inner = T.colx[c + span] - T.colx[c] - 2 * pad, h, have = 0;
@@ -2140,7 +2161,7 @@ typedef struct {
 
 /* the cell of a row whose columns take in col */
 static const blk* cell_over(const pd_doc* d, const ptable* T, const blk* row, int32_t col) {
-    int32_t k, c = 0;
+    int32_t k, c = row_c0(row);
 
     for (k = 0; row && k < row->nkids && c < T->ncols; k++) {
         const blk* cell = d->tab[row->kids[k]];
@@ -2225,7 +2246,7 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
 
         rowh[r] = 0;
 
-        for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
+        for (k = 0, c = row_c0(row); k < row->nkids && c < T.ncols; k++) {
             const blk* cell = d->tab[row->kids[k]];
             int32_t span = cell_span(&T, cell, c);
             pd_sp inner = T.colx[c + span] - T.colx[c] - 2 * pad, ch;
@@ -2264,7 +2285,7 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
         const blk* prev = r > 0 ? d->tab[t->kids[r - 1]] : NULL;
         pd_sp ry = y + h, tx = x + T.x;
 
-        for (k = 0, c = 0; k < row->nkids && c < T.ncols; k++) {
+        for (k = 0, c = row_c0(row); k < row->nkids && c < T.ncols; k++) {
             const blk* cell = d->tab[row->kids[k]];
             int32_t span = cell_span(&T, cell, c);
             pd_sp cx = tx + col_left(&T, c, span), cw = T.colx[c + span] - T.colx[c], inner = cw - 2 * pad, bw, ch;
@@ -2284,8 +2305,8 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                 stack_walk(L, cell->id, inner, 1, page, cx + pad, ry + padv + (off > 0 ? off : 0), region, st);
             }
 
-            bw = edge_rule(&T, cell, PD_BORDER_LEFT, c > 0 ? cell_over(d, &T, row, c - 1) : NULL, PD_BORDER_RIGHT,
-                           PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, c == 0, &bc);
+            bw = edge_rule(&T, cell, PD_BORDER_LEFT, c > row_c0(row) ? cell_over(d, &T, row, c - 1) : NULL,
+                           PD_BORDER_RIGHT, PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, c == row_c0(row), &bc);
 
             if (bw > 0) {
                 add_rule(L, page, cx - bw / 2, ry, bw, rowh[r], bc, region, cell->id);
@@ -2293,7 +2314,7 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
 
             if (c + span >= T.ncols || k + 1 == row->nkids) {
                 bw = edge_rule(&T, cell, PD_BORDER_RIGHT, NULL, 0, PD_TBORDER_RIGHT, PD_TBORDER_INSIDE_V,
-                               c + span >= T.ncols, &bc);
+                               c + span + row->st.row.grid_after >= T.ncols, &bc);
 
                 if (bw > 0) {
                     add_rule(L, page, cx + cw - bw / 2, ry, bw, rowh[r], bc, region, cell->id);
@@ -2341,7 +2362,7 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
         return;
     }
 
-    for (k = 0; k < row->nkids && c < T->ncols; k++) {
+    for (k = 0, c = row_c0(row); k < row->nkids && c < T->ncols; k++) {
         const blk* cell = d->tab[row->kids[k]];
         const blk* below = next ? cell_at(d, T, next, c) : NULL;
         int32_t span = cell_span(T, cell, c), down = t ? merge_rows(d, T, t, v->line, c) : 1, j;
@@ -2380,8 +2401,8 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
         }
 
         /* left edge: every cell's; right edge: the last one's (the next cell's left is the rest) */
-        bw = edge_rule(T, cell, PD_BORDER_LEFT, c > 0 ? cell_over(d, T, row, c - 1) : NULL, PD_BORDER_RIGHT,
-                       PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, c == 0, &bc);
+        bw = edge_rule(T, cell, PD_BORDER_LEFT, c > row_c0(row) ? cell_over(d, T, row, c - 1) : NULL,
+                       PD_BORDER_RIGHT, PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, c == row_c0(row), &bc);
 
         if (bw > 0) {
             add_rule(F->L, F->page, cx - bw / 2, y, bw, v->h, bc, 0, cell->id);
@@ -2389,7 +2410,7 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
         if (c + span >= T->ncols || k + 1 == row->nkids) {
             bw = edge_rule(T, cell, PD_BORDER_RIGHT, NULL, 0, PD_TBORDER_RIGHT, PD_TBORDER_INSIDE_V,
-                           c + span >= T->ncols, &bc);
+                           c + span + row->st.row.grid_after >= T->ncols, &bc);
 
             if (bw > 0) {
                 add_rule(F->L, F->page, cx + cw - bw / 2, y, bw, v->h, bc, 0, cell->id);

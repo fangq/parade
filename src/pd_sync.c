@@ -1577,6 +1577,8 @@ static void props_apply(pd_sync* s, const YTransaction* t, blk* b, const char* j
                 }
             } else if (b->kind == PD_BLOCK_CELL && memcmp(&st.cell, &b->st.cell, sizeof(st.cell)) != 0) {
                 pd_doc_set_cell_props(d, id, &st.cell);
+            } else if (b->kind == PD_BLOCK_ROW && memcmp(&st.row, &b->st.row, sizeof(st.row)) != 0) {
+                pd_doc_set_row_props(d, id, &st.row);
             } else if (b->kind == PD_BLOCK_BREAK && st.break_kind != b->st.break_kind) {
                 pd_doc_set_break(d, id, (pd_break_kind)st.break_kind);
             }

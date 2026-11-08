@@ -5713,6 +5713,59 @@ static void test_wide_table(void) {
     }
 }
 
+/* Rows that leave grid columns empty (gridBefore, gridAfter): a row's one cell after a skipped column sits under
+   the second column, not the first, also after .docx and native round trips; HTML gets an empty cell for it */
+static void test_grid_before(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblGrid><w:gridCol w:w=\"3000\"/><w:gridCol w:w=\"3000\"/><w:gridCol w:w=\"3000\"/>"
+                             "</w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>AA</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>BB</w:t>"
+                             "</w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>CC</w:t></w:r></w:p></w:tc></w:tr>"
+                             "<w:tr><w:trPr><w:gridBefore w:val=\"1\"/><w:gridAfter w:val=\"1\"/><w:wBefore w:w=\"3000\" "
+                             "w:type=\"dxa\"/></w:trPr><w:tc><w:p><w:r><w:t>GB</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+                             "<w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pg[3];
+            pd_sp x[3], y[3];
+
+            CHECK(text_drawn(d, L, "AA", &pg[0], &x[0], &y[0]) && text_drawn(d, L, "BB", &pg[1], &x[1], &y[1]) &&
+                  text_drawn(d, L, "GB", &pg[2], &x[2], &y[2]));
+            CHECK(x[2] == x[1] && x[1] > x[0] + PD_PT(140) && y[2] > y[1]);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    if (d) {
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "<tr><td colspan=\"1\" style=\"border:none\"></td><td>") != NULL);
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -5737,6 +5790,7 @@ int main(void) {
     test_docx_tables();
     printf("tables and pages\n");
     test_wide_table();
+    test_grid_before();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");
