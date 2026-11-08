@@ -211,6 +211,7 @@ struct pd_layout {
     } *fly;
     int32_t nfly, capfly;
     int32_t stable;             /* hybrid line breaking: -1 as the document says, 0 off, 1 on */
+    int32_t comments;           /* PD_LAYOUT_COMMENTS_* */
     int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
     int32_t dtext_rot;          /* the one being placed: how far it is turned (60000ths of a degree, clockwise), */
     pd_sp dtext_rx, dtext_ry;   /* about its middle */
@@ -3432,6 +3433,36 @@ static pd_sp story_height(pd_layout* L, pd_block_id story, pd_sp tw) {
     return h;
 }
 
+/* the pane comments are drawn in, 0 when there is none */
+static pd_sp comment_pane(const pd_layout* L) {
+    int32_t i;
+    pd_comment c;
+
+    if (L->comments != PD_LAYOUT_COMMENTS_MARGIN) {
+        return 0;
+    }
+
+    for (i = 1; i <= pd_doc_comment_count(L->doc); i++) {
+        if (pd_doc_comment_get(L->doc, (pd_comment_id)i, &c) == PD_OK) {
+            return PD_LAYOUT_COMMENT_PANE;
+        }
+    }
+
+    return 0;
+}
+
+void pd_layout_set_comments(pd_layout* L, int32_t mode) {
+    int32_t i;
+
+    if (L && L->comments != mode) {
+        L->comments = mode == PD_LAYOUT_COMMENTS_MARGIN ? mode : PD_LAYOUT_COMMENTS_NONE;
+
+        for (i = 0; i < L->npages; i++) {
+            L->pages[i].items_ok = 0;
+        }
+    }
+}
+
 void pd_layout_set_stable_breaks(pd_layout* L, int32_t mode) {
     if (L) {
         L->stable = mode < 0 ? -1 : mode > 0;
@@ -3887,7 +3918,7 @@ pd_status pd_layout_page_info(const pd_layout* L, int32_t page, pd_page_info* ou
 
     p = &L->pages[page];
     memset(out, 0, sizeof(*out));
-    out->width = p->w;
+    out->width = p->w + comment_pane(L);
     out->height = p->h;
     out->section = p->section;
     out->number = p->number;
@@ -5689,6 +5720,173 @@ static void turn_items(dlist_t* D, int32_t n0, const pline* l) {
     }
 }
 
+/* the lines of a balloon's text as wide as w, at most n, each into its own 160 bytes: words as they fit, a
+   paragraph ('\n') a line of its own; how many */
+static int32_t balloon_lines(const pd_layout* L, const pd_style* st, const char* s, size_t len, pd_sp w,
+                             char (*out)[160], int32_t n) {
+    int32_t k = 0;
+    size_t i = 0;
+
+    while (i < len && k < n) {
+        size_t j = i, best = i;
+
+        out[k][0] = '\0';
+
+        while (j < len && s[j] != '\n') {    /* the longest run of words that fits */
+            size_t e = j;
+            dlist_t M;
+            char t[160];
+            pd_sp tw;
+
+            while (e < len && s[e] == ' ') {
+                e++;
+            }
+
+            while (e < len && s[e] != ' ' && s[e] != '\n') {
+                e++;
+            }
+
+            if (e - i >= sizeof(t)) {
+                break;
+            }
+
+            memcpy(t, s + i, e - i);
+            t[e - i] = '\0';
+            memset(&M, 0, sizeof(M));
+            tw = emit_text(L, &M, t, st, 0, 0, 0, 0, 6);
+            free(M.d);
+            free(M.pts);
+
+            if (tw > w && best > i) {
+                break;
+            }
+
+            best = e;
+            j = e;
+        }
+
+        if (best == i) {    /* nothing fits: as much as the line holds */
+            best = j > i ? j : i + 1;
+            best = best - i >= 159 ? i + 159 : best;
+
+            while (best < len && best > i + 1 && ((unsigned char)s[best] & 0xC0) == 0x80) {
+                best--;
+            }
+        }
+
+        memcpy(out[k], s + i, best - i);
+        out[k][best - i] = '\0';
+        k++;
+
+        for (i = best; i < len && s[i] == ' '; i++) {
+        }
+
+        i += i < len && s[i] == '\n';
+    }
+
+    return k;
+}
+
+/* The comments starting on a page as balloons in the pane right of it: each a box in its author's colour,
+   lightened, under the last one or level with where its range starts, holding "Author: text" and its replies,
+   and a line from the range's start out to the box. In PD_MARKUP_BALLOONS deleted text is one too. */
+static void emit_comments(const pd_layout* L, dlist_t* D, int32_t page) {
+    const pd_doc* d = L->doc;
+    pd_sp pane = comment_pane(L), x0, bw, last = 0, lh, pad = PD_PT(4);
+    pd_markup_item* mk;
+    int32_t nm = 0, i, j, k;
+    pd_style st;
+    const ppage* pg = &L->pages[page];
+
+    if (!pane || pd_layout_page_markup(L, page, NULL, 0, &nm) != PD_OK || nm <= 0 || pd_doc_default_style(d, &st) != PD_OK ||
+            !(mk = (pd_markup_item*)malloc((size_t)nm * sizeof(*mk)))) {
+        return;
+    }
+
+    pd_layout_page_markup(L, page, mk, nm, &nm);
+    st.size = PD_PT(8);
+    st.color = 0xFF000000u;
+    lh = PD_PT(10);
+    x0 = pg->w + PD_PT(12);
+    bw = pane - PD_PT(24);
+
+    for (i = 0; i < nm; i++) {
+        char (*ln)[160] = (char (*)[160])malloc(64 * 160);
+        int32_t n = 0;
+        uint32_t c = mk[i].color, tint;
+        pd_sp top, h, xy[10];
+        char t[1600];
+        size_t tn = 0;
+
+        if (!ln || (mk[i].kind != PD_MARK_COMMENT && !(mk[i].kind == PD_MARK_DELETION &&
+                    pd_doc_markup(d) == PD_MARKUP_BALLOONS))) {
+            free(ln);
+            continue;
+        }
+
+        t[0] = '\0';
+
+        if (mk[i].kind == PD_MARK_COMMENT) {    /* the comment, then its replies */
+            for (j = 1; j <= pd_doc_comment_count(d); j++) {
+                pd_comment cm;
+
+                if (pd_doc_comment_get(d, (pd_comment_id)j, &cm) == PD_OK &&
+                        ((uint32_t)j == mk[i].id || cm.parent == (pd_comment_id)mk[i].id)) {
+                    tn += (size_t)snprintf(t + tn, sizeof(t) - tn, "%s%s: %.*s", tn ? "\n" : "",
+                                           cm.author[0] ? cm.author : "Comment", (int)cm.text_len, cm.text ? cm.text : "");
+                    tn = tn < sizeof(t) ? tn : sizeof(t) - 1;
+                }
+            }
+        } else {    /* the deleted text, objects left out */
+            const blk* b = pd_doc_blk(d, mk[i].range.start.block);
+            uint32_t o;
+
+            tn = (size_t)snprintf(t, sizeof(t), "Deleted: ");
+
+            for (o = mk[i].range.start.offset; b && o < mk[i].range.end.offset && o < b->st.len && tn < 400; o++) {
+                if (o + 2 < b->st.len && !memcmp(b->st.text + o, "\xEF\xBF\xBC", 3)) {
+                    o += 2;
+                } else {
+                    t[tn++] = b->st.text[o];
+                }
+            }
+
+            t[tn] = '\0';
+        }
+
+        n = balloon_lines(L, &st, t, tn, bw - 2 * pad, ln, 64);
+        top = mk[i].top > last ? mk[i].top : last;
+        h = n * lh + 2 * pad;
+        tint = 0xFF000000u | (((c >> 16 & 255) + 3 * 255) / 4) << 16 | (((c >> 8 & 255) + 3 * 255) / 4) << 8 |
+               ((c & 255) + 3 * 255) / 4;
+        xy[0] = x0;
+        xy[1] = top;
+        xy[2] = x0 + bw;
+        xy[3] = top;
+        xy[4] = x0 + bw;
+        xy[5] = top + h;
+        xy[6] = x0;
+        xy[7] = top + h;
+        emit_path(D, xy, 4, 1, tint, c, PD_PT(1) / 2, mk[i].range.start.block, 6);
+        xy[0] = mk[i].x;    /* from the range's start, along under its line, out to the box */
+        xy[1] = mk[i].bottom;
+        xy[2] = pg->w;
+        xy[3] = mk[i].bottom;
+        xy[4] = x0;
+        xy[5] = top + lh / 2 + pad;
+        emit_path(D, xy, 3, 0, 0, c, PD_PT(1) / 2, mk[i].range.start.block, 6);
+
+        for (k = 0; k < n; k++) {
+            emit_text(L, D, ln[k], &st, x0 + pad, top + pad + k * lh + PD_PT(8), mk[i].range.start.block, 0, 6);
+        }
+
+        last = top + h + PD_PT(4);
+        free(ln);
+    }
+
+    free(mk);
+}
+
 pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, int32_t cap, int32_t* count) {
     ppage* pg;
     dlist_t D;
@@ -5741,6 +5939,7 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
         }
 
         emit_line_numbers(L, &D, pg);
+        emit_comments(L, &D, page);
 
         if (D.err) {
             free(D.d);

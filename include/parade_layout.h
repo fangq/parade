@@ -57,6 +57,22 @@ PD_API void      pd_layout_invalidate(pd_layout* layout);
  */
 PD_API void      pd_layout_set_stable_breaks(pd_layout* layout, int32_t mode);
 
+/* how comments (and, in PD_MARKUP_BALLOONS, deletions) are shown */
+#define PD_LAYOUT_COMMENTS_NONE   0     /**< not drawn (pd_layout_page_markup lists them for the host) */
+#define PD_LAYOUT_COMMENTS_MARGIN 1     /**< balloons in a pane right of the page */
+
+/**
+ * Comments drawn as Word prints its markup: when the document has comments,
+ * every page is PD_LAYOUT_COMMENT_PANE wider (pd_page_info.width), and each
+ * comment starting on a page is a balloon in that pane -- its author and
+ * text, its replies under it -- joined by a line to where its range starts;
+ * in PD_MARKUP_BALLOONS a deletion is one too ("Deleted: ..."). They are
+ * display-list items (region 6), so screen and PDF show the same. Default
+ * PD_LAYOUT_COMMENTS_NONE.
+ */
+PD_API void      pd_layout_set_comments(pd_layout* layout, int32_t mode);
+#define PD_LAYOUT_COMMENT_PANE PD_PT(216)
+
 PD_API int32_t   pd_layout_page_count(const pd_layout* layout);
 
 typedef struct {
@@ -94,7 +110,8 @@ typedef struct {
     pd_res_id resource;
     pd_block_id block;          /**< source paragraph */
     uint32_t offset;            /**< source byte offset */
-    int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float, 4 footnote, 5 a text box in a drawing */
+    int32_t region;             /**< 0 body, 1 header, 2 footer, 3 float, 4 footnote, 5 a text box in a drawing, 6 a
+                                     comment balloon (pd_layout_set_comments) */
     uint32_t text;              /**< glyphs: the code point shown (also for generated text), 0 if none */
     int32_t scale;              /**< glyphs: horizontal scale, 65536 = 1 (font expansion) */
     const pd_sp* points;        /**< paths: x, y pairs on the page; valid until the page is laid out or listed again */

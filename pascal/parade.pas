@@ -962,6 +962,7 @@ procedure pd_layout_free(layout: Ppd_layout); cdecl; PDEXT;
 function pd_layout_update(layout: Ppd_layout; info: Ppd_layout_info): pd_status; cdecl; PDEXT;
 procedure pd_layout_invalidate(layout: Ppd_layout); cdecl; PDEXT;
 procedure pd_layout_set_stable_breaks(layout: Ppd_layout; mode: Int32); cdecl; PDEXT;
+procedure pd_layout_set_comments(layout: Ppd_layout; mode: Int32); cdecl; PDEXT;
 function pd_layout_page_count(layout: Ppd_layout): Int32; cdecl; PDEXT;
 function pd_layout_page_info(layout: Ppd_layout; page: Int32; out info: pd_page_info): pd_status; cdecl; PDEXT;
 function pd_layout_page_items(layout: Ppd_layout; page: Int32; buf: Ppd_draw; cap: Int32; out count: Int32): pd_status; cdecl; PDEXT;

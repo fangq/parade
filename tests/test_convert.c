@@ -5560,6 +5560,87 @@ static void test_docx_nested_fields(void) {
     pd_doc_free(d);
 }
 
+/* Comments drawn as Word prints them (pd_layout_set_comments): the page a pane wider, a balloon there with the
+   author and each paragraph of the text on its own line, a line out to it from the commented text and the box
+   round it in the author's colour; a reply under it. Off, the page is as it was and nothing is drawn. */
+static void test_comment_balloons(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\" xmlns:w14=\"w14\"><w:body>"
+                    "<w:p><w:r><w:t xml:space=\"preserve\">The </w:t></w:r><w:commentRangeStart w:id=\"7\"/><w:r><w:t>fox</w:t>"
+                    "</w:r><w:commentRangeEnd w:id=\"7\"/><w:r><w:commentReference w:id=\"7\"/></w:r>"
+                    "<w:r><w:commentReference w:id=\"8\"/></w:r></w:p></w:body></w:document>",
+                    "word/comments.xml",
+                    "<w:comments xmlns:w=\"w\" xmlns:w14=\"w14\">"
+                    "<w:comment w:id=\"7\" w:author=\"Cy\"><w:p w14:paraId=\"0A000001\"><w:r><w:t>Which fox?</w:t></w:r></w:p>"
+                    "<w:p w14:paraId=\"0A000002\"><w:r><w:t>Really.</w:t></w:r></w:p></w:comment>"
+                    "<w:comment w:id=\"8\" w:author=\"Ann\"><w:p w14:paraId=\"0A000003\"><w:r><w:t>Red.</w:t></w:r></w:p>"
+                    "</w:comment></w:comments>",
+                    "word/commentsExtended.xml",
+                    "<w15:commentsEx xmlns:w15=\"w15\"><w15:commentEx w15:paraId=\"0A000003\" w15:paraIdParent=\"0A000002\"/>"
+                    "</w15:commentsEx>",
+                    NULL);
+    pd_layout* L = NULL;
+    int mode;
+
+    CHECK(d != NULL);
+
+    if (!d || !have_layout_font()) {
+        pd_doc_free(d);
+        return;
+    }
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+    CHECK(pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK);
+
+    for (mode = 0; mode < 2 && L; mode++) {
+        pd_page_info pi;
+        pd_draw* it;
+        int32_t n = 0, k, paths = 0;
+        char text[256];
+        size_t o = 0;
+        pd_sp y_which = 0, y_really = 0, y_red = 0;
+
+        pd_layout_set_comments(L, mode ? PD_LAYOUT_COMMENTS_MARGIN : PD_LAYOUT_COMMENTS_NONE);
+        CHECK(pd_layout_page_info(L, 0, &pi) == PD_OK);
+        CHECK(pd_layout_page_items(L, 0, NULL, 0, &n) == PD_OK);
+        it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+        pd_layout_page_items(L, 0, it, n, &n);
+
+        for (k = 0; k < n; k++) {
+            if (it[k].region != 6) {
+                continue;
+            }
+
+            paths += it[k].kind == PD_DRAW_PATH;
+
+            if (it[k].kind == PD_DRAW_GLYPH && it[k].text < 128 && o + 1 < sizeof(text)) {
+                text[o++] = (char)it[k].text;
+                y_which = it[k].text == 'W' && !y_which ? it[k].y : y_which;
+                y_really = it[k].text == 'R' && !y_really ? it[k].y : y_really;
+                y_red = it[k].text == 'd' && it[k].y > y_really && y_really ? it[k].y : y_red;
+                CHECK(it[k].x > PD_PT(595));    /* in the pane, right of the A4 page */
+            }
+        }
+
+        text[o] = '\0';
+        free(it);
+
+        if (mode == 0) {
+            CHECK(o == 0 && paths == 0);
+            CHECK(pi.width < PD_PT(600));
+        } else {
+            CHECK(pi.width > PD_PT(595) + PD_LAYOUT_COMMENT_PANE - PD_PT(1));
+            CHECK(strcmp(text, "Cy:Whichfox?Really.Ann:Red.") == 0);
+            CHECK(paths == 2);  /* one box and its line: the reply shares them */
+            CHECK(y_which > 0 && y_really > y_which && y_red > y_really);
+        }
+    }
+
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -6249,6 +6330,7 @@ int main(void) {
     test_docx_drop_cap();
     test_docx_text_boxes();
     test_docx_nested_fields();
+    test_comment_balloons();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");
