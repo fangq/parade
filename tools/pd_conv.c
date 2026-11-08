@@ -1,7 +1,7 @@
 /*
  * pd_conv: convert between document formats with Parade
  *
- *   pd_conv in.{pdoc,jdoc,html,md,rtf,docx,pptx,txt} out.{pdoc,jdoc,html,md,tex,rtf,docx,txt,pdf}
+ *   pd_conv in.{pdoc,jdoc,html,md,rtf,docx,pptx,txt} out.{pdoc,jdoc,html,md,tex,rtf,docx,txt,pdf,svg}
  *   (.pdoc: the native document in BJData; .jdoc: the same in JSON text)
  *
  * Formats come from the file extensions (or, for input, the content).
@@ -9,7 +9,8 @@
  * Liberation Sans for sans-serif families such as Arial, its narrow faces for
  * Arial Narrow and the like; Carlito and Caladea for Calibri and Cambria,
  * whose metrics they share; DejaVu Sans Mono for code, Noto CJK and DejaVu Sans as fallbacks
- * when installed).
+ * when installed). SVG output is laid out the same way, a file a page: the first page in out.svg, the
+ * others in out-2.svg, out-3.svg, ...
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -343,7 +344,7 @@ int main(int argc, char** argv) {
 
     oext = ext_of(argv[2]);
 
-    if (!strcmp(oext, "pdf")) {
+    if (!strcmp(oext, "pdf") || !strcmp(oext, "svg")) {
         pd_layout* L;
         pd_layout_info info;
         const pd_font* fb[2];
@@ -378,8 +379,29 @@ int main(int argc, char** argv) {
         pd_layout_new(d, &L);
         st = pd_layout_update(L, &info);
 
-        if (st == PD_OK) {
+        if (st == PD_OK && !strcmp(oext, "pdf")) {
             st = pd_layout_write_pdf(L, NULL, to_file, f);
+            fprintf(stderr, "%d pages\n", (int)info.pages);
+        } else if (st == PD_OK) {   /* a file a page: out.svg, out-2.svg, ... */
+            int32_t pg;
+
+            st = pd_layout_write_svg(L, 0, to_file, f);
+
+            for (pg = 1; pg < info.pages && st == PD_OK; pg++) {
+                char name[4096];
+                FILE* pf;
+
+                snprintf(name, sizeof(name), "%.*s-%d.svg", (int)(strlen(argv[2]) - 4), argv[2], (int)pg + 1);
+
+                if ((pf = fopen(name, "wb")) == NULL) {
+                    st = PD_ERR_IO;
+                    break;
+                }
+
+                st = pd_layout_write_svg(L, pg, to_file, pf);
+                fclose(pf);
+            }
+
             fprintf(stderr, "%d pages\n", (int)info.pages);
         }
 

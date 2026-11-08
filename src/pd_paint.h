@@ -4,6 +4,7 @@
 #define PD_PAINT_H
 
 #include "parade_layout.h"
+#include "pd_conv.h"
 
 typedef struct {
     int kind;                   /* PD_GRAD_LINEAR, PD_GRAD_CIRCLE, PD_GRAD_RECT */
@@ -38,5 +39,23 @@ int pd_draw_effects(const pd_draw* a);
 /* an item's layers into an RGBA image, as pd_draw_render */
 pd_status pd_draw_render_layers(const pd_draw* a, int layers, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba,
                                 int32_t width, int32_t height, int32_t stride);
+
+/* a drawing resource's display list on its own, at (0, 0) in w by h: what the layout draws for it in a page (its
+   text boxes' stories aside: those are laid out with the page) */
+typedef struct {
+    pd_draw* d;
+    int32_t n;
+    pd_sp* pts;
+    pd_path_style* sty;
+} pd_drawlist;
+
+pd_status pd_drawing_list(const pd_doc* doc, pd_res_id res, pd_sp w, pd_sp h, pd_drawlist* out);
+void pd_drawlist_free(pd_drawlist* l);
+
+/* a drawing as an SVG element (no XML declaration) into o, for HTML; 0 when it is no drawing */
+int pd_drawing_svg_buf(const pd_doc* doc, pd_res_id res, pd_sp w, pd_sp h, pd_buf* o);
+
+/* RGBA pixels (premultiplied, as pd_draw_render makes them) as a PNG file in a new buffer; 0 on success */
+int pd_png_encode(const uint8_t* rgba, int32_t w, int32_t h, int32_t stride, unsigned char** out, size_t* n);
 
 #endif

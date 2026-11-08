@@ -37,6 +37,7 @@
 #include "pd_doc_internal.h"
 #include "pd_json.h"
 #include "parade_layout.h"
+#include "pd_paint.h"
 
 #define INF_PEN 10000
 #define INTERLINE_PEN 0          /* TeX's \\interlinepenalty: widows and orphans are rules, not costs */
@@ -6865,4 +6866,66 @@ pd_status pd_layout_page_markup(const pd_layout* L, int32_t page, pd_markup_item
 
     free(M.m);
     return PD_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* a drawing on its own: its display list without a page               */
+/* ------------------------------------------------------------------ */
+
+pd_status pd_drawing_list(const pd_doc* doc, pd_res_id res, pd_sp w, pd_sp h, pd_drawlist* out) {
+    pd_layout* L = NULL;
+    dlist_t D;
+    int32_t i;
+    pd_status st;
+
+    memset(out, 0, sizeof(*out));
+    memset(&D, 0, sizeof(D));
+
+    if (!doc || w <= 0 || h <= 0) {
+        return PD_ERR_ARG;
+    }
+
+    if ((st = pd_layout_new(doc, &L)) != PD_OK) {
+        return st;
+    }
+
+    if (!emit_drawing(L, &D, res, 0, 0, w, h, 0, 0, 3)) {
+        pd_layout_free(L);
+        free(D.d);
+        free(D.pts);
+        free(D.sty);
+        return PD_ERR_ARG;     /* not a drawing */
+    }
+
+    pd_layout_free(L);
+
+    if (D.err) {
+        free(D.d);
+        free(D.pts);
+        free(D.sty);
+        return PD_ERR_NOMEM;
+    }
+
+    for (i = 0; i < D.n; i++) {     /* the indexes made pointers, as for a page */
+        if (D.d[i].kind == PD_DRAW_PATH) {
+            D.d[i].points = D.pts + (intptr_t)D.d[i].points;
+            D.d[i].style = D.d[i].style ? D.sty + ((intptr_t)D.d[i].style - 1) : NULL;
+            D.d[i].curve = D.d[i].curve ? D.pts + ((intptr_t)D.d[i].curve - 1) : NULL;
+        } else if (D.d[i].kind == PD_DRAW_IMAGE && D.d[i].clip_npoints) {
+            D.d[i].clip_points = D.pts + (intptr_t)D.d[i].clip_points;
+        }
+    }
+
+    out->d = D.d;
+    out->n = D.n;
+    out->pts = D.pts;
+    out->sty = D.sty;
+    return PD_OK;
+}
+
+void pd_drawlist_free(pd_drawlist* l) {
+    free(l->d);
+    free(l->pts);
+    free(l->sty);
+    memset(l, 0, sizeof(*l));
 }

@@ -3867,6 +3867,72 @@ static void test_docx_text_in_shapes(void) {
     pd_doc_free(d);
 }
 
+/* SVG: a page with a dashed curve, a three-stop gradient and a pattern as SVG's own -- a dash array, a cubic, a
+   linear gradient with its stops, a pattern -- and the drawing alone the same; HTML shows the drawing as an SVG
+   picture and reads the drawing itself back. */
+static void test_svg_out(void) {
+    pd_doc* d = NULL, *back = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"ellipse\"/><a:noFill/><a:ln w=\"25400\"><a:solidFill><a:srgbClr val=\"FF0000\"/>"
+                      "</a:solidFill><a:prstDash val=\"dash\"/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"FF0000\"/></a:gs>"
+                      "<a:gs pos=\"50000\"><a:srgbClr val=\"00FF00\"/></a:gs><a:gs pos=\"100000\"><a:srgbClr val=\"0000FF\"/>"
+                      "</a:gs></a:gsLst><a:lin ang=\"0\" scaled=\"0\"/></a:gradFill></wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:pattFill prst=\"smCheck\"><a:fgClr><a:srgbClr val=\"000000\"/></a:fgClr>"
+                      "<a:bgClr><a:srgbClr val=\"FFFFFF\"/></a:bgClr></a:pattFill></wps:spPr><wps:bodyPr/></wps:wsp>",
+                      &d, &L, &n);
+    buf_t b;
+    pd_inline o;
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_layout_write_svg(L, 0, to_buf, &b) == PD_OK);
+    CHECK(b.p && strstr(b.p, "<svg xmlns=\"http://www.w3.org/2000/svg\"") && strstr(b.p, "viewBox=\"0 0 "));
+    CHECK(b.p && strstr(b.p, "stroke-dasharray=\"8 6\"") && strstr(b.p, "stroke=\"#ff0000\""));
+    CHECK(b.p && strstr(b.p, "C") && strstr(b.p, "<linearGradient") && strstr(b.p, "<stop offset=\"0.5000\" stop-color=\"#00ff00\"/>"));
+    CHECK(b.p && strstr(b.p, "<pattern id=") && strstr(b.p, "fill=\"url(#p"));
+    free(b.p);
+
+    if (pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK) {
+        memset(&b, 0, sizeof(b));   /* the drawing alone, 200 pt square */
+        CHECK(pd_drawing_to_svg(d, o.resource, PD_PT(200), PD_PT(200), to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "viewBox=\"0 0 200 200\"") && strstr(b.p, "stroke-dasharray=\"8 6\"") &&
+              strstr(b.p, "<linearGradient"));
+        free(b.p);
+    }
+
+    memset(&b, 0, sizeof(b));   /* HTML: an SVG picture, the drawing kept beside it and read back */
+    CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK);
+    CHECK(b.p && strstr(b.p, "<img src=\"data:image/svg+xml;base64,") &&
+          strstr(b.p, "data-parade=\"data:application/vnd.parade.drawing+json;base64,"));
+
+    if (b.p && pd_doc_import(b.p, b.n, PD_CONV_HTML, &back) == PD_OK) {
+        const char* mime = NULL;
+        const void* data;
+        size_t len;
+        int found = pd_doc_resource(back, 1, &mime, &data, &len) == PD_OK &&
+                    !strcmp(mime, "application/vnd.parade.drawing+json");
+
+        CHECK(found);
+        pd_doc_free(back);
+    }
+
+    free(b.p);
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -6362,6 +6428,7 @@ int main(void) {
     test_docx_picture_fill();
     test_docx_shape_effects();
     test_docx_text_in_shapes();
+    test_svg_out();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();

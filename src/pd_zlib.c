@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pd_internal.h"
+#include "pd_paint.h"
 
 /* ------------------------------------------------------------------ */
 /* output bits                                                        */
@@ -601,4 +602,83 @@ uint32_t pd_crc32(const void* data, size_t n) {
     }
 
     return c ^ 0xFFFFFFFFu;
+}
+
+/* ------------------------------------------------------------------ */
+/* PNG out                                                            */
+/* ------------------------------------------------------------------ */
+
+static void png_be32(unsigned char* p, uint32_t v) {
+    p[0] = (unsigned char)(v >> 24);
+    p[1] = (unsigned char)(v >> 16);
+    p[2] = (unsigned char)(v >> 8);
+    p[3] = (unsigned char)v;
+}
+
+/* a chunk at *at in buf: length, type, data, CRC of type and data */
+static size_t png_put_chunk(unsigned char* buf, size_t at, const char* type, const unsigned char* data, size_t n) {
+    png_be32(buf + at, (uint32_t)n);
+    memcpy(buf + at + 4, type, 4);
+
+    if (n) {
+        memcpy(buf + at + 8, data, n);
+    }
+
+    png_be32(buf + at + 8 + n, pd_crc32(buf + at + 4, n + 4));
+    return at + 12 + n;
+}
+
+int pd_png_encode(const uint8_t* rgba, int32_t w, int32_t h, int32_t stride, unsigned char** out, size_t* outlen) {
+    size_t row = (size_t)w * 4 + 1, zn = 0, at;
+    unsigned char* raw, *z = NULL, ihdr[13];
+    int32_t x, y;
+
+    *out = NULL;
+    *outlen = 0;
+
+    if (w <= 0 || h <= 0 || !(raw = (unsigned char*)malloc(row * (size_t)h))) {
+        return 1;
+    }
+
+    for (y = 0; y < h; y++) {   /* filter 0; the colours unmultiplied by alpha */
+        const uint8_t* s = rgba + (size_t)y * (size_t)stride;
+        unsigned char* d = raw + row * (size_t)y;
+
+        d[0] = 0;
+
+        for (x = 0; x < w; x++) {
+            int k, a = s[4 * x + 3];
+
+            for (k = 0; k < 3; k++) {
+                d[1 + 4 * x + k] = (unsigned char)(a ? (s[4 * x + k] * 255 + a / 2) / a : 0);
+            }
+
+            d[1 + 4 * x + 3] = (unsigned char)a;
+        }
+    }
+
+    if (pd_deflate(raw, row * (size_t)h, 1, &z, &zn) != 0) {
+        free(raw);
+        return 1;
+    }
+
+    free(raw);
+    png_be32(ihdr, (uint32_t)w);
+    png_be32(ihdr + 4, (uint32_t)h);
+    ihdr[8] = 8;    /* 8 bits, RGBA, deflate, filter 0, no interlace */
+    ihdr[9] = 6;
+    ihdr[10] = ihdr[11] = ihdr[12] = 0;
+
+    if (!(*out = (unsigned char*)malloc(8 + 25 + 12 + zn + 12))) {
+        free(z);
+        return 1;
+    }
+
+    memcpy(*out, "\x89PNG\r\n\x1a\n", 8);
+    at = png_put_chunk(*out, 8, "IHDR", ihdr, 13);
+    at = png_put_chunk(*out, at, "IDAT", z, zn);
+    at = png_put_chunk(*out, at, "IEND", NULL, 0);
+    free(z);
+    *outlen = at;
+    return 0;
 }

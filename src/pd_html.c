@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pd_conv.h"
+#include "pd_doc_internal.h"
+#include "pd_paint.h"
 
 /* ------------------------------------------------------------------ */
 /* export                                                             */
@@ -153,6 +155,29 @@ static int hx_span(void* user, const pd_span* sp) {
 
                     if (ob->source_len > 0) {   /* by address, as the document gave it */
                         esc(o, ob->source, (size_t)ob->source_len, 1);
+                    } else if (!strcmp(mime, "application/vnd.parade.drawing+json")) {
+                        /* a drawing: an SVG picture a browser shows, the drawing itself beside it for Parade to read
+                           back */
+                        pd_buf svg;
+                        pd_sp dw = ob->width, dh = ob->height;
+
+                        memset(&svg, 0, sizeof(svg));
+
+                        if (dw <= 0 || dh <= 0) {
+                            pd_doc_image_size(x->d, ob, &dw, &dh);
+                        }
+
+                        if (pd_drawing_svg_buf(x->d, ob->resource, dw, dh, &svg) && !svg.err) {
+                            pb_puts(o, "data:image/svg+xml;base64,");
+                            pb_base64(o, (const unsigned char*)svg.p, svg.n);
+                            pb_puts(o, "\" data-parade=\"");
+                        }
+
+                        pb_free(&svg);
+                        pb_puts(o, "data:");
+                        esc(o, mime, strlen(mime), 1);
+                        pb_puts(o, ";base64,");
+                        pb_base64(o, (const unsigned char*)data, len);
                     } else {
                         pb_puts(o, "data:");
                         esc(o, mime, strlen(mime), 1);
@@ -1587,7 +1612,8 @@ static void hi_image(hi* h, const pd_markup* m) {
 
     src[0] = '\0';
 
-    if (mu_attr(m, "src", src, m->alen + 1) && strncmp(src, "data:", 5) == 0 && strstr(src, ";base64,")) {
+    if ((mu_attr(m, "data-parade", src, m->alen + 1) || mu_attr(m, "src", src, m->alen + 1)) &&
+            strncmp(src, "data:", 5) == 0 && strstr(src, ";base64,")) {     /* (a drawing: itself, not its SVG) */
         char mime[64];
         const char* semi = strchr(src, ';'), *data = strstr(src, ";base64,") + 8;
         size_t ml = (size_t)(semi - src - 5), dl = strlen(data);

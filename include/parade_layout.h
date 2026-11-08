@@ -228,6 +228,24 @@ PD_API pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp
 PD_API void pd_draw_bounds(const pd_draw* item, pd_sp* x0, pd_sp* y0, pd_sp* x1, pd_sp* y1);
 
 /* ------------------------------------------------------------------ */
+/* SVG                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Write a page as an SVG 1.1 document from its display list, in points:
+ * paths with their curves, dashes, ends and corners, gradients and
+ * patterns as SVG's own, glyphs as paths from the fonts' outlines,
+ * pictures as data: URIs, effects as PNG pictures from Parade's
+ * rasterizer.
+ */
+PD_API pd_status pd_layout_write_svg(const pd_layout* layout, int32_t page, pd_writer fn, void* user);
+
+/** a drawing resource (application/vnd.parade.drawing+json) as SVG, width by height; PD_ERR_ARG if it is none.
+    Its text boxes' stories, laid out with the page, are not in it */
+PD_API pd_status pd_drawing_to_svg(const pd_doc* doc, pd_res_id res, pd_sp width, pd_sp height, pd_writer fn,
+                                   void* user);
+
+/* ------------------------------------------------------------------ */
 /* PDF                                                                */
 /* ------------------------------------------------------------------ */
 
