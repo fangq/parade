@@ -673,6 +673,11 @@ typedef struct {
     int32_t npoly;              /**< text wraps to this outline of it rather than its box (Word's wrapTight and
                                      wrapThrough): points used in poly, 0 = its box */
     int32_t poly[2 * PD_WRAP_POLY_MAX];     /**< x, y pairs in 21600ths of its width and height, from its top left */
+    pd_sp height;               /**< a box of this height, what it holds cut off below it (0: as tall as that) */
+    int32_t chain;              /**< linked text boxes (Word's linkedTxbx): boxes of the same chain (non-zero) show one
+                                     story, the first box's (chain_seq 0), what does not fit in one going on in the
+                                     next by chain_seq; the others hold nothing of their own */
+    int32_t chain_seq;
 } pd_float_props;
 
 /* a float that is a Word frame: paragraphs with a framePr rather than a text box */

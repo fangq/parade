@@ -10439,6 +10439,104 @@ static void test_wordart_on_path(void) {
     }
 }
 
+/* the y on page 0 of the first glyph showing code point c (-1: none) */
+static pd_sp glyph_y_of(pd_layout* L, uint32_t c) {
+    int32_t n = 0, k;
+    pd_draw* it;
+    pd_sp y = -1;
+
+    if (pd_layout_page_items(L, 0, NULL, 0, &n) != PD_OK || !(it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw)))) {
+        return -1;
+    }
+
+    pd_layout_page_items(L, 0, it, n, &n);
+
+    for (k = 0; k < n && y < 0; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].text == c) {
+            y = it[k].y;
+        }
+    }
+
+    free(it);
+    return y;
+}
+
+/* Linked text boxes (wps:linkedTxbx): the first box 40 pt high holds eight one-word paragraphs, Alpha to Hotel, that
+   do not fit; what does not goes on in the second box lower down the page. Kept so through a .docx */
+static void test_docx_linked_textboxes(void) {
+    static const char* anchor = "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" simplePos=\"0\" "
+                                "relativeHeight=\"1\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\">"
+                                "<wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"page\"><wp:posOffset>914400"
+                                "</wp:posOffset></wp:positionH><wp:positionV relativeFrom=\"page\"><wp:posOffset>%d"
+                                "</wp:posOffset></wp:positionV><wp:extent cx=\"2540000\" cy=\"%d\"/><wp:wrapNone/>"
+                                "<wp:docPr id=\"%d\" name=\"Text Box %d\"/><a:graphic><a:graphicData uri=\"http://schemas."
+                                "microsoft.com/office/word/2010/wordprocessingShape\"><wps:wsp><wps:cNvSpPr txBox=\"1\"/>"
+                                "<wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"%d\"/></a:xfrm>"
+                                "<a:prstGeom prst=\"rect\"/></wps:spPr>%s<wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" "
+                                "bIns=\"0\"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:anchor>"
+                                "</w:drawing></w:r>";
+    static const char* words[8] = { "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel" };
+    char paras[2048], first[4096], second[2048], doc[16384];
+    size_t pl = 0;
+    int k, pass;
+    pd_doc* d;
+
+    for (k = 0; k < 8; k++) {
+        pl += (size_t)snprintf(paras + pl, sizeof(paras) - pl, "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>"
+                               "<w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:t>%s</w:t></w:r></w:p>", words[k]);
+    }
+
+    snprintf(first, sizeof(first), "<wps:txbx id=\"1\"><w:txbxContent>%s</w:txbxContent></wps:txbx>", paras);
+    snprintf(second, sizeof(second), "<wps:linkedTxbx id=\"1\" seq=\"1\"/>");
+    {
+        char a1[8192], a2[4096];
+
+        snprintf(a1, sizeof(a1), anchor, 914400, 508000, 1, 1, 508000, first);         /* 72 pt down, 40 pt high */
+        snprintf(a2, sizeof(a2), anchor, 5080000, 2540000, 2, 2, 2540000, second);    /* 400 pt down, 200 pt high */
+        snprintf(doc, sizeof(doc), "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wps=\"wps\"><w:body>"
+                 "<w:p>%s%s<w:r><w:t>Body</w:t></w:r></w:p></w:body></w:document>", a1, a2);
+    }
+
+    d = docx_doc("word/document.xml", doc, NULL);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 2 && have_layout_font(); pass++) {
+        pd_layout* L = NULL;
+        pd_sp ya, yh;
+
+        pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+        if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+            ya = glyph_y_of(L, 'A');
+            yh = glyph_y_of(L, 'H');
+            CHECK(ya > PD_PT(72) && ya < PD_PT(112));    /* Alpha in the first box */
+            CHECK(yh > PD_PT(400) && yh < PD_PT(600));   /* Hotel gone on into the second */
+        } else {
+            CHECK(0);
+        }
+
+        pd_layout_free(L);
+
+        if (pass == 0) {    /* and once more through Parade's .docx: the link kept */
+            buf_t b = { 0 };
+            unsigned char* x;
+            size_t n;
+            pd_doc* t = NULL;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            x = pd_zip_get((const unsigned char*)b.p, b.n, "word/document.xml", &n);
+            CHECK(x && strstr((char*)x, "<wps:txbx id=\"1\">") && strstr((char*)x, "<wps:linkedTxbx id=\"1\" seq=\"1\"/>"));
+            free(x);
+            CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &t) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = t;
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -10556,6 +10654,7 @@ int main(void) {
     test_docx_shape_effects();
     test_docx_text_in_shapes();
     test_wordart_on_path();
+    test_docx_linked_textboxes();
     test_svg_out();
     test_drawing_png();
     test_docx_canvas_kept();

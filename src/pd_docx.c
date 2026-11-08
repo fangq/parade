@@ -1753,7 +1753,7 @@ static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp) {
     pd_block_info fi;
     pd_sp w = fp->width > 0 ? fp->width : (pd_sp)((int64_t)dx_text_width(x) * (fp->width_fraction > 0 ?
               fp->width_fraction : 1000) / 1000);
-    long long cx = EMU(w), cy = EMU(dx_block_height(x, fl, w)), gap = EMU(fp->gap);
+    long long cx = EMU(w), cy = EMU(fp->height > 0 ? fp->height : dx_block_height(x, fl, w)), gap = EMU(fp->gap);
     int off = (fp->placement & PD_PLACE_OFFSET) && fp->wrap != PD_WRAP_NONE;
     int32_t i;
     char wb[2048];
@@ -1780,18 +1780,30 @@ static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp) {
               "<wp:docPr id=\"%d\" name=\"Text Box %d\"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData "
               "uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\"><wps:wsp><wps:cNvSpPr txBox=\"1\"/>"
               "<wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\">"
-              "<a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>",
+              "<a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>",
               fp->offset_from == PD_FROM_PAGE ? "page" : fp->offset_from == PD_FROM_MARGIN ? "margin" : "paragraph",
               EMU(fp->offset_y), cx, cy, dx_wrap(wb, sizeof(wb), fp, off), x->docpr, x->docpr, cx, cy);
 
-    for (i = 0; i < fi.child_count; i++) {
-        dx_block(x, pd_doc_child(x->d, fl, i));
+    if (fp->chain && fp->chain_seq > 0) {   /* a linked box: the chain's text goes on in it, none of its own */
+        pb_printf(o, "<wps:linkedTxbx id=\"%d\" seq=\"%d\"/>", (int)fp->chain, (int)fp->chain_seq);
+    } else {
+        if (fp->chain) {
+            pb_printf(o, "<wps:txbx id=\"%d\"><w:txbxContent>", (int)fp->chain);
+        } else {
+            pb_puts(o, "<wps:txbx><w:txbxContent>");
+        }
+
+        for (i = 0; i < fi.child_count; i++) {
+            dx_block(x, pd_doc_child(x->d, fl, i));
+        }
+
+        dx_flush_anchors(x);
+        pb_puts(o, "</w:txbxContent></wps:txbx>");
     }
 
-    dx_flush_anchors(x);
-    pb_puts(o, "</w:txbxContent></wps:txbx><wps:bodyPr rot=\"0\" vert=\"horz\" wrap=\"square\" lIns=\"0\" tIns=\"0\" "
-            "rIns=\"0\" bIns=\"0\" anchor=\"t\"><a:spAutoFit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic>"
-            "</wp:anchor></w:drawing></mc:Choice></mc:AlternateContent></w:r>");
+    pb_printf(o, "<wps:bodyPr rot=\"0\" vert=\"horz\" wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" "
+              "anchor=\"t\">%s</wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>"
+              "</mc:AlternateContent></w:r>", fp->height > 0 ? "<a:noAutofit/>" : "<a:spAutoFit/>");
 }
 
 /* the anchored pictures waiting for a paragraph */
@@ -7456,6 +7468,8 @@ typedef struct {
     int math_para;              /* the paragraph opens with display math (m:oMathPara) */
     const char* tbx;            /* a floating text box's content, in the part being read */
     size_t tbn;
+    int chain, chain_seq, linked;   /* the drawing's text box linked: its chain (wps:txbx id), place in it, and
+                                       whether it only shows the chain's text (wps:linkedTxbx) */
     long long posh_off, dist;
     struct {
         pd_res_id res;
@@ -7469,6 +7483,7 @@ typedef struct {
         int wrap_mode;          /* PD_WRAPSIDE_* */
         int npoly;              /* its wrap polygon (wrapTight, wrapThrough), points in 21600ths of its box */
         int32_t poly[2 * PD_WRAP_POLY_MAX];
+        int chain, chain_seq, linked;   /* a linked text box: its chain, its place, and no text of its own */
     }* pend_fl;                 /* floats anchored in a paragraph already under way: after it */
     int npend_fl, cappend_fl;
     int wrap_mode;              /* the drawing's wrapText: PD_WRAPSIDE_* */
@@ -8832,7 +8847,20 @@ static void dw_floats(dw* w) {
             fp.npoly = fp.wrap_mode || fp.wrap == PD_WRAP_LEFT || fp.wrap == PD_WRAP_RIGHT ? w->pend_fl[k].npoly : 0;
             memcpy(fp.poly, w->pend_fl[k].poly, sizeof(fp.poly));
 
+            if (w->pend_fl[k].chain) {  /* linked: a box of its height, the chain's text going on through it */
+                fp.chain = w->pend_fl[k].chain;
+                fp.chain_seq = w->pend_fl[k].chain_seq;
+                fp.height = w->pend_fl[k].h;
+            }
+
             pd_doc_set_float_props(b->d, fl, &fp);
+        }
+
+        if (w->pend_fl[k].linked) {     /* nothing of its own: an empty paragraph to hold its place */
+            bld_begin_para(b);
+            bld_end_para(b);
+            bld_float_end(b);
+            continue;
         }
 
         if (w->pend_fl[k].tbx) {    /* a text box: what it holds, read here, in the float */
@@ -13538,6 +13566,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->drawing_res = 0;
                 w->tbx = NULL;
                 w->tbn = 0;
+                w->chain = w->chain_seq = w->linked = 0;
                 w->dist = 0;
                 memset(w->crop, 0, sizeof(w->crop));
             } else if ((strcmp(t, "object") == 0 || strcmp(t, "pict") == 0) && m.type == MT_OPEN && !w->in_drawing) {
@@ -13634,6 +13663,13 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 if (mu_attr(&m, "cy", v, sizeof(v))) {
                     w->cy = atoll(v);
                 }
+            } else if (w->in_drawing && strcmp(t, "txbx") == 0 && m.type == MT_OPEN && mu_attr(&m, "id", v, sizeof(v))) {
+                w->chain = atoi(v);     /* the first box of a chain of linked ones, when another names it */
+                w->chain_seq = 0;
+            } else if (w->in_drawing && strcmp(t, "linkedTxbx") == 0 && mu_attr(&m, "id", v, sizeof(v))) {
+                w->chain = atoi(v);     /* a box showing what does not fit in the boxes before it */
+                w->chain_seq = mu_attr(&m, "seq", v, sizeof(v)) ? atoi(v) : 1;
+                w->linked = 1;
             } else if (w->in_drawing && strcmp(t, "blip") == 0) {
                 mu_attr(&m, "r:embed", w->blip, sizeof(w->blip));
             } else if (w->in_drawing && strcmp(t, "srcRect") == 0) {   /* the picture cropped */
@@ -14040,8 +14076,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                                            w->posh_off > 2286000 ? PD_WRAP_RIGHT : PD_WRAP_LEFT) : -w->wrap;
             }
 
-            if (w->in_drawing && w->tbx && w->anchor && w->cx > 0 && dw_pend_add(w) >= 0) {
+            if (w->in_drawing && (w->tbx || w->linked) && w->anchor && w->cx > 0 && dw_pend_add(w) >= 0) {
                 int k = w->npend_fl - 1;
+
+                w->pend_fl[k].chain = w->chain;
+                w->pend_fl[k].chain_seq = w->chain_seq;
+                w->pend_fl[k].linked = w->linked;
 
                 w->pend_fl[k].w = (pd_sp)(w->cx * 65536 / 12700);
                 w->pend_fl[k].h = (pd_sp)(w->cy * 65536 / 12700);

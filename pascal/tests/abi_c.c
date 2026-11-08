@@ -243,6 +243,9 @@ int main(void) {
     printf("pd_float_props.wrap_mode %zu\n", offsetof(pd_float_props, wrap_mode));
     printf("pd_float_props.npoly %zu\n", offsetof(pd_float_props, npoly));
     printf("pd_float_props.poly %zu\n", offsetof(pd_float_props, poly));
+    printf("pd_float_props.height %zu\n", offsetof(pd_float_props, height));
+    printf("pd_float_props.chain %zu\n", offsetof(pd_float_props, chain));
+    printf("pd_float_props.chain_seq %zu\n", offsetof(pd_float_props, chain_seq));
     printf("pd_section_props %zu\n", sizeof(pd_section_props));
     printf("pd_section_props.page_width %zu\n", offsetof(pd_section_props, page_width));
     printf("pd_section_props.page_height %zu\n", offsetof(pd_section_props, page_height));

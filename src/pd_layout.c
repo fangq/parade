@@ -1512,6 +1512,93 @@ static void stack_lines(pd_layout* L, pd_block_id container, pd_sp width, pd_sp*
     }
 }
 
+/* A box of a chain of linked text boxes: the story it shows a slice of (the chain's first box's), at width w, and the
+   slice -- [lo, hi) of the story's height -- the boxes before it filled in order of chain_seq, each to its height,
+   cut between lines. 0 when it is no such box or the chain has no first box */
+static int chain_slice(pd_layout* L, const pfloat* f, pd_block_id* src, pd_sp* lo, pd_sp* hi) {
+    const pd_doc* d = L->doc;
+    pd_sp caps[64], lt[512], lb[512];
+    int32_t seqs[64], n = 0, i, k, nl = 0, me = -1, line = 0;
+    pd_block_id head = 0;
+    uint32_t id;
+
+    if (!f->fp.chain) {
+        return 0;
+    }
+
+    for (id = 1; id < d->next_id && n < 64; id++) {     /* the chain's boxes, in place in the document */
+        const blk* b = d->tab[id];
+
+        if (b && b->kind == PD_BLOCK_FLOAT && b->parent && b->st.fp.chain == f->fp.chain) {
+            if (b->st.fp.chain_seq == 0) {
+                head = b->id;
+            }
+
+            seqs[n] = b->st.fp.chain_seq;
+            caps[n++] = b->st.fp.height;
+        }
+    }
+
+    if (!head) {
+        return 0;
+    }
+
+    for (i = 1; i < n; i++) {   /* in order of their places in the chain */
+        for (k = i; k > 0 && seqs[k] < seqs[k - 1]; k--) {
+            int32_t ts = seqs[k];
+            pd_sp tc = caps[k];
+
+            seqs[k] = seqs[k - 1];
+            caps[k] = caps[k - 1];
+            seqs[k - 1] = ts;
+            caps[k - 1] = tc;
+        }
+    }
+
+    for (i = 0; i < n; i++) {
+        me = seqs[i] == f->fp.chain_seq ? i : me;
+    }
+
+    stack_lines(L, head, f->w, lt, lb, &nl, 512);
+    *src = head;
+    *lo = 0;
+    *hi = 0;
+
+    for (i = 0; i <= me; i++) {     /* each box from the first line left, as many lines as reach no lower than it */
+        pd_sp start = line < nl ? lt[line] : (nl ? lb[nl - 1] : 0);
+
+        *lo = start;
+
+        if (caps[i] <= 0 || i == n - 1) {   /* no height said, or the last box: all the rest */
+            line = nl;
+        } else {
+            while (line < nl && lb[line] - start <= caps[i]) {
+                line++;
+            }
+        }
+
+        *hi = line < nl ? lt[line] : (nl ? lb[nl - 1] + 1 : 0);
+    }
+
+    return 1;
+}
+
+/* a float's content placed with its top at (x, y): its own stack, or cut to its height, or its slice of a chain */
+static void place_float(filler* F, const pfloat* f, pd_sp x, pd_sp y, int32_t region) {
+    pd_block_id src = f->block;
+    pd_sp lo = 0, hi = 0;
+
+    if (f->fp.chain && chain_slice(F->L, f, &src, &lo, &hi)) {
+        if (hi > lo) {
+            place_stack_clip(F->L, src, f->w, F->page, x, y - lo, lo, hi, 0, region);
+        }
+    } else if (f->fp.height > 0) {
+        place_stack_clip(F->L, f->block, f->w, F->page, x, y, 0, f->fp.height, 1, region);
+    } else {
+        place_stack(F->L, f->block, f->w, F->page, x, y, region);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* fields, counters, labels                                           */
 /* ------------------------------------------------------------------ */
@@ -2683,10 +2770,17 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
             f->fp = b->st.fp;
             f->w = f->fp.width ? (f->fp.width < F->colw ? f->fp.width : F->colw) :
                    (pd_sp)((int64_t)F->colw * (f->fp.width_fraction ? f->fp.width_fraction : 1000) / 1000);
-            f->h = stack_height(F->L, b->id, f->w, &st);
+            f->h = f->fp.height > 0 || f->fp.chain ? f->fp.height : stack_height(F->L, b->id, f->w, &st);
 
             if (f->h < 0) {
                 return st;
+            }
+
+            if (f->fp.chain && f->fp.height <= 0) {     /* a linked box of no height said: as its slice */
+                pd_block_id src;
+                pd_sp lo, hi;
+
+                f->h = chain_slice(F->L, f, &src, &lo, &hi) ? hi - lo : 0;
             }
 
             /* text wraps only beside a float that leaves it room: an inch, as Word fills a gap a line of a few
@@ -2879,7 +2973,7 @@ static int float_page(filler* F) {
             break;
         }
 
-        place_stack(F->L, f->block, f->w, F->page, col_x(F, F->page, 0) + (F->colw - f->w) / 2,
+        place_float(F, f, col_x(F, F->page, 0) + (F->colw - f->w) / 2,
                     F->top + y + f->fp.gap, 3);
         f->state = FL_PLACED;
         y += h;
@@ -2908,7 +3002,7 @@ static int next_column(filler* F, int force_page) {
         int small = (int64_t)(F->top_used + h) * 1000 <= (int64_t)F->colh * TOP_FRACTION;
 
         if (top_ok && (small || (F->top_used == 0 && (!(f->fp.placement & PD_PLACE_PAGE) || stuck)))) {
-            place_stack(F->L, f->block, f->w, F->page, col_x(F, F->page, F->col) + (F->colw - f->w) / 2,
+            place_float(F, f, col_x(F, F->page, F->col) + (F->colw - f->w) / 2,
                         F->top + F->top_used + f->fp.gap, 3);
             f->state = FL_PLACED;
             F->top_used += h;
@@ -3401,7 +3495,7 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
                 ppage* pg = &F->L->pages[F->page];
                 int32_t n0 = pg->n;
 
-                place_stack(F->L, f->block, f->w, F->page, x + ox, y0 + r[i].y + f->fp.offset_y, 3);
+                place_float(F, f, x + ox, y0 + r[i].y + f->fp.offset_y, 3);
 
                 if (f->fp.wrap == PD_WRAP_BEHIND && pg->n > n0 && n0 > 0) {     /* under: drawn first */
                     pline* tmp = (pline*)malloc(sizeof(pline) * (size_t)(pg->n - n0));
@@ -3417,10 +3511,10 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
                 pd_sp ox;
 
                 float_taken(&f->fp, f->w, F->colw, &ox);
-                place_stack(F->L, f->block, f->w, F->page, x + ox,
+                place_float(F, f, x + ox,
                             y0 + r[i].y + f->fp.offset_y, 3);
             } else {
-                place_stack(F->L, f->block, f->w, F->page, x + (F->colw - f->w) / 2,
+                place_float(F, f, x + (F->colw - f->w) / 2,
                             y0 + r[i].y + f->fp.offset_y + f->fp.gap, 3);
             }
 
@@ -3456,7 +3550,7 @@ static void commit(filler* F, const rec* r, int32_t nr, int32_t cut, pd_sp used_
 
         if (i == 0 && (f->fp.placement & PD_PLACE_BOTTOM) && f->item < cut && used_at_cut + h <= bottom) {
             bottom -= h;
-            place_stack(F->L, f->block, f->w, F->page, x + (F->colw - f->w) / 2, y0 + bottom + f->fp.gap, 3);
+            place_float(F, f, x + (F->colw - f->w) / 2, y0 + bottom + f->fp.gap, 3);
             f->state = FL_PLACED;
             memmove(F->queue + i, F->queue + i + 1, (size_t)(F->nq - i - 1) * sizeof(int32_t));
             F->nq--;
@@ -3630,7 +3724,7 @@ static pd_status fill(filler* F, int32_t start) {
                 if (empty && (f->fp.placement & PD_PLACE_TOP) && F->nq == 0 &&
                         (int64_t)(F->top_used + v->h) * 1000 <= (int64_t)F->colh * TOP_FRACTION) {
                     /* nothing on this column yet: its top is still free */
-                    place_stack(F->L, f->block, f->w, F->page, col_x(F, F->page, F->col) + (F->colw - f->w) / 2,
+                    place_float(F, f, col_x(F, F->page, F->col) + (F->colw - f->w) / 2,
                                 F->top + F->top_used + f->fp.gap, 3);
                     f->state = FL_PLACED;
                     F->top_used += v->h;

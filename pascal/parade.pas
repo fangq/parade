@@ -669,6 +669,8 @@ type
     wrap_mode: Int32;       { PD_WRAPSIDE_* }
     npoly: Int32;           { points of its wrap outline, 0 = its box }
     poly: array[0..2 * PD_WRAP_POLY_MAX - 1] of Int32;  { x, y in 21600ths of its box }
+    height: pd_sp;          { a box this high, cut off below (0: as its content) }
+    chain, chain_seq: Int32;  { linked text boxes: one story through the chain's boxes in seq order }
   end;
   Ppd_float_props = ^pd_float_props;
 

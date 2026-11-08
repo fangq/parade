@@ -999,6 +999,15 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "WrapSide", p->wrap_mode);
             }
 
+            if (p->height) {
+                put_int(w, "Height", p->height);
+            }
+
+            if (p->chain) {
+                put_int(w, "Chain", p->chain);
+                put_int(w, "ChainSeq", p->chain_seq);
+            }
+
             if (p->npoly) {
                 int64_t q[2 * PD_WRAP_POLY_MAX];
                 int k;
@@ -2252,6 +2261,9 @@ static void load_float(loader* L, const pj_node* o, pd_float_props* p) {
     p->frame_lines = (int32_t)int_or(pj_get(x, "FrameLines"), 0, 0, 10, L);
     p->wrap = pj_get(x, "Wrap") ? enum_of(pj_get(x, "Wrap"), NAMES(wrap_names)) : 0;
     p->wrap_mode = (int32_t)int_or(pj_get(x, "WrapSide"), 0, 0, PD_WRAPSIDE_LARGEST, L);
+    p->height = (pd_sp)int_or(pj_get(x, "Height"), 0, 0, PD_PT(20000), L);
+    p->chain = (int32_t)int_or(pj_get(x, "Chain"), 0, 0, 1000000, L);
+    p->chain_seq = (int32_t)int_or(pj_get(x, "ChainSeq"), 0, 0, 1000000, L);
 
     {
         const pj_node* q = pj_get(x, "WrapPolygon");
