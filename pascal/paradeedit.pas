@@ -602,6 +602,10 @@ type
       ready to draw in; a new one after another (-1: first), blank or (Copy) a copy of that one; one deleted (not
       the last left); one moved to another place. Each one step of undo }
     function SlideCount: Integer;
+    { a slide's speaker notes, as text (paragraphs on lines of their own); set as one step of undo ('' takes them
+      away). False when there is no such slide }
+    function SlideNotes(Index: Integer): string;
+    function SetSlideNotes(Index: Integer; const ANotes: string): Boolean;
     function CurrentSlide: Integer;
     function GoToSlide(Index: Integer): Boolean;
     { a slide's page at the top of the view, the selection as it is }
@@ -8608,6 +8612,72 @@ begin
     Result := 0;
 end;
 
+function TParadeEdit.SlideNotes(Index: Integer): string;
+var
+  Sp: pd_section_props;
+  Info: pd_block_info;
+  I: Integer;
+  T: PAnsiChar;
+  N: UInt32;
+  S: string;
+begin
+  Result := '';
+  if (Index < 0) or (Index >= ChildCount(pd_doc_root(FDoc))) or
+     (pd_doc_section_props(FDoc, pd_doc_child(FDoc, pd_doc_root(FDoc), Index), Sp) <> PD_OK) or (Sp.notes = 0) or
+     (pd_doc_block_info(FDoc, Sp.notes, Info) <> PD_OK) then
+    Exit;
+  for I := 0 to Info.child_count - 1 do
+    if pd_doc_para_text(FDoc, pd_doc_child(FDoc, Sp.notes, I), T, N) = PD_OK then
+    begin
+      SetString(S, T, N);
+      if I > 0 then
+        Result := Result + LineEnding;
+      Result := Result + S;
+    end;
+end;
+
+function TParadeEdit.SetSlideNotes(Index: Integer; const ANotes: string): Boolean;
+var
+  Sec, St, P: pd_block_id;
+  Sp: pd_section_props;
+  Lines: TStringList;
+  I: Integer;
+begin
+  Result := False;
+  if FReadOnly or (Index < 0) or (Index >= ChildCount(pd_doc_root(FDoc))) then
+    Exit;
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
+  if pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK then
+    Exit;
+  Lines := TStringList.Create;
+  pd_doc_begin_group(FDoc, 'Speaker notes');
+  try
+    Lines.Text := ANotes;
+    St := 0;
+    if ANotes <> '' then
+    begin   { a story of its own, a paragraph a line }
+      if pd_doc_insert_block(FDoc, 0, -1, PD_BLOCK_STORY, St) <> PD_OK then
+        Exit;
+      for I := 0 to Lines.Count - 1 do
+      begin
+        if (I = 0) and (pd_doc_child(FDoc, St, 0) <> 0) then
+          P := pd_doc_child(FDoc, St, 0)
+        else if pd_doc_insert_block(FDoc, St, -1, PD_BLOCK_PARAGRAPH, P) <> PD_OK then
+          Exit;
+        if Lines[I] <> '' then
+          pd_doc_insert_text(FDoc, PdPos(P, 0), PAnsiChar(Lines[I]), Length(Lines[I]), PD_FORMAT_INHERIT, nil);
+      end;
+    end;
+    Sp.notes := St;
+    Result := pd_doc_set_section_props(FDoc, Sec, Sp) = PD_OK;
+  finally
+    pd_doc_end_group(FDoc);
+    Lines.Free;
+  end;
+  if Result then
+    Changed;
+end;
+
 function TParadeEdit.CurrentSlide: Integer;
 var
   Sec: pd_block_id;
@@ -8694,6 +8764,7 @@ begin
   try
     if pd_doc_insert_block(FDoc, pd_doc_root(FDoc), After + 1, PD_BLOCK_SECTION, Sec) <> PD_OK then
       Exit;
+    Sp.notes := 0;      { its own notes, none yet (not the slide's it was copied from) }
     pd_doc_set_section_props(FDoc, Sec, Sp);
     Result := PutPageCanvas(Sec, R);
     if Result and (R <> 0) then
