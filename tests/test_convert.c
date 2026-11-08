@@ -4809,6 +4809,97 @@ static void test_pptx_math(void) {
     pd_doc_free(d);
 }
 
+/* a table style's first and last columns and its column bands; the edges its tcBdr gives, the inside ones between
+   rows, and a cell's own over them */
+static void test_pptx_table_style(void) {
+#define PTC(t, pr) "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>" t "</a:t></a:r></a:p></a:txBody><a:tcPr>" \
+    pr "</a:tcPr></a:tc>"
+#define PROW(a, b, c, e) "<a:tr h=\"370000\">" PTC(a, "") PTC(b, e) PTC(c, "") PTC("z", "") "</a:tr>"
+#define PFILL(part, rgb, more) "<a:" part ">" more "<a:tcStyle><a:fill><a:solidFill><a:srgbClr val=\"" rgb \
+    "\"/></a:solidFill></a:fill></a:tcStyle></a:" part ">"
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"4\" "
+                         "name=\"T\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\"/>"
+                         "<a:ext cx=\"4000000\" cy=\"1110000\"/></p:xfrm><a:graphic><a:graphicData uri=\"t\"><a:tbl><a:tblPr "
+                         "firstCol=\"1\" lastCol=\"1\" bandCol=\"1\"><a:tableStyleId>{S}</a:tableStyleId></a:tblPr><a:tblGrid>"
+                         "<a:gridCol w=\"1000000\"/><a:gridCol w=\"1000000\"/><a:gridCol w=\"1000000\"/><a:gridCol "
+                         "w=\"1000000\"/></a:tblGrid>" PROW("a", "b", "c", "") PROW("d", "e", "f", "<a:lnB w=\"25400\">"
+                                 "<a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill></a:lnB>") PROW("g", "h", "i", "")
+                         "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"),
+                         "ppt/tableStyles.xml", "<a:tblStyleLst xmlns:a=\"a\"><a:tblStyle styleId=\"{S}\"><a:wholeTbl>"
+                         "<a:tcStyle><a:tcBdr><a:insideH><a:ln w=\"12700\"><a:solidFill><a:srgbClr val=\"FF0000\"/>"
+                         "</a:solidFill></a:ln></a:insideH></a:tcBdr><a:fill><a:solidFill><a:srgbClr val=\"111111\"/>"
+                         "</a:solidFill></a:fill></a:tcStyle></a:wholeTbl>" PFILL("band1V", "444444", "") PFILL("band2V", "555555", "")
+                         PFILL("firstCol", "222222", "<a:tcTxStyle b=\"on\"/>") PFILL("lastCol", "333333", "")
+                         "</a:tblStyle></a:tblStyleLst>", NULL);
+    char* js = d ? slide_json(d, 0) : NULL;
+    pd_block_id t = 0;
+    int32_t i;
+
+    CHECK(js && count_of(js, "\"fill\":4280427042") == 3 && count_of(js, "\"fill\":4282664004") == 3 &&
+          count_of(js, "\"fill\":4283782485") == 3 && count_of(js, "\"fill\":4281545523") == 3 &&
+          count_of(js, "\"fill\":4279308561") == 0);  /* first, band 1, band 2, last; nothing the whole table's */
+
+    for (i = 0; d && i < pd_doc_story_count(d) && !t; i++) {
+        pd_block_info bi;
+        pd_block_id b = pd_doc_child(d, pd_doc_story_at(d, i), 0);
+
+        if (pd_doc_block_info(d, b, &bi) == PD_OK && bi.kind == PD_BLOCK_TABLE) {
+            t = b;
+        }
+    }
+
+    CHECK(t != 0);
+
+    if (t) {
+        pd_cell_props a = cell_props_at(d, t, 0, 0), e = cell_props_at(d, t, 1, 1);
+
+        /* a ruled below and not above (the style has no top edge); e: its own 2 points below, the inside one above */
+        CHECK((a.border_on & PD_BORDER_BOTTOM) && !(a.border_on & PD_BORDER_TOP));
+        CHECK((e.border_on & (PD_BORDER_BOTTOM | PD_BORDER_TOP)) == (PD_BORDER_BOTTOM | PD_BORDER_TOP) &&
+              (e.edge_width[2] ? e.edge_width[2] : e.border_width) == PD_PT(2) && e.edge_width[0] == PD_PT(1));
+        CHECK(chars_at(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 0), 0), 0), 0).weight >= 700 &&
+              chars_at(d, pd_doc_child(d, pd_doc_child(d, pd_doc_child(d, t, 0), 1), 0), 0).weight < 700);
+    }
+
+    free(js);
+    pd_doc_free(d);
+#undef PTC
+#undef PROW
+#undef PFILL
+}
+
+/* a slide whose master's theme is not the document's (the first master's): its shapes' style references are to its
+   own theme's fills and lines */
+static void test_pptx_other_theme(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"S\"/><p:cNvSpPr/>"
+                         "<p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/>"
+                         "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr><p:style><a:lnRef idx=\"2\">"
+                         "<a:srgbClr val=\"00FF00\"/></a:lnRef><a:fillRef idx=\"2\"><a:srgbClr val=\"FF0000\"/></a:fillRef>"
+                         "<a:effectRef idx=\"0\"><a:srgbClr val=\"000000\"/></a:effectRef><a:fontRef idx=\"minor\">"
+                         "<a:srgbClr val=\"000000\"/></a:fontRef></p:style></p:sp>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>",
+                         "ppt/slideLayouts/slideLayout1.xml", "<p:sldLayout xmlns:p=\"p\"><p:cSld><p:spTree/></p:cSld>"
+                         "</p:sldLayout>",
+                         "ppt/slideLayouts/_rels/slideLayout1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../slideMasters/slideMaster2.xml\"/></Relationships>",
+                         "ppt/slideMasters/slideMaster2.xml", "<p:sldMaster xmlns:p=\"p\"><p:cSld><p:spTree/></p:cSld>"
+                         "</p:sldMaster>",
+                         "ppt/slideMasters/_rels/slideMaster2.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../theme/theme2.xml\"/></Relationships>",
+                         "ppt/theme/theme2.xml", "<a:theme xmlns:a=\"a\"><a:themeElements><a:fmtScheme><a:fillStyleLst>"
+                         "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:srgbClr val=\"0000FF\"/>"
+                         "</a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w=\"9525\"><a:solidFill><a:schemeClr "
+                         "val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"50800\"><a:solidFill><a:schemeClr val=\"phClr\"/>"
+                         "</a:solidFill></a:ln></a:lnStyleLst></a:fmtScheme></a:themeElements></a:theme>", NULL);
+    char* js = d ? slide_json(d, 0) : NULL;
+
+    /* its own blue, the line 4 points in the reference's green */
+    CHECK(js && strstr(js, "\"fill\":4278190335,\"line\":4278255360,\"lw\":262144"));
+    free(js);
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -7416,6 +7507,8 @@ int main(void) {
     test_pptx_ph_inherit();
     test_pptx_run_props();
     test_pptx_math();
+    test_pptx_table_style();
+    test_pptx_other_theme();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();
