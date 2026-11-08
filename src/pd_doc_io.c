@@ -43,7 +43,7 @@ static const char* const field_names[] = { "page", "pages", "sectionpage", "refn
 static const char* const num_names[] = { "bullet", "decimal", "loweralpha", "upperalpha", "lowerroman",
                                          "upperroman", "none", "decimalzero", "ordinal", "circled",
                                          "fullwidth", "cjkcounting", "cjktraditional", "cardinaltext",
-                                         "ordinaltext"
+                                         "ordinaltext", "symbol"
                                        };
 static const char* const wrap_names[] = { "none", "left", "right", "front", "behind" };
 static const char* const break_names[] = { "page", "column", "oddpage", "evenpage", "rule" };
@@ -125,6 +125,11 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
 
     if (m & PD_PP_LINE_SPACING) {
         put_int(w, "LineSpacing", p->line_spacing);
+
+        if (p->line_rule) {
+            put_int(w, "LineRule", p->line_rule);
+            put_int(w, "LineHeight", p->line_height);
+        }
     }
 
     if (m & PD_PP_KEEP_NEXT) {
@@ -551,6 +556,7 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
         case PD_BLOCK_SECTION: {
             const pd_section_props* p = &s->sp;
+            int k;
 
             pj_key(w, "Page");
             pj_obj_begin(w);
@@ -607,6 +613,24 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
             if (p->direction == PD_DIR_RTL) {
                 put_str(w, "Direction", "rtl");
+            }
+
+            for (k = 0; k < 2; k++) {
+                static const char* const nk[2][3] = { { "FootnoteFormat", "FootnoteStart", "FootnoteRestart" },
+                    { "EndnoteFormat", "EndnoteStart", "EndnoteRestart" }
+                };
+
+                if (p->note_format[k]) {
+                    put_str(w, nk[k][0], name_of(NAMES(num_names), p->note_format[k]));
+                }
+
+                if (p->note_start[k]) {
+                    put_int(w, nk[k][1], p->note_start[k]);
+                }
+
+                if (p->note_restart[k]) {
+                    put_int(w, nk[k][2], p->note_restart[k]);
+                }
             }
 
             if (p->line_numbers) {
@@ -749,6 +773,11 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
             if (p->offset_y) {
                 put_int(w, "OffsetY", p->offset_y);
+            }
+
+            if (p->frame) {
+                put_int(w, "Frame", p->frame);
+                put_int(w, "FrameLines", p->frame_lines);
             }
 
             if (p->offset_from) {
@@ -1287,6 +1316,8 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
     F("SpaceBefore", PD_PP_SPACE_BEFORE, space_before, SP_MIN, SP_MAX);
     F("SpaceAfter", PD_PP_SPACE_AFTER, space_after, SP_MIN, SP_MAX);
     F("LineSpacing", PD_PP_LINE_SPACING, line_spacing, 0, 100000);
+    F("LineRule", PD_PP_LINE_SPACING, line_rule, 0, 2);
+    F("LineHeight", PD_PP_LINE_SPACING, line_height, 0, PD_PT(1000));
     F("KeepWithNext", PD_PP_KEEP_NEXT, keep_with_next, 0, 1);
     F("KeepLines", PD_PP_KEEP_LINES, keep_lines, 0, 1);
     F("Widows", PD_PP_WIDOWS, widows, 0, 1000);
@@ -1348,7 +1379,7 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
 
             REQUIRE(t && t->type == PJ_ARR && t->n == 3);
             p->tabs[i].position = (pd_sp)int_or(pj_at(t, 0), 0, SP_MIN, SP_MAX, L);
-            p->tabs[i].align = (int32_t)int_or(pj_at(t, 1), 0, PD_TAB_LEFT, PD_TAB_DECIMAL, L);
+            p->tabs[i].align = (int32_t)int_or(pj_at(t, 1), 0, PD_TAB_LEFT, PD_TAB_BAR, L);
             p->tabs[i].leader = (int32_t)int_or(pj_at(t, 2), 0, PD_LEADER_NONE, PD_LEADER_UNDERSCORE, L);
             p->ntabs = i + 1;
         }
@@ -1758,6 +1789,20 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->line_number_distance = (pd_sp)int_or(pj_get(x, "LineNumberDistance"), 0, 0, PD_PT(1000), L);
     p->line_number_restart = (int32_t)int_or(pj_get(x, "LineNumberRestart"), 0, 0, 2, L);
 
+    {
+        static const char* const nk[2][3] = { { "FootnoteFormat", "FootnoteStart", "FootnoteRestart" },
+            { "EndnoteFormat", "EndnoteStart", "EndnoteRestart" }
+        };
+        int k;
+
+        for (k = 0; k < 2; k++) {
+            p->note_format[k] = pj_get(x, nk[k][0]) ? enum_of(pj_get(x, nk[k][0]), NAMES(num_names)) : 0;
+            REQUIRE(p->note_format[k] >= 0);
+            p->note_start[k] = (int32_t)int_or(pj_get(x, nk[k][1]), 0, 0, 1000000, L);
+            p->note_restart[k] = (int32_t)int_or(pj_get(x, nk[k][2]), 0, 0, 2, L);
+        }
+    }
+
     if (pj_get(x, "PageBreaking")) {
         static const char* const pb_names[] = { "greedy", "optimal" };
 
@@ -1861,6 +1906,8 @@ static void load_float(loader* L, const pj_node* o, pd_float_props* p) {
     p->offset_x = (pd_sp)int_or(pj_get(x, "OffsetX"), 0, -PD_PT(10000), PD_PT(10000), L);
     p->offset_y = (pd_sp)int_or(pj_get(x, "OffsetY"), 0, -PD_PT(10000), PD_PT(10000), L);
     p->offset_from = (int32_t)int_or(pj_get(x, "OffsetFrom"), 0, 0, 2, L);
+    p->frame = (int32_t)int_or(pj_get(x, "Frame"), 0, 0, 3, L);
+    p->frame_lines = (int32_t)int_or(pj_get(x, "FrameLines"), 0, 0, 10, L);
     p->wrap = pj_get(x, "Wrap") ? enum_of(pj_get(x, "Wrap"), NAMES(wrap_names)) : 0;
     REQUIRE(p->wrap >= 0);
     p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);

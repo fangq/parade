@@ -336,7 +336,14 @@ typedef struct {
     int32_t snap_grid;          /**< its lines on the section's grid, when it has one (1, the default) */
     uint32_t border_theme;      /**< pd_theme_color reference of the border (with PD_PP_BORDER), 0 = none */
     uint32_t shading_theme;     /**< pd_theme_color reference of the shading (with PD_PP_SHADING), 0 = none */
+    int32_t line_rule;          /**< PD_LINE_*: what sets the line height (with PD_PP_LINE_SPACING) */
+    pd_sp line_height;          /**< PD_LINE_AT_LEAST, PD_LINE_EXACT: that height, baseline to baseline */
 } pd_para_props;
+
+/* line spacing: a multiple of the font's line height (line_spacing), or a length (line_height) */
+#define PD_LINE_MULTIPLE 0
+#define PD_LINE_AT_LEAST 1      /**< the font's single line height, but no less than line_height */
+#define PD_LINE_EXACT    2      /**< exactly line_height, whatever the text's size */
 
 /* the edges of a paragraph border; paragraphs one after another with the
    same border share one box, and BETWEEN rules them off from each other */
@@ -456,7 +463,8 @@ typedef enum {
     PD_NUM_CJK_TRADITIONAL = 12, /**< the ten heavenly stems, decimal past ten */
     PD_NUM_CARDINAL_TEXT = 13,  /**< One, Two, Three (English) */
     PD_NUM_ORDINAL_TEXT = 14,   /**< First, Second, Third (English) */
-    PD_NUM_LAST = 14
+    PD_NUM_SYMBOL = 15,         /**< *, \u2020, \u2021, \u00a7, then doubled (Word's chicago, for notes) */
+    PD_NUM_LAST = 15
 } pd_num_format;
 
 typedef struct {
@@ -622,7 +630,15 @@ typedef struct {
                                      paragraph it is anchored in; the text beside it from there. Negative: above
                                      it. With offset_from, from the page's top or its top margin instead */
     int32_t offset_from;        /**< what offset_y is from: PD_FROM_PARAGRAPH, PD_FROM_PAGE, PD_FROM_MARGIN */
+    int32_t frame;              /**< PD_FRAME_*: a Word frame (framePr) its paragraphs are, written back as one */
+    int32_t frame_lines;        /**< a drop cap: the lines of text it is beside */
 } pd_float_props;
+
+/* a float that is a Word frame: paragraphs with a framePr rather than a text box */
+#define PD_FRAME_NONE   0
+#define PD_FRAME_BOX    1       /**< a frame placed as its float props say */
+#define PD_FRAME_DROP   2       /**< a drop cap: its letter frame_lines high, the text beside it */
+#define PD_FRAME_MARGIN 3       /**< a drop cap in the margin, left of the text */
 
 #define PD_FROM_PARAGRAPH 0     /**< the top of the paragraph after it (its anchor) */
 #define PD_FROM_PAGE 1          /**< the top edge of the page its anchor is on */
@@ -656,7 +672,16 @@ typedef struct {
     pd_sp line_pitch;           /**< the document grid (East Asian layout): every line a whole number of this high,
                                      in paragraphs that snap to it (0 = no grid) */
     int32_t direction;          /**< pd_direction: PD_DIR_RTL puts its first column at the right */
+    /* the numbers of its footnotes [0] and endnotes [1] */
+    int32_t note_format[2];     /**< pd_num_format; PD_NUM_BULLET (0) = the usual: 1, 2, 3 and i, ii, iii */
+    int32_t note_start[2];      /**< the first number, 0 = 1 */
+    int32_t note_restart[2];    /**< PD_NOTES_*: where they count from note_start again */
 } pd_section_props;
+
+/* where notes are numbered from the start again */
+#define PD_NOTES_CONTINUOUS 0   /**< never: through the document */
+#define PD_NOTES_SECTION    1   /**< at each section */
+#define PD_NOTES_PAGE       2   /**< on each page (footnotes) */
 
 typedef enum {
     PD_PAGES_GREEDY = 0,        /**< fill each column, best break on it (TeX) */

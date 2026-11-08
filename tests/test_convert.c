@@ -876,6 +876,8 @@ static pd_para_props para_resolved(const pd_doc* d, pd_block_id p) {
     if (o.mask & PD_PP_SPACE_BEFORE) r.space_before = o.space_before;
     if (o.mask & PD_PP_SPACE_AFTER) r.space_after = o.space_after;
     if (o.mask & PD_PP_LINE_SPACING) r.line_spacing = o.line_spacing;
+    if (o.mask & PD_PP_LINE_SPACING) r.line_rule = o.line_rule;
+    if (o.mask & PD_PP_LINE_SPACING) r.line_height = o.line_height;
     if (o.mask & PD_PP_SHADING) r.shading = o.shading;
     if (o.mask & PD_PP_SHADING) r.shading_theme = o.shading_theme;
     if (o.mask & PD_PP_BORDER) {
@@ -1088,7 +1090,7 @@ static void check_docx_styles(const pd_doc* d) {
 
     /* direct paragraph properties: centred, exactly 24pt lines on 12pt text */
     pp = para_resolved(d, p[3]);
-    CHECK(pp.align == PD_ALIGN_CENTER && pp.line_spacing > 1700 && pp.line_spacing < 1780);
+    CHECK(pp.align == PD_ALIGN_CENTER && pp.line_rule == PD_LINE_EXACT && pp.line_height == PD_PT(24));
 
     /* a heading in the theme's heading font; a run that turns the bold off */
     pd_doc_block_info(d, p[4], &bi);
@@ -3484,6 +3486,62 @@ static void test_docx_curves(void) {
     pd_doc_free(d);
 }
 
+/* the text drawn in a region (-1: any) on every page of a fresh layout, as UTF-8 in display order; the
+   number of pages, -1 when it cannot be laid out */
+static int layout_text(pd_doc* d, int32_t region, char* out, size_t cap) {
+    pd_layout* L = NULL;
+    int32_t pg, k, n, np;
+    size_t o = 0;
+
+    out[0] = '\0';
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) != PD_OK || pd_layout_update(L, NULL) != PD_OK) {
+        pd_layout_free(L);
+        return -1;
+    }
+
+    np = pd_layout_page_count(L);
+
+    for (pg = 0; pg < np; pg++) {
+        pd_draw* it;
+
+        pd_layout_page_items(L, pg, NULL, 0, &n);
+        it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+        pd_layout_page_items(L, pg, it, n, &n);
+
+        for (k = 0; k < n; k++) {
+            uint32_t c = it[k].text;
+
+            if (it[k].kind != PD_DRAW_GLYPH || !c || (region >= 0 && it[k].region != region) || o + 5 > cap) {
+                continue;
+            }
+
+            if (c < 0x80) {
+                out[o++] = (char)c;
+            } else if (c < 0x800) {
+                out[o++] = (char)(0xC0 | (c >> 6));
+                out[o++] = (char)(0x80 | (c & 0x3F));
+            } else if (c < 0x10000) {
+                out[o++] = (char)(0xE0 | (c >> 12));
+                out[o++] = (char)(0x80 | ((c >> 6) & 0x3F));
+                out[o++] = (char)(0x80 | (c & 0x3F));
+            } else {
+                out[o++] = (char)(0xF0 | (c >> 18));
+                out[o++] = (char)(0x80 | ((c >> 12) & 0x3F));
+                out[o++] = (char)(0x80 | ((c >> 6) & 0x3F));
+                out[o++] = (char)(0x80 | (c & 0x3F));
+            }
+        }
+
+        free(it);
+    }
+
+    out[o] = '\0';
+    pd_layout_free(L);
+    return np;
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -5681,6 +5739,417 @@ static void test_docx_endnotes(void) {
     pd_doc_free(d);
 }
 
+/* a part of a .docx written out, NUL-terminated (caller frees); "" when it has none */
+static char* docx_part(const buf_t* b, const char* name) {
+    size_t n = 0;
+    unsigned char* x = b->p ? pd_zip_get((const unsigned char*)b->p, b->n, name, &n) : NULL;
+    char* s = (char*)malloc(n + 1);
+
+    if (s) {
+        if (x) {
+            memcpy(s, x, n);
+        }
+
+        s[n] = '\0';
+    }
+
+    free(x);
+    return s;
+}
+
+/* Small things of Word's text: all sixteen highlight colours (written back as highlights, not shading), w:sym
+   in the Symbol font as the Unicode character it shows and in Wingdings as its code in that font, w:lang, and
+   how notes are numbered (footnotePr/endnotePr: format, start, restart), shown so and written back. */
+static void test_docx_text_small(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:r><w:rPr><w:highlight w:val=\"darkCyan\"/><w:lang w:val=\"de-DE\"/></w:rPr><w:t>hi</w:t></w:r>"
+                    "<w:r><w:rPr><w:highlight w:val=\"lightGray\"/></w:rPr><w:t>lo</w:t></w:r>"
+                    "<w:r><w:sym w:font=\"Symbol\" w:char=\"F06D\"/><w:sym w:font=\"Wingdings\" w:char=\"F04A\"/></w:r></w:p>"
+                    "<w:p><w:r><w:t>One</w:t></w:r><w:r><w:endnoteReference w:id=\"1\"/></w:r>"
+                    "<w:r><w:t xml:space=\"preserve\"> two</w:t></w:r><w:r><w:footnoteReference w:id=\"1\"/></w:r>"
+                    "<w:r><w:footnoteReference w:id=\"2\"/></w:r></w:p>"
+                    "<w:sectPr><w:footnotePr><w:numFmt w:val=\"lowerLetter\"/><w:numStart w:val=\"3\"/></w:footnotePr>"
+                    "<w:endnotePr><w:numFmt w:val=\"upperRoman\"/><w:numRestart w:val=\"eachSect\"/></w:endnotePr>"
+                    "</w:sectPr></w:body></w:document>",
+                    "word/endnotes.xml",
+                    "<w:endnotes xmlns:w=\"w\"><w:endnote w:id=\"1\"><w:p><w:r><w:endnoteRef/></w:r><w:r><w:t>E</w:t>"
+                    "</w:r></w:p></w:endnote></w:endnotes>",
+                    "word/footnotes.xml",
+                    "<w:footnotes xmlns:w=\"w\"><w:footnote w:id=\"1\"><w:p><w:r><w:footnoteRef/></w:r>"
+                    "<w:r><w:t>F</w:t></w:r></w:p></w:footnote><w:footnote w:id=\"2\"><w:p><w:r><w:footnoteRef/></w:r>"
+                    "<w:r><w:t>G</w:t></w:r></w:p></w:footnote></w:footnotes>",
+                    "word/settings.xml",
+                    "<w:settings xmlns:w=\"w\"><w:footnotePr><w:numFmt w:val=\"upperLetter\"/>"
+                    "<w:footnote w:id=\"-1\"/></w:footnotePr></w:settings>",
+                    NULL);
+    pd_doc* back = NULL;
+    pd_block_id sec, p0;
+    pd_section_props sp;
+    pd_char_props cp;
+    const char* t;
+    uint32_t n;
+    char shown[256];
+    buf_t b;
+    int pass;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+    {
+        char* xml = docx_part(&b, "word/document.xml");
+
+        CHECK(strstr(xml, "<w:highlight w:val=\"darkCyan\"/>") && strstr(xml, "<w:highlight w:val=\"lightGray\"/>"));
+        CHECK(strstr(xml, "<w:numFmt w:val=\"lowerLetter\"/><w:numStart w:val=\"3\"/>") &&
+              strstr(xml, "<w:numFmt w:val=\"upperRoman\"/><w:numRestart w:val=\"eachSect\"/>"));
+        free(xml);
+    }
+
+    free(b.p);
+
+    for (pass = 0; pass < 2; pass++) {
+        pd_doc* x = pass ? back : d;
+
+        if (!x) {
+            continue;
+        }
+
+        sec = pd_doc_child(x, pd_doc_root(x), 0);
+        p0 = pd_doc_child(x, sec, 0);
+        cp = chars_at(x, p0, 0);
+        CHECK(cp.background == 0xFF008080u && strcmp(cp.lang, "de-DE") == 0);
+        CHECK(chars_at(x, p0, 2).background == 0xFFC0C0C0u);
+        pd_doc_para_text(x, p0, &t, &n);
+        CHECK(n == 9 && memcmp(t + 4, "\xCE\xBC\xEF\x81\x8A", 5) == 0);   /* mu, then Wingdings' U+F04A */
+        CHECK(strcmp(chars_at(x, p0, 6).family, "Wingdings") == 0);
+        CHECK(pd_doc_section_props(x, sec, &sp) == PD_OK && sp.note_format[0] == PD_NUM_LOWER_ALPHA &&
+              sp.note_start[0] == 3 && sp.note_format[1] == PD_NUM_UPPER_ROMAN &&
+              sp.note_restart[1] == PD_NOTES_SECTION);
+
+        if (have_layout_font()) {   /* the marks as the section numbers them: endnote I, footnotes c and d */
+            layout_text(x, 0, shown, sizeof(shown));
+            CHECK(strstr(shown, "OneItwocd") != NULL);
+        }
+    }
+
+    pd_doc_free(back);
+    pd_doc_free(d);
+}
+
+/* the baseline (y) of the first glyph drawn for a code point on page 0; 0 when there is none */
+static pd_sp glyph_y(pd_doc* d, uint32_t cp) {
+    pd_layout* L = NULL;
+    int32_t n = 0, k;
+    pd_sp y = 0;
+    pd_draw* it;
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &n) == PD_OK && (it = (pd_draw*)malloc(((size_t)n + 1) *
+                    sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, n, &n);
+
+        for (k = 0; k < n && !y; k++) {
+            y = it[k].kind == PD_DRAW_GLYPH && it[k].text == cp ? it[k].y : 0;
+        }
+
+        free(it);
+    }
+
+    pd_layout_free(L);
+    return y;
+}
+
+/* Word's exact and at-least line spacing are lengths, not multiples of the font size: 24pt exactly on 12pt text,
+   6pt exactly (the lines overlap, as in Word), at least 30pt, and at least 6pt (a single line then); read, laid
+   out at those distances, and written back with their rules. */
+static void test_docx_line_rules(void) {
+    static const char* const rules[4][2] = { { "480", "exact" }, { "120", "exact" }, { "600", "atLeast" },
+        { "120", "atLeast" }
+    };
+    static const int32_t want[4] = { 24, 6, 30, 0 };
+    int k, pass;
+
+    for (k = 0; k < 4; k++) {
+        char xml[600];
+        pd_doc* d;
+        pd_doc* back = NULL;
+        buf_t b;
+
+        snprintf(xml, sizeof(xml), "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:spacing w:line=\"%s\" "
+                 "w:lineRule=\"%s\"/></w:pPr><w:r><w:rPr><w:sz w:val=\"24\"/></w:rPr><w:t>A</w:t><w:br/>"
+                 "<w:t>B</w:t></w:r></w:p></w:body></w:document>", rules[k][0], rules[k][1]);
+        d = docx_doc("word/document.xml", xml, NULL);
+        CHECK(d != NULL);
+
+        if (!d) {
+            continue;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+
+        for (pass = 0; pass < 2 && have_layout_font(); pass++) {
+            pd_doc* x = pass ? back : d;
+            pd_sp step;
+
+            if (!x) {
+                continue;
+            }
+
+            step = glyph_y(x, 'B') - glyph_y(x, 'A');
+
+            if (want[k]) {
+                CHECK(step == PD_PT(want[k]));
+            } else {    /* at least 6pt: the font's own single line, as with no rule (Liberation Serif 12pt: 13.8) */
+                CHECK(step > PD_PT(13) && step < PD_PT(15));
+            }
+        }
+
+        pd_doc_free(back);
+        pd_doc_free(d);
+    }
+}
+
+/* the rules (PD_DRAW_RULE) on page 0 whose left edge is at x, at most n of their heights into h; how many */
+static int rules_at(pd_doc* d, pd_sp x, pd_sp* h, int n) {
+    pd_layout* L = NULL;
+    int32_t cnt = 0, k, c = 0;
+    pd_draw* it;
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &cnt) == PD_OK && (it = (pd_draw*)malloc(((size_t)cnt + 1) *
+                    sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, cnt, &cnt);
+
+        for (k = 0; k < cnt; k++) {
+            if (it[k].kind == PD_DRAW_RULE && it[k].x == x) {
+                if (c < n) {
+                    h[c] = it[k].h;
+                }
+
+                c++;
+            }
+        }
+
+        free(it);
+    }
+
+    pd_layout_free(L);
+    return c;
+}
+
+/* A bar tab is a vertical rule through each line of its paragraph at the stop (it was dropped), and is written
+   back as one; the tab stop after it still takes the text. */
+static void test_docx_bar_tab(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:tabs><w:tab w:val=\"bar\" w:pos=\"2880\"/>"
+                    "<w:tab w:val=\"left\" w:pos=\"4320\"/></w:tabs></w:pPr><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t><w:br/>"
+                    "<w:t>C</w:t></w:r></w:p></w:body></w:document>",
+                    NULL);
+    pd_doc* back = NULL;
+    pd_sp h[4];
+    buf_t b;
+    int pass;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+    free(b.p);
+
+    for (pass = 0; pass < 2 && have_layout_font(); pass++) {
+        pd_doc* x = pass ? back : d;
+        pd_sp lo, hi;
+        pd_layout* L = NULL;
+
+        if (!x) {
+            continue;
+        }
+
+        /* the margin is 1in: the bar 2in into the column, half a point wide, down both lines */
+        CHECK(rules_at(x, PD_PT(72 + 144) - PD_PT(1) / 4, h, 4) == 2 && h[0] > PD_PT(10) && h[1] > PD_PT(10));
+        pd_doc_set_font_resolver(x, layout_resolver, NULL);
+
+        if (pd_layout_new(x, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+            CHECK(glyph_span(L, 'B', &lo, &hi) && lo == PD_PT(72 + 216));   /* B at the 3in stop, past the bar */
+        }
+
+        pd_layout_free(L);
+    }
+
+    pd_doc_free(back);
+    pd_doc_free(d);
+}
+
+/* the leftmost x of the glyphs on each baseline of page 0, region 0, top to bottom, into xs (at most n); how many */
+static int line_starts(pd_doc* d, pd_sp* xs, pd_sp* ys, int n) {
+    pd_layout* L = NULL;
+    int32_t cnt = 0, k, j, c = 0;
+    pd_draw* it;
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &cnt) == PD_OK && (it = (pd_draw*)malloc(((size_t)cnt + 1) *
+                    sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, cnt, &cnt);
+
+        for (k = 0; k < cnt; k++) {
+            if (it[k].kind != PD_DRAW_GLYPH || it[k].region != 0) {
+                continue;
+            }
+
+            for (j = 0; j < c && ys[j] != it[k].y; j++) {
+            }
+
+            if (j == c && c < n) {
+                ys[c] = it[k].y;
+                xs[c++] = it[k].x;
+            } else if (j < c && it[k].x < xs[j]) {
+                xs[j] = it[k].x;
+            }
+        }
+
+        free(it);
+    }
+
+    pd_layout_free(L);
+
+    for (k = 1; k < c; k++) {   /* top to bottom */
+        for (j = k; j > 0 && ys[j - 1] > ys[j]; j--) {
+            pd_sp t = ys[j];
+
+            ys[j] = ys[j - 1];
+            ys[j - 1] = t;
+            t = xs[j];
+            xs[j] = xs[j - 1];
+            xs[j - 1] = t;
+        }
+    }
+
+    return c;
+}
+
+/* A drop cap (framePr dropCap="drop" lines="3") is a float of its letter beside the first three lines of the
+   paragraph after it, which wrap round it, and is written back as a frame; a frame with a width and wrapping
+   around is a float of that width at the left with the text beside it. */
+static void test_docx_drop_cap(void) {
+    static const char lorem[] = "<w:p><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:t>he quick brown fox jumps over the lazy dog and keeps on running far "
+                                "away across the wide green fields until the sun goes down behind the hills and the "
+                                "night comes on, and then it runs again all through the dark and quiet night, past "
+                                "farms and rivers and sleeping towns, never stopping once to rest its tired legs, and on "
+                                "and on it goes over the hills and far away, until the morning light comes up again "
+                                "over the edge of the world and the birds begin to sing in the trees.</w:t>"
+                                "</w:r></w:p>";
+    char xml[2400];
+    pd_doc* d, *back = NULL;
+    buf_t b;
+    int pass;
+
+    snprintf(xml, sizeof(xml), "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:framePr w:dropCap=\"drop\" "
+             "w:lines=\"3\" w:wrap=\"around\" w:vAnchor=\"text\" w:hAnchor=\"text\"/><w:spacing w:line=\"680\" "
+             "w:lineRule=\"exact\"/></w:pPr><w:r><w:rPr><w:position w:val=\"-8\"/><w:sz w:val=\"90\"/></w:rPr>"
+             "<w:t>T</w:t></w:r></w:p>%s</w:body></w:document>", lorem);
+    d = docx_doc("word/document.xml", xml, NULL);
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+
+    {
+        char* dx = docx_part(&b, "word/document.xml");
+
+        CHECK(strstr(dx, "<w:framePr w:dropCap=\"drop\" w:lines=\"3\"") != NULL);
+        free(dx);
+    }
+
+    free(b.p);
+
+    for (pass = 0; pass < 2; pass++) {
+        pd_doc* x = pass ? back : d;
+        pd_block_id sec, fl;
+        pd_block_info bi;
+        pd_float_props fp;
+        pd_sp xs[16], ys[16];
+        int n;
+
+        if (!x) {
+            continue;
+        }
+
+        sec = pd_doc_child(x, pd_doc_root(x), 0);
+        fl = pd_doc_child(x, sec, 0);
+        CHECK(pd_doc_block_info(x, fl, &bi) == PD_OK && bi.kind == PD_BLOCK_FLOAT);
+        CHECK(pd_doc_float_props(x, fl, &fp) == PD_OK && fp.frame == PD_FRAME_DROP && fp.frame_lines == 3 &&
+              fp.wrap == PD_WRAP_LEFT);
+
+        if (!have_layout_font()) {
+            continue;
+        }
+
+        /* the cap at the margin, the first three lines of text right of it, the fourth back at the margin */
+        n = line_starts(x, xs, ys, 16);
+        CHECK(n >= 5 && xs[0] > PD_PT(72 + 20) && xs[1] == xs[0] && xs[2] == xs[0] && xs[3] == PD_PT(72));
+        {
+            pd_layout* L = NULL;
+            pd_sp lo, hi;
+
+            if (pd_layout_new(x, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+                CHECK(glyph_span(L, 'T', &lo, &hi) && lo == PD_PT(72) && hi <= xs[0]);
+            }
+
+            pd_layout_free(L);
+        }
+    }
+
+    pd_doc_free(back);
+    pd_doc_free(d);
+
+    /* a frame 2in wide at the margin, the text round it */
+    snprintf(xml, sizeof(xml), "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:framePr w:w=\"2880\" "
+             "w:hSpace=\"180\" w:wrap=\"around\" w:hAnchor=\"margin\" w:x=\"0\"/></w:pPr><w:r><w:t>Boxed</w:t></w:r>"
+             "</w:p>%s</w:body></w:document>", lorem);
+    d = docx_doc("word/document.xml", xml, NULL);
+    CHECK(d != NULL);
+
+    if (d && have_layout_font()) {
+        pd_float_props fp;
+        pd_sp xs[16], ys[16];
+        int n;
+
+        CHECK(pd_doc_float_props(d, pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), &fp) == PD_OK &&
+              fp.frame == PD_FRAME_BOX && fp.width == PD_PT(144));
+        n = line_starts(d, xs, ys, 16);
+        CHECK(n >= 1 && xs[0] == PD_PT(72 + 144 + 9));
+    }
+
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -6482,6 +6951,10 @@ int main(void) {
     test_docx_page_meta();
     printf("docx endnotes\n");
     test_docx_endnotes();
+    test_docx_text_small();
+    test_docx_line_rules();
+    test_docx_bar_tab();
+    test_docx_drop_cap();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

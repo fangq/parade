@@ -258,6 +258,8 @@ typedef struct {
     int32_t full_lines;     /**< 1: every line, the first too, is a full line high, its leading above it (word
                                  processors); 0: the paragraph starts at its first line's ascent (TeX) */
     pd_sp line_grid;        /**< every line's height rounded up to a whole number of this (a document grid; 0 off) */
+    pd_sp line_exact;       /**< every baseline exactly this far below the one above, whatever its text (Word's exact
+                                 line spacing; 0 off) */
 } pd_params;
 
 PD_API void pd_params_init(pd_params* params);
@@ -291,7 +293,9 @@ typedef enum {
     PD_TAB_LEFT = 0,            /**< text after the tab starts at the stop */
     PD_TAB_CENTER = 1,          /**< ... is centred on it */
     PD_TAB_RIGHT = 2,           /**< ... ends at it */
-    PD_TAB_DECIMAL = 3          /**< ... has its decimal point at it */
+    PD_TAB_DECIMAL = 3,         /**< ... has its decimal point at it */
+    PD_TAB_BAR = 4              /**< not a stop text goes to: a vertical rule through the paragraph's lines there
+                                     (Word's bar tab; a document paragraph's, pd_para_set_tabs takes none) */
 } pd_tab_align;
 
 typedef enum {

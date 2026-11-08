@@ -204,6 +204,7 @@ const
   PD_NUM_CJK_TRADITIONAL = 12;
   PD_NUM_CARDINAL_TEXT = 13;
   PD_NUM_ORDINAL_TEXT = 14;
+  PD_NUM_SYMBOL = 15;
 
   PD_INLINE_IMAGE = 0;
   PD_INLINE_EQUATION = 1;
@@ -247,6 +248,7 @@ const
   PD_TAB_CENTER = 1;
   PD_TAB_RIGHT = 2;
   PD_TAB_DECIMAL = 3;
+  PD_TAB_BAR = 4;
   PD_LEADER_NONE = 0;
   PD_LEADER_DOT = 1;
   PD_LEADER_HYPHEN = 2;
@@ -306,6 +308,19 @@ const
   PD_LINENUM_PAGE = 0;
   PD_LINENUM_SECTION = 1;
   PD_LINENUM_CONTINUOUS = 2;
+
+  PD_FRAME_NONE = 0;
+  PD_FRAME_BOX = 1;
+  PD_FRAME_DROP = 2;
+  PD_FRAME_MARGIN = 3;
+
+  PD_LINE_MULTIPLE = 0;
+  PD_LINE_AT_LEAST = 1;
+  PD_LINE_EXACT = 2;
+
+  PD_NOTES_CONTINUOUS = 0;
+  PD_NOTES_SECTION = 1;
+  PD_NOTES_PAGE = 2;
   PD_TBORDER_TOP = 1;
   PD_TBORDER_RIGHT = 2;
   PD_TBORDER_BOTTOM = 4;
@@ -395,6 +410,7 @@ type
     protrusion, expansion: Int32;
     full_lines: Int32;
     line_grid: pd_sp;
+    line_exact: pd_sp;        { every baseline exactly this far below the one above; 0 off }
   end;
   Ppd_params = ^pd_params;
 
@@ -524,6 +540,8 @@ type
     snap_grid: Int32;         { lines on the section's grid (1) }
     border_theme: UInt32;     { pd_theme_color reference of the border, 0 = none }
     shading_theme: UInt32;    { pd_theme_color reference of the shading, 0 = none }
+    line_rule: Int32;         { PD_LINE_*: a multiple (line_spacing), at least or exactly line_height }
+    line_height: pd_sp;
   end;
   Ppd_para_props = ^pd_para_props;
 
@@ -588,6 +606,8 @@ type
     offset_x: pd_sp;
     offset_y: pd_sp;
     offset_from: Int32;     { PD_FROM_* }
+    frame: Int32;           { PD_FRAME_*: a Word frame it is }
+    frame_lines: Int32;     { a drop cap: the lines of text beside it }
   end;
   Ppd_float_props = ^pd_float_props;
 
@@ -611,6 +631,9 @@ type
     page_valign: Int32;
     line_pitch: pd_sp;        { the document grid's line pitch; 0 none }
     direction: Int32;         { pd_direction: PD_DIR_RTL puts its first column at the right }
+    note_format: array[0..1] of Int32;   { footnotes', endnotes' pd_num_format; 0 the usual }
+    note_start: array[0..1] of Int32;    { the first number, 0 = 1 }
+    note_restart: array[0..1] of Int32;  { PD_NOTES_* }
   end;
   Ppd_section_props = ^pd_section_props;
 

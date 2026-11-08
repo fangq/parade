@@ -213,6 +213,8 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
     KEEP(PD_PP_SPACE_BEFORE, space_before);
     KEEP(PD_PP_SPACE_AFTER, space_after);
     KEEP(PD_PP_LINE_SPACING, line_spacing);
+    KEEP(PD_PP_LINE_SPACING, line_rule);
+    KEEP(PD_PP_LINE_SPACING, line_height);
     KEEP(PD_PP_KEEP_NEXT, keep_with_next);
     KEEP(PD_PP_KEEP_LINES, keep_lines);
     KEEP(PD_PP_WIDOWS, widows);
@@ -367,6 +369,8 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
     SET(PD_PP_SPACE_BEFORE, space_before);
     SET(PD_PP_SPACE_AFTER, space_after);
     SET(PD_PP_LINE_SPACING, line_spacing);
+    SET(PD_PP_LINE_SPACING, line_rule);
+    SET(PD_PP_LINE_SPACING, line_height);
     SET(PD_PP_KEEP_NEXT, keep_with_next);
     SET(PD_PP_KEEP_LINES, keep_lines);
     SET(PD_PP_WIDOWS, widows);
@@ -1635,6 +1639,13 @@ void pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap) {
 
     if (fmt == PD_NUM_DECIMAL || v <= 0) {
         snprintf(buf, cap, "%d", (int)v);
+    } else if (fmt == PD_NUM_SYMBOL) {    /* *, dagger, double dagger, section; then two of each, ... */
+        static const char* const sym[4] = { "*", "\xE2\x80\xA0", "\xE2\x80\xA1", "\xC2\xA7" };
+        int32_t r = (v - 1) / 4 + 1;
+
+        for (k = 0; k < r && k < 8 && o + strlen(sym[(v - 1) % 4]) < cap; k++) {
+            o += (size_t)snprintf(buf + o, cap - o, "%s", sym[(v - 1) % 4]);
+        }
     } else if (fmt == PD_NUM_DECIMAL_ZERO) {
         snprintf(buf, cap, "%02d", (int)v);
     } else if (fmt == PD_NUM_ORDINAL) {
@@ -3826,7 +3837,7 @@ int pd_doc_tabs_ok(const pd_para_props* pp) {
     }
 
     for (i = 0; i < pp->ntabs; i++) {
-        if (pp->tabs[i].align < PD_TAB_LEFT || pp->tabs[i].align > PD_TAB_DECIMAL ||
+        if (pp->tabs[i].align < PD_TAB_LEFT || pp->tabs[i].align > PD_TAB_BAR ||
                 pp->tabs[i].leader < PD_LEADER_NONE || pp->tabs[i].leader > PD_LEADER_UNDERSCORE) {
             return 0;
         }
