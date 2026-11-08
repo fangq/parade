@@ -348,6 +348,7 @@ type
     procedure RestoreShapeStep(const S: TParadeShapeStep);
     procedure OnlyShape;
     function ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
+    procedure AddShapePictures;
     { the selected shapes' XML changed by one of the format edits (Op), one step of undo }
     function ShapeFormatOp(Op: Integer; const S1, S2, S3, S4: string; N1, N2: Double; C1, C2: TColor;
       const Lbl: string): Boolean;
@@ -9658,6 +9659,97 @@ begin
   Result := Clipboard.HasFormat(CF_Shapes);
 end;
 
+{ the selected shapes as pictures other programs paste: a PNG of the drawing cut to the box round them (two pixels
+  a point, transparent where nothing is drawn), and with all its shapes selected an SVG of it; into the clipboard
+  that is open }
+procedure TParadeEdit.AddShapePictures;
+var
+  O: pd_inline;
+  Pg: Int32;
+  X, Y, W, H, JW, JH, X0, Y0, X1, Y1, BX0, BY0, BX1, BY1: Double;
+  Sids: TIntegerArray;
+  Boxes: TParadeShapeBoxes;
+  Buf: array of Byte;
+  PW, PH, CX0, CY0, CW, CH, I, J, K: Integer;
+  Img: TLazIntfImage;
+  Png: TPortableNetworkGraphic;
+  Ms: TMemoryStream;
+  Col: TFPColor;
+  A: Integer;
+begin
+  if (FShapeAt.block = 0) or (pd_doc_inline_at(FDoc, FShapeAt, O) <> PD_OK) or
+     not DrawingPlace(FShapeAt, Pg, X, Y, W, H, JW, JH) or (JW <= 0) or (JH <= 0) or (W <= 0) or (H <= 0) then
+    Exit;
+  Sids := SelectedShapes;
+  Boxes := DrawingShapes(FShapeAt);
+  BX0 := MaxDouble; BY0 := MaxDouble; BX1 := -MaxDouble; BY1 := -MaxDouble;
+  for I := 0 to High(Sids) do
+    if ShapeBox(Sids[I], X0, Y0, X1, Y1) then
+    begin
+      BX0 := Min(BX0, X0); BY0 := Min(BY0, Y0); BX1 := Max(BX1, X1); BY1 := Max(BY1, Y1);
+    end;
+  if BX1 <= BX0 then
+  begin   { the whole drawing }
+    BX0 := 0; BY0 := 0; BX1 := JW; BY1 := JH;
+  end;
+  PW := Ceil(W / PD_SP_PER_PT * 2);
+  PH := Ceil(H / PD_SP_PER_PT * 2);
+  if (PW <= 0) or (PH <= 0) or (Int64(PW) * PH > 40000000) then
+    Exit;
+  SetLength(Buf, PW * PH * 4);
+  FillChar(Buf[0], Length(Buf), 0);
+  if pd_drawing_render(FDoc, O.resource, Round(W), Round(H), 2 * 65536, @Buf[0], PW, PH, PW * 4) <> PD_OK then
+    Exit;
+  CX0 := EnsureRange(Floor(BX0 / JW * PW) - 2, 0, PW - 1);
+  CY0 := EnsureRange(Floor(BY0 / JH * PH) - 2, 0, PH - 1);
+  CW := EnsureRange(Ceil(BX1 / JW * PW) + 2, CX0 + 1, PW) - CX0;
+  CH := EnsureRange(Ceil(BY1 / JH * PH) + 2, CY0 + 1, PH) - CY0;
+  Img := TLazIntfImage.Create(CW, CH, [riqfRGB, riqfAlpha]);
+  Png := TPortableNetworkGraphic.Create;
+  Ms := TMemoryStream.Create;
+  try
+    for J := 0 to CH - 1 do
+      for I := 0 to CW - 1 do
+      begin
+        K := ((CY0 + J) * PW + CX0 + I) * 4;
+        A := Buf[K + 3];
+        if A > 0 then
+        begin   { premultiplied, as rendered: unmultiplied for the PNG }
+          Col.Red := Min(255, Buf[K] * 255 div A) * 257;
+          Col.Green := Min(255, Buf[K + 1] * 255 div A) * 257;
+          Col.Blue := Min(255, Buf[K + 2] * 255 div A) * 257;
+        end
+        else
+        begin
+          Col.Red := 0; Col.Green := 0; Col.Blue := 0;
+        end;
+        Col.Alpha := A * 257;
+        Img.Colors[I, J] := Col;
+      end;
+    Png.LoadFromIntfImage(Img);
+    Png.SaveToStream(Ms);
+    Ms.Position := 0;
+    Clipboard.AddFormat(RegisterClipboardFormat('image/png'), Ms);
+    {$IFDEF WINDOWS}
+    Ms.Position := 0;
+    Clipboard.AddFormat(RegisterClipboardFormat('PNG'), Ms);
+    {$ENDIF}
+    if Length(Sids) >= Length(Boxes) then
+    begin   { all of it: as SVG too }
+      Ms.Clear;
+      if pd_drawing_to_svg(FDoc, O.resource, Round(W), Round(H), @WriteToStream, Ms) = PD_OK then
+      begin
+        Ms.Position := 0;
+        Clipboard.AddFormat(RegisterClipboardFormat('image/svg+xml'), Ms);
+      end;
+    end;
+  finally
+    Ms.Free;
+    Png.Free;
+    Img.Free;
+  end;
+end;
+
 function TParadeEdit.CopyShapes: Boolean;
 var
   S: string;
@@ -9670,6 +9762,7 @@ begin
   try
     Clipboard.Clear;
     AddClip(CF_Shapes, S);
+    AddShapePictures;
   finally
     Clipboard.Close;
   end;
