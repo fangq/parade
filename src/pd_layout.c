@@ -194,6 +194,8 @@ struct pd_layout {
     int32_t nfv, capfv;
     pd_block_id* endnotes;      /* endnote bodies in reading order: they follow the last section */
     int32_t nendnotes, capendnotes;
+    int32_t note_count[2];      /* footnotes and endnotes counted since they last started again */
+    int32_t note_page;          /* the page of the last footnote counted (numbers starting on each page) */
     int32_t* first_page;        /* by block id: first page showing it, -1 = none */
     pd_para* scratch;           /* shaping of labels and field values */
     pd_layout_info info;
@@ -1040,6 +1042,26 @@ static void set_label(pd_layout* L, pd_block_id id, const char* text, int note) 
     }
 }
 
+/* the section a block is in (its numbering of notes), NULL for one in no section */
+static const pd_section_props* sect_of(const pd_doc* d, const blk* b) {
+    int32_t hops;
+
+    for (hops = 0; b && b->kind != PD_BLOCK_SECTION && hops < 256; hops++) {
+        b = b->parent ? pd_doc_blk(d, b->parent) : NULL;
+    }
+
+    return b ? &b->st.sp : NULL;
+}
+
+/* a note's number as its section shows it: footnotes 1, 2, 3 and endnotes i, ii, iii unless it says otherwise */
+static void note_number(const pd_layout* L, const blk* b, int32_t endnote, int32_t v, char* buf, size_t cap) {
+    const pd_section_props* sp = sect_of(L->doc, b);
+    int32_t f = sp && sp->note_format[endnote] ? sp->note_format[endnote] : endnote ? PD_NUM_LOWER_ROMAN :
+                PD_NUM_DECIMAL;
+
+    pd_doc_format_number(v, f, buf, cap);
+}
+
 static void count_walk(pd_layout* L, pd_block_id id, seqc* seq, int32_t* nseq, int32_t* footnotes,
                        int32_t lcnt[][9], int32_t lseen[][9]) {
     const pd_doc* d = L->doc;
@@ -1048,6 +1070,14 @@ static void count_walk(pd_layout* L, pd_block_id id, seqc* seq, int32_t* nseq, i
 
     if (!b) {
         return;
+    }
+
+    if (b->kind == PD_BLOCK_SECTION) {  /* notes that count again at each section */
+        for (k = 0; k < 2; k++) {
+            if (b->st.sp.note_restart[k] == PD_NOTES_SECTION) {
+                L->note_count[k] = 0;
+            }
+        }
     }
 
     if (b->kind != PD_BLOCK_PARAGRAPH) {
@@ -1082,18 +1112,31 @@ static void count_walk(pd_layout* L, pd_block_id id, seqc* seq, int32_t* nseq, i
             int32_t nf = 0;
             char num[16];
 
-            if (o->level == 1) {    /* an endnote: numbered on its own, i, ii, iii as Word does */
-                v.value = L->nendnotes + 1;
+            const pd_section_props* sp = sect_of(d, b);
+            int32_t en = o->level == 1, start = sp && sp->note_start[en] > 0 ? sp->note_start[en] : 1;
 
+            if (!en && sp && sp->note_restart[0] == PD_NOTES_PAGE) {
+                /* counted again on each page: the page it was on when last laid out (a second pass settles it) */
+                int32_t pg = L->first_page && id <= d->captab ? L->first_page[id] : -1;
+
+                if (pg != L->note_page) {
+                    L->note_count[0] = 0;
+                    L->note_page = pg;
+                }
+
+                L->want_rerun = 1;
+            }
+
+            if (en) {    /* an endnote: numbered on its own, i, ii, iii as Word does */
                 if (!grow((void**)&L->endnotes, &L->capendnotes, (int64_t)L->nendnotes + 1, sizeof(pd_block_id))) {
                     L->endnotes[L->nendnotes++] = o->target;
                 }
-
-                pd_doc_format_number(v.value, PD_NUM_LOWER_ROMAN, num, sizeof(num));
             } else {
-                v.value = ++*footnotes;
-                snprintf(num, sizeof(num), "%d", (int)v.value);
+                ++*footnotes;
             }
+
+            v.value = start + L->note_count[en]++;
+            note_number(L, b, en, v.value, num, sizeof(num));
 
             collect_paras(d, o->target, first, &nf, 1);
 
@@ -3476,6 +3519,8 @@ static void run_counters(pd_layout* L) {
 
     L->nfv = 0;
     L->nendnotes = 0;
+    L->note_count[0] = L->note_count[1] = 0;
+    L->note_page = -1;
 
     for (k = 0; k < L->ncache; k++) {   /* labels are recomputed from scratch */
         pcache* c;
@@ -4020,13 +4065,8 @@ static void field_text(const pd_layout* L, const ppage* p, const blk* b, const d
 
     buf[0] = '\0';
 
-    if (o->kind == PD_INLINE_FOOTNOTE && o->level == 1) {
-        pd_doc_format_number(fv_find(L, b->id, q->offset), PD_NUM_LOWER_ROMAN, buf, cap);
-        return;
-    }
-
     if (o->kind == PD_INLINE_FOOTNOTE) {
-        snprintf(buf, cap, "%d", (int)fv_find(L, b->id, q->offset));
+        note_number(L, b, o->level == 1, fv_find(L, b->id, q->offset), buf, cap);
         return;
     }
 

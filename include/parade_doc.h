@@ -456,7 +456,8 @@ typedef enum {
     PD_NUM_CJK_TRADITIONAL = 12, /**< the ten heavenly stems, decimal past ten */
     PD_NUM_CARDINAL_TEXT = 13,  /**< One, Two, Three (English) */
     PD_NUM_ORDINAL_TEXT = 14,   /**< First, Second, Third (English) */
-    PD_NUM_LAST = 14
+    PD_NUM_SYMBOL = 15,         /**< *, \u2020, \u2021, \u00a7, then doubled (Word's chicago, for notes) */
+    PD_NUM_LAST = 15
 } pd_num_format;
 
 typedef struct {
@@ -656,7 +657,16 @@ typedef struct {
     pd_sp line_pitch;           /**< the document grid (East Asian layout): every line a whole number of this high,
                                      in paragraphs that snap to it (0 = no grid) */
     int32_t direction;          /**< pd_direction: PD_DIR_RTL puts its first column at the right */
+    /* the numbers of its footnotes [0] and endnotes [1] */
+    int32_t note_format[2];     /**< pd_num_format; PD_NUM_BULLET (0) = the usual: 1, 2, 3 and i, ii, iii */
+    int32_t note_start[2];      /**< the first number, 0 = 1 */
+    int32_t note_restart[2];    /**< PD_NOTES_*: where they count from note_start again */
 } pd_section_props;
+
+/* where notes are numbered from the start again */
+#define PD_NOTES_CONTINUOUS 0   /**< never: through the document */
+#define PD_NOTES_SECTION    1   /**< at each section */
+#define PD_NOTES_PAGE       2   /**< on each page (footnotes) */
 
 typedef enum {
     PD_PAGES_GREEDY = 0,        /**< fill each column, best break on it (TeX) */

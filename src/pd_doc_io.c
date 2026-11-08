@@ -43,7 +43,7 @@ static const char* const field_names[] = { "page", "pages", "sectionpage", "refn
 static const char* const num_names[] = { "bullet", "decimal", "loweralpha", "upperalpha", "lowerroman",
                                          "upperroman", "none", "decimalzero", "ordinal", "circled",
                                          "fullwidth", "cjkcounting", "cjktraditional", "cardinaltext",
-                                         "ordinaltext"
+                                         "ordinaltext", "symbol"
                                        };
 static const char* const wrap_names[] = { "none", "left", "right", "front", "behind" };
 static const char* const break_names[] = { "page", "column", "oddpage", "evenpage", "rule" };
@@ -551,6 +551,7 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
         case PD_BLOCK_SECTION: {
             const pd_section_props* p = &s->sp;
+            int k;
 
             pj_key(w, "Page");
             pj_obj_begin(w);
@@ -607,6 +608,24 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
             if (p->direction == PD_DIR_RTL) {
                 put_str(w, "Direction", "rtl");
+            }
+
+            for (k = 0; k < 2; k++) {
+                static const char* const nk[2][3] = { { "FootnoteFormat", "FootnoteStart", "FootnoteRestart" },
+                    { "EndnoteFormat", "EndnoteStart", "EndnoteRestart" }
+                };
+
+                if (p->note_format[k]) {
+                    put_str(w, nk[k][0], name_of(NAMES(num_names), p->note_format[k]));
+                }
+
+                if (p->note_start[k]) {
+                    put_int(w, nk[k][1], p->note_start[k]);
+                }
+
+                if (p->note_restart[k]) {
+                    put_int(w, nk[k][2], p->note_restart[k]);
+                }
             }
 
             if (p->line_numbers) {
@@ -1757,6 +1776,20 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     p->line_number_start = (int32_t)int_or(pj_get(x, "LineNumberStart"), 0, 0, 1000000, L);
     p->line_number_distance = (pd_sp)int_or(pj_get(x, "LineNumberDistance"), 0, 0, PD_PT(1000), L);
     p->line_number_restart = (int32_t)int_or(pj_get(x, "LineNumberRestart"), 0, 0, 2, L);
+
+    {
+        static const char* const nk[2][3] = { { "FootnoteFormat", "FootnoteStart", "FootnoteRestart" },
+            { "EndnoteFormat", "EndnoteStart", "EndnoteRestart" }
+        };
+        int k;
+
+        for (k = 0; k < 2; k++) {
+            p->note_format[k] = pj_get(x, nk[k][0]) ? enum_of(pj_get(x, nk[k][0]), NAMES(num_names)) : 0;
+            REQUIRE(p->note_format[k] >= 0);
+            p->note_start[k] = (int32_t)int_or(pj_get(x, nk[k][1]), 0, 0, 1000000, L);
+            p->note_restart[k] = (int32_t)int_or(pj_get(x, nk[k][2]), 0, 0, 2, L);
+        }
+    }
 
     if (pj_get(x, "PageBreaking")) {
         static const char* const pb_names[] = { "greedy", "optimal" };

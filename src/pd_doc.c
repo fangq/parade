@@ -1635,6 +1635,13 @@ void pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap) {
 
     if (fmt == PD_NUM_DECIMAL || v <= 0) {
         snprintf(buf, cap, "%d", (int)v);
+    } else if (fmt == PD_NUM_SYMBOL) {    /* *, dagger, double dagger, section; then two of each, ... */
+        static const char* const sym[4] = { "*", "\xE2\x80\xA0", "\xE2\x80\xA1", "\xC2\xA7" };
+        int32_t r = (v - 1) / 4 + 1;
+
+        for (k = 0; k < r && k < 8 && o + strlen(sym[(v - 1) % 4]) < cap; k++) {
+            o += (size_t)snprintf(buf + o, cap - o, "%s", sym[(v - 1) % 4]);
+        }
     } else if (fmt == PD_NUM_DECIMAL_ZERO) {
         snprintf(buf, cap, "%02d", (int)v);
     } else if (fmt == PD_NUM_ORDINAL) {

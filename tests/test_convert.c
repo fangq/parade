@@ -3137,6 +3137,62 @@ static int count_draws(pd_doc* d, int32_t kind, uint32_t color) {
     return c;
 }
 
+/* the text drawn in a region (-1: any) on every page of a fresh layout, as UTF-8 in display order; the
+   number of pages, -1 when it cannot be laid out */
+static int layout_text(pd_doc* d, int32_t region, char* out, size_t cap) {
+    pd_layout* L = NULL;
+    int32_t pg, k, n, np;
+    size_t o = 0;
+
+    out[0] = '\0';
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) != PD_OK || pd_layout_update(L, NULL) != PD_OK) {
+        pd_layout_free(L);
+        return -1;
+    }
+
+    np = pd_layout_page_count(L);
+
+    for (pg = 0; pg < np; pg++) {
+        pd_draw* it;
+
+        pd_layout_page_items(L, pg, NULL, 0, &n);
+        it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+        pd_layout_page_items(L, pg, it, n, &n);
+
+        for (k = 0; k < n; k++) {
+            uint32_t c = it[k].text;
+
+            if (it[k].kind != PD_DRAW_GLYPH || !c || (region >= 0 && it[k].region != region) || o + 5 > cap) {
+                continue;
+            }
+
+            if (c < 0x80) {
+                out[o++] = (char)c;
+            } else if (c < 0x800) {
+                out[o++] = (char)(0xC0 | (c >> 6));
+                out[o++] = (char)(0x80 | (c & 0x3F));
+            } else if (c < 0x10000) {
+                out[o++] = (char)(0xE0 | (c >> 12));
+                out[o++] = (char)(0x80 | ((c >> 6) & 0x3F));
+                out[o++] = (char)(0x80 | (c & 0x3F));
+            } else {
+                out[o++] = (char)(0xF0 | (c >> 18));
+                out[o++] = (char)(0x80 | ((c >> 12) & 0x3F));
+                out[o++] = (char)(0x80 | ((c >> 6) & 0x3F));
+                out[o++] = (char)(0x80 | (c & 0x3F));
+            }
+        }
+
+        free(it);
+    }
+
+    out[o] = '\0';
+    pd_layout_free(L);
+    return np;
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -4954,6 +5010,110 @@ static void test_docx_endnotes(void) {
     pd_doc_free(d);
 }
 
+/* a part of a .docx written out, NUL-terminated (caller frees); "" when it has none */
+static char* docx_part(const buf_t* b, const char* name) {
+    size_t n = 0;
+    unsigned char* x = b->p ? pd_zip_get((const unsigned char*)b->p, b->n, name, &n) : NULL;
+    char* s = (char*)malloc(n + 1);
+
+    if (s) {
+        if (x) {
+            memcpy(s, x, n);
+        }
+
+        s[n] = '\0';
+    }
+
+    free(x);
+    return s;
+}
+
+/* Small things of Word's text: all sixteen highlight colours (written back as highlights, not shading), w:sym
+   in the Symbol font as the Unicode character it shows and in Wingdings as its code in that font, w:lang, and
+   how notes are numbered (footnotePr/endnotePr: format, start, restart), shown so and written back. */
+static void test_docx_text_small(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:r><w:rPr><w:highlight w:val=\"darkCyan\"/><w:lang w:val=\"de-DE\"/></w:rPr><w:t>hi</w:t></w:r>"
+                    "<w:r><w:rPr><w:highlight w:val=\"lightGray\"/></w:rPr><w:t>lo</w:t></w:r>"
+                    "<w:r><w:sym w:font=\"Symbol\" w:char=\"F06D\"/><w:sym w:font=\"Wingdings\" w:char=\"F04A\"/></w:r></w:p>"
+                    "<w:p><w:r><w:t>One</w:t></w:r><w:r><w:endnoteReference w:id=\"1\"/></w:r>"
+                    "<w:r><w:t xml:space=\"preserve\"> two</w:t></w:r><w:r><w:footnoteReference w:id=\"1\"/></w:r>"
+                    "<w:r><w:footnoteReference w:id=\"2\"/></w:r></w:p>"
+                    "<w:sectPr><w:footnotePr><w:numFmt w:val=\"lowerLetter\"/><w:numStart w:val=\"3\"/></w:footnotePr>"
+                    "<w:endnotePr><w:numFmt w:val=\"upperRoman\"/><w:numRestart w:val=\"eachSect\"/></w:endnotePr>"
+                    "</w:sectPr></w:body></w:document>",
+                    "word/endnotes.xml",
+                    "<w:endnotes xmlns:w=\"w\"><w:endnote w:id=\"1\"><w:p><w:r><w:endnoteRef/></w:r><w:r><w:t>E</w:t>"
+                    "</w:r></w:p></w:endnote></w:endnotes>",
+                    "word/footnotes.xml",
+                    "<w:footnotes xmlns:w=\"w\"><w:footnote w:id=\"1\"><w:p><w:r><w:footnoteRef/></w:r>"
+                    "<w:r><w:t>F</w:t></w:r></w:p></w:footnote><w:footnote w:id=\"2\"><w:p><w:r><w:footnoteRef/></w:r>"
+                    "<w:r><w:t>G</w:t></w:r></w:p></w:footnote></w:footnotes>",
+                    "word/settings.xml",
+                    "<w:settings xmlns:w=\"w\"><w:footnotePr><w:numFmt w:val=\"upperLetter\"/>"
+                    "<w:footnote w:id=\"-1\"/></w:footnotePr></w:settings>",
+                    NULL);
+    pd_doc* back = NULL;
+    pd_block_id sec, p0;
+    pd_section_props sp;
+    pd_char_props cp;
+    const char* t;
+    uint32_t n;
+    char shown[256];
+    buf_t b;
+    int pass;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+    {
+        char* xml = docx_part(&b, "word/document.xml");
+
+        CHECK(strstr(xml, "<w:highlight w:val=\"darkCyan\"/>") && strstr(xml, "<w:highlight w:val=\"lightGray\"/>"));
+        CHECK(strstr(xml, "<w:numFmt w:val=\"lowerLetter\"/><w:numStart w:val=\"3\"/>") &&
+              strstr(xml, "<w:numFmt w:val=\"upperRoman\"/><w:numRestart w:val=\"eachSect\"/>"));
+        free(xml);
+    }
+
+    free(b.p);
+
+    for (pass = 0; pass < 2; pass++) {
+        pd_doc* x = pass ? back : d;
+
+        if (!x) {
+            continue;
+        }
+
+        sec = pd_doc_child(x, pd_doc_root(x), 0);
+        p0 = pd_doc_child(x, sec, 0);
+        cp = chars_at(x, p0, 0);
+        CHECK(cp.background == 0xFF008080u && strcmp(cp.lang, "de-DE") == 0);
+        CHECK(chars_at(x, p0, 2).background == 0xFFC0C0C0u);
+        pd_doc_para_text(x, p0, &t, &n);
+        CHECK(n == 9 && memcmp(t + 4, "\xCE\xBC\xEF\x81\x8A", 5) == 0);   /* mu, then Wingdings' U+F04A */
+        CHECK(strcmp(chars_at(x, p0, 6).family, "Wingdings") == 0);
+        CHECK(pd_doc_section_props(x, sec, &sp) == PD_OK && sp.note_format[0] == PD_NUM_LOWER_ALPHA &&
+              sp.note_start[0] == 3 && sp.note_format[1] == PD_NUM_UPPER_ROMAN &&
+              sp.note_restart[1] == PD_NOTES_SECTION);
+
+        if (have_layout_font()) {   /* the marks as the section numbers them: endnote I, footnotes c and d */
+            layout_text(x, 0, shown, sizeof(shown));
+            CHECK(strstr(shown, "OneItwocd") != NULL);
+        }
+    }
+
+    pd_doc_free(back);
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -5637,6 +5797,7 @@ int main(void) {
     test_docx_page_meta();
     printf("docx endnotes\n");
     test_docx_endnotes();
+    test_docx_text_small();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

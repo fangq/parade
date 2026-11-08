@@ -467,6 +467,30 @@ static void dx_shd(pd_buf* o, uint32_t rgb, uint32_t ref) {
     pb_puts(o, "/>");
 }
 
+/* Word's sixteen highlight colours (ST_HighlightColor) */
+static const struct {
+    const char* name;
+    uint32_t rgb;
+} dx_highlights[16] = {
+    { "yellow", 0xFFFF00 }, { "green", 0x00FF00 }, { "cyan", 0x00FFFF }, { "magenta", 0xFF00FF },
+    { "blue", 0x0000FF }, { "red", 0xFF0000 }, { "darkBlue", 0x000080 }, { "darkCyan", 0x008080 },
+    { "darkGreen", 0x008000 }, { "darkMagenta", 0x800080 }, { "darkRed", 0x800000 }, { "darkYellow", 0x808000 },
+    { "darkGray", 0x808080 }, { "lightGray", 0xC0C0C0 }, { "black", 0x000000 }, { "white", 0xFFFFFF }
+};
+
+/* the highlight a run's background is, NULL when it is shading: one of the sixteen, not linked to the theme */
+static const char* dx_highlight_name(uint32_t rgb, uint32_t ref) {
+    int i;
+
+    for (i = 0; i < 16 && rgb && !ref; i++) {
+        if (dx_highlights[i].rgb == (rgb & 0xFFFFFF)) {
+            return dx_highlights[i].name;
+        }
+    }
+
+    return NULL;
+}
+
 /* the theme's fonts a family is linked to, as w:rFonts attributes */
 static void dx_font_theme_attr(pd_buf* o, int32_t ft) {
     int t = PD_FONT_THEME_TEXT(ft), e = PD_FONT_THEME_EA(ft), c = PD_FONT_THEME_CS(ft);
@@ -590,12 +614,18 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_printf(o, "<w:szCs w:val=\"%d\"/>", (int)SCALE(c->size_cs, 2, 65536));
     }
 
+    if (c->background && (c->background != b->background || c->background_theme != b->background_theme) &&
+            dx_highlight_name(c->background, c->background_theme)) {
+        pb_printf(o, "<w:highlight w:val=\"%s\"/>", dx_highlight_name(c->background, c->background_theme));
+    }
+
     if (c->underline != b->underline || (rstyle && !strcmp(rstyle, "Hyperlink") && !c->underline)) {
         /* a link not underlined says so: the Hyperlink style it is written in underlines */
         pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name(c->underline));
     }
 
-    if (c->background && (c->background != b->background || c->background_theme != b->background_theme)) {
+    if (c->background && (c->background != b->background || c->background_theme != b->background_theme) &&
+            !dx_highlight_name(c->background, c->background_theme)) {
         dx_shd(o, c->background, c->background_theme);
     }
 
@@ -603,6 +633,12 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_puts(o, "<w:vertAlign w:val=\"superscript\"/>");
     } else if (c->shift == PD_SHIFT_SUB) {
         pb_puts(o, "<w:vertAlign w:val=\"subscript\"/>");
+    }
+
+    if (strcmp(c->lang, b->lang) && c->lang[0]) {
+        pb_puts(o, "<w:lang w:val=\"");
+        xesc(o, c->lang, strlen(c->lang));
+        pb_puts(o, "\"/>");
     }
 
     if (o->n == mark) {     /* nothing: no rPr at all */
@@ -2920,6 +2956,28 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
         }
     }
 
+    for (k = 0; k < 2; k++) {   /* how its notes are numbered, when not as usual */
+        static const char* const rs[3] = { "continuous", "eachSect", "eachPage" };
+
+        if (sp->note_format[k] || sp->note_start[k] > 1 || sp->note_restart[k]) {
+            pb_printf(o, "<w:%s>", k ? "endnotePr" : "footnotePr");
+
+            if (sp->note_format[k]) {
+                pb_printf(o, "<w:numFmt w:val=\"%s\"/>", num_fmt_name(sp->note_format[k]));
+            }
+
+            if (sp->note_start[k] > 1) {
+                pb_printf(o, "<w:numStart w:val=\"%d\"/>", (int)sp->note_start[k]);
+            }
+
+            if (sp->note_restart[k] > 0 && sp->note_restart[k] <= 2) {
+                pb_printf(o, "<w:numRestart w:val=\"%s\"/>", rs[sp->note_restart[k]]);
+            }
+
+            pb_printf(o, "</w:%s>", k ? "endnotePr" : "footnotePr");
+        }
+    }
+
     if (sp->continuous) {
         pb_puts(o, "<w:type w:val=\"continuous\"/>");
     }
@@ -3271,11 +3329,15 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
         pb_printf(o, "<w:szCs w:val=\"%d\"/>", (int)SCALE(c->size, 2, 65536));  /* the same, as Word writes it */
     }
 
+    if ((m & PD_CP_BACKGROUND) && dx_highlight_name(c->background, c->background_theme)) {
+        pb_printf(o, "<w:highlight w:val=\"%s\"/>", dx_highlight_name(c->background, c->background_theme));
+    }
+
     if (m & PD_CP_UNDERLINE) {
         pb_printf(o, "<w:u w:val=\"%s\"/>", dx_u_name(c->underline));
     }
 
-    if ((m & PD_CP_BACKGROUND) && c->background) {
+    if ((m & PD_CP_BACKGROUND) && c->background && !dx_highlight_name(c->background, c->background_theme)) {
         dx_shd(o, c->background, c->background_theme);
     }
 
@@ -4554,6 +4616,7 @@ typedef struct {
     dprops defaults;            /* w:docDefaults and settings.xml */
     int even_odd;               /* settings.xml: even pages have headers of their own */
     int mirror;                 /* settings.xml: margins mirror on even pages */
+    int32_t note_fmt[2], note_start[2], note_restart[2];    /* settings.xml: footnotePr, endnotePr */
     char hf_rid[16][64];        /* header/footer parts already read, and their stories */
     pd_block_id hf_story[16];
     int nhf;
@@ -4929,8 +4992,13 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "highlight") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
         cp->mask |= PD_CP_BACKGROUND;
         cp->background_theme = 0;
-        cp->background = strcmp(v, "none") == 0 ? 0 : strcmp(v, "yellow") == 0 ? 0xFFFFFF00u : strcmp(v, "green") == 0 ?
-                         0xFF00FF00u : strcmp(v, "cyan") == 0 ? 0xFF00FFFFu : 0xFFFFFF00u;
+        cp->background = strcmp(v, "none") == 0 ? 0 : 0xFFFFFF00u;
+
+        for (c = 0; c < 16; c++) {
+            if (strcmp(v, dx_highlights[c].name) == 0) {
+                cp->background = 0xFF000000u | dx_highlights[c].rgb;
+            }
+        }
     } else if (strcmp(t, "rFonts") == 0) {
         /* a named font, else the theme's: minorHAnsi is the body font, majorHAnsi the headings' */
         /* Word takes the theme's font over a name given beside it (the name is what it was when saved) */
@@ -5002,6 +5070,9 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "kern") == 0) {            /* kerned from a size up: Word's own default is not to */
         cp->mask |= PD_CP_KERNING;
         cp->kerning = attr_int(m, "w:val", 0) > 0;
+    } else if (strcmp(t, "lang") == 0 && mu_attr(m, "w:val", v, sizeof(v))) {
+        cp->mask |= PD_CP_LANG;
+        snprintf(cp->lang, sizeof(cp->lang), "%.15s", v);
     } else if (strcmp(t, "rStyle") == 0 && rstyle) {
         mu_attr(m, "w:val", rstyle, rcap);
     }
@@ -5234,6 +5305,7 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sc->mask & PD_CP_LETTERSPACE) dc->letter_space = sc->letter_space;
     if (sc->mask & PD_CP_POSITION) dc->position = sc->position;
     if (sc->mask & PD_CP_KERNING) dc->kerning = sc->kerning;
+    if (sc->mask & PD_CP_LANG) memcpy(dc->lang, sc->lang, sizeof(dc->lang));
     if (sc->mask & PD_CP_FAMILY_EA) memcpy(dc->family_ea, sc->family_ea, sizeof(dc->family_ea));
     if (sc->mask & PD_CP_FAMILY_CS) memcpy(dc->family_cs, sc->family_cs, sizeof(dc->family_cs));
     if (sc->mask & PD_CP_SIZE_CS) dc->size_cs = sc->size_cs;
@@ -5653,13 +5725,41 @@ static void dx_theme_from(const dxi* X, pd_theme* out) {
 }
 
 /* document-wide settings that are paragraph properties in Parade */
+/* a child of a footnotePr or endnotePr: how the notes are numbered */
+static void notepr_elem(const pd_markup* m, const char* t, int32_t* fmt, int32_t* start, int32_t* restart) {
+    char v[32];
+
+    if (!mu_attr(m, "w:val", v, sizeof(v))) {
+        return;
+    }
+
+    if (strcmp(t, "numFmt") == 0) {
+        *fmt = num_fmt_of(v);
+        *fmt = *fmt == PD_NUM_NONE ? PD_NUM_DECIMAL : *fmt;
+    } else if (strcmp(t, "numStart") == 0) {
+        *start = atoi(v) > 0 ? atoi(v) : 0;
+    } else if (strcmp(t, "numRestart") == 0) {
+        *restart = strcmp(v, "eachSect") == 0 ? PD_NOTES_SECTION : strcmp(v, "eachPage") == 0 ? PD_NOTES_PAGE :
+                   PD_NOTES_CONTINUOUS;
+    }
+}
+
 static void read_settings(dxi* X, const char* xml, size_t n) {
     pd_markup m;
+    int k = -1;
 
     mu_init(&m, xml, n, 0);
 
     while (mu_next(&m) != MT_END) {
-        if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "autoHyphenation") == 0) {
+        const char* t = mu_local(m.name);
+
+        if (m.type == MT_OPEN && (strcmp(t, "footnotePr") == 0 || strcmp(t, "endnotePr") == 0)) {
+            k = t[0] == 'e';
+        } else if (m.type == MT_CLOSE && (strcmp(t, "footnotePr") == 0 || strcmp(t, "endnotePr") == 0)) {
+            k = -1;
+        } else if (k >= 0 && (m.type == MT_OPEN || m.type == MT_EMPTY)) {
+            notepr_elem(&m, t, &X->note_fmt[k], &X->note_start[k], &X->note_restart[k]);
+        } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "autoHyphenation") == 0) {
             X->defaults.pp.hyphenate = attr_on(&m);
         } else if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "evenAndOddHeaders") == 0) {
             X->even_odd = attr_on(&m);
@@ -5671,6 +5771,39 @@ static void read_settings(dxi* X, const char* xml, size_t n) {
             X->defaults.pp.tab_interval = twips(attr_int(&m, "w:val", 0));
         }
     }
+}
+
+/* Adobe's Symbol encoding from 0x20, as Unicode (0: no character of its own) */
+static const uint16_t symbol_font[224] = {
+    0x0020, 0x0021, 0x2200, 0x0023, 0x2203, 0x0025, 0x0026, 0x220B, 0x0028, 0x0029, 0x2217, 0x002B, 0x002C, 0x2212,
+    0x002E, 0x002F, 0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003A, 0x003B,
+    0x003C, 0x003D, 0x003E, 0x003F, 0x2245, 0x0391, 0x0392, 0x03A7, 0x0394, 0x0395, 0x03A6, 0x0393, 0x0397, 0x0399,
+    0x03D1, 0x039A, 0x039B, 0x039C, 0x039D, 0x039F, 0x03A0, 0x0398, 0x03A1, 0x03A3, 0x03A4, 0x03A5, 0x03C2, 0x03A9,
+    0x039E, 0x03A8, 0x0396, 0x005B, 0x2234, 0x005D, 0x22A5, 0x005F, 0x203E, 0x03B1, 0x03B2, 0x03C7, 0x03B4, 0x03B5,
+    0x03C6, 0x03B3, 0x03B7, 0x03B9, 0x03D5, 0x03BA, 0x03BB, 0x03BC, 0x03BD, 0x03BF, 0x03C0, 0x03B8, 0x03C1, 0x03C3,
+    0x03C4, 0x03C5, 0x03D6, 0x03C9, 0x03BE, 0x03C8, 0x03B6, 0x007B, 0x007C, 0x007D, 0x223C, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0x20AC, 0x03D2, 0x2032, 0x2264, 0x2044, 0x221E, 0x0192, 0x2663, 0x2666, 0x2665, 0x2660, 0x2194, 0x2190, 0x2191,
+    0x2192, 0x2193, 0x00B0, 0x00B1, 0x2033, 0x2265, 0x00D7, 0x221D, 0x2202, 0x2022, 0x00F7, 0x2260, 0x2261, 0x2248,
+    0x2026, 0x23D0, 0x23AF, 0x21B5, 0x2135, 0x2111, 0x211C, 0x2118, 0x2297, 0x2295, 0x2205, 0x2229, 0x222A, 0x2283,
+    0x2287, 0x2284, 0x2282, 0x2286, 0x2208, 0x2209, 0x2220, 0x2207, 0x00AE, 0x00A9, 0x2122, 0x220F, 0x221A, 0x22C5,
+    0x00AC, 0x2227, 0x2228, 0x21D4, 0x21D0, 0x21D1, 0x21D2, 0x21D3, 0x25CA, 0x27E8, 0x00AE, 0x00A9, 0x2122, 0x2211,
+    0x239B, 0x239C, 0x239D, 0x23A1, 0x23A2, 0x23A3, 0x23A7, 0x23A8, 0x23A9, 0x23AA, 0, 0x27E9, 0x222B, 0x2320,
+    0x23AE, 0x2321, 0x239E, 0x239F, 0x23A0, 0x23A4, 0x23A5, 0x23A6, 0x23AB, 0x23AC, 0x23AD, 0
+};
+
+/* a w:sym's character as Unicode where its font has a standard mapping (Symbol's, in the private use area
+   or not); 0 when it has none (Wingdings, Webdings: the code stays, drawn in that font) */
+static uint32_t sym_unicode(const char* font, uint32_t c) {
+    if (c >= 0xF000 && c < 0xF100) {
+        c -= 0xF000;
+    }
+
+    if (!same_ci(font, "Symbol") || c < 0x20 || c > 0xFF) {
+        return 0;
+    }
+
+    return symbol_font[c - 0x20];
 }
 
 /* a bullet as Word stores it -- often a character of the Symbol or Wingdings
@@ -5716,7 +5849,7 @@ static int32_t num_fmt_of(const char* v) {
         { "chineseCounting", PD_NUM_CJK_COUNTING }, { "chineseCountingThousand", PD_NUM_CJK_COUNTING },
         { "japaneseCounting", PD_NUM_CJK_COUNTING }, { "taiwaneseCounting", PD_NUM_CJK_COUNTING },
         { "taiwaneseCountingThousand", PD_NUM_CJK_COUNTING }, { "ideographTraditional", PD_NUM_CJK_TRADITIONAL },
-        { "cardinalText", PD_NUM_CARDINAL_TEXT }, { "ordinalText", PD_NUM_ORDINAL_TEXT }
+        { "cardinalText", PD_NUM_CARDINAL_TEXT }, { "ordinalText", PD_NUM_ORDINAL_TEXT }, { "chicago", PD_NUM_SYMBOL }
     };
     size_t i;
 
@@ -5734,7 +5867,8 @@ static const char* num_fmt_name(int32_t f) {
     static const char* fmts[PD_NUM_LAST + 1] = { "bullet", "decimal", "lowerLetter", "upperLetter", "lowerRoman",
                                                  "upperRoman", "none", "decimalZero", "ordinal",
                                                  "decimalEnclosedCircle", "decimalFullWidth", "chineseCounting",
-                                                 "ideographTraditional", "cardinalText", "ordinalText"
+                                                 "ideographTraditional", "cardinalText", "ordinalText",
+                                                 "chicago"
                                                };
 
     return f >= 0 && f <= PD_NUM_LAST ? fmts[f] : "decimal";
@@ -6007,6 +6141,7 @@ typedef struct {
     dxi* X;
     /* paragraph */
     int in_p, started, in_ppr, in_rpr, in_tcpr, in_trpr, in_sect;
+    int in_notepr;              /* in a sectPr's footnotePr (1) or endnotePr (2) */
     char pstyle[64];
     int num_id, ilvl, outline, sect_here;
     char hf_ref[6][64];         /* the section's header/footer r:ids: default, first, even; footers after */
@@ -6141,6 +6276,11 @@ static void dw_apply_run(dw* w) {
     if ((f->mask & PD_CP_FAMILY) && PD_FONT_THEME_TEXT(f->font_theme) != PD_FONT_THEME_TEXT(t->font_theme)) {
         cp.mask |= PD_CP_FAMILY;
         memcpy(cp.family, f->family, sizeof(cp.family));
+    }
+
+    if ((f->mask & PD_CP_LANG) && strcmp(f->lang, t->lang)) {
+        cp.mask |= PD_CP_LANG;
+        memcpy(cp.lang, f->lang, sizeof(cp.lang));
     }
 
     if ((f->mask & PD_CP_FAMILY_EA) && !same_ci(f->family_ea, t->family_ea)) {
@@ -10229,13 +10369,22 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->in_sect = m.type == MT_OPEN;
                 pd_section_props_init(&w->sp);
                 w->sp.mirror_margins = X->mirror ? 1 : -1;  /* Word mirrors only when its settings say so */
+                memcpy(w->sp.note_format, X->note_fmt, sizeof(X->note_fmt));
+                memcpy(w->sp.note_start, X->note_start, sizeof(X->note_start));
+                memcpy(w->sp.note_restart, X->note_restart, sizeof(X->note_restart));
+                w->in_notepr = 0;
                 memset(w->hf_ref, 0, sizeof(w->hf_ref));
 
                 if (w->in_ppr) {
                     w->sect_here = 1;
                 }
             } else if (w->in_sect) {
-                if (strcmp(t, "pgSz") == 0) {
+                if (strcmp(t, "footnotePr") == 0 || strcmp(t, "endnotePr") == 0) {
+                    w->in_notepr = m.type == MT_OPEN ? 1 + (t[0] == 'e') : 0;
+                } else if (w->in_notepr) {
+                    notepr_elem(&m, t, &w->sp.note_format[w->in_notepr - 1], &w->sp.note_start[w->in_notepr - 1],
+                                &w->sp.note_restart[w->in_notepr - 1]);
+                } else if (strcmp(t, "pgSz") == 0) {
                     w->sp.page_width = twips(attr_int(&m, "w:w", 11906));   /* (a poster's: past 2^31 / 65536) */
                     w->sp.page_height = twips(attr_int(&m, "w:h", 16838));
                 } else if (strcmp(t, "pgMar") == 0) {
@@ -10511,12 +10660,17 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->fld = 0;
                 }
             } else if (strcmp(t, "sym") == 0 && mu_attr(&m, "w:char", v, sizeof(v))) {
-                uint32_t c = (uint32_t)strtoul(v, NULL, 16);
-                char u[4];
+                uint32_t c = (uint32_t)strtoul(v, NULL, 16), sc;
+                char font[64] = "", u[4];
                 size_t un = 0;
 
-                if (c >= 0xF000 && c < 0xF100) {
-                    c -= 0xF000;    /* symbol fonts map into the private use area */
+                mu_attr(&m, "w:font", font, sizeof(font));
+                sc = sym_unicode(font, c);
+
+                if (sc) {
+                    c = sc;
+                } else if (c >= 0xF000 && c < 0xF100 && !font[0]) {
+                    c -= 0xF000;    /* no font named: the character it stands in for */
                 }
 
                 if (c >= 0x20 && c < 0x80) {
@@ -10530,7 +10684,17 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     u[un++] = (char)(0x80 | (c & 0x3F));
                 }
 
-                dw_text(w, u, un);
+                if (!sc && font[0]) {   /* Wingdings and the like: its code in that font, for a font that has it */
+                    pd_char_props keep = w->rcp;
+
+                    w->rcp.mask |= PD_CP_FAMILY;
+                    snprintf(w->rcp.family, sizeof(w->rcp.family), "%s", font);
+                    w->rcp.font_theme &= ~3;
+                    dw_text(w, u, un);
+                    w->rcp = keep;
+                } else {
+                    dw_text(w, u, un);
+                }
             } else if (strcmp(t, "footnoteRef") == 0 || strcmp(t, "endnoteRef") == 0) {
                 w->after_ref = 1;
             } else if (strcmp(t, "tbl") == 0) {
@@ -10697,6 +10861,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             }
         } else if (strcmp(t, "pPr") == 0) {
             w->in_ppr = 0;
+        } else if (strcmp(t, "footnotePr") == 0 || strcmp(t, "endnotePr") == 0) {
+            w->in_notepr = 0;
         } else if (strcmp(t, "sectPr") == 0) {
             w->in_sect = 0;
 
