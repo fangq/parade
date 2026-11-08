@@ -645,6 +645,8 @@ type
     width: pd_sp;            { preferred width (Word's tcW), 0 = automatic }
     width_pct: Int32;        { or per-mille of the table's width }
     text_dir: Int32;         { PD_CELLTEXT_* }
+    diag_width: array[0..1] of pd_sp;   { corner to corner: tl2br, tr2bl; 0 = none }
+    diag_color: array[0..1] of UInt32;
   end;
   Ppd_cell_props = ^pd_cell_props;
 

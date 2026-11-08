@@ -2773,7 +2773,7 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 pb_puts(o, "<w:vMerge w:val=\"restart\"/>");
             }
 
-            if (cp.border_set) {
+            if (cp.border_set || cp.diag_width[0] || cp.diag_width[1]) {
                 static const char* edge[] = { "top", "left", "bottom", "right" };
                 static const int bit[] = { PD_BORDER_TOP, PD_BORDER_LEFT, PD_BORDER_BOTTOM, PD_BORDER_RIGHT };
                 static const int slot[] = { 0, 3, 2, 1 };  /* edge_width's order: top, right, bottom, left */
@@ -2792,6 +2792,14 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                         pb_puts(o, "/>");
                     } else if (cp.border_set & bit[e]) {
                         pb_printf(o, "<w:%s w:val=\"nil\"/>", edge[e]);
+                    }
+                }
+
+                for (e = 0; e < 2; e++) {   /* corner to corner, after the edges (insideH and insideV between) */
+                    if (cp.diag_width[e] > 0) {
+                        sz = (int)SCALE(cp.diag_width[e], 8, 65536);
+                        pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"/>",
+                                  e ? "tr2bl" : "tl2br", sz < 2 ? 2 : sz, (unsigned)(cp.diag_color[e] & 0xFFFFFF));
                     }
                 }
 
@@ -6106,6 +6114,8 @@ typedef struct {
     pd_sp cell_w;               /* the cell's w:tcW: twips made sp, or (cell_wpct) per-mille */
     int32_t cell_wpct;
     int32_t cell_dir;           /* its w:textDirection, PD_CELLTEXT_* */
+    pd_sp cell_diag[2];         /* its w:tl2br and w:tr2bl rules' widths, and colours */
+    uint32_t cell_diag_c[2];
     uint32_t cell_bg, cell_bg_ref;
     int in_tblpr, in_grid, in_borders, in_mar, in_cb;
     pd_sp t_width, grid[PD_TABLE_MAX_COLS];
@@ -6322,10 +6332,17 @@ static void dw_begin_cell(dw* w) {
             bld_cell_merge_up(b);
         }
 
-        if (w->cell_valign || w->cell_w || w->cell_wpct || w->cell_dir) {
+        if (w->cell_valign || w->cell_w || w->cell_wpct || w->cell_dir || w->cell_diag[0] || w->cell_diag[1]) {
             pd_cell_props cp;
 
             if (pd_doc_cell_props(b->d, bld_container(b), &cp) == PD_OK) {
+                int dk;
+
+                for (dk = 0; dk < 2; dk++) {
+                    cp.diag_width[dk] = w->cell_diag[dk];
+                    cp.diag_color[dk] = w->cell_diag[dk] ? w->cell_diag_c[dk] : 0;
+                }
+
                 cp.text_dir = w->cell_dir;
                 cp.width = w->cell_w;
                 cp.width_pct = w->cell_w ? 0 : w->cell_wpct;
@@ -10732,6 +10749,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->cell_w = 0;
                 w->cell_wpct = 0;
                 w->cell_dir = 0;
+                w->cell_diag[0] = w->cell_diag[1] = 0;
                 memset(&w->cell_edges, 0, sizeof(w->cell_edges));
             } else if (strcmp(t, "tcPr") == 0) {
                 w->in_tcpr = m.type == MT_OPEN;
@@ -10757,6 +10775,20 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 } else if (strcmp(t, "shd") == 0 && shd_color_ref(w->X, &m, &w->cell_bg, &w->cell_bg_ref)) {
                 } else if (strcmp(t, "tcBorders") == 0) {
                     w->in_cb = m.type == MT_OPEN;
+                } else if (w->in_cb && (!strcmp(t, "tl2br") || !strcmp(t, "tr2bl"))) {     /* corner to corner */
+                    int e = t[1] == 'r';
+                    uint32_t ref = 0;
+
+                    w->cell_diag[e] = 0;
+                    w->cell_diag_c[e] = 0xFF000000u;
+
+                    if (mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "nil") != 0 && strcmp(v, "none") != 0) {
+                        w->cell_diag[e] = (pd_sp)((int64_t)attr_int(&m, "w:sz", 4) * 65536 / 8);
+                        w->cell_diag[e] = w->cell_diag[e] > 0 ? w->cell_diag[e] : PD_PT(0.25);
+                        wcolor_ref(w->X, &m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade",
+                                   &w->cell_diag_c[e], &ref);
+                        w->cell_diag_c[e] = w->cell_diag_c[e] ? w->cell_diag_c[e] : 0xFF000000u;
+                    }
                 } else if (w->in_cb) {
                     edge_elem(w->X, &m, t, &w->cell_edges);
                 }

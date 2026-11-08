@@ -85,6 +85,9 @@ typedef struct {                /* a filled rectangle: rules, borders, cell back
     uint32_t color;
     int32_t region;
     pd_block_id block;
+    int32_t diag;               /* 0 a rectangle; a line across it, 1 top left to bottom right, 2 top right to bottom
+                                   left, lw wide */
+    pd_sp lw;
 } prule;
 
 typedef struct {                /* a line (or a whole paragraph region) on a page */
@@ -585,7 +588,18 @@ static int add_rule(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp
     r->color = color;
     r->region = region;
     r->block = block;
+    r->diag = 0;
+    r->lw = 0;
     return 0;
+}
+
+/* a line corner to corner across the box x, y, w by h (diag 1: from top left, 2: from top right), lw wide */
+static void add_diag(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, int32_t diag, pd_sp lw,
+                     uint32_t color, int32_t region, pd_block_id block) {
+    if (lw > 0 && add_rule(L, page, x, y, w, h, color, region, block) == 0) {
+        L->pages[page].rules[L->pages[page].nrules - 1].diag = diag;
+        L->pages[page].rules[L->pages[page].nrules - 1].lw = lw;
+    }
 }
 
 static void place_stack(pd_layout* L, pd_block_id container, pd_sp width, int32_t page, pd_sp x, pd_sp y,
@@ -2424,6 +2438,17 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                 }
             }
 
+            if (!cell->st.cell.merge_up) {     /* corner to corner */
+                pd_cell_props dp;
+                int e;
+
+                pd_doc_cell_effective(d, cell, &dp);
+
+                for (e = 0; e < 2; e++) {
+                    add_diag(L, page, cx, ry, cw, rowh[r], e + 1, dp.diag_width[e], dp.diag_color[e], region, cell->id);
+                }
+            }
+
             bw = edge_rule(&T, cell, PD_BORDER_LEFT, c > row_c0(row) ? cell_over(d, &T, row, c - 1) : NULL,
                            PD_BORDER_RIGHT, PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, c == row_c0(row), &bc);
 
@@ -2528,6 +2553,17 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
                                  ch - 2 * padv - (off > 0 ? off : 0), 1, 0);
             } else {
                 place_stack(F->L, cell->id, inner, F->page, cx + pad, y + padv + (off > 0 ? off : 0), 0);
+            }
+        }
+
+        if (!cell->st.cell.merge_up && v->part == 0) {     /* corner to corner */
+            pd_cell_props dp;
+            int e;
+
+            pd_doc_cell_effective(d, cell, &dp);
+
+            for (e = 0; e < 2; e++) {
+                add_diag(F->L, F->page, cx, y, cw, ch, e + 1, dp.diag_width[e], dp.diag_color[e], 0, cell->id);
             }
         }
 
@@ -5563,6 +5599,18 @@ static void emit_rules(dlist_t* D, const ppage* pg, int32_t from, int32_t to, in
         pd_draw a;
 
         if ((only == 5 && r->region != 5) || (only == 0 && r->region == 5)) {
+            continue;
+        }
+
+        if (r->diag) {
+            pd_sp q[4] = { r->x, r->y, r->x + r->w, r->y + r->h };
+
+            if (r->diag == 2) {
+                q[0] = r->x + r->w;
+                q[2] = r->x;
+            }
+
+            emit_path(D, q, 2, 0, 0, r->color, r->lw, r->block, r->region);
             continue;
         }
 

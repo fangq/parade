@@ -5986,6 +5986,58 @@ static void test_cell_text_dir(void) {
     pd_doc_free(d);
 }
 
+/* Rules corner to corner across a cell (tl2br, tr2bl): a line from its top left to its bottom right in the first
+   colour, one from top right to bottom left in the second, also after .docx and native round trips */
+static void test_cell_diagonals(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblGrid><w:gridCol w:w=\"3000\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcBorders>"
+                             "<w:tl2br w:val=\"single\" w:sz=\"8\" w:color=\"FF0000\"/>"
+                             "<w:tr2bl w:val=\"single\" w:sz=\"8\" w:color=\"0000FF\"/></w:tcBorders></w:tcPr>"
+                             "<w:p><w:r><w:t>X</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, down = 0, up = 0;
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                const pd_sp* q = it[k].points;
+
+                if (it[k].kind != PD_DRAW_PATH || it[k].npoints != 2 || it[k].line_width != PD_PT(1)) {
+                    continue;
+                }
+
+                down += it[k].color == 0xFFFF0000u && q[0] < q[2] - PD_PT(140) && q[1] < q[3] - PD_PT(5);
+                up += it[k].color == 0xFF0000FFu && q[0] > q[2] + PD_PT(140) && q[1] < q[3] - PD_PT(5);
+            }
+
+            CHECK(down == 1 && up == 1);
+            free(it);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -6015,6 +6067,7 @@ int main(void) {
     test_cant_split();
     test_cell_width();
     test_cell_text_dir();
+    test_cell_diagonals();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

@@ -731,6 +731,9 @@ typedef struct {
                                      0 = automatic */
     int32_t width_pct;          /**< or that in per-mille of the table's width (width 0) */
     int32_t text_dir;           /**< PD_CELLTEXT_*: its text across, or turned to run up or down the cell */
+    pd_sp diag_width[2];        /**< rules across it, corner to corner: [0] top left to bottom right (tl2br),
+                                     [1] top right to bottom left (tr2bl); 0 = none */
+    uint32_t diag_color[2];
 } pd_cell_props;
 
 /* which way a cell's text runs (Word's w:textDirection) */

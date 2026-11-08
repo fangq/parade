@@ -315,6 +315,8 @@ int main(void) {
     printf("pd_cell_props.width %zu\n", offsetof(pd_cell_props, width));
     printf("pd_cell_props.width_pct %zu\n", offsetof(pd_cell_props, width_pct));
     printf("pd_cell_props.text_dir %zu\n", offsetof(pd_cell_props, text_dir));
+    printf("pd_cell_props.diag_width %zu\n", offsetof(pd_cell_props, diag_width));
+    printf("pd_cell_props.diag_color %zu\n", offsetof(pd_cell_props, diag_color));
     printf("pd_theme %zu\n", sizeof(pd_theme));
     printf("pd_theme.name %zu\n", offsetof(pd_theme, name));
     printf("pd_theme.color %zu\n", offsetof(pd_theme, color));

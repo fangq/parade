@@ -3948,7 +3948,8 @@ pd_status pd_doc_set_cell_props(pd_doc* d, pd_block_id id, const pd_cell_props* 
              cp->merge_up <= 1 && cp->min_height >= 0 && cp->border_width >= 0 && cp->edge_width[0] >= 0 && cp->edge_width[1] >= 0 &&
              cp->edge_width[2] >= 0 && cp->edge_width[3] >= 0 && (cp->border_set & ~15) == 0 &&
              (cp->border_on & ~cp->border_set) == 0 && cp->width >= 0 && cp->width_pct >= 0 && cp->width_pct <= 1000 &&
-             cp->text_dir >= PD_CELLTEXT_LRTB && cp->text_dir <= PD_CELLTEXT_TBRL,
+             cp->text_dir >= PD_CELLTEXT_LRTB && cp->text_dir <= PD_CELLTEXT_TBRL && cp->diag_width[0] >= 0 &&
+             cp->diag_width[1] >= 0,
              b->st.cell = *cp);
 }
 
