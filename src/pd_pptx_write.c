@@ -56,6 +56,7 @@ typedef struct {
     char link[16];              /* the hyperlink the text is in: its relationship id, "" none */
     int kept;                   /* the masters and layouts the presentation came with are written (else one blank) */
     const unsigned char* kdata; /* they, as the reader kept them (PD_PPTX_KEEP_MIME) */
+    char clr_ovr[256];          /* the slide being written: its own colour map's attributes ("" the master's) */
     size_t klen;
     int own_bg, has_rec;        /* the slide being written: it has a background of its own; what the reader saw */
     long rec_bg;                /* the background colour it read (with has_rec) */
@@ -2072,20 +2073,23 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         P->slide_no = s + 1;
         P->next_id = 2;
         P->nfld = 0;
+        P->clr_ovr[0] = '\0';
         P->own_bg = P->has_rec = 0;
         layout[0] = '\0';
         pb_puts(&slide, DECL);
 
         if (P->kept) {  /* the layout it was on, and what it had of its own */
-            char f[4][256], key[16];
+            char f[5][256], key[16];
 
             snprintf(key, sizeof(key), "%u", (unsigned)sec);
+            f[4][0] = '\0';
 
-            if (kept_line(P, key, f, 4) == 4 && f[0][0]) {
+            if (kept_line(P, key, f, 5) >= 4 && f[0][0]) {
                 snprintf(layout, sizeof(layout), "%s", f[0]);
                 P->own_bg = atoi(f[1]);
                 P->has_rec = 1;
                 P->rec_bg = strtol(f[3], NULL, 16);
+                snprintf(P->clr_ovr, sizeof(P->clr_ovr), "%s", f[4]);   /* its own colour map, if it had one */
                 pb_printf(&slide, "<p:sld %s%s>", NS, atoi(f[2]) ? " showMasterSp=\"0\"" : "");
             } else {
                 pb_printf(&slide, "<p:sld %s>", NS);
@@ -2109,7 +2113,12 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
             put_text_slide(P, sec);
         }
 
-        pb_puts(&slide, "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>");
+        if (P->clr_ovr[0]) {
+            pb_printf(&slide, "</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping %s/></p:clrMapOvr></p:sld>",
+                      P->clr_ovr);
+        } else {
+            pb_puts(&slide, "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>");
+        }
         snprintf(name, sizeof(name), "ppt/slides/slide%d.xml", s + 1);
         zadd(z, name, &slide, &err);
         memset(&b, 0, sizeof(b));

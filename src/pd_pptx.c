@@ -63,6 +63,7 @@ typedef struct {
         char layout[256];       /* shows its master's shapes -- for a writer to put it back on its layout */
         int own_bg, no_master;
         long bg;
+        char clr[256];          /* its own colour map (a:overrideClrMapping's attributes), "" the master's */
     } *rec;
     int nrec, caprec;
 } pptx;
@@ -3028,6 +3029,23 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
         r->own_bg = xd_find(&slide.x, "bg") >= 0;
         r->no_master = !show;
         r->bg = bg >= 0 ? bg : 0xFFFFFF;
+        r->clr[0] = '\0';
+
+        {   /* its own colour map, kept to be written back */
+            static const char* an[12] = { "bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4",
+                                          "accent5", "accent6", "hlink", "folHlink"
+                                        };
+            int om = xd_find(&slide.x, "overrideClrMapping"), q;
+            size_t cl = 0;
+
+            for (q = 0; om >= 0 && q < 12; q++) {
+                char cm[32];
+
+                if (xd_attr(&slide.x, om, an[q], cm, sizeof(cm)) && cl < sizeof(r->clr) - 40) {
+                    cl += (size_t)snprintf(r->clr + cl, sizeof(r->clr) - cl, "%s%s=\"%s\"", cl ? " " : "", an[q], cm);
+                }
+            }
+        }
     }
 
     /* the slide: a page as big as it, its canvas in front of an empty paragraph, from the page's corner */
@@ -3303,8 +3321,8 @@ static void pkeep_read(pptx* P, pd_doc* d) {
         pb_printf(&map, "theme\t%s\n", P->doc_theme);
 
         for (i = 0; i < P->nrec; i++) {
-            pb_printf(&map, "%u\t%s\t%d\t%d\t%06lX\n", (unsigned)pd_doc_child(d, pd_doc_root(d), i), P->rec[i].layout,
-                      P->rec[i].own_bg, P->rec[i].no_master, (unsigned long)P->rec[i].bg & 0xFFFFFFul);
+            pb_printf(&map, "%u\t%s\t%d\t%d\t%06lX\t%s\n", (unsigned)pd_doc_child(d, pd_doc_root(d), i), P->rec[i].layout,
+                      P->rec[i].own_bg, P->rec[i].no_master, (unsigned long)P->rec[i].bg & 0xFFFFFFul, P->rec[i].clr);
         }
 
         pkeep_entry(&k, "map", "", "map", "", map.p ? map.p : "", map.n);

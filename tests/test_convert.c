@@ -6108,7 +6108,10 @@ static void test_pptx_write_kept_masters(void) {
                     "ppt/slides/slide2.xml", "<p:sld " KNS " showMasterSp=\"0\"><p:cSld><p:bg><p:bgPr><a:solidFill>"
                     "<a:srgbClr val=\"FF0000\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr>"
                     "<p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>"
-                    KSP("2", "Two", "<p:ph type=\"title\"/>", "2540000") "</p:spTree></p:cSld></p:sld>",
+                    KSP("2", "Two", "<p:ph type=\"title\"/>", "2540000") "</p:spTree></p:cSld><p:clrMapOvr>"
+                    "<a:overrideClrMapping bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" "
+                    "accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" "
+                    "hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr></p:sld>",
                     "ppt/slides/_rels/slide2.xml.rels", "<Relationships>" KREL("rId1", "../slideLayouts/slideLayout2.xml")
                     "</Relationships>", NULL);
     pd_doc* back = NULL;
@@ -6132,6 +6135,7 @@ static void test_pptx_write_kept_masters(void) {
     CHECK(s2 && strstr(s2, "name=\"Two\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"title\"/></p:nvPr>") &&
           !strstr(s2, "name=\"Logo\""));
     CHECK(r2 && strstr(r2, "Target=\"../slideLayouts/slideLayout2.xml\""));
+    CHECK(s2 && strstr(s2, "<a:overrideClrMapping bg1=\"dk1\" tx1=\"lt1\"") && s1 && strstr(s1, "<a:masterClrMapping/>"));
     free(r2);
     r2 = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slideLayouts/slideLayout2.xml", &n) : NULL;
     CHECK(r2 && strstr(r2, "name=\"Logo\""));
