@@ -643,6 +643,8 @@ type
   pd_row_props = record
     grid_before, grid_after: Int32;     { grid columns left empty before its first cell, after its last }
     width_before, width_after: pd_sp;   { their widths, at least (0 = unsaid) }
+    height: pd_sp;                      { with height_exact: the row's height }
+    height_exact: Int32;                { 1: exactly that tall, its cells' content cut off there }
   end;
 
   { what a table style says of a part's cells (PD_TPART_*), and of their text }

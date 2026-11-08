@@ -733,7 +733,7 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
         case PD_BLOCK_ROW: {
             const pd_row_props* p = &s->row;
 
-            if (p->grid_before || p->grid_after || p->width_before || p->width_after) {
+            if (p->grid_before || p->grid_after || p->width_before || p->width_after || p->height_exact) {
                 pj_key(w, "Row");
                 pj_obj_begin(w);
 
@@ -745,6 +745,11 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 if (p->grid_after || p->width_after) {
                     put_int(w, "GridAfter", p->grid_after);
                     put_int(w, "WidthAfter", p->width_after);
+                }
+
+                if (p->height_exact) {
+                    put_int(w, "Height", p->height);
+                    put_bool(w, "HeightExact", p->height_exact);
                 }
 
                 pj_obj_end(w);
@@ -1849,6 +1854,8 @@ static void load_row(loader* L, const pj_node* o, pd_row_props* p) {
     p->grid_after = (int32_t)int_or(pj_get(x, "GridAfter"), 0, 0, PD_TABLE_MAX_GRID - 1, L);
     p->width_before = (pd_sp)int_or(pj_get(x, "WidthBefore"), 0, 0, SP_MAX, L);
     p->width_after = (pd_sp)int_or(pj_get(x, "WidthAfter"), 0, 0, SP_MAX, L);
+    p->height = (pd_sp)int_or(pj_get(x, "Height"), 0, 0, SP_MAX, L);
+    p->height_exact = (int32_t)int_or(pj_get(x, "HeightExact"), 0, 0, 1, L);
 }
 
 static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {

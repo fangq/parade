@@ -332,6 +332,8 @@ begin
   WriteLn('pd_row_props.grid_after ', PtrUInt(@v_pd_row_props.grid_after) - PtrUInt(@v_pd_row_props));
   WriteLn('pd_row_props.width_before ', PtrUInt(@v_pd_row_props.width_before) - PtrUInt(@v_pd_row_props));
   WriteLn('pd_row_props.width_after ', PtrUInt(@v_pd_row_props.width_after) - PtrUInt(@v_pd_row_props));
+  WriteLn('pd_row_props.height ', PtrUInt(@v_pd_row_props.height) - PtrUInt(@v_pd_row_props));
+  WriteLn('pd_row_props.height_exact ', PtrUInt(@v_pd_row_props.height_exact) - PtrUInt(@v_pd_row_props));
   WriteLn('pd_cell_props ', SizeOf(pd_cell_props));
   WriteLn('pd_cell_props.col_span ', PtrUInt(@v_pd_cell_props.col_span) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.valign ', PtrUInt(@v_pd_cell_props.valign) - PtrUInt(@v_pd_cell_props));

@@ -5766,6 +5766,57 @@ static void test_grid_before(void) {
     pd_doc_free(d);
 }
 
+/* A row of exact height (trHeight hRule="exact") keeps it, and what its cell holds past it is cut off, the next
+   row right below; also after .docx and native round trips */
+static void test_exact_row(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblGrid><w:gridCol w:w=\"3000\"/></w:tblGrid>"
+                             "<w:tr><w:trPr><w:trHeight w:val=\"400\" w:hRule=\"exact\"/></w:trPr><w:tc>"
+                             "<w:p><w:r><w:t>L1</w:t></w:r></w:p><w:p><w:r><w:t>L2</w:t></w:r></w:p>"
+                             "<w:p><w:r><w:t>L3</w:t></w:r></w:p><w:p><w:r><w:t>L4</w:t></w:r></w:p></w:tc></w:tr>"
+                             "<w:tr><w:tc><w:p><w:r><w:t>NEXT</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pg[2];
+            pd_sp x[2], y[2];
+
+            CHECK(text_drawn(d, L, "L1", &pg[0], &x[0], &y[0]) && text_drawn(d, L, "NEXT", &pg[1], &x[1], &y[1]));
+            CHECK(y[1] - y[0] > PD_PT(19) && y[1] - y[0] < PD_PT(21));    /* 20pt below: the row's height */
+            CHECK(!text_drawn(d, L, "L2", &pg[0], &x[0], &y[0]) && !text_drawn(d, L, "L4", &pg[0], &x[0], &y[0]));
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    if (d) {
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK && b.p && strstr(b.p, "<tr style=\"height:20.00pt\">"));
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -5791,6 +5842,7 @@ int main(void) {
     printf("tables and pages\n");
     test_wide_table();
     test_grid_before();
+    test_exact_row();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

@@ -936,10 +936,10 @@ static void place_stack(pd_layout* L, pd_block_id container, pd_sp width, int32_
     stack_walk(L, container, width, 1, page, x, y, region, &st);
 }
 
-/* the lines of a container whose tops are in [lo, hi) of it (a slice of a table row): placed with the
-   container's top at y */
+/* the lines of a container whose tops are in [lo, hi) of it (a slice of a table row), or with whole, those
+   wholly above hi (a row of exact height): placed with the container's top at y */
 static void place_stack_clip(pd_layout* L, pd_block_id container, pd_sp width, int32_t page, pd_sp x, pd_sp y,
-                             pd_sp lo, pd_sp hi) {
+                             pd_sp lo, pd_sp hi, int whole, int32_t region) {
     pd_block_id ids[512];
     int32_t n = 0, i, k;
     pd_sp prev_after = 0, py = 0;
@@ -959,8 +959,8 @@ static void place_stack_clip(pd_layout* L, pd_block_id container, pd_sp width, i
         }
 
         for (k = 0; k < c->nlines; k++) {
-            if (py + c->top[k] >= lo && py + c->top[k] < hi) {
-                add_line(L, page, c, k, x, y + py, 0);
+            if (whole ? py + c->top[k + 1] <= hi : py + c->top[k] >= lo && py + c->top[k] < hi) {
+                add_line(L, page, c, k, x, y + py, region);
             }
         }
 
@@ -1674,6 +1674,14 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
         }
     }
 
+    for (r = 0; r < t->nkids; r++) {    /* a row of exact height is that tall, whatever it holds */
+        const blk* row = d->tab[t->kids[r]];
+
+        if (row->st.row.height_exact && row->st.row.height > 0) {
+            F->tb[ti].rowh[r] = row->st.row.height;
+        }
+    }
+
     for (r = 0; r < t->nkids; r++) {
         const blk* row = d->tab[t->kids[r]];
         pd_sp rowh = F->tb[ti].rowh[r];
@@ -1689,7 +1697,8 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
             push(F, VI_PEN, 0, merged || r <= F->tb[ti].header_rows ? INF_PEN : 0, NULL, 0, 0);
         }
 
-        if (rowh > F->colh && F->colh > 0 && !merged && r >= F->tb[ti].header_rows && row_alone(d, &T, t, r)) {
+        if (rowh > F->colh && F->colh > 0 && !merged && r >= F->tb[ti].header_rows && !row->st.row.height_exact &&
+                row_alone(d, &T, t, r)) {
             /* taller than a column: in slices that break across columns and pages, cut where no cell has a line */
             int32_t ncut = 0, j2;
             pd_sp* cuts = row_cuts(F, &T, row, pad, padv, rowh, &ncut), at = 0;
@@ -2270,6 +2279,8 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
             rowh[r] = ch > rowh[r] ? ch : rowh[r];
         }
 
+        rowh[r] = row->st.row.height_exact && row->st.row.height > 0 ? row->st.row.height : rowh[r];
+
         h += rowh[r];
     }
 
@@ -2302,7 +2313,14 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                 ch = stack_walk(L, cell->id, inner, 0, 0, 0, 0, 0, st);
                 off = cell->st.cell.valign == 1 ? (rowh[r] - 2 * padv - ch) / 2 : cell->st.cell.valign == 2 ?
                       rowh[r] - 2 * padv - ch : 0;
-                stack_walk(L, cell->id, inner, 1, page, cx + pad, ry + padv + (off > 0 ? off : 0), region, st);
+                off = off > 0 ? off : 0;
+
+                if (row->st.row.height_exact) {     /* what does not fit is cut off */
+                    place_stack_clip(L, cell->id, inner, page, cx + pad, ry + padv + off, 0, rowh[r] - 2 * padv - off,
+                                     1, region);
+                } else {
+                    stack_walk(L, cell->id, inner, 1, page, cx + pad, ry + padv + off, region, st);
+                }
             }
 
             bw = edge_rule(&T, cell, PD_BORDER_LEFT, c > row_c0(row) ? cell_over(d, &T, row, c - 1) : NULL,
@@ -2383,7 +2401,7 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
             }
 
             place_stack_clip(F->L, cell->id, inner, F->page, cx + pad, y - v->from + padv, v->from - padv,
-                             v->from - padv + v->h);
+                             v->from - padv + v->h, 0, 0);
         } else if (!cell->st.cell.merge_up) {
             if (cell_fill(F->L->doc, cell)) {
                 add_rule(F->L, F->page, cx, y, cw, ch, cell_fill(F->L->doc, cell), 0, cell->id);
@@ -2397,7 +2415,12 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
                 off = ch - 2 * padv - h;
             }
 
-            place_stack(F->L, cell->id, inner, F->page, cx + pad, y + padv + (off > 0 ? off : 0), 0);
+            if (row->st.row.height_exact) {     /* what does not fit is cut off */
+                place_stack_clip(F->L, cell->id, inner, F->page, cx + pad, y + padv + (off > 0 ? off : 0), 0,
+                                 ch - 2 * padv - (off > 0 ? off : 0), 1, 0);
+            } else {
+                place_stack(F->L, cell->id, inner, F->page, cx + pad, y + padv + (off > 0 ? off : 0), 0);
+            }
         }
 
         /* left edge: every cell's; right edge: the last one's (the next cell's left is the rest) */

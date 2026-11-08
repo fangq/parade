@@ -735,6 +735,9 @@ typedef struct {
     int32_t grid_after;         /**< and after its last (gridAfter) */
     pd_sp width_before;         /**< the empty columns' width before, at least (w:wBefore), 0 = unsaid */
     pd_sp width_after;          /**< and after (w:wAfter) */
+    pd_sp height;               /**< with height_exact: the row's height (else its cells' min_height say) */
+    int32_t height_exact;       /**< 1: exactly height tall, what its cells hold beyond that cut off (Word's
+                                     hRule="exact"); such a row is never broken */
 } pd_row_props;
 
 /* ------------------------------------------------------------------ */

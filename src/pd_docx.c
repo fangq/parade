@@ -2708,6 +2708,10 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 minh = cp.min_height > minh ? cp.min_height : minh;
             }
 
+            if (rp.height_exact) {
+                minh = rp.height;
+            }
+
             if (minh > 0 || r < tp.header_rows || rp.grid_before || rp.grid_after) {
                 pb_puts(o, "<w:trPr>");
 
@@ -2728,7 +2732,7 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 }
 
                 if (minh > 0) {
-                    pb_printf(o, "<w:trHeight w:val=\"%d\"/>", TW(minh));
+                    pb_printf(o, "<w:trHeight w:val=\"%d\"%s/>", TW(minh), rp.height_exact ? " w:hRule=\"exact\"" : "");
                 }
 
                 if (r < tp.header_rows) {
@@ -6231,7 +6235,7 @@ static void dw_row_begin(dw* w) {
     w->pend_row = 0;
 
     if (b->ntables >= 1 && b->ntables <= 8 && b->table[b->ntables - 1] && (w->row_pr.grid_before ||
-            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after)) {
+            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after || w->row_pr.height_exact)) {
         pd_doc_set_row_props(b->d, b->row[b->ntables - 1], &w->row_pr);
     }
 }
@@ -10681,7 +10685,16 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (w->in_trpr && strcmp(t, "tblHeader") == 0) {
                 w->row_header = attr_on(&m);
             } else if (w->in_trpr && strcmp(t, "trHeight") == 0 && w->ntab >= 1 && w->ntab <= 8) {
-                w->tabs[w->ntab - 1].row_h = twips(attr_int(&m, "w:val", 0));    /* at least, or exactly: at least */
+                pd_sp hh = twips(attr_int(&m, "w:val", 0));
+
+                hh = hh > 0 ? hh : 0;
+
+                if (!mu_attr(&m, "w:hRule", v, sizeof(v)) || strcmp(v, "atLeast") == 0) {
+                    w->tabs[w->ntab - 1].row_h = hh;
+                } else if (strcmp(v, "exact") == 0 && hh > 0) {   /* "auto": as tall as its content */
+                    w->row_pr.height = hh;
+                    w->row_pr.height_exact = 1;
+                }
             } else if (strcmp(t, "tc") == 0) {
                 if (w->pend_row) {
                     dw_row_begin(w);

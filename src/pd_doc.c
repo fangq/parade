@@ -3955,7 +3955,8 @@ pd_status pd_doc_set_row_props(pd_doc* d, pd_block_id id, const pd_row_props* rp
 
     BLOCK_OP("Row", b && b->kind == PD_BLOCK_ROW && rp && rp->grid_before >= 0 &&
              rp->grid_before < PD_TABLE_MAX_GRID && rp->grid_after >= 0 && rp->grid_after < PD_TABLE_MAX_GRID &&
-             rp->width_before >= 0 && rp->width_after >= 0, b->st.row = *rp);
+             rp->width_before >= 0 && rp->width_after >= 0 && rp->height >= 0 && rp->height_exact >= 0 &&
+             rp->height_exact <= 1, b->st.row = *rp);
 }
 
 pd_status pd_doc_set_break(pd_doc* d, pd_block_id id, pd_break_kind kind) {

@@ -730,7 +730,12 @@ static void hx_table(hx* x, pd_block_id t) {
 
         pd_doc_block_info(x->d, row, &ri);
         pd_doc_row_props(x->d, row, &rp);
-        pb_puts(x->o, "<tr>");
+
+        if (rp.height_exact && rp.height > 0) {
+            pb_printf(x->o, "<tr style=\"height:%.2fpt\">", rp.height / 65536.0);
+        } else {
+            pb_puts(x->o, "<tr>");
+        }
         col = rp.grid_before;
 
         if (rp.grid_before > 0) {   /* the grid columns it leaves empty: a cell of nothing */

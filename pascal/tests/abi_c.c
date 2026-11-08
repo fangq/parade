@@ -296,6 +296,8 @@ int main(void) {
     printf("pd_row_props.grid_after %zu\n", offsetof(pd_row_props, grid_after));
     printf("pd_row_props.width_before %zu\n", offsetof(pd_row_props, width_before));
     printf("pd_row_props.width_after %zu\n", offsetof(pd_row_props, width_after));
+    printf("pd_row_props.height %zu\n", offsetof(pd_row_props, height));
+    printf("pd_row_props.height_exact %zu\n", offsetof(pd_row_props, height_exact));
     printf("pd_cell_props %zu\n", sizeof(pd_cell_props));
     printf("pd_cell_props.col_span %zu\n", offsetof(pd_cell_props, col_span));
     printf("pd_cell_props.valign %zu\n", offsetof(pd_cell_props, valign));

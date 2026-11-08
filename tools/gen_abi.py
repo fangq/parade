@@ -44,7 +44,7 @@ STRUCTS = {
                         "line_number_restart mirror_margins gutter page_valign line_pitch direction",
     "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width indent width_pct "
                       "border_sides cell_padding_v direction border_theme style look border_given",
-    "pd_row_props": "grid_before grid_after width_before width_after",
+    "pd_row_props": "grid_before grid_after width_before width_after height height_exact",
     "pd_cell_props": "col_span valign background merge_up min_height border_set border_on border_width border_color "
                      "edge_width background_theme border_theme",
     "pd_theme": "name color major minor major_ea minor_ea major_cs minor_cs",
