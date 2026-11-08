@@ -4150,6 +4150,18 @@ static void test_pptx_hidden(void) {
     pd_doc_free(d);
 }
 
+/* a deck of one slide: its canvas at the page's corner. (Its section's margins, none, are read after the canvas, the
+   last section's being at the document's end; a picture placed from the page's edge was put an inch to the left of
+   it, Word's default margin.) */
+static void test_pptx_one_slide(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PSP("2", PP("Alone"))), NULL);
+    pd_float_props fp;
+
+    CHECK(d && pd_doc_float_props(d, pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), &fp) == PD_OK &&
+          fp.offset_x == 0);
+    pd_doc_free(d);
+}
+
 /* a paragraph with properties PPR and text T */
 #define PPP(ppr, text) "<a:p><a:pPr" ppr "</a:pPr><a:r><a:rPr sz=\"2000\"/><a:t>" text "</a:t></a:r></a:p>"
 
@@ -5766,6 +5778,7 @@ int main(void) {
     test_pptx();
     test_pptx_smartart();
     test_pptx_hidden();
+    test_pptx_one_slide();
     test_pptx_autonum();
     test_docx_smartart();
     test_docx_turned_text();
