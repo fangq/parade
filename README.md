@@ -106,7 +106,10 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   the top of every continuation.
 - Text wraps to a float's outline where it has one (Word's wrapTight and
   wrapThrough polygons: each line narrowed to how far the outline reaches
-  beside it), on the wider side for Word's "largest" and "bothSides".
+  beside it), on the wider side for Word's "largest"; with "bothSides"
+  beside a float in the middle of the column each row is a left and a
+  right part on one baseline (the paragraph broken to alternating widths,
+  each pair of lines set side by side).
 - A table can float (a float holding just the table: Word's floating
   tables, `w:tblpPr`), placed and wrapped like a picture.
 - Floats with `wrap` left/right sit at their anchor and the following
@@ -115,8 +118,14 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
 - Sections may have page borders (each side's line style, width, colour
   and space, from the page's edge or the text, on all, the first or all
   but the first page, over or under the text), a page colour, a line
-  between columns, and start on an odd or even page (a blank page put in
+  between columns, columns of their own widths (paragraphs re-broken at
+  the width of the column each line lands in), and start on an odd or even page (a blank page put in
   before them when needed).
+- A section of vertical text (Word's tbRl) has its lines run down the
+  page, the first at the right, East Asian characters upright and others
+  turned: its body is laid out across the page turned a quarter left and
+  turned back as placed (its tables' rules, headers and footers are not
+  turned).
 - Continuous sections start below the previous one on the same page;
   a multi-column section ending there gets balanced columns.
 - `PD_PAGES_OPTIMAL` sections choose all column breaks at once (shortest

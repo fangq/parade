@@ -369,6 +369,8 @@ static int rx_style_of(const pd_block_info* bi) {
 }
 
 /* paragraph properties after \pard */
+static void rx_line(rx* x, pd_buf* o, const char* side, const pd_border_line* l);
+
 static void rx_para_props(rx* x, pd_block_id p, int in_table) {
     pd_block_info bi;
     pd_para_props pp, dp;
@@ -412,6 +414,18 @@ static void rx_para_props(rx* x, pd_block_id p, int in_table) {
         pb_puts(x->o, "\\intbl");
     }
 
+    {   /* its border, each edge's line */
+        static const char* side[6] = { "\\brdrt", "\\brdrr", "\\brdrb", "\\brdrl", "\\brdrbtw", "\\brdrbar" };
+        pd_border_line bl[6];
+        int k;
+
+        if (pd_conv_para_lines(x->d, p, bl)) {
+            for (k = 0; k < 6; k++) {
+                rx_line(x, x->o, side[k], &bl[k]);
+            }
+        }
+    }
+
     /* the paragraph's own character look (readers apply no style formatting) */
     pd_conv_base_props(x->d, p, &base);
 
@@ -433,6 +447,22 @@ static void rx_para_props(rx* x, pd_block_id p, int in_table) {
 }
 
 static void rx_block(rx* x, pd_block_id id, int in_table);
+
+/* a border line after its side's control word (\brdrt, \pgbrdrl, ...): style, width (twips, each stroke's),
+   colour and space (points) */
+static void rx_line(rx* x, pd_buf* o, const char* side, const pd_border_line* l) {
+    static const char* st[] = { "", "\\brdrs", "\\brdrdb", "\\brdrdot", "\\brdrdash", "\\brdrth",
+                                "\\brdrtnthsg", "\\brdrthtnsg", "\\brdrtriple", "\\brdrdashd"
+                              };
+    int w = TWIPS(l->width);
+
+    if (l->style <= PD_LINE_NONE || l->style > PD_LINE_DOT_DASH) {
+        return;
+    }
+
+    pb_printf(o, "%s%s\\brdrw%d\\brdrcf%d\\brsp%d", side, st[l->style], w < 1 ? 1 : w > 75 ? 75 : w,
+              color_index(x, l->color), (int)((l->space + 32768) / 65536) * 20);
+}
 
 static void rx_table(rx* x, pd_block_id t) {
     pd_block_info ti, ri;
@@ -602,7 +632,7 @@ static void rx_block(rx* x, pd_block_id id, int in_table) {
 
 pd_status pd_rtf_export(const pd_doc* d, pd_buf* out) {
     rx* x = (rx*)calloc(1, sizeof(rx));
-    pd_buf body;
+    pd_buf body, pgb;
     pd_section_props sp;
     int i, lv;
 
@@ -620,6 +650,23 @@ pd_status pd_rtf_export(const pd_doc* d, pd_buf* out) {
     pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp);
     x->text_w = sp.page_width - sp.margin_left - sp.margin_right;
     rx_block(x, pd_doc_root(d), 0);
+
+    {   /* the pages' border (the first section's): its colours in the table too */
+        static const char* side[4] = { "\\pgbrdrt", "\\pgbrdrr", "\\pgbrdrb", "\\pgbrdrl" };
+        int f = sp.page_border_flags;
+
+        memset(&pgb, 0, sizeof(pgb));
+
+        if (sp.page_border[0].style || sp.page_border[1].style || sp.page_border[2].style || sp.page_border[3].style) {
+            pb_puts(&pgb, (f & PD_PGBORDER_FROM_TEXT) ? "" : "\\pgbrdropt32");     /* from the page's edge */
+
+            for (i = 0; i < 4; i++) {
+                rx_line(x, &pgb, side[i], &sp.page_border[i]);
+            }
+
+            pb_putc(&pgb, '\n');
+        }
+    }
 
     /* the header, now that the fonts and colors are known */
     pb_puts(out, "{\\rtf1\\ansi\\ansicpg1252\\deff0\\uc1\n{\\fonttbl");
@@ -671,9 +718,18 @@ pd_status pd_rtf_export(const pd_doc* d, pd_buf* out) {
 
     pb_puts(out, "}\n{\\*\\listoverridetable{\\listoverride\\listid1\\listoverridecount0\\ls1}"
             "{\\listoverride\\listid2\\listoverridecount0\\ls2}}\n");
+    if (sp.page_color) {    /* the pages' colour: a background shape, shown */
+        uint32_t c = sp.page_color;
+
+        pb_printf(out, "\\viewbksp1{\\*\\background{\\shp{\\*\\shpinst{\\sp{\\sn fillColor}{\\sv %u}}}}}\n",
+                  (unsigned)(((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)));
+    }
+
     pb_printf(out, "\\paperw%d\\paperh%d\\margl%d\\margr%d\\margt%d\\margb%d\n", TWIPS(sp.page_width),
               TWIPS(sp.page_height), TWIPS(sp.margin_left), TWIPS(sp.margin_right), TWIPS(sp.margin_top),
               TWIPS(sp.margin_bottom));
+    pb_put(out, pgb.p, pgb.n);
+    pb_free(&pgb);
     pb_put(out, body.p, body.n);
     pb_puts(out, "}\n");
     pb_free(&body);

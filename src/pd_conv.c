@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pd_conv.h"
+#include "pd_doc_internal.h"
 
 /* ------------------------------------------------------------------ */
 /* output buffer                                                      */
@@ -1943,4 +1944,42 @@ pd_status pd_doc_paste(pd_doc* d, pd_pos at, const void* data, size_t len, pd_co
     }
 
     return st;
+}
+
+int pd_conv_para_lines(const pd_doc* d, pd_block_id para, pd_border_line* out) {
+    pd_para_props pp;
+    int k, any = 0;
+
+    memset(out, 0, 6 * sizeof(pd_border_line));
+
+    if (pd_doc_para_resolve(d, para, &pp) != PD_OK) {
+        return 0;
+    }
+
+    pd_doc_para_border_lines(&pp, out);
+
+    for (k = 0; k < 6; k++) {
+        any |= out[k].style != PD_LINE_NONE;
+    }
+
+    return any;
+}
+
+void pd_conv_border_css(char* b, size_t cap, const char* side, const pd_border_line* l) {
+    static const char* css[] = { "none", "solid", "double", "dotted", "dashed", "solid", "double", "double",
+                                 "double", "dashed"
+                               };
+    size_t n = strlen(b);
+    double w = l->width / 65536.0;
+
+    if (l->style == PD_LINE_NONE || l->style > PD_LINE_DOT_DASH || n >= cap) {
+        return;
+    }
+
+    if (l->style == PD_LINE_DOUBLE || l->style == PD_LINE_TRIPLE) {     /* CSS's double: the whole, strokes and gap */
+        w *= l->style == PD_LINE_DOUBLE ? 3 : 5;
+    }
+
+    snprintf(b + n, cap - n, "border-%s:%.2fpt %s #%06X;padding-%s:%.2fpt;", side, w, css[l->style],
+             (unsigned)(l->color & 0xFFFFFF), side, l->space / 65536.0);
 }

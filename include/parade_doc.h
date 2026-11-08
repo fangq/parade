@@ -727,14 +727,18 @@ typedef struct {
     int32_t page_border_flags;  /**< PD_PGBORDER_* */
     int32_t column_rule;        /**< 1: a line between its columns (Word's w:cols w:sep) */
     int32_t ncol_widths;        /**< columns of their own widths (Word's equalWidth="0"), 0 = all column_gap apart,
-                                     equal; laid out as equal columns of the same total (kept, read and written) */
+                                     equal; used when it is columns (each paragraph broken at the widths of the
+                                     columns its lines go to) */
     pd_sp col_width[PD_SECTION_MAX_COLS];   /**< each column's width */
     pd_sp col_space[PD_SECTION_MAX_COLS];   /**< and the space after it */
     int32_t start;              /**< where it starts, unless continuous: PD_BREAK_PAGE (the next page),
                                      PD_BREAK_ODD_PAGE / PD_BREAK_EVEN_PAGE (a blank page put in when needed),
-                                     PD_BREAK_COLUMN (the next column: laid out as a new page) */
+                                     PD_BREAK_COLUMN (the next column of the page the section before ended on,
+                                     when it has one; else a new page) */
     uint32_t page_color;        /**< its pages' background, 0 = none (Word's w:background, document-wide) */
-    int32_t text_flow;          /**< PD_CELLTEXT_*: Word's section w:textDirection (kept; laid out across) */
+    int32_t text_flow;          /**< PD_CELLTEXT_*: Word's section w:textDirection; PD_CELLTEXT_TBRL: vertical
+                                     text, its lines running down the page from the right (btLr kept, laid out
+                                     across) */
 } pd_section_props;
 
 /* where notes are numbered from the start again */

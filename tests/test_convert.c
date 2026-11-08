@@ -9882,6 +9882,373 @@ static void test_docx_exact_rows_keep_text(void) {
     pd_doc_free(d);
 }
 
+/* Text on both sides of a float in the middle of the column (wrapSquare bothSides): beside it each row of the
+   paragraph is a left part and a right part on one baseline, none of it under the picture, read left part then
+   right part; a click on the right part finds text after the left part's, and its caret is drawn there. Also
+   after .docx and native round trips */
+static void test_wrap_both_sides(void) {
+    char body[16384], *p;
+    pd_doc* d;
+    int pass, i;
+
+    p = body + sprintf(body, "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\">"
+                       "<w:body><w:p>"
+                       "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"114300\" distR=\"114300\">"
+                       "<wp:positionH relativeFrom=\"column\"><wp:posOffset>2286000</wp:posOffset></wp:positionH>"
+                       "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset></wp:positionV>"
+                       "<wp:extent cx=\"914400\" cy=\"914400\"/><wp:wrapSquare wrapText=\"bothSides\"/>"
+                       "<wp:docPr id=\"1\" name=\"p\"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip "
+                       "r:embed=\"rId5\"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:anchor>"
+                       "</w:drawing></w:r><w:r><w:t>BOTH");
+
+    for (i = 0; i < 60; i++) {
+        p += sprintf(p, " words on either side");
+    }
+
+    sprintf(p, "</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" "
+            "w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>"
+            "</w:sectPr></w:body></w:document>");
+    d = docx_doc("word/_rels/document.xml.rels",
+                 "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                 "</Relationships>", "word/media/image1.png", "tests/data/rgba.png", "word/document.xml", body, NULL);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            pd_block_id para = find_para(d, "BOTH");
+            int32_t n, k, left = 0, right = 0, under = 0, pg;
+            pd_sp ly = -1, ry = -1, lo = PD_PT(72 + 180), hi = PD_PT(72 + 252), cx, cb, ca, cd;
+            pd_draw* it = page_draws(L, 0, &n);
+            pd_pos at, at2;
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind != PD_DRAW_GLYPH || it[k].block != para || it[k].y > PD_PT(72 + 70)) {
+                    continue;
+                }
+
+                left += it[k].x + it[k].w <= lo;
+                right += it[k].x >= hi;
+                under += it[k].x + it[k].w > lo && it[k].x < hi;
+                ly = ly < 0 && it[k].x < lo ? it[k].y : ly;
+                ry = ry < 0 && it[k].x >= hi ? it[k].y : ry;
+            }
+
+            free(it);
+            CHECK(left > 20 && right > 20 && under == 0 && ly == ry && ly > 0);
+            CHECK(pd_layout_hit_test(L, 0, PD_PT(80), ly, &at) == PD_OK && at.block == para);
+            CHECK(pd_layout_hit_test(L, 0, PD_PT(72 + 300), ly, &at2) == PD_OK && at2.block == para &&
+                  at2.offset > at.offset + 10);
+            CHECK(pd_layout_caret(L, at2, &pg, &cx, &cb, &ca, &cd) == PD_OK && pg == 0 && cb == ly && cx > hi);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
+/* A drawing over the text (wrapNone), placed 15pt below the paragraph it is anchored in: when that paragraph's
+   first line goes over to the next page, the drawing goes with it rather than staying at the foot of the page
+   before (where it would run off it). Laid out with as many lines before it as fill the first page to the line */
+static void test_anchor_follows_paragraph(void) {
+    int n, found = 0;
+
+    for (n = 40; n < 70 && !found; n++) {
+        char* body = (char*)malloc(32768), *p;
+        pd_doc* d;
+        pd_layout* L;
+        int i;
+
+        if (!body) {
+            return;
+        }
+
+        p = body + sprintf(body, "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" "
+                           "xmlns:r=\"r\"><w:body>");
+
+        for (i = 0; i < n; i++) {
+            p += sprintf(p, "<w:p><w:r><w:t>filler %d</w:t></w:r></w:p>", i);
+        }
+
+        sprintf(p, "<w:p><w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" behindDoc=\"0\">"
+                "<wp:positionH relativeFrom=\"column\"><wp:posOffset>0</wp:posOffset></wp:positionH>"
+                "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>190500</wp:posOffset></wp:positionV>"
+                "<wp:extent cx=\"2540000\" cy=\"2540000\"/><wp:wrapNone/><wp:docPr id=\"1\" name=\"p\"/><a:graphic>"
+                "<a:graphicData><pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic>"
+                "</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r><w:r><w:t>ANCHOR</w:t></w:r></w:p>"
+                "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" "
+                "w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>"
+                "</w:body></w:document>");
+        d = docx_doc("word/_rels/document.xml.rels",
+                     "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                     "</Relationships>", "word/media/image1.png", "tests/data/rgba.png", "word/document.xml", body, NULL);
+        free(body);
+
+        if (d && (L = laid_out(d)) != NULL) {
+            int32_t pa, pf, pg, k, m, img = -1;
+            pd_sp x, y;
+            char last[32];
+
+            snprintf(last, sizeof(last), "filler %d", n - 1);
+
+            if (text_drawn(d, L, "ANCHOR", &pa, &x, &y) && text_drawn(d, L, last, &pf, &x, &y) && pa == 1 && pf == 0) {
+                found = 1;
+
+                for (pg = 0; pg < pd_layout_page_count(L); pg++) {
+                    pd_draw* it = page_draws(L, pg, &m);
+
+                    for (k = 0; it && k < m; k++) {
+                        img = it[k].kind == PD_DRAW_IMAGE ? pg : img;
+                    }
+
+                    free(it);
+                }
+
+                CHECK(img == pa);
+            }
+
+            pd_layout_free(L);
+        }
+
+        pd_doc_free(d);
+    }
+
+    CHECK(found || !have_layout_font());
+}
+
+/* Columns of their own widths (w:cols equalWidth="0"): a paragraph running from a 100pt column into a 332pt one
+   is broken at each column's width, its lines in the first no wider than it, those in the second starting where
+   it does and reaching across it; also after .docx and native round trips */
+static void test_unequal_columns(void) {
+    char* body = (char*)malloc(32768), *p;
+    pd_doc* d;
+    int pass, i;
+
+    if (!body) {
+        return;
+    }
+
+    p = body + sprintf(body, "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>COLUMNS");
+
+    for (i = 0; i < 260; i++) {
+        p += sprintf(p, " some words");
+    }
+
+    sprintf(p, "</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" "
+            "w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>"
+            "<w:cols w:num=\"2\" w:space=\"720\" w:equalWidth=\"0\"><w:col w:w=\"2000\" w:space=\"720\"/>"
+            "<w:col w:w=\"6640\"/></w:cols></w:sectPr></w:body></w:document>");
+    d = docx_doc("word/document.xml", body, NULL);
+    free(body);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, in0 = 0, in1 = 0;
+            pd_sp right0 = 0, left1 = PD_PT(1000), right1 = 0;
+            pd_block_id para = find_para(d, "COLUMNS");
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind != PD_DRAW_GLYPH || it[k].block != para) {
+                    continue;
+                }
+
+                if (it[k].x < PD_PT(72 + 118)) {
+                    in0++;
+                    right0 = it[k].x + it[k].w > right0 ? it[k].x + it[k].w : right0;
+                } else {
+                    in1++;
+                    left1 = it[k].x < left1 ? it[k].x : left1;
+                    right1 = it[k].x + it[k].w > right1 ? it[k].x + it[k].w : right1;
+                }
+            }
+
+            free(it);
+            CHECK(in0 > 100 && in1 > 100 && right0 <= PD_PT(72 + 100) + PD_PT(0.5));
+            CHECK(left1 >= PD_PT(72 + 136) - PD_PT(0.5) && left1 < PD_PT(72 + 140) && right1 > PD_PT(72 + 136 + 300));
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
+/* A section that starts in the next column (w:type nextColumn): its text at the top of the second column of the
+   page the section before it ended on, not on a new page; also after .docx and native round trips */
+static void test_next_column_section(void) {
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>ALPHA</w:t></w:r></w:p>"
+                         "<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" "
+                         "w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" "
+                         "w:gutter=\"0\"/><w:cols w:num=\"2\" w:space=\"720\"/></w:sectPr></w:pPr></w:p>"
+                         "<w:p><w:r><w:t>BETA</w:t></w:r></w:p><w:sectPr><w:type w:val=\"nextColumn\"/><w:pgSz "
+                         "w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" "
+                         "w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/><w:cols w:num=\"2\" "
+                         "w:space=\"720\"/></w:sectPr></w:body></w:document>", NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pa, pb;
+            pd_sp xa, ya, xb, yb;
+
+            CHECK(text_drawn(d, L, "ALPHA", &pa, &xa, &ya) && text_drawn(d, L, "BETA", &pb, &xb, &yb));
+            CHECK(pa == 0 && pb == 0 && pd_layout_page_count(L) == 1 && yb == ya && xb == PD_PT(72 + 252));
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
+/* Paragraph borders (each edge its own) and the pages' border and colour in HTML (CSS borders on the paragraph,
+   the body's for the page) and RTF (\brdr... with their style, width, colour and space; \pgbrdr...; a background
+   shape) */
+static void test_border_export(void) {
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:background w:color=\"FFFFCC\"/><w:body><w:p><w:pPr><w:pBdr>"
+                         "<w:top w:val=\"double\" w:sz=\"6\" w:space=\"1\" w:color=\"0000FF\"/>"
+                         "<w:left w:val=\"dashed\" w:sz=\"6\" w:space=\"4\" w:color=\"FF0000\"/></w:pBdr></w:pPr>"
+                         "<w:r><w:t>BORDERED</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/>"
+                         "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" "
+                         "w:footer=\"720\" w:gutter=\"0\"/><w:pgBorders w:offsetFrom=\"page\"><w:top w:val=\"single\" "
+                         "w:sz=\"8\" w:space=\"24\" w:color=\"00FF00\"/></w:pgBorders></w:sectPr></w:body></w:document>",
+                         NULL);
+    buf_t b;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK && b.p);
+    CHECK(b.p && strstr(b.p, "border-top:2.25pt double #0000FF;padding-top:1.00pt;") &&
+          strstr(b.p, "border-left:0.75pt dashed #FF0000;padding-left:4.00pt;"));
+    CHECK(b.p && strstr(b.p, "<body style=\"border-top:1.00pt solid #00FF00;padding-top:24.00pt;"
+                        "background-color:#FFFFCC;\">"));
+    free(b.p);
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_RTF, to_buf, &b) == PD_OK && b.p);
+    CHECK(b.p && strstr(b.p, "\\brdrt\\brdrdb\\brdrw15\\brdrcf") && strstr(b.p, "\\brdrl\\brdrdash\\brdrw15\\brdrcf"));
+    CHECK(b.p && strstr(b.p, "\\pgbrdropt32\\pgbrdrt\\brdrs\\brdrw20\\brdrcf") && strstr(b.p, "\\brsp480"));
+    CHECK(b.p && strstr(b.p, "\\viewbksp1{\\*\\background{\\shp{\\*\\shpinst{\\sp{\\sn fillColor}{\\sv 13434879}}}}}"));
+    free(b.p);
+    pd_doc_free(d);
+}
+
+/* A section of vertical text (w:textDirection tbRl): its lines run down the page, the first at the right (near
+   the right margin), the next to its left; Latin letters turned a quarter right, East Asian characters
+   upright; also after .docx and native round trips */
+static void test_vertical_section(void) {
+    char body[8192], *p;
+    pd_doc* d;
+    int pass, i;
+
+    p = body + sprintf(body, "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>Vertical");
+
+    for (i = 0; i < 40; i++) {
+        p += sprintf(p, " words");
+    }
+
+    sprintf(p, "</w:t></w:r></w:p><w:p><w:r><w:t>\xE4\xB8\xAD\xE6\x96\x87</w:t></w:r></w:p><w:sectPr>"
+            "<w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" "
+            "w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/><w:textDirection w:val=\"tbRl\"/>"
+            "</w:sectPr></w:body></w:document>");
+    d = docx_doc("word/document.xml", body, NULL);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            pd_draw v[2], c[2];
+            int32_t n, k;
+            pd_sp maxx = 0, minx = PD_PT(1000);
+            pd_block_id para = find_para(d, "Vertical");
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind == PD_DRAW_GLYPH && it[k].block == para) {
+                    maxx = it[k].x > maxx ? it[k].x : maxx;
+                    minx = it[k].x < minx ? it[k].x : minx;
+                }
+            }
+
+            free(it);
+            CHECK(two_glyphs(d, L, "Vertical", v) && v[0].rotation == 5400000 && v[1].x == v[0].x &&
+                  v[1].y > v[0].y && v[0].y > PD_PT(72) - 1 && v[0].y < PD_PT(80));
+            CHECK(maxx > PD_PT(612 - 72 - 20) && maxx <= PD_PT(612 - 72) && minx < maxx - PD_PT(10));  /* lines leftward */
+            CHECK(two_glyphs(d, L, "\xE4\xB8\xAD", c) && c[0].rotation == 0 && c[1].rotation == 0 &&
+                  c[1].y > c[0].y && c[0].x < v[0].x);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9919,6 +10286,12 @@ int main(void) {
     test_page_features();
     test_para_border_lines();
     test_wrap_outline();
+    test_wrap_both_sides();
+    test_anchor_follows_paragraph();
+    test_unequal_columns();
+    test_next_column_section();
+    test_border_export();
+    test_vertical_section();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

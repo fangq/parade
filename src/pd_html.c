@@ -36,6 +36,7 @@ typedef struct {
     char code_lang[32];
     int dl_open;
     char div[32];               /* the <div class> open */
+    char attr[768];             /* a paragraph's attributes written just now (its alignment and border) */
 } hx;
 
 static void esc(pd_buf* o, const char* s, size_t n, int attr) {
@@ -483,6 +484,28 @@ static void hx_para(hx* x, pd_block_id p, int in_figure) {
             pp.align == PD_ALIGN_RIGHT ? (rtl ? " dir=\"rtl\" style=\"text-align:left\"" :
                                           " style=\"text-align:right\"") :
             rtl ? " dir=\"rtl\"" : "";
+
+    {   /* its border: each edge's line (a bar as a left edge where there is none) */
+        pd_border_line bl[6];
+        static const char* side[4] = { "top", "right", "bottom", "left" };
+        char css[640] = "";
+        int k;
+
+        if (pd_conv_para_lines(x->d, p, bl)) {
+            if (bl[3].style == PD_LINE_NONE) {
+                bl[3] = bl[PD_BORDER_LINE_BAR];
+            }
+
+            for (k = 0; k < 4; k++) {
+                pd_conv_border_css(css, sizeof(css), side[k], &bl[k]);
+            }
+
+            snprintf(x->attr, sizeof(x->attr), "%s style=\"%s%s\"", rtl ? " dir=\"rtl\"" : "",
+                     pp.align == PD_ALIGN_CENTER ? "text-align:center;" : pp.align == PD_ALIGN_RIGHT ? (rtl ?
+                             "text-align:left;" : "text-align:right;") : "", css);
+            align = x->attr;
+        }
+    }
 
     {
         pd_para_attrs at;
@@ -946,7 +969,34 @@ pd_status pd_html_export(const pd_doc* d, pd_buf* o) {
             "table.grid td, table.grid th { border: 1px solid #000; padding: 4px; }\n"
             "figure { text-align: center; }\n"
             ".footnotes { font-size: smaller; }\n"
-            "</style>\n</head>\n<body>\n");
+            "</style>\n</head>\n");
+
+    {   /* the pages' colour and border (the first section's), on the body */
+        pd_section_props sp;
+        static const char* side[4] = { "top", "right", "bottom", "left" };
+        char css[640] = "";
+
+        if (pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp) == PD_OK) {
+            for (k = 0; k < 4; k++) {
+                pd_conv_border_css(css, sizeof(css), side[k], &sp.page_border[k]);
+            }
+
+            if (sp.page_color) {
+                size_t n = strlen(css);
+
+                snprintf(css + n, sizeof(css) - n, "background-color:#%06X;", (unsigned)(sp.page_color & 0xFFFFFF));
+            }
+        }
+
+        pb_puts(o, "<body");
+
+        if (css[0]) {
+            pb_printf(o, " style=\"%s\"", css);
+        }
+
+        pb_puts(o, ">\n");
+    }
+
     hx_block(x, pd_doc_root(d), 0);
     close_lists(x, 0);
     close_groups(x);
