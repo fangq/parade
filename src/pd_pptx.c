@@ -1784,11 +1784,62 @@ static void put_nvpr(conv* C, const xdoc* d, int sp, const char* nv, const char*
     pb_puts(C->o, "\"/>");
 }
 
-/* a table style's part (wholeTbl, band1H, firstRow, ...): the fill its cells take, their text's colour and whether it
-   is bold (-1, -1, -1: what it does not say) */
-static void tstyle_part(const pptx* P, int style, const char* part, long* fill, long* text, int* bold) {
+/* a cell's edge: its width (EMU) and colour; set 1 a line, -1 none, 0 not said */
+typedef struct {
+    long long w;
+    long c;
+    int set;
+} tedge;
+
+/* what a cell takes from its table's style: its fill, its text's colour and whether it is bold (-1: not said), its
+   edges (left, top, right, bottom) */
+typedef struct {
+    long fill, text;
+    int bold;
+    tedge e[4];
+} tcell;
+
+/* an edge from a line (a:ln, a:lnL...: its width and fill) or a reference to the theme's (a:lnRef: its colour) */
+static void edge_of(const pptx* P, const xdoc* d, int ln, tedge* e) {
+    int k;
+
+    if (ln < 0) {
+        return;
+    }
+
+    if (!strcmp(d->v[ln].name, "lnRef")) {
+        k = (int)xd_int(d, ln, "idx", 1);
+        e->w = (long long)P->line_w[k >= 1 && k <= 3 ? k - 1 : 0];
+        e->c = d->v[ln].kid >= 0 ? colour_of(P, d, d->v[ln].kid) : 0;
+        e->set = k > 0 ? 1 : -1;
+        return;
+    }
+
+    if (xd_kid(d, ln, "noFill") >= 0) {
+        e->set = -1;
+        return;
+    }
+
+    if (xd_kid(d, ln, "solidFill") < 0 && !d->v[ln].alen) {
+        return;     /* says nothing */
+    }
+
+    e->set = 1;
+    e->w = xd_int(d, ln, "w", 12700);
+    e->c = fill_colour(P, d, ln);
+    e->c = e->c >= 0 ? e->c : 0;
+}
+
+/* a table style's part (wholeTbl, band1H, firstRow, ...) over a cell: the fill its cells take, their text's colour,
+   whether it is bold, and the edges its tcBdr gives the cell. REGION is what the part covers -- 0 the table, 1 a row,
+   2 a column -- for which of its edges are the cell's (the outer ones where the cell is at the region's side, the
+   inside ones between) */
+static void tstyle_part(const pptx* P, int style, const char* part, int region, int top, int bottom, int left,
+                        int right, tcell* tc) {
+    static const char* const outer[4] = { "left", "top", "right", "bottom" };
+    static const char* const inner[4] = { "insideV", "insideH", "insideV", "insideH" };
     const xdoc* d = P->tstyles;
-    int pn = style >= 0 ? xd_kid(d, style, part) : -1, k, tx, f;
+    int pn = style >= 0 ? xd_kid(d, style, part) : -1, k, tx, f, bd;
     char v[16];
 
     if (pn < 0) {
@@ -1798,14 +1849,16 @@ static void tstyle_part(const pptx* P, int style, const char* part, long* fill, 
     f = xd_path(d, pn, "tcStyle/fill");
 
     if (f >= 0 && fill_colour(P, d, f) >= 0) {
-        *fill = fill_colour(P, d, f);
+        tc->fill = fill_colour(P, d, f);
+    } else if ((f = xd_path(d, pn, "tcStyle/fillRef")) >= 0 && d->v[f].kid >= 0 && colour_of(P, d, d->v[f].kid) >= 0) {
+        tc->fill = colour_of(P, d, d->v[f].kid);
     }
 
     tx = xd_kid(d, pn, "tcTxStyle");
 
     if (tx >= 0) {
         if (xd_attr(d, tx, "b", v, sizeof(v))) {
-            *bold = !strcmp(v, "on");
+            tc->bold = !strcmp(v, "on");
         }
 
         for (k = d->v[tx].kid; k >= 0; k = d->v[k].next) {     /* its colour; a font reference's, else */
@@ -1813,8 +1866,31 @@ static void tstyle_part(const pptx* P, int style, const char* part, long* fill, 
                      colour_of(P, d, k);
 
             if (c >= 0) {
-                *text = c;
+                tc->text = c;
             }
+        }
+    }
+
+    bd = xd_path(d, pn, "tcStyle/tcBdr");
+
+    for (k = 0; bd >= 0 && k < 4; k++) {
+        int at_side = k == 0 ? left : k == 1 ? top : k == 2 ? right : bottom, side;
+        tedge e = { 0, 0, 0 };
+
+        if (region == 1 && (k == 1 || k == 3)) {
+            at_side = 1;    /* a row's top and bottom are its own */
+        } else if (region == 2 && (k == 0 || k == 2)) {
+            at_side = 1;    /* a column's sides */
+        }
+
+        side = xd_kid(d, bd, at_side ? outer[k] : inner[k]);
+
+        if (side >= 0) {
+            edge_of(P, d, xd_kid(d, side, "ln") >= 0 ? xd_kid(d, side, "ln") : xd_kid(d, side, "lnRef"), &e);
+        }
+
+        if (e.set) {
+            tc->e[k] = e;
         }
     }
 }
@@ -1852,6 +1928,8 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
     int grid = xd_kid(d, tbl, "tblGrid"), tp = xd_kid(d, tbl, "tblPr"), k, r, row = 0;
     int first = (int)xd_int(d, tp, "firstRow", 0), band = (int)xd_int(d, tp, "bandRow", 0);
     int last = (int)xd_int(d, tp, "lastRow", 0), nrows = 0, style = tstyle_of(C->P, d, tbl), rr;
+    int fcol = (int)xd_int(d, tp, "firstCol", 0), lcol = (int)xd_int(d, tp, "lastCol", 0);
+    int bandc = (int)xd_int(d, tp, "bandCol", 0), ncols = 0;
     int xf = xd_kid(d, gf, "xfrm"), col;
     long long total = 0, colx[65], x0, y0, rowy = 0;
     uint32_t acc = C->P->theme[4];
@@ -1875,6 +1953,8 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
         colx[col + 1] = colx[col] + xd_int(d, k, "w", 0);
         col++;
     }
+
+    ncols = col;
 
     pb_puts(C->o, "<wps:wsp>");
     put_nvpr(C, d, gf, "nvGraphicFramePr/cNvPr", "wps:cNvPr");
@@ -1923,28 +2003,48 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
                 continue;
             }
 
-            long sfill = -1, stext = -1;
-            int sbold = -1;
+            tcell st;
 
-            if (style >= 0) {   /* the table's style: the whole table's, the bands', the first and last rows' */
-                tstyle_part(C->P, style, "wholeTbl", &sfill, &stext, &sbold);
+            memset(&st, 0, sizeof(st));
+            st.fill = st.text = -1;
+            st.bold = -1;
 
-                if (band && (row - first) % 2 == 0 && !(first && row == 0)) {
-                    tstyle_part(C->P, style, "band1H", &sfill, &stext, &sbold);
-                } else if (band && !(first && row == 0)) {
-                    tstyle_part(C->P, style, "band2H", &sfill, &stext, &sbold);
+            if (style >= 0) {   /* the table's style, its parts in the order they win: the whole table's, the column
+                                   and row bands', the last and first columns', the last and first rows' */
+                int top = row == 0, bottom = row + (int)xd_int(d, c, "rowSpan", 1) >= nrows, left = col == 0;
+                int right = col + (int)span >= ncols, hrow = first && row == 0, frow = last && row == nrows - 1;
+                int fc = fcol && col == 0, lc = lcol && right;
+
+                tstyle_part(C->P, style, "wholeTbl", 0, top, bottom, left, right, &st);
+
+                if (bandc && !fc && !lc) {
+                    tstyle_part(C->P, style, (col - fcol) % 2 == 0 ? "band1V" : "band2V", 2, top, bottom, left, right,
+                                &st);
                 }
 
-                if (first && row == 0) {
-                    tstyle_part(C->P, style, "firstRow", &sfill, &stext, &sbold);
+                if (band && !hrow && !frow) {
+                    tstyle_part(C->P, style, (row - first) % 2 == 0 ? "band1H" : "band2H", 1, top, bottom, left, right,
+                                &st);
                 }
 
-                if (last && row == nrows - 1) {
-                    tstyle_part(C->P, style, "lastRow", &sfill, &stext, &sbold);
+                if (lc) {
+                    tstyle_part(C->P, style, "lastCol", 2, top, bottom, left, right, &st);
+                }
+
+                if (fc) {
+                    tstyle_part(C->P, style, "firstCol", 2, top, bottom, left, right, &st);
+                }
+
+                if (frow) {
+                    tstyle_part(C->P, style, "lastRow", 1, top, bottom, left, right, &st);
+                }
+
+                if (hrow) {
+                    tstyle_part(C->P, style, "firstRow", 1, top, bottom, left, right, &st);
                 }
 
                 if (fill < 0) {
-                    fill = sfill;
+                    fill = st.fill;
                 }
             } else if (fill < 0 && first && row == 0) {     /* none the file has: a plain one */
                 fill = (long)acc;
@@ -1953,6 +2053,15 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
 
                 rgb_hsl(acc, &h, &s, &l);
                 fill = (long)hsl_rgb(h, s, (row - first) % 2 ? 0.92 : 0.84);
+            }
+
+            {   /* its own edges over the style's */
+                static const char* const own[4] = { "lnL", "lnT", "lnR", "lnB" };
+                int q;
+
+                for (q = 0; q < 4; q++) {
+                    edge_of(C->P, d, tc >= 0 ? xd_kid(d, tc, own[q]) : -1, &st.e[q]);
+                }
             }
 
             pb_puts(C->o, "<w:tc><w:tcPr>");
@@ -1965,6 +2074,27 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
                 pb_puts(C->o, "<w:vMerge/>");
             } else if (xd_int(d, c, "rowSpan", 1) > 1) {
                 pb_puts(C->o, "<w:vMerge w:val=\"restart\"/>");
+            }
+
+            if (st.e[0].set || st.e[1].set || st.e[2].set || st.e[3].set) {
+                static const char* const wn[4] = { "left", "top", "right", "bottom" };
+                static const int order[4] = { 1, 0, 3, 2 };     /* Word's: top, left, bottom, right */
+                int q;
+
+                pb_puts(C->o, "<w:tcBorders>");
+
+                for (q = 0; q < 4; q++) {
+                    const tedge* e = &st.e[order[q]];
+
+                    if (e->set > 0) {
+                        pb_printf(C->o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06lX\"/>", wn[order[q]],
+                                  (int)((e->w * 8 + 6350) / 12700), (unsigned long)e->c & 0xFFFFFFul);
+                    } else if (e->set < 0) {
+                        pb_printf(C->o, "<w:%s w:val=\"nil\"/>", wn[order[q]]);
+                    }
+                }
+
+                pb_puts(C->o, "</w:tcBorders>");
             }
 
             if (fill >= 0 && col < 64 && !xd_int(d, c, "vMerge", 0)) {   /* its fill: a rectangle under the table */
@@ -1995,8 +2125,8 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
             T.parts[0] = pt;
             T.parts[2] = C->master;
             T.scale = T.spacing = 1;
-            T.font_colour = style >= 0 ? stext : first && row == 0 ? 0xFFFFFF : -1;
-            T.force_bold = style >= 0 && sbold == 1;
+            T.font_colour = style >= 0 ? st.text : first && row == 0 ? 0xFFFFFF : -1;
+            T.force_bold = style >= 0 && st.bold == 1;
 
             for (p = tx >= 0 ? d->v[tx].kid : -1; p >= 0; p = d->v[p].next) {
                 if (!strcmp(d->v[p].name, "p")) {
