@@ -104,6 +104,23 @@ begin
     Ms.Free;
   end;
 
+  { written as PowerPoint (what an editor's Save As .pptx calls) and read back: its text a slide's }
+  Ms := TMemoryStream.Create;
+  Doc2 := nil;
+  Check(pd_doc_export(Doc, PD_CONV_PPTX, @WriteStream, Ms) = PD_OK, 'pptx export');
+  Check(pd_doc_import(Ms.Memory, Ms.Size, PD_CONV_PPTX, Doc2) = PD_OK, 'pptx import');
+  if Doc2 <> nil then
+  begin
+    Check(pd_doc_story_count(Doc2) >= 1, 'pptx text box');
+    if pd_doc_story_count(Doc2) >= 1 then
+    begin
+      pd_doc_para_text(Doc2, pd_doc_child(Doc2, pd_doc_story_at(Doc2, 0), 0), Txt, Len);
+      Check(Len = 29, 'pptx: the first paragraph in the slide''s text box');
+    end;
+    pd_doc_free(Doc2);
+  end;
+  Ms.Free;
+
   { the rasterizer }
   Check(pd_font_glyph_render(Font, pd_font_glyph_index(Font, Ord('g')), PT(48), 0, nil, 0, Img) = PD_OK, 'render size');
   SetLength(Buf, Img.width * Img.height);

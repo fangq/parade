@@ -581,7 +581,7 @@ static void write_files(const char* dir) {
         pd_conv_format f;
         const char* ext;
     } fmts[] = { { PD_CONV_HTML, "html" }, { PD_CONV_MARKDOWN, "md" }, { PD_CONV_LATEX, "tex" }, { PD_CONV_RTF, "rtf" },
-        { PD_CONV_DOCX, "docx" }, { PD_CONV_TEXT, "txt" }, { PD_CONV_JDATA, "jdoc" }
+        { PD_CONV_DOCX, "docx" }, { PD_CONV_TEXT, "txt" }, { PD_CONV_JDATA, "jdoc" }, { PD_CONV_PPTX, "pptx" }
     };
     pd_doc* d = rich();
     size_t i;
@@ -5017,6 +5017,360 @@ static void test_pptx_smartart(void) {
     pd_doc_free(d);
 }
 
+/* ---- PowerPoint written ---- */
+
+static pd_doc* read_doc(const char* path, pd_conv_format fmt) {
+    FILE* f = fopen(path, "rb");
+    unsigned char* data = NULL;
+    long sz = 0;
+    pd_doc* d = NULL;
+
+    if (f && fseek(f, 0, SEEK_END) == 0 && (sz = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+            (data = (unsigned char*)malloc((size_t)sz)) != NULL && fread(data, 1, (size_t)sz, f) != (size_t)sz) {
+        sz = 0;
+    }
+
+    if (f) {
+        fclose(f);
+    }
+
+    if (data && sz > 0 && pd_doc_import(data, (size_t)sz, fmt, &d) != PD_OK) {
+        d = NULL;
+    }
+
+    free(data);
+    return d;
+}
+
+/* a document written as a .pptx and read back */
+static pd_doc* pptx_again(const pd_doc* d, buf_t* out) {
+    pd_doc* back = NULL;
+
+    memset(out, 0, sizeof(*out));
+
+    if (pd_doc_export(d, PD_CONV_PPTX, to_buf, out) != PD_OK || !out->p ||
+            pd_doc_import(out->p, out->n, PD_CONV_PPTX, &back) != PD_OK) {
+        return NULL;
+    }
+
+    return back;
+}
+
+/* a block's text, paragraphs (and cells) by '|', into o */
+static void block_text(const pd_doc* d, pd_block_id b, char* o, size_t cap) {
+    pd_block_info bi;
+    int32_t k;
+
+    if (pd_doc_block_info(d, b, &bi) != PD_OK) {
+        return;
+    }
+
+    if (bi.kind == PD_BLOCK_PARAGRAPH) {
+        uint32_t n;
+        const char* t = para_text(d, b, &n);
+        size_t at = strlen(o);
+
+        snprintf(o + at, cap - at, "%.*s|", (int)n, t);
+        return;
+    }
+
+    for (k = 0; k < bi.child_count; k++) {
+        block_text(d, pd_doc_child(d, b, k), o, cap);
+    }
+}
+
+/* what a page that is a canvas shows: each item's box (sp) and kind, and its text boxes' text in their order */
+typedef struct {
+    pd_sp w, h;
+    int nitems, npics;
+    long long box[256][4];
+    char kind[256];
+    char text[4096];
+} slide_sum;
+
+static int slide_of(const pd_doc* d, int k, slide_sum* s) {
+    pd_block_id sec = pd_doc_child(d, pd_doc_root(d), k), fl = pd_doc_child(d, sec, 0);
+    pd_section_props sp;
+    pd_inline o;
+    char* js;
+    const char* p;
+
+    memset(s, 0, sizeof(*s));
+
+    if (pd_doc_section_props(d, sec, &sp) != PD_OK ||
+            pd_doc_inline_at(d, at(pd_doc_child(d, fl, 0), 0), &o) != PD_OK || !(js = drawing_json(d, o.resource))) {
+        return 0;
+    }
+
+    s->w = sp.page_width;
+    s->h = sp.page_height;
+    p = strstr(js, "\"items\":[");
+
+    while (p && (p = strchr(p + 1, '{')) != NULL && s->nitems < 256) {
+        const char* e = strchr(p, '}');
+        long long x = 0, y = 0, w = 0, h = 0;
+        long st = 0;
+        char kind = 0;
+
+        if (!e) {
+            break;
+        }
+
+        if (!strncmp(p, "{\"sid\"", 6) || !strncmp(p, "{\"shape\":\"rect\",\"x\":0,\"y\":0,", 25)) {
+            /* an index, not a thing drawn; the page's background */
+            p = e;
+            continue;
+        }
+
+        kind = !strncmp(p, "{\"shape\"", 8) ? 's' : !strncmp(p, "{\"img\"", 6) ? 'i' : !strncmp(p, "{\"path\"", 7) ?
+               'p' : !strncmp(p, "{\"story\"", 8) ? 't' : '?';
+
+        if (kind == 'p') {
+            sscanf(p, "{\"path\":[%lld,%lld", &x, &y);
+        } else {
+            const char* q = strstr(p, "\"x\":");
+
+            if (q && q < e) {
+                sscanf(q, "\"x\":%lld,\"y\":%lld,\"w\":%lld,\"h\":%lld", &x, &y, &w, &h);
+            }
+        }
+
+        if (kind == 't' && sscanf(p, "{\"story\":%ld", &st) == 1) {
+            block_text(d, (pd_block_id)st, s->text, sizeof(s->text));
+            strncat(s->text, "/", sizeof(s->text) - strlen(s->text) - 1);
+        }
+
+        s->npics += kind == 'i';
+        s->kind[s->nitems] = kind;
+        s->box[s->nitems][0] = x;
+        s->box[s->nitems][1] = y;
+        s->box[s->nitems][2] = w;
+        s->box[s->nitems][3] = h;
+        s->nitems++;
+        p = kind == 'p' ? strchr(p, ']') : e;   /* a path's points: past them */
+    }
+
+    free(js);
+    return 1;
+}
+
+/* two documents' slides the same: as many, as big, the same things where they were (within a point), the same text
+   in the same order, as many pictures */
+static int slides_same(const pd_doc* a, const pd_doc* b) {
+    pd_block_info ra, rb;
+    int k, i, q, same = 1;
+    static slide_sum sa, sb;
+
+    if (pd_doc_block_info(a, pd_doc_root(a), &ra) != PD_OK || pd_doc_block_info(b, pd_doc_root(b), &rb) != PD_OK ||
+            ra.child_count != rb.child_count) {
+        fprintf(stderr, "slides: %d, back %d\n", ra.child_count, rb.child_count);
+        return 0;
+    }
+
+    for (k = 0; k < ra.child_count; k++) {
+        if (!slide_of(a, k, &sa) || !slide_of(b, k, &sb)) {
+            return 0;
+        }
+
+        if (sa.w != sb.w || sa.h != sb.h || sa.nitems != sb.nitems || sa.npics != sb.npics || strcmp(sa.text, sb.text)) {
+            fprintf(stderr, "slide %d: %dx%d %d items %d pictures \"%s\"; back %dx%d %d %d \"%s\"\n", k + 1, (int)sa.w,
+                    (int)sa.h, sa.nitems, sa.npics, sa.text, (int)sb.w, (int)sb.h, sb.nitems, sb.npics, sb.text);
+            return 0;
+        }
+
+        for (i = 0; i < sa.nitems; i++) {
+            for (q = 0; q < 4; q++) {
+                if (sa.kind[i] != sb.kind[i] || llabs(sa.box[i][q] - sb.box[i][q]) > PD_PT(1)) {
+                    fprintf(stderr, "slide %d item %d (%c): %lld, back %lld (%c)\n", k + 1, i, sa.kind[i], sa.box[i][q],
+                            sb.box[i][q], sb.kind[i]);
+                    same = 0;
+                    break;
+                }
+            }
+        }
+    }
+
+    return same;
+}
+
+/* A presentation read, written as a .pptx and read again comes back the same: its slides as many and as big, every
+   shape, picture and text box where it was, the text in the same order; the same bytes each time it is written */
+static void test_pptx_write_roundtrip(void) {
+    static const char* const files[] = { "tests/data/slides.pptx", "tests/data/smartart.pptx" };
+    int f;
+
+    for (f = 0; f < 2; f++) {
+        pd_doc* d = read_doc(files[f], PD_CONV_PPTX), *back;
+        buf_t b, b2;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            continue;
+        }
+
+        back = pptx_again(d, &b);
+        CHECK(back != NULL && slides_same(d, back));
+        CHECK(b.p && b.n > 4 && !memcmp(b.p, "PK", 2));
+        memset(&b2, 0, sizeof(b2));
+        CHECK(pd_doc_export(d, PD_CONV_PPTX, to_buf, &b2) == PD_OK && b2.n == b.n && !memcmp(b.p, b2.p, b.n));
+
+        if (f == 0 && b.p) {    /* PowerPoint's own: shapes, a connector between two of them, a picture, a table */
+            size_t n = 0;
+            char* s1 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide1.xml", &n), *s2;
+
+            CHECK(s1 && strstr(s1, "<p:cxnSp>") && strstr(s1, "<a:stCxn id=\"5\" idx=\"3\"/><a:endCxn id=\"6\" idx=\"2\"/>"));
+            CHECK(s1 && strstr(s1, "<p:cNvPr id=\"5\" name=\"Box\"/>") && strstr(s1, "<p:cNvPr id=\"6\" name=\"Oval\"/>"));
+            CHECK(s1 && strstr(s1, "<a:buChar char=\"\xE2\x80\xA2\"/></a:pPr><a:r>") && strstr(s1, "<a:t>First point</a:t>"));
+            free(s1);
+            s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide2.xml", &n);
+            CHECK(s2 && strstr(s2, "<p:pic>") && strstr(s2, "<a:blip r:embed=\"rId2\"/>") && strstr(s2, "<a:tbl>"));
+            free(s2);
+            s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/_rels/slide2.xml.rels", &n);
+            CHECK(s2 && strstr(s2, "Target=\"../media/image1.png\""));
+            free(s2);
+            s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/presentation.xml", &n);
+            CHECK(s2 && strstr(s2, "<p:sldSz cx=\"9144000\" cy=\"5143500\"/>"));
+            free(s2);
+        }
+
+        free(b.p);
+        free(b2.p);
+        pd_doc_free(back);
+        pd_doc_free(d);
+    }
+}
+
+/* Slides an editor made (a page made a canvas, its shapes and a text box in the DrawingML kept with it, the text
+   box's text edited after) written as a .pptx: read back, the shapes where they were and the text as edited; and a
+   document of plain text, each section a slide of one text box with its text */
+static void test_pptx_write_made(void) {
+    static const char xml[] = "<wpc:wpc><wpc:bg/><wpc:whole/><wps:wsp><wps:cNvPr id=\"2\" name=\"Rectangle 2\"/>"
+                              "<wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x=\"914400\" y=\"457200\"/><a:ext cx=\"1828800\" "
+                              "cy=\"914400\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr "
+                              "val=\"FF0000\"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp><wps:wsp><wps:cNvPr id=\"3\" "
+                              "name=\"Text Box 3\"/><wps:cNvSpPr txBox=\"1\"/><wps:spPr><a:xfrm><a:off x=\"914400\" y=\"1828800\"/>"
+                              "<a:ext cx=\"3657600\" cy=\"914400\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>"
+                              "<a:noFill/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Draft</w:t></w:r></w:p>"
+                              "</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpc:wpc>";
+    pd_doc* d = NULL, *back;
+    pd_block_id sec, fl, para, story = 0;
+    pd_section_props sp;
+    pd_float_props fp;
+    pd_inline o;
+    pd_res_id r0, r1 = 0;
+    char json[2048];
+    buf_t b;
+    int32_t k;
+
+    CHECK(pd_doc_new(&d) == PD_OK);
+
+    if (!d) {
+        return;
+    }
+
+    /* as the editor's StartCanvasPage: a landscape page with no margins, a canvas in front of it from its corner */
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+    pd_doc_section_props(d, sec, &sp);
+    sp.page_width = PD_PT(720);
+    sp.page_height = PD_PT(540);
+    sp.margin_left = sp.margin_right = sp.margin_top = sp.margin_bottom = 0;
+    pd_doc_set_section_props(d, sec, &sp);
+    snprintf(json, sizeof(json), "{\"w\":%d,\"h\":%d,\"items\":[],\"kind\":\"wpc\",\"rels\":{},\"xml\":\"<wpc:wpc><wpc:bg/>"
+             "<wpc:whole/></wpc:wpc>\"}", (int)sp.page_width, (int)sp.page_height);
+    CHECK(pd_doc_add_resource(d, "application/vnd.parade.drawing+json", json, strlen(json), &r0) == PD_OK);
+    CHECK(pd_docx_drawing_rebuild(d, r0, xml, strlen(xml), &r1) == PD_OK && r1);
+    pd_doc_insert_block(d, sec, 0, PD_BLOCK_FLOAT, &fl);
+    pd_doc_float_props(d, fl, &fp);
+    fp.placement = PD_PLACE_HERE | PD_PLACE_FORCE | PD_PLACE_OFFSET;
+    fp.wrap = PD_WRAP_FRONT;
+    fp.width = sp.page_width;
+    fp.gap = fp.offset_x = fp.offset_y = 0;
+    fp.offset_from = PD_FROM_PAGE;
+    pd_doc_set_float_props(d, fl, &fp);
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_IMAGE;
+    o.resource = r1;
+    o.width = sp.page_width;
+    o.height = sp.page_height;
+    CHECK(pd_doc_insert_inline(d, at(pd_doc_child(d, fl, 0), 0), &o, NULL) == PD_OK);
+
+    for (k = 0; k < pd_doc_story_count(d); k++) {  /* the text box's story: its text edited */
+        pd_block_id st = pd_doc_story_at(d, k);
+
+        if (text_is(d, pd_doc_child(d, st, 0), "Draft")) {
+            story = st;
+        }
+    }
+
+    CHECK(story != 0);
+
+    if (story) {
+        para = pd_doc_child(d, story, 0);
+        pd_doc_insert_text(d, end_of(d, para), " two", 4, PD_FORMAT_INHERIT, NULL);
+    }
+
+    back = pptx_again(d, &b);
+    CHECK(back && slides_same(d, back));
+
+    {
+        slide_sum s;
+
+        CHECK(back && slide_of(back, 0, &s) && !strcmp(s.text, "Draft two|/") && s.nitems >= 3);
+        CHECK(back && s.w == PD_PT(720) && s.h == PD_PT(540) && s.box[0][0] == PD_PT(72) && s.box[0][2] == PD_PT(144) &&
+              s.kind[0] == 's');
+    }
+
+    free(b.p);
+    pd_doc_free(back);
+    pd_doc_free(d);
+
+    /* plain text in two sections: two slides, each a text box of its section's text */
+    d = NULL;
+    CHECK(pd_doc_import("First slide\nmore of it", 22, PD_CONV_TEXT, &d) == PD_OK && d);
+
+    if (d) {
+        pd_block_id s2, p2;
+        pd_block_info bi;
+
+        pd_doc_insert_block(d, pd_doc_root(d), 1, PD_BLOCK_SECTION, &s2);
+        pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp);
+        pd_doc_set_section_props(d, s2, &sp);
+        p2 = pd_doc_child(d, s2, 0);
+        text(d, p2, "Second slide");
+        back = pptx_again(d, &b);
+        CHECK(back && pd_doc_block_info(back, pd_doc_root(back), &bi) == PD_OK && bi.child_count == 2);
+
+        if (back && bi.child_count == 2) {
+            slide_sum s;
+
+            CHECK(slide_of(back, 0, &s) && !strcmp(s.text, "First slide|more of it|/") &&
+                  labs((long)(s.w - sp.page_width)) < PD_PT(1));
+            CHECK(slide_of(back, 1, &s) && !strcmp(s.text, "Second slide|/"));
+            CHECK(llabs(s.box[0][0] - sp.margin_left) < PD_PT(1) && llabs(s.box[0][1] - sp.margin_top) < PD_PT(1));
+        }
+
+        free(b.p);
+        pd_doc_free(back);
+        pd_doc_free(d);
+    }
+
+    /* a document of every kind of text: the numbers its fields and notes show, as text */
+    d = rich();
+    back = d ? pptx_again(d, &b) : NULL;
+
+    {
+        slide_sum s;
+
+        CHECK(back && slide_of(back, 0, &s) && strstr(s.text, "Conversion Test|") && strstr(s.text, "|Figure 1: ") &&
+              strstr(s.text, "footnote here1 and"));
+    }
+
+    free(b.p);
+    pd_doc_free(back);
+    pd_doc_free(d);
+}
+
 /* SmartArt in a Word document: a cycle with no drawing laid out from its definition, a diagram with a drawing
    drawn as saved (with the model's newer text), a list with a picture; each a group of shapes inline where it
    was */
@@ -7509,6 +7863,9 @@ int main(void) {
     test_pptx_math();
     test_pptx_table_style();
     test_pptx_other_theme();
+    printf("pptx writer\n");
+    test_pptx_write_roundtrip();
+    test_pptx_write_made();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

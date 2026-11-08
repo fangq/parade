@@ -3661,6 +3661,26 @@ static void dx_theme_patch(pd_buf* o, const char* s, size_t n, const pd_theme* t
     pb_put(o, s + at, n - at);
 }
 
+/* the document's theme as a theme part: the one it came with (its colours and fonts as they are now) when that is
+   whole, else one made of pd_doc_theme with Office's formats -- for a package that needs one (pptx) */
+static int dx_kept(const pd_doc* d, const char* type, const void** data, size_t* len);
+static const char* dw_memmem(const char* h, size_t n, const char* needle, size_t nn);
+
+void pd_docx_theme_part(const pd_doc* d, pd_buf* o) {
+    const void* theme = NULL;
+    size_t len = 0;
+    pd_theme th;
+
+    pd_doc_theme(d, &th);
+
+    if (dx_kept(d, THEME_MIME, &theme, &len) && dw_memmem((const char*)theme, len, "fillStyleLst", 12) &&
+            dw_memmem((const char*)theme, len, "bgFillStyleLst", 14)) {
+        dx_theme_patch(o, (const char*)theme, len, &th);
+    } else {
+        dx_theme_new(o, &th);
+    }
+}
+
 /* the rules of a cell (w:tcBorders) or a table (w:tblBorders, with inside): the edges said, ruled or nil */
 static void dx_rules(pd_buf* o, const char* tag, int set, int on, pd_sp w, const pd_sp* ew, uint32_t c, uint32_t ref,
                      int table) {

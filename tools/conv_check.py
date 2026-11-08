@@ -110,9 +110,56 @@ def foreign_docx(work):
     check(r.returncode == 0, "and lays it out to PDF")
 
 
+def pptx_package(path):
+    """a .pptx Parade wrote: a valid zip, every part well-formed, every relationship's target there, every part
+    typed; the slides as many as the presentation lists"""
+    import posixpath
+    import xml.dom.minidom
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        check(z.testzip() is None, "the zip is valid (CRCs)")
+        bad = []
+        for n in names:
+            if n.endswith(".xml") or n.endswith(".rels"):
+                try:
+                    xml.dom.minidom.parseString(z.read(n))
+                except Exception as e:
+                    bad.append("%s: %s" % (n, e))
+        check(not bad, "every part is well-formed XML" + (" (%s)" % bad[:3] if bad else ""))
+        missing = []
+        for n in names:
+            if not n.endswith(".rels"):
+                continue
+            base = posixpath.dirname(posixpath.dirname(n))
+            dom = xml.dom.minidom.parseString(z.read(n))
+            for r in dom.getElementsByTagName("Relationship"):
+                if r.getAttribute("TargetMode") == "External":
+                    continue
+                t = posixpath.normpath(posixpath.join(base, r.getAttribute("Target")))
+                if t not in names:
+                    missing.append(n + " -> " + t)
+        check(not missing, "every relationship's target is in the package" + (" (%s)" % missing[:3] if missing else ""))
+        ct = xml.dom.minidom.parseString(z.read("[Content_Types].xml"))
+        ext = {d.getAttribute("Extension") for d in ct.getElementsByTagName("Default")}
+        over = {o.getAttribute("PartName").lstrip("/") for o in ct.getElementsByTagName("Override")}
+        untyped = [n for n in names if n not in over and n.rsplit(".", 1)[-1] not in ext]
+        check(not untyped, "every part has a content type" + (" (%s)" % untyped[:3] if untyped else ""))
+        pres = xml.dom.minidom.parseString(z.read("ppt/presentation.xml"))
+        n = len(pres.getElementsByTagName("p:sldId"))
+        check(n == len([x for x in names if x.startswith("ppt/slides/slide")]), "the slides listed are there")
+        return n
+
+
 def main():
     os.makedirs(CONV, exist_ok=True)
     work = tempfile.mkdtemp(prefix="conv-check-")
+    impress = False     # LibreOffice with Impress (Draw and Writer alone do not open a .pptx)
+    if shutil.which("soffice"):
+        probe = os.path.join(work, "probe.pptx")
+        shutil.copy(os.path.join("tests", "data", "slides.pptx"), probe)
+        impress = soffice(probe, "pdf", work) is not None
+        if not impress:
+            print("  (LibreOffice Impress is not installed: the .pptx is checked as a package only)")
 
     print("HTML")
     import lxml.html
@@ -160,6 +207,26 @@ def main():
         check(z.testzip() is None, "the zip is valid (CRCs)")
         check("word/footnotes.xml" in z.namelist() and "word/media/image1.png" in z.namelist(),
               "footnotes and media parts")
+
+    print("PPTX")
+    slides = os.path.join(work, "slides.pptx")
+    r = run([PD_CONV, os.path.join("tests", "data", "slides.pptx"), slides])
+    check(r.returncode == 0, "pd_conv writes a .pptx from a .pptx")
+    decks = [(os.path.join(CONV, "rich.pptx"), None)]
+    if r.returncode == 0:
+        decks.append((slides, ["Hello Slides", "First point", "A detail", "Box & text", "Name", "width", "42"]))
+    for deck, words in decks:
+        n = pptx_package(deck)
+        if impress:
+            pdf = soffice(deck, "pdf", work)
+            check(pdf is not None, "LibreOffice opens %s and converts it to PDF" % os.path.basename(deck))
+            if pdf:
+                pages = run(["pdfinfo", pdf]).stdout.decode()
+                check(("Pages:          %3d" % n) in pages or ("Pages: %d" % n) in " ".join(pages.split()),
+                      "as many pages as slides")
+                t = pdf_text(pdf)
+                miss = [w for w in (words or KEY[:3]) if w not in t]
+                check(not miss, "the slides' text is there" + (" (missing %s)" % miss if miss else ""))
 
     print("Parade reads python-docx output")
     foreign_docx(work)
