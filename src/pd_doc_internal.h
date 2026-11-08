@@ -14,6 +14,9 @@
 
 int pd_doc_table_props_ok(const pd_table_props* tp);
 int pd_doc_line_ok(const pd_border_line* l);
+/* a paragraph's border as six lines: top, right, bottom, left, between, bar (its own, or the single ones its
+   colour, width, sides and space say) */
+void pd_doc_para_border_lines(const pd_para_props* pp, pd_border_line* out);
 
 /* an inline object; source owns its strings, "source\0title\0alt\0", and obj points into them */
 typedef struct {

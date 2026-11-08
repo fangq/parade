@@ -669,29 +669,9 @@ static pd_sp line_thickness(const pd_border_line* l) {
     }
 }
 
-/* A paragraph's border as lines: its own edges' (top, right, bottom, left, between, bar), or the single lines its
-   colour, width, sides and space say */
+/* a paragraph's border as lines (pd_doc_para_border_lines) */
 static void para_lines(const pd_para_props* pp, pd_border_line* out) {
-    int32_t k, sides = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM |
-                       PD_BORDER_LEFT;
-    static const int bit[5] = { PD_BORDER_TOP, PD_BORDER_RIGHT, PD_BORDER_BOTTOM, PD_BORDER_LEFT, PD_BORDER_BETWEEN };
-
-    memcpy(out, pp->border_line, 6 * sizeof(pd_border_line));
-
-    for (k = 0; k < 6; k++) {
-        if (out[k].style != PD_LINE_NONE) {
-            return;
-        }
-    }
-
-    for (k = 0; pp->border_color && pp->border_width > 0 && k < 5; k++) {
-        if (sides & bit[k]) {
-            out[k].style = PD_LINE_SINGLE;
-            out[k].width = pp->border_width;
-            out[k].color = pp->border_color;
-            out[k].space = k < 4 ? pp->border_space : 0;
-        }
-    }
+    pd_doc_para_border_lines(pp, out);
 }
 
 /* the room a border edge takes: its strokes and its space */

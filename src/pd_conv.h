@@ -78,6 +78,10 @@ const char* pd_conv_style_name(const pd_doc* d, pd_block_id para);
 /* character properties a run of a paragraph gets from the paragraph alone */
 void pd_conv_base_props(const pd_doc* d, pd_block_id para, pd_char_props* out);
 void pd_conv_style_pp(const pd_doc* d, pd_block_id para, pd_style_id style, pd_para_props* out);
+/* a paragraph's border as it shows: top, right, bottom, left, between, bar; 1 if it has any line */
+int pd_conv_para_lines(const pd_doc* d, pd_block_id para, pd_border_line* out);
+/* CSS for one side of a border ("top"...), its line and its space as padding, appended to b; nothing for none */
+void pd_conv_border_css(char* b, size_t cap, const char* side, const pd_border_line* l);
 int pd_conv_is_mono(const pd_char_props* cp);
 
 /* list kind of a paragraph: 0 none, 1 bullet, 2 numbered; level 0-8 */

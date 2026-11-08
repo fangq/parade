@@ -9410,6 +9410,43 @@ static void test_next_column_section(void) {
     pd_doc_free(d);
 }
 
+/* Paragraph borders (each edge its own) and the pages' border and colour in HTML (CSS borders on the paragraph,
+   the body's for the page) and RTF (\brdr... with their style, width, colour and space; \pgbrdr...; a background
+   shape) */
+static void test_border_export(void) {
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:background w:color=\"FFFFCC\"/><w:body><w:p><w:pPr><w:pBdr>"
+                         "<w:top w:val=\"double\" w:sz=\"6\" w:space=\"1\" w:color=\"0000FF\"/>"
+                         "<w:left w:val=\"dashed\" w:sz=\"6\" w:space=\"4\" w:color=\"FF0000\"/></w:pBdr></w:pPr>"
+                         "<w:r><w:t>BORDERED</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/>"
+                         "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" "
+                         "w:footer=\"720\" w:gutter=\"0\"/><w:pgBorders w:offsetFrom=\"page\"><w:top w:val=\"single\" "
+                         "w:sz=\"8\" w:space=\"24\" w:color=\"00FF00\"/></w:pgBorders></w:sectPr></w:body></w:document>",
+                         NULL);
+    buf_t b;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK && b.p);
+    CHECK(b.p && strstr(b.p, "border-top:2.25pt double #0000FF;padding-top:1.00pt;") &&
+          strstr(b.p, "border-left:0.75pt dashed #FF0000;padding-left:4.00pt;"));
+    CHECK(b.p && strstr(b.p, "<body style=\"border-top:1.00pt solid #00FF00;padding-top:24.00pt;"
+                        "background-color:#FFFFCC;\">"));
+    free(b.p);
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_RTF, to_buf, &b) == PD_OK && b.p);
+    CHECK(b.p && strstr(b.p, "\\brdrt\\brdrdb\\brdrw15\\brdrcf") && strstr(b.p, "\\brdrl\\brdrdash\\brdrw15\\brdrcf"));
+    CHECK(b.p && strstr(b.p, "\\pgbrdropt32\\pgbrdrt\\brdrs\\brdrw20\\brdrcf") && strstr(b.p, "\\brsp480"));
+    CHECK(b.p && strstr(b.p, "\\viewbksp1{\\*\\background{\\shp{\\*\\shpinst{\\sp{\\sn fillColor}{\\sv 13434879}}}}}"));
+    free(b.p);
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9450,6 +9487,7 @@ int main(void) {
     test_anchor_follows_paragraph();
     test_unequal_columns();
     test_next_column_section();
+    test_border_export();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");
