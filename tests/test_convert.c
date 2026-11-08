@@ -6948,6 +6948,323 @@ static void test_docx_drop_cap(void) {
     pd_doc_free(d);
 }
 
+/* Text boxes that lost their text: a DrawingML text box in the line (wp:inline), a VML text box (v:textbox in a
+   w:pict) and VML WordArt (v:textpath, a header's watermark) are floats holding their text, laid out and written
+   back (as text boxes). The watermark is centred on the page's text area, in the fill made lighter by its
+   opacity (silver at half: E0E0E0). */
+static void test_docx_text_boxes(void) {
+    pd_doc* d = docx_doc(
+                    "word/_rels/document.xml.rels",
+                    "<Relationships xmlns=\"r\"><Relationship Id=\"rId1\" Type=\"t/header\" Target=\"header1.xml\"/>"
+                    "</Relationships>",
+                    "word/header1.xml",
+                    "<w:hdr xmlns:w=\"w\" xmlns:v=\"v\"><w:p><w:r><w:pict><v:shape style=\"position:absolute;margin-left:0;"
+                    "margin-top:0;width:400pt;height:100pt;rotation:315;z-index:-251657216;mso-position-horizontal:center;"
+                    "mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin\" "
+                    "fillcolor=\"silver\" stroked=\"f\"><v:fill opacity=\".5\"/><v:textpath style=\"font-family:&quot;Calibri&quot;;"
+                    "font-size:1pt\" string=\"DRAFT\"/></v:shape></w:pict></w:r></w:p></w:hdr>",
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\" xmlns:r=\"r\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wps=\"wps\" xmlns:v=\"v\" "
+                    "xmlns:w10=\"w10\"><w:body>"
+                    "<w:p><w:r><w:t>Before.</w:t></w:r></w:p>"
+                    "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"1828800\" cy=\"457200\"/><wp:docPr id=\"1\" name=\"T\"/>"
+                    "<a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>Inline</w:t></w:r></w:p>"
+                    "</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"
+                    "<w:p><w:r><w:pict><v:shape style=\"position:absolute;margin-left:0;margin-top:0;width:144pt;height:36pt;"
+                    "z-index:1\"><v:textbox><w:txbxContent><w:p><w:r><w:t>Legacy</w:t></w:r></w:p></w:txbxContent></v:textbox>"
+                    "<w10:wrap type=\"square\"/></v:shape></w:pict></w:r><w:r><w:t>After.</w:t></w:r></w:p>"
+                    "<w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId1\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/>"
+                    "<w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" "
+                    "w:footer=\"720\"/></w:sectPr></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        char shown[512];
+        pd_section_props sp;
+        pd_block_id fl, p;
+        pd_float_props fp;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            break;
+        }
+
+        CHECK(pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp) == PD_OK && sp.header);
+        fl = pd_doc_child(d, sp.header, 0);
+        p = pd_doc_child(d, fl, 0);
+        CHECK(pd_doc_float_props(d, fl, &fp) == PD_OK && fp.wrap == PD_WRAP_BEHIND && fp.width == PD_PT(400));
+        CHECK(chars_at(d, p, 0).color == 0xFFE0E0E0u);
+
+        if (pass == 0) {    /* centred on the text area: the page 612 x 792pt, 1in margins */
+            CHECK(fp.offset_x == PD_PT(34) && fp.offset_y == PD_PT(274) && fp.offset_from == PD_FROM_MARGIN);
+        }
+
+        if (have_layout_font()) {
+            layout_text(d, -1, shown, sizeof(shown));
+            CHECK(strstr(shown, "DRAFT") && strstr(shown, "Inline") && strstr(shown, "Legacy") &&
+                  strstr(shown, "After."));
+        }
+    }
+
+    pd_doc_free(d);
+}
+
+#define FLD(ins, res) "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\">" ins \
+    "</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>" res "</w:t></w:r>" \
+    "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
+
+/* Fields nest (IF { PAGE } = 1 broke the outer field, shown "1 1"); a field Parade does not compute keeps its
+   instruction and Word's result, shown and written back as a field; dates follow their \@ picture; document
+   properties, IF and = are worked out when read; STYLEREF "Heading 1" is a running head. */
+static void test_docx_nested_fields(void) {
+    pd_doc* d = docx_doc(
+                    "docProps/core.xml",
+                    "<cp:coreProperties xmlns:cp=\"cp\" xmlns:dc=\"dc\" xmlns:dcterms=\"dcterms\"><dc:title>MyTitle</dc:title>"
+                    "<dcterms:modified>2026-10-06T03:40:00Z</dcterms:modified></cp:coreProperties>",
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:r><w:t>A:</w:t></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>"
+                    "<w:r><w:instrText xml:space=\"preserve\"> IF </w:instrText></w:r>" FLD(" PAGE ", "1")
+                    "<w:r><w:instrText xml:space=\"preserve\"> = 1 \"first\" \"other\" </w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>first</w:t></w:r>"
+                    "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
+                    "<w:p><w:r><w:t>B:</w:t></w:r>" FLD(" DOCPROPERTY Title ", "old") "</w:p>"
+                    "<w:p><w:r><w:t>C:</w:t></w:r>" FLD(" IF \"a\" = \"a\" \"yes\" \"no\" ", "no") "</w:p>"
+                    "<w:p><w:r><w:t>D:</w:t></w:r>" FLD(" = 2+3*4 ", "0") "</w:p>"
+                    "<w:p><w:r><w:t>E:</w:t></w:r>" FLD(" MERGEFIELD Name ", "Kept") "</w:p>"
+                    "<w:p><w:r><w:t>F:</w:t></w:r>" FLD(" SAVEDATE \\@ \"dddd, MMMM d, yyyy\" ", "x") "</w:p>"
+                    "<w:p><w:r><w:t>G:</w:t></w:r><w:fldSimple w:instr=\" DATE \\@ &quot;yyyy&quot; \"><w:r><w:t>z</w:t></w:r>"
+                    "</w:fldSimple></w:p>"
+                    "<w:p><w:r><w:t>H:</w:t></w:r>" FLD(" STYLEREF \"Heading 1\" ", "q") "</w:p>"
+                    "</w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        char shown[600];
+        const char* g;
+        pd_block_id p;
+        pd_inline o;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            break;
+        }
+
+        p = pd_doc_next_paragraph(d, 0);
+        CHECK(pd_doc_inline_at(d, at(p, 2), &o) == PD_OK && o.kind == PD_INLINE_FIELD && o.field == PD_FIELD_KEPT &&
+              o.source_len > 4 && strstr(o.source, "\xEF\xBF\xB9 PAGE \xEF\xBF\xBA" "1\xEF\xBF\xBB"));     /* PAGE in IF */
+
+        if (!have_layout_font()) {
+            continue;
+        }
+
+        layout_text(d, 0, shown, sizeof(shown));
+        CHECK(strstr(shown, "A:firstB:MyTitleC:yesD:14E:KeptF:Tuesday,October6,2026G:") != NULL);
+        g = strstr(shown, "G:");
+        CHECK(g && g[2] >= '2' && g[2] <= '9' && g[5] >= '0' && g[5] <= '9' && g[6] == 'H');
+    }
+
+    {
+        /* written back as fields, the nested one inside the IF's code */
+        buf_t b = { NULL, 0 };
+        char* xml;
+
+        CHECK(d && pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        xml = docx_part(&b, "word/document.xml");
+        CHECK(strstr(xml, "<w:instrText xml:space=\"preserve\"> IF </w:instrText></w:r><w:r><w:fldChar "
+                     "w:fldCharType=\"begin\"/>") && strstr(xml, "MERGEFIELD Name") &&
+              strstr(xml, "STYLEREF &quot;Heading 1&quot;"));
+        free(xml);
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
+/* Comments drawn as Word prints them (pd_layout_set_comments): the page a pane wider, a balloon there with the
+   author and each paragraph of the text on its own line, a line out to it from the commented text and the box
+   round it in the author's colour; a reply under it. Off, the page is as it was and nothing is drawn. */
+static void test_comment_balloons(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\" xmlns:w14=\"w14\"><w:body>"
+                    "<w:p><w:r><w:t xml:space=\"preserve\">The </w:t></w:r><w:commentRangeStart w:id=\"7\"/><w:r><w:t>fox</w:t>"
+                    "</w:r><w:commentRangeEnd w:id=\"7\"/><w:r><w:commentReference w:id=\"7\"/></w:r>"
+                    "<w:r><w:commentReference w:id=\"8\"/></w:r></w:p></w:body></w:document>",
+                    "word/comments.xml",
+                    "<w:comments xmlns:w=\"w\" xmlns:w14=\"w14\">"
+                    "<w:comment w:id=\"7\" w:author=\"Cy\"><w:p w14:paraId=\"0A000001\"><w:r><w:t>Which fox?</w:t></w:r></w:p>"
+                    "<w:p w14:paraId=\"0A000002\"><w:r><w:t>Really.</w:t></w:r></w:p></w:comment>"
+                    "<w:comment w:id=\"8\" w:author=\"Ann\"><w:p w14:paraId=\"0A000003\"><w:r><w:t>Red.</w:t></w:r></w:p>"
+                    "</w:comment></w:comments>",
+                    "word/commentsExtended.xml",
+                    "<w15:commentsEx xmlns:w15=\"w15\"><w15:commentEx w15:paraId=\"0A000003\" w15:paraIdParent=\"0A000002\"/>"
+                    "</w15:commentsEx>",
+                    NULL);
+    pd_layout* L = NULL;
+    int mode;
+
+    CHECK(d != NULL);
+
+    if (!d || !have_layout_font()) {
+        pd_doc_free(d);
+        return;
+    }
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+    CHECK(pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK);
+
+    for (mode = 0; mode < 2 && L; mode++) {
+        pd_page_info pi;
+        pd_draw* it;
+        int32_t n = 0, k, paths = 0;
+        char text[256];
+        size_t o = 0;
+        pd_sp y_which = 0, y_really = 0, y_red = 0;
+
+        pd_layout_set_comments(L, mode ? PD_LAYOUT_COMMENTS_MARGIN : PD_LAYOUT_COMMENTS_NONE);
+        CHECK(pd_layout_page_info(L, 0, &pi) == PD_OK);
+        CHECK(pd_layout_page_items(L, 0, NULL, 0, &n) == PD_OK);
+        it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+        pd_layout_page_items(L, 0, it, n, &n);
+
+        for (k = 0; k < n; k++) {
+            if (it[k].region != 6) {
+                continue;
+            }
+
+            paths += it[k].kind == PD_DRAW_PATH;
+
+            if (it[k].kind == PD_DRAW_GLYPH && it[k].text < 128 && o + 1 < sizeof(text)) {
+                text[o++] = (char)it[k].text;
+                y_which = it[k].text == 'W' && !y_which ? it[k].y : y_which;
+                y_really = it[k].text == 'R' && !y_really ? it[k].y : y_really;
+                y_red = it[k].text == 'd' && it[k].y > y_really && y_really ? it[k].y : y_red;
+                CHECK(it[k].x > PD_PT(595));    /* in the pane, right of the A4 page */
+            }
+        }
+
+        text[o] = '\0';
+        free(it);
+
+        if (mode == 0) {
+            CHECK(o == 0 && paths == 0);
+            CHECK(pi.width < PD_PT(600));
+        } else {
+            CHECK(pi.width > PD_PT(595) + PD_LAYOUT_COMMENT_PANE - PD_PT(1));
+            CHECK(strcmp(text, "Cy:Whichfox?Really.Ann:Red.") == 0);
+            CHECK(paths == 2);  /* one box and its line: the reply shares them */
+            CHECK(y_which > 0 && y_really > y_which && y_red > y_really);
+        }
+    }
+
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* Moves stay moves (moveFrom/moveTo: a deletion and an insertion sharing a move number, written back as moves)
+   and a run's formatting change (rPrChange) is a revision of kind format holding the old formatting: listed for
+   the margin, written back, accepted (kept as it is) or rejected (the old formatting back). */
+static void test_docx_moves_formats(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:moveFromRangeStart w:id=\"1\" w:name=\"move1\" w:author=\"Al\"/><w:moveFrom w:id=\"2\" w:author=\"Al\">"
+                    "<w:r><w:t>Gone</w:t></w:r></w:moveFrom><w:moveFromRangeEnd w:id=\"1\"/><w:r><w:t xml:space=\"preserve\"> stay "
+                    "</w:t></w:r><w:r><w:rPr><w:b/><w:rPrChange w:id=\"3\" w:author=\"Bo\"><w:rPr><w:i/></w:rPr></w:rPrChange>"
+                    "</w:rPr><w:t>bold</w:t></w:r></w:p>"
+                    "<w:p><w:moveToRangeStart w:id=\"4\" w:name=\"move1\" w:author=\"Al\"/><w:moveTo w:id=\"5\" w:author=\"Al\">"
+                    "<w:r><w:t>Gone</w:t></w:r></w:moveTo><w:moveToRangeEnd w:id=\"4\"/></w:p>"
+                    "</w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {
+        pd_block_id p0, p1;
+        pd_char_props a, f, t;
+        pd_revision ra, rt, rf;
+        pd_range r;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            break;
+        }
+
+        p0 = pd_doc_next_paragraph(d, 0);
+        p1 = pd_doc_next_paragraph(d, p0);
+        a = chars_at(d, p0, 0);
+        t = chars_at(d, p1, 0);
+        f = chars_at(d, p0, 10);
+        CHECK(pd_doc_revision_get(d, a.revision, &ra) == PD_OK && ra.kind == PD_REV_DELETE && ra.move > 0);
+        CHECK(pd_doc_revision_get(d, t.revision, &rt) == PD_OK && rt.kind == PD_REV_INSERT && rt.move == ra.move);
+        CHECK(f.weight == 700 && pd_doc_revision_get(d, f.revision, &rf) == PD_OK && rf.kind == PD_REV_FORMAT &&
+              (rf.old.mask & PD_CP_ITALIC) && rf.old.italic && !strcmp(rf.author, "Bo"));
+
+        if (have_layout_font()) {   /* the formatting change listed for the margin */
+            pd_layout* L = NULL;
+            pd_markup_item mk[8];
+            int32_t n = 0, k, fmt = 0;
+
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+            if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+                    pd_layout_page_markup(L, 0, mk, 8, &n) == PD_OK) {
+                for (k = 0; k < n; k++) {
+                    fmt += mk[k].kind == PD_MARK_FORMAT && mk[k].range.start.offset == 10;
+                }
+            }
+
+            CHECK(fmt == 1);
+            pd_layout_free(L);
+        }
+
+        if (pass == 0) {
+            buf_t b = { NULL, 0 };
+            char* xml;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            xml = docx_part(&b, "word/document.xml");
+            CHECK(strstr(xml, "<w:moveFrom ") && strstr(xml, "<w:moveTo ") && strstr(xml, "w:name=\"move") &&
+                  strstr(xml, "<w:rPrChange "));
+            free(xml);
+            free(b.p);
+            d = docx_again(d);
+            continue;
+        }
+
+        {
+            /* kept in Parade's own format */
+            buf_t b = { NULL, 0 };
+            pd_doc* j = NULL;
+
+            CHECK(pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b) == PD_OK && pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j) == PD_OK);
+            CHECK(j && pd_doc_revision_get(j, chars_at(j, pd_doc_next_paragraph(j, 0), 10).revision, &rf) == PD_OK &&
+                  rf.kind == PD_REV_FORMAT && rf.old.italic && pd_doc_revision_get(j, chars_at(j, pd_doc_next_paragraph(j, 0),
+                          0).revision, &ra) == PD_OK && ra.move > 0);
+            pd_doc_free(j);
+            free(b.p);
+        }
+
+        /* rejected: italic and not bold, no revision; accepted (undone first): bold, no revision */
+        r.start = at(p0, 10);
+        r.end = at(p0, 14);
+        CHECK(pd_doc_revision_resolve(d, r, 0) == PD_OK);
+        f = chars_at(d, p0, 10);
+        CHECK(f.weight == 400 && f.italic && !f.revision);
+        CHECK(pd_doc_undo(d) == PD_OK);
+        CHECK(pd_doc_revision_resolve(d, r, 1) == PD_OK);
+        f = chars_at(d, p0, 10);
+        CHECK(f.weight == 700 && !f.italic && !f.revision);
+    }
+
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -8269,6 +8586,10 @@ int main(void) {
     test_docx_line_rules();
     test_docx_bar_tab();
     test_docx_drop_cap();
+    test_docx_text_boxes();
+    test_docx_nested_fields();
+    test_comment_balloons();
+    test_docx_moves_formats();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

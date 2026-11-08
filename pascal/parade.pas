@@ -146,6 +146,7 @@ const
   PD_CP_ITALIC_CS = 1 shl 22;
   PD_REV_INSERT = 1;
   PD_REV_DELETE = 2;
+  PD_REV_FORMAT = 3;
   PD_MARKUP_BALLOONS = 0;
   PD_MARKUP_INLINE = 1;
   PD_MARKUP_FINAL = 2;
@@ -153,6 +154,7 @@ const
   PD_MARK_DELETION = 1;
   PD_MARK_INSERTION = 2;
   PD_MARK_COMMENT = 3;
+  PD_MARK_FORMAT = 4;
   PD_UNDERLINE_NONE = 0;
   PD_UNDERLINE_SINGLE = 1;
   PD_UNDERLINE_DOUBLE = 2;
@@ -226,6 +228,7 @@ const
   PD_FIELD_SEQ = 5;
   PD_FIELD_HEADING = 6;
   PD_FIELD_DATE = 7;
+  PD_FIELD_KEPT = 8;
 
   PD_PLACE_HERE = 1;
   PD_PLACE_TOP = 2;
@@ -510,6 +513,8 @@ type
     kind: Int32;
     author: array[0..63] of AnsiChar;
     date: array[0..31] of AnsiChar;
+    move: Int32;              { a moved text's number, its deletion and insertion; 0 not a move }
+    old: pd_char_props;       { PD_REV_FORMAT: the direct formatting it had }
   end;
   Ppd_revision = ^pd_revision;
 
@@ -1021,6 +1026,7 @@ procedure pd_layout_free(layout: Ppd_layout); cdecl; PDEXT;
 function pd_layout_update(layout: Ppd_layout; info: Ppd_layout_info): pd_status; cdecl; PDEXT;
 procedure pd_layout_invalidate(layout: Ppd_layout); cdecl; PDEXT;
 procedure pd_layout_set_stable_breaks(layout: Ppd_layout; mode: Int32); cdecl; PDEXT;
+procedure pd_layout_set_comments(layout: Ppd_layout; mode: Int32); cdecl; PDEXT;
 function pd_layout_page_count(layout: Ppd_layout): Int32; cdecl; PDEXT;
 function pd_layout_page_info(layout: Ppd_layout; page: Int32; out info: pd_page_info): pd_status; cdecl; PDEXT;
 function pd_layout_page_items(layout: Ppd_layout; page: Int32; buf: Ppd_draw; cap: Int32; out count: Int32): pd_status; cdecl; PDEXT;

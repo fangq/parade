@@ -9,7 +9,8 @@
  *   "Formats": [ {"Style": id, "Char": {...}} ],
  *   "Lists": [ {"Levels": [ {"Format","Start","Text","Indent","Hanging","RestartAfter","Label*"} ]} ],
  *   "Resources": [ {"_ByteStream_": {"_DataInfo_": {"MediaType","ByteLength"}, "Data": bytes}} ],
- *   "Revisions": [ {"Kind": "insert"|"delete", "Author", "Date"} ],     (tracked changes; formats' "Revision")
+ *   "Revisions": [ {"Kind": "insert"|"delete"|"format", "Author", "Date", "Move", "Old"} ],     (tracked changes;
+ *                formats' "Revision"; Move: a moved text's number, Old: a formatting change's old character props)
  *   "Comments": [ {"Author","Date","Text","Parent","Resolved","Start":[block,offset],"End":[block,offset]} ],
  *   "Document": {"_TreeNode_(root)": {"ID": 1}, "_TreeChildren_": [ ... ]},
  *   "Stories": [ {"_TreeNode_(story)": {...}, "_TreeChildren_": [...]} ]
@@ -38,7 +39,7 @@ static const char* const inline_names[] = { "image", "equation", "field", "footn
                                             "user", "raw", "control", "ruby"
                                           };
 static const char* const field_names[] = { "page", "pages", "sectionpage", "refnumber", "refpage", "seq",
-                                           "heading", "date"
+                                           "heading", "date", "kept"
                                          };
 static const char* const num_names[] = { "bullet", "decimal", "loweralpha", "upperalpha", "lowerroman",
                                          "upperroman", "none", "decimalzero", "ordinal", "circled",
@@ -329,6 +330,25 @@ static void save_cp(pj_writer* w, const pd_char_props* c) {
 
     if (m & PD_CP_ITALIC_CS) {
         put_int(w, "ItalicComplex", c->italic_cs);
+    }
+
+    pj_obj_end(w);
+}
+
+/* a tracked change: its kind, author, date, a move's number, a formatting change's old formatting */
+static void save_rev(pj_writer* w, const pd_revision* r) {
+    pj_obj_begin(w);
+    put_str(w, "Kind", r->kind == PD_REV_DELETE ? "delete" : r->kind == PD_REV_FORMAT ? "format" : "insert");
+    put_str(w, "Author", r->author);
+    put_str(w, "Date", r->date);
+
+    if (r->move) {
+        put_int(w, "Move", r->move);
+    }
+
+    if (r->kind == PD_REV_FORMAT) {
+        pj_key(w, "Old");
+        save_cp(w, &r->old);
     }
 
     pj_obj_end(w);
@@ -1169,11 +1189,7 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
             for (j = 1; j <= d->nrevs && rmap[j] != (uint32_t)k; j++) {
             }
 
-            pj_obj_begin(&w);
-            put_str(&w, "Kind", d->revs[j - 1].kind == PD_REV_DELETE ? "delete" : "insert");
-            put_str(&w, "Author", d->revs[j - 1].author);
-            put_str(&w, "Date", d->revs[j - 1].date);
-            pj_obj_end(&w);
+            save_rev(&w, &d->revs[j - 1]);
         }
 
         pj_arr_end(&w);
@@ -1493,6 +1509,21 @@ static void load_cp(const pj_node* o, pd_char_props* c, loader* L) {
     F("ItalicComplex", PD_CP_ITALIC_CS, italic_cs, -1, 1);
 #undef F
     pd_doc_cp_normalize(c);
+}
+
+static void load_rev(const pj_node* c, pd_revision* rv, loader* L) {
+    const pj_node* kn = pj_get(c, "Kind");
+
+    memset(rv, 0, sizeof(*rv));
+    rv->kind = kn && kn->type == PJ_STR && kn->len == 6 && !memcmp(kn->s, "delete", 6) ? PD_REV_DELETE :
+               kn && kn->type == PJ_STR && kn->len == 6 && !memcmp(kn->s, "format", 6) ? PD_REV_FORMAT : PD_REV_INSERT;
+    copy_name(pj_get(c, "Author"), rv->author, sizeof(rv->author), L);
+    copy_name(pj_get(c, "Date"), rv->date, sizeof(rv->date), L);
+    rv->move = (int32_t)int_or(pj_get(c, "Move"), 0, 0, INT32_MAX, L);
+
+    if (rv->kind == PD_REV_FORMAT && pj_get(c, "Old")) {
+        load_cp(pj_get(c, "Old"), &rv->old, L);
+    }
 }
 
 static void load_theme(loader* L, const pj_node* x, pd_theme* t) {
@@ -2157,10 +2188,8 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
         pd_rev_id rid;
         const pj_node* kn = pj_get(c, "Kind");
 
-        memset(&rv, 0, sizeof(rv));
-        rv.kind = kn && kn->type == PJ_STR && kn->len == 6 && !memcmp(kn->s, "delete", 6) ? PD_REV_DELETE : PD_REV_INSERT;
-        copy_name(pj_get(c, "Author"), rv.author, sizeof(rv.author), L);
-        copy_name(pj_get(c, "Date"), rv.date, sizeof(rv.date), L);
+        (void)kn;
+        load_rev(c, &rv, L);
 
         /* the same triple twice would fold into one id and shift the rest */
         if (!L->bad && (pd_doc_revision_add(d, &rv, &rid) != PD_OK || (int32_t)rid != d->nrevs)) {
@@ -2558,11 +2587,7 @@ void pd_doc_delta_emit(pd_doc* d) {
         pj_arr_begin(&w);
 
         for (i = d->sent_revs; i < d->nrevs; i++) {
-            pj_obj_begin(&w);
-            put_str(&w, "Kind", d->revs[i].kind == PD_REV_DELETE ? "delete" : "insert");
-            put_str(&w, "Author", d->revs[i].author);
-            put_str(&w, "Date", d->revs[i].date);
-            pj_obj_end(&w);
+            save_rev(&w, &d->revs[i]);
         }
 
         pj_arr_end(&w);
@@ -2897,10 +2922,8 @@ pd_status pd_doc_apply_delta(pd_doc* d, const char* json, size_t len) {
             pd_rev_id rid;
             const pj_node* kn = pj_get(c, "Kind");
 
-            memset(&rv, 0, sizeof(rv));
-            rv.kind = kn && kn->type == PJ_STR && kn->len == 6 && !memcmp(kn->s, "delete", 6) ? PD_REV_DELETE : PD_REV_INSERT;
-            copy_name(pj_get(c, "Author"), rv.author, sizeof(rv.author), &L);
-            copy_name(pj_get(c, "Date"), rv.date, sizeof(rv.date), &L);
+            (void)kn;
+            load_rev(c, &rv, &L);
 
             if (!L.bad && (pd_doc_revision_add(d, &rv, &rid) != PD_OK || (int32_t)rid != d->nrevs)) {
                 FAIL(PD_ERR_STATE);

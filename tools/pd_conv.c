@@ -376,6 +376,7 @@ int main(int argc, char** argv) {
         }
 
         pd_layout_new(d, &L);
+        pd_layout_set_comments(L, PD_LAYOUT_COMMENTS_MARGIN);  /* as Word prints a document with comments */
         st = pd_layout_update(L, &info);
 
         if (st == PD_OK) {

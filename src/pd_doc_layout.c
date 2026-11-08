@@ -640,7 +640,9 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                     case PD_INLINE_FOOTNOTE: {  /* its value's width, or a placeholder until known */
                         char val[96];
 
-                        if (fn && fn(user, b, &s->inl[k], val, sizeof(val))) {
+                        if (o->kind == PD_INLINE_FIELD && o->field == PD_FIELD_KEPT) {
+                            ow = oh = od = 0;   /* its result is the text after it */
+                        } else if (fn && fn(user, b, &s->inl[k], val, sizeof(val))) {
                             ow = text_width(&ps, val);
 
                             if (o->kind == PD_INLINE_FOOTNOTE) {

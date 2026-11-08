@@ -376,6 +376,7 @@ typedef struct {
     int nhf;
     int hyph_auto;              /* the document hyphenates: settings.xml autoHyphenation */
     const pd_float_props* frame;    /* the frame whose paragraphs are being written (their w:framePr) */
+    int move_range;             /* the id of the move's range being written */
     pd_block_id pending[8];     /* picture floats to anchor in the next paragraph */
     int npending;
     int page_break;             /* a page break opens the next paragraph */
@@ -511,6 +512,8 @@ static void dx_font_theme_attr(pd_buf* o, int32_t ft) {
     }
 }
 
+static void dx_rpr_set(pd_buf* o, const pd_char_props* c);
+
 static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const char* rstyle) {
     pd_buf* o = x->o;
     size_t mark;
@@ -643,6 +646,25 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_puts(o, "\"/>");
     }
 
+    {
+        /* a formatting change: what the run had */
+        pd_revision rv;
+
+        if (c->revision && pd_doc_revision_get(x->d, c->revision, &rv) == PD_OK && rv.kind == PD_REV_FORMAT) {
+            pb_printf(o, "<w:rPrChange w:id=\"%d\" w:author=\"", ++x->nrev);
+            xesc(o, rv.author, strlen(rv.author));
+
+            if (rv.date[0]) {
+                pb_puts(o, "\" w:date=\"");
+                xesc(o, rv.date, strlen(rv.date));
+            }
+
+            pb_puts(o, "\"><w:rPr>");
+            dx_rpr_set(o, &rv.old);
+            pb_puts(o, "</w:rPr></w:rPrChange>");
+        }
+    }
+
     if (o->n == mark) {     /* nothing: no rPr at all */
         o->n -= 7;
     } else {
@@ -673,6 +695,41 @@ static void dx_text_as(pd_buf* o, const char* s, size_t n, const char* tag) {
 
 static void dx_text(pd_buf* o, const char* s, size_t n) {
     dx_text_as(o, s, n, "w:t");
+}
+
+/* a field's instruction as w:instrText runs, a field nested in it (U+FFF9 instruction U+FFFA result U+FFFB) as
+   a field of its own there */
+static void dx_field_code(dxo* x, const pd_char_props* cp, const char* s, size_t n) {
+    static const char* const fc[3] = { "begin", "separate", "end" };
+    pd_buf* o = x->o;
+    size_t i = 0, j;
+    int result = 0, mark;
+
+    while (i < n) {
+        for (j = i; j + 2 < n && !(s[j] == '\xEF' && s[j + 1] == '\xBF' && s[j + 2] >= '\xB9' && s[j + 2] <= '\xBB');
+                j++) {
+        }
+
+        j = j + 2 < n ? j : n;
+
+        if (j > i) {
+            pb_puts(o, "<w:r>");
+            dx_rpr(x, cp, &x->base, NULL);
+            pb_puts(o, result ? "<w:t xml:space=\"preserve\">" : "<w:instrText xml:space=\"preserve\">");
+            xesc(o, s + i, j - i);
+            pb_puts(o, result ? "</w:t></w:r>" : "</w:instrText></w:r>");
+        }
+
+        if (j < n) {
+            mark = (unsigned char)s[j + 2] - 0xB9;
+            result = mark == 1;
+            pb_puts(o, "<w:r>");
+            dx_rpr(x, cp, &x->base, NULL);
+            pb_printf(o, "<w:fldChar w:fldCharType=\"%s\"/></w:r>", fc[mark]);
+        }
+
+        i = j + 3;
+    }
 }
 
 static int dx_media(dxo* x, pd_res_id res, const char** rid_name) {
@@ -1797,28 +1854,45 @@ static void dx_comment_bounds(dxo* x, pd_block_id p) {
 
 /* one run of text, inside w:ins or w:del when it is a tracked change */
 /* the w:ins or w:del a tracked change's runs go in, opened: its kind (PD_REV_*), 0 when it is none */
+/* a tracked insertion or deletion opened round runs: its kind, 8 more for a move (moveFrom, moveTo, in a range
+   of the move's name), 0 none (a formatting change is in the run's rPr) */
 static int dx_rev_open(dxo* x, pd_rev_id rev) {
     pd_buf* o = x->o;
     pd_revision rv;
+    const char* el;
+    int k;
 
-    if (!rev || pd_doc_revision_get(x->d, rev, &rv) != PD_OK) {
+    if (!rev || pd_doc_revision_get(x->d, rev, &rv) != PD_OK || rv.kind == PD_REV_FORMAT) {
         return 0;
     }
 
-    pb_printf(o, "<w:%s w:id=\"%d\" w:author=\"", rv.kind == PD_REV_DELETE ? "del" : "ins", ++x->nrev);
-    xesc(o, rv.author, strlen(rv.author));
+    el = rv.move ? (rv.kind == PD_REV_DELETE ? "moveFrom" : "moveTo") : rv.kind == PD_REV_DELETE ? "del" : "ins";
 
-    if (rv.date[0]) {
-        pb_puts(o, "\" w:date=\"");
-        xesc(o, rv.date, strlen(rv.date));
+    for (k = rv.move ? 0 : 1; k < 2; k++) {     /* the move's range, then the change */
+        pb_printf(o, k ? "<w:%s w:id=\"%d\" w:author=\"" : "<w:%sRangeStart w:id=\"%d\" w:author=\"", el, ++x->nrev);
+        xesc(o, rv.author, strlen(rv.author));
+
+        if (rv.date[0]) {
+            pb_puts(o, "\" w:date=\"");
+            xesc(o, rv.date, strlen(rv.date));
+        }
+
+        if (k) {
+            pb_puts(o, "\">");
+        } else {
+            pb_printf(o, "\" w:name=\"move%d\"/>", (int)rv.move);
+            x->move_range = x->nrev;
+        }
     }
 
-    pb_puts(o, "\">");
-    return rv.kind;
+    return rv.move ? rv.kind + 8 : rv.kind;
 }
 
 static void dx_rev_close(dxo* x, int kind) {
-    if (kind) {
+    if (kind > 8) {
+        pb_printf(x->o, kind == PD_REV_DELETE + 8 ? "</w:moveFrom><w:moveFromRangeEnd w:id=\"%d\"/>" :
+                  "</w:moveTo><w:moveToRangeEnd w:id=\"%d\"/>", x->move_range);
+    } else if (kind) {
         pb_puts(x->o, kind == PD_REV_DELETE ? "</w:del>" : "</w:ins>");
     }
 }
@@ -2098,10 +2172,27 @@ static int dx_span(void* user, const pd_span* sp) {
                 break;
 
             case PD_INLINE_FIELD: {
-                char v[32] = "";
+                char v[96] = "", ins[300];
                 const char* instr = NULL;
 
                 switch (ob->field) {
+                    case PD_FIELD_KEPT:     /* Word's field around its result: its start, or (no source) its end */
+                        if (ob->source_len > 0) {
+                            pb_puts(o, "<w:r>");
+                            dx_rpr(x, &sp->cp, &x->base, NULL);
+                            pb_puts(o, "<w:fldChar w:fldCharType=\"begin\"/></w:r>");
+                            dx_field_code(x, &sp->cp, ob->source, (size_t)ob->source_len);
+                            pb_puts(o, "<w:r>");
+                            dx_rpr(x, &sp->cp, &x->base, NULL);
+                            pb_puts(o, "<w:fldChar w:fldCharType=\"separate\"/></w:r>");
+                        } else {
+                            pb_puts(o, "<w:r>");
+                            dx_rpr(x, &sp->cp, &x->base, NULL);
+                            pb_puts(o, "<w:fldChar w:fldCharType=\"end\"/></w:r>");
+                        }
+
+                        break;
+
                     case PD_FIELD_SEQ:
                         snprintf(v, sizeof(v), "%d", (int)pd_numbers_at(&x->nb, x->para, sp->offset));
                         instr = "SEQ";
@@ -2123,9 +2214,12 @@ static int dx_span(void* user, const pd_span* sp) {
 
                         break;
 
-                    case PD_FIELD_DATE:
-                        strcpy(v, " ");
-                        instr = "DATE";
+                    case PD_FIELD_DATE:     /* its own instruction, and its date now */
+                        snprintf(ins, sizeof(ins), "%.*s", ob->source_len > 0 ? (int)(ob->source_len < 299 ?
+                                 ob->source_len : 299) : 0, ob->source ? ob->source : "");
+                        instr = ins[strspn(ins, " ")] ? ins : "DATE";
+                        pd_date_field(x->d, ob->source, ob->source_len, v, sizeof(v));
+                        v[0] = v[0] ? v[0] : ' ';
                         break;
 
                     case PD_FIELD_PAGE:
@@ -2154,7 +2248,7 @@ static int dx_span(void* user, const pd_span* sp) {
                        a w:fldSimple cannot be inside -- a deleted field's code and result as deleted text */
                     int kind = dx_rev_open(x, sp->cp.revision);
                     const char* it = kind == PD_REV_DELETE ? "w:delInstrText" : "w:instrText";
-                    char code[96];
+                    char code[320];
 
                     if (ob->field == PD_FIELD_SEQ) {
                         snprintf(code, sizeof(code), " SEQ %.40s \\* ARABIC ", ob->name[0] ? ob->name : "Figure");
@@ -2189,7 +2283,9 @@ static int dx_span(void* user, const pd_span* sp) {
                     pb_printf(o, "<w:fldSimple w:instr=\" STYLEREF &quot;Heading %d&quot; \">", ob->level > 0 ? (int)ob->level :
                               1);
                 } else if (instr) {
-                    pb_printf(o, "<w:fldSimple w:instr=\" %s \">", instr);
+                    pb_puts(o, "<w:fldSimple w:instr=\" ");
+                    xesc(o, instr + strspn(instr, " "), strlen(instr + strspn(instr, " ")));
+                    pb_puts(o, " \">");
                 }
 
                 if (v[0]) {
@@ -5481,6 +5577,7 @@ typedef struct {
     int nbuiltin;
     uint32_t theme_clr[12];     /* the theme's colours: dk1 lt1 dk2 lt2 accent1..6 hlink folHlink */
     pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
+    pd_sp page_w, page_h, margin_right, margin_top, margin_bottom;  /* ... and for VML shapes placed in it */
     struct {                    /* bookmarks read: where they are */
         char name[32];
         pd_block_id para;
@@ -6997,7 +7094,6 @@ typedef struct {
     char pstyle[64];
     int num_id, ilvl, outline, sect_here;
     char hf_ref[6][64];         /* the section's header/footer r:ids: default, first, even; footers after */
-    int fld_kind;               /* a page-number field being read: PD_FIELD_* + 1, 0 none */
     dprops ppr;                 /* the paragraph's own w:pPr */
     pd_char_props pcp;          /* character properties of the paragraph style, defaults included */
     pd_char_props tcp;          /* what the Parade style it was given already says, resolved */
@@ -7010,11 +7106,25 @@ typedef struct {
     int in_mrpr;
     int in_t, in_instr, in_drawing;
     /* fields and links */
-    int fld;                    /* 0 none, 1 instruction, 2 result */
-    char instr[512];
-    size_t ninstr;
-    int fld_link, link_depth[16], nlinks;
-    int simple_link;
+    struct {
+        char instr[512];
+        size_t n;
+        char res[256];          /* its result, while it is in its parent's instruction */
+        size_t nres;
+        int state;              /* 1 instruction, 2 result */
+        int inner;              /* nested in its parent's instruction */
+        int suppress;           /* its result not shown: Parade computes it */
+        int kept, link;         /* a PD_FIELD_KEPT start, a link opened, to end with it */
+    } fs[8];                    /* the fields open, the innermost last */
+    int nfs, nfs_over;          /* how many, and those past the eighth (ignored) */
+    /* tracked changes */
+    int in_rprchg;              /* in a run's w:rPrChange: its old w:rPr */
+    pd_char_props old_cp;
+    char chg_author[64], chg_date[32];
+    pd_rev_id fmt_rev;          /* the run's formatting change */
+    char move_name[32][40];     /* the moves' names (moveFromRangeStart, moveToRangeStart), numbered from 1 */
+    int nmove, move_cur;
+    int link_depth[16], nlinks;
     /* drawings */
     char blip[64];
     long long cx, cy;
@@ -7025,6 +7135,11 @@ typedef struct {
     long long posv_off;
     pd_res_id drawing_res;      /* a group or canvas made into a drawing resource */
     int in_vml;                 /* inside w:object or w:pict: a VML picture */
+    char vml_style[400];        /* its shape's style (size, position), for one with text */
+    char art[128], art_font[64];    /* WordArt: v:textpath's string and font */
+    uint32_t vml_fill;          /* the shape's fillcolor (0: none said) */
+    int vml_opacity;            /* v:fill's opacity, per-mille */
+    int vml_wrap;               /* w10:wrap: -1 not said, else a pd_wrap (LEFT for square, NONE topAndBottom) */
     int math_para;              /* the paragraph opens with display math (m:oMathPara) */
     const char* tbx;            /* a floating text box's content, in the part being read */
     size_t tbn;
@@ -7035,6 +7150,7 @@ typedef struct {
         int wrap, has_off, off_from;
         const char* tbx;        /* a text box: its w:txbxContent, read into the float */
         size_t tbn;
+        char* own;              /* tbx made here (WordArt's text as a paragraph), freed once read */
         pd_rev_id rev;          /* inserted or deleted with its anchor */
     } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
     int npend_fl;
@@ -7150,9 +7266,9 @@ static void dw_apply_run(dw* w) {
 
     cp.font_theme = f->font_theme;      /* kept for the families given (pd_doc_format masks it) */
 
-    if (w->rev || w->X->float_rev) {
+    if (w->rev || w->X->float_rev || w->fmt_rev) {
         cp.mask |= PD_CP_REVISION;
-        cp.revision = w->rev ? w->rev : w->X->float_rev;
+        cp.revision = w->rev ? w->rev : w->X->float_rev ? w->X->float_rev : w->fmt_rev;
     }
 
     bld_set_format(w->X->b, &cp);
@@ -7911,6 +8027,8 @@ static void dw_comment_mark(dw* w, int wid, int what) {
     }
 }
 
+static int dw_fld_hidden(const dw* w);
+
 static void dw_text(dw* w, const char* s, size_t n) {
     if (w->after_ref) {
         while (n > 0 && *s == ' ') {
@@ -7921,7 +8039,7 @@ static void dw_text(dw* w, const char* s, size_t n) {
         w->after_ref = n == 0;
     }
 
-    if (w->fld == 1 || n == 0) {
+    if (dw_fld_hidden(w) || n == 0) {
         return;
     }
 
@@ -8012,6 +8130,183 @@ static pd_rev_id deleted_rev(const dxi* X, pd_rev_id rev) {
     pd_revision rv;
 
     return rev && pd_doc_revision_get(X->b->d, rev, &rv) == PD_OK && rv.kind == PD_REV_DELETE ? rev : 0;
+}
+
+static long long vml_length(const char* style, const char* prop);
+static void dw_floats(dw* w);
+
+/* a property of a VML style ("mso-position-horizontal:center"), its value into out; 0 when it has none */
+static int vml_prop(const char* style, const char* prop, char* out, size_t cap) {
+    const char* p = style;
+    size_t n = strlen(prop), k = 0;
+
+    while ((p = strstr(p, prop)) != NULL) {
+        if ((p == style || p[-1] == ';' || p[-1] == ' ') && p[n] == ':') {
+            for (p += n + 1; *p == ' ' || *p == '"' || *p == '\''; p++) {
+            }
+
+            while (*p && *p != ';' && *p != '"' && *p != '\'' && k + 1 < cap) {
+                out[k++] = *p++;
+            }
+
+            out[k] = '\0';
+            return 1;
+        }
+
+        p += n;
+    }
+
+    return 0;
+}
+
+/* a VML colour: #rrggbb, #rgb or a name (with Word's " [n]" index after it), as 0xFFRRGGBB; black if unknown */
+static uint32_t vml_color(const char* v) {
+    static const struct {
+        const char* n;
+        uint32_t c;
+    } names[] = {
+        { "black", 0x000000 }, { "white", 0xFFFFFF }, { "silver", 0xC0C0C0 }, { "gray", 0x808080 },
+        { "red", 0xFF0000 }, { "green", 0x008000 }, { "blue", 0x0000FF }, { "yellow", 0xFFFF00 },
+        { "navy", 0x000080 }, { "maroon", 0x800000 }, { "purple", 0x800080 }, { "teal", 0x008080 },
+        { "olive", 0x808000 }, { "lime", 0x00FF00 }, { "aqua", 0x00FFFF }, { "fuchsia", 0xFF00FF }
+    };
+    size_t i;
+
+    if (v[0] == '#' && strlen(v) >= 7) {
+        return 0xFF000000u | (uint32_t)strtoul(v + 1, NULL, 16);
+    }
+
+    if (v[0] == '#' && strlen(v) >= 4) {
+        uint32_t c = (uint32_t)strtoul(v + 1, NULL, 16);
+
+        return 0xFF000000u | ((c >> 8) & 15) * 0x110000u | ((c >> 4) & 15) * 0x1100u | (c & 15) * 0x11u;
+    }
+
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (!strncmp(v, names[i].n, strlen(names[i].n))) {
+            return 0xFF000000u | names[i].c;
+        }
+    }
+
+    return 0xFF000000u;
+}
+
+/* A VML shape with text -- a text box (v:textbox) or WordArt (v:textpath, a header's watermark) -- as a
+   float like a DrawingML text box's: as big as its style says, where it puts it when it is absolutely
+   positioned (from the margin, the page or the text, centred where it says), the text round it as w10:wrap
+   says, else over it (under it, at a negative z-index); in the line when it is not positioned. WordArt's
+   string becomes a paragraph of its font and fill (made lighter by the fill's opacity), as big as fits. */
+static void dw_vml_float(dw* w) {
+    dxi* X = w->X;
+    const char* st = w->vml_style;
+    char v[64];
+    long long cx = vml_length(st, "width"), cy = vml_length(st, "height");
+    int k, absolute = vml_prop(st, "position", v, sizeof(v)) && !strcmp(v, "absolute");
+    pd_sp colw = X->page_w - X->margin_left - X->margin_right;
+
+    if (cx <= 0 || cy <= 0 || w->npend_fl >= 8) {
+        return;
+    }
+
+    k = w->npend_fl++;
+    memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+    w->pend_fl[k].w = (pd_sp)(cx * 65536 / 12700);
+    w->pend_fl[k].h = (pd_sp)(cy * 65536 / 12700);
+    w->pend_fl[k].rev = deleted_rev(X, w->rev);
+
+    if (!absolute) {
+        w->pend_fl[k].wrap = PD_WRAP_NONE;
+    } else {
+        char ha[16] = "", hr[16] = "", va[16] = "", vr[16] = "";
+        pd_sp ox = (pd_sp)((vml_length(st, "margin-left") + vml_length(st, "left")) * 65536 / 12700);
+        pd_sp oy = (pd_sp)((vml_length(st, "margin-top") + vml_length(st, "top")) * 65536 / 12700);
+
+        vml_prop(st, "mso-position-horizontal", ha, sizeof(ha));
+        vml_prop(st, "mso-position-horizontal-relative", hr, sizeof(hr));
+        vml_prop(st, "mso-position-vertical", va, sizeof(va));
+        vml_prop(st, "mso-position-vertical-relative", vr, sizeof(vr));
+
+        if (w->vml_wrap >= 0) {
+            w->pend_fl[k].wrap = w->vml_wrap == PD_WRAP_LEFT && !strcmp(ha, "right") ? PD_WRAP_RIGHT : w->vml_wrap;
+        } else {
+            w->pend_fl[k].wrap = vml_prop(st, "z-index", v, sizeof(v)) && atol(v) < 0 ? PD_WRAP_BEHIND : PD_WRAP_FRONT;
+        }
+
+        if (!strcmp(hr, "page")) {
+            ox -= X->margin_left;
+        }
+
+        if (!strcmp(ha, "center") && colw > 0) {
+            ox = (colw - w->pend_fl[k].w) / 2;
+        } else if (!strcmp(ha, "right") && colw > 0) {
+            ox = colw - w->pend_fl[k].w;
+        }
+
+        w->pend_fl[k].has_off = 1;
+        w->pend_fl[k].off_x = ox;
+        w->pend_fl[k].off_from = !strcmp(vr, "page") ? PD_FROM_PAGE : !strcmp(vr, "margin") ? PD_FROM_MARGIN :
+                                 PD_FROM_PARAGRAPH;
+
+        if (!strcmp(va, "center") && X->page_h > 0) {
+            oy = ((w->pend_fl[k].off_from == PD_FROM_PAGE ? X->page_h : X->page_h - X->margin_top - X->margin_bottom) -
+                  w->pend_fl[k].h) / 2;
+            w->pend_fl[k].off_from = w->pend_fl[k].off_from == PD_FROM_PAGE ? PD_FROM_PAGE : PD_FROM_MARGIN;
+        }
+
+        w->pend_fl[k].off_y = oy;
+    }
+
+    if (w->tbx) {
+        w->pend_fl[k].tbx = w->tbx;
+        w->pend_fl[k].tbn = w->tbn;
+    } else {    /* WordArt: its string as a paragraph */
+        pd_buf o;
+        uint32_t c = w->vml_fill ? w->vml_fill : 0xFF000000u;
+        int op = w->vml_opacity < 0 ? 0 : w->vml_opacity > 1000 ? 1000 : w->vml_opacity, r, g, bl;
+        size_t i, chars = 0;
+        long long hp;
+
+        for (i = 0; w->art[i]; i++) {
+            chars += ((unsigned char)w->art[i] & 0xC0) != 0x80;
+        }
+
+        /* as tall as the shape, or as wide, a character 0.6 em */
+        hp = cy * 2 / 12700;
+        hp = chars && cx * 2 * 10 / (12700 * 6 * (long long)chars) < hp ? cx * 2 * 10 / (12700 * 6 * (long long)chars) :
+             hp;
+        hp = hp < 2 ? 2 : hp > 3276 ? 3276 : hp;
+        r = ((int)((c >> 16) & 255) * op + 255 * (1000 - op) + 500) / 1000;
+        g = ((int)((c >> 8) & 255) * op + 255 * (1000 - op) + 500) / 1000;
+        bl = ((int)(c & 255) * op + 255 * (1000 - op) + 500) / 1000;
+        memset(&o, 0, sizeof(o));
+        pb_puts(&o, "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:rPr>");
+
+        if (w->art_font[0]) {
+            pb_puts(&o, "<w:rFonts w:ascii=\"");
+            xesc(&o, w->art_font, strlen(w->art_font));
+            pb_puts(&o, "\" w:hAnsi=\"");
+            xesc(&o, w->art_font, strlen(w->art_font));
+            pb_puts(&o, "\"/>");
+        }
+
+        pb_printf(&o, "<w:color w:val=\"%02X%02X%02X\"/><w:sz w:val=\"%d\"/></w:rPr><w:t xml:space=\"preserve\">", r, g,
+                  bl, (int)hp);
+        xesc(&o, w->art, strlen(w->art));
+        pb_puts(&o, "</w:t></w:r></w:p>");
+
+        if (o.p) {
+            w->pend_fl[k].own = o.p;
+            w->pend_fl[k].tbx = o.p;
+            w->pend_fl[k].tbn = o.n;
+        } else {
+            w->npend_fl--;
+            return;
+        }
+    }
+
+    if (!w->started) {
+        dw_floats(w);
+    }
 }
 
 /* A frame's paragraph read: the float it is in placed as its framePr says -- a drop cap beside the lines of
@@ -8110,6 +8405,8 @@ static void dw_floats(dw* w) {
             dw_parse(w->X, w->pend_fl[k].tbx, w->pend_fl[k].tbn, 1);
             w->X->float_rev = outer;
             w->X->depth--;
+            free(w->pend_fl[k].own);
+            w->pend_fl[k].own = NULL;
             bld_end_para(b);
             b->cp = keep;
             bld_float_end(b);
@@ -10915,8 +11212,9 @@ static int page_field(const char* instr) {
     word[k] = '\0';
     return strcmp(word, "PAGE") == 0 ? PD_FIELD_PAGE + 1 : strcmp(word, "NUMPAGES") == 0 ? PD_FIELD_PAGES + 1 :
            strcmp(word, "SECTIONPAGES") == 0 ? PD_FIELD_SECTION_PAGE + 1 : strcmp(word, "PAGEREF") == 0 ?
-           PD_FIELD_REF_PAGE + 1 : strcmp(word, "SEQ") == 0 ? PD_FIELD_SEQ + 1 : strcmp(word, "DATE") == 0 ?
-           PD_FIELD_DATE + 1 : 0;
+           PD_FIELD_REF_PAGE + 1 : strcmp(word, "SEQ") == 0 ? PD_FIELD_SEQ + 1 : strcmp(word, "DATE") == 0 ||
+           strcmp(word, "TIME") == 0 || strcmp(word, "CREATEDATE") == 0 || strcmp(word, "SAVEDATE") == 0 ||
+           strcmp(word, "PRINTDATE") == 0 ? PD_FIELD_DATE + 1 : 0;
 }
 
 /* the instruction's first argument: a bookmark (PAGEREF), a sequence (SEQ) */
@@ -10959,6 +11257,14 @@ static void dw_field(dw* w, int kind, const char* instr) {
 
     if (o.field == PD_FIELD_SEQ) {
         snprintf(o.name, sizeof(o.name), "%.31s", arg[0] ? arg : "Figure");
+    } else if (o.field == PD_FIELD_DATE || o.field == PD_FIELD_KEPT) {   /* the instruction, for its picture */
+        o.source = instr;
+        o.source_len = (int32_t)strlen(instr);
+    } else if (o.field == PD_FIELD_HEADING) {
+        const char* h = strstr(instr, "eading ");
+
+        o.level = h ? atoi(h + 7) : 1;
+        o.level = o.level < 1 ? 1 : o.level > 6 ? 6 : o.level;
     }
 
     dw_begin_para(w);
@@ -10975,6 +11281,397 @@ static void dw_field(dw* w, int kind, const char* instr) {
             w->X->refs[w->X->nrefs].field = o.field;
             w->X->nrefs++;
         }
+    }
+}
+
+/* the end of a kept field (its result read) */
+static void dw_kept_end(dw* w) {
+    pd_inline o;
+
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_FIELD;
+    o.field = PD_FIELD_KEPT;
+    dw_begin_para(w);
+    dw_apply_run(w);
+    bld_inline(w->X->b, &o);
+}
+
+/* whether text read now is not shown: in a field's instruction, or a result Parade computes */
+static int dw_fld_hidden(const dw* w) {
+    int k;
+
+    for (k = 0; k < w->nfs && k < 8; k++) {
+        if (w->fs[k].state == 1 || w->fs[k].suppress) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void dw_fld_instr(dw* w, const char* s, size_t n) {
+    if (w->nfs > 0 && !w->nfs_over && w->fs[w->nfs - 1].state == 1 && w->fs[w->nfs - 1].n + n < sizeof(w->fs[0].instr)) {
+        memcpy(w->fs[w->nfs - 1].instr + w->fs[w->nfs - 1].n, s, n);
+        w->fs[w->nfs - 1].n += n;
+        w->fs[w->nfs - 1].instr[w->fs[w->nfs - 1].n] = '\0';
+    }
+}
+
+static void dw_fld_begin(dw* w) {
+    if (w->nfs >= 8 || w->nfs_over) {
+        w->nfs_over++;
+        return;
+    }
+
+    memset(&w->fs[w->nfs], 0, sizeof(w->fs[0]));
+    w->fs[w->nfs].state = 1;
+    w->fs[w->nfs].inner = w->nfs > 0 && w->fs[w->nfs - 1].state == 1;
+    w->nfs++;
+}
+
+/* the marks of a field nested in another's instruction: U+FFF9 instruction U+FFFA result U+FFFB */
+#define FLD_IN  "\xEF\xBF\xB9"
+#define FLD_SEP "\xEF\xBF\xBA"
+#define FLD_OUT "\xEF\xBF\xBB"
+
+/* an instruction's text with each field nested in it as its result; 0 when one of those depends on the page
+   (its result then is only Word's last one) */
+static int fld_flat(const char* in, char* out, size_t cap) {
+    size_t o = 0;
+    int ok = 1;
+
+    while (*in && o + 1 < cap) {
+        if (!strncmp(in, FLD_IN, 3)) {
+            const char* us = strstr(in, FLD_SEP), *e = us ? strstr(us, FLD_OUT) : NULL;
+            char ins[256];
+
+            if (!us || !e) {
+                break;
+            }
+
+            snprintf(ins, sizeof(ins), "%.*s", (int)(us - in - 3 < 255 ? us - in - 3 : 255), in + 3);
+            ok &= !page_field(ins) || page_field(ins) == PD_FIELD_DATE + 1;
+
+            for (us += 3; us < e && o + 1 < cap; us++) {
+                out[o++] = *us;
+            }
+
+            in = e + 3;
+        } else {
+            out[o++] = *in++;
+        }
+    }
+
+    out[o] = '\0';
+    return ok;
+}
+
+/* the next operand of an IF: a quoted string or a word; NULL at the end */
+static const char* fld_token(const char* p, char* out, size_t cap) {
+    size_t k = 0;
+
+    while (*p == ' ') {
+        p++;
+    }
+
+    if (!*p) {
+        return NULL;
+    }
+
+    if (*p == '"') {
+        for (p++; *p && *p != '"'; p++) {
+            if (k + 1 < cap) {
+                out[k++] = *p;
+            }
+        }
+
+        p += *p == '"';
+    } else if (strchr("=<>", *p)) {
+        while (*p && strchr("=<>", *p) && k + 1 < cap) {
+            out[k++] = *p++;
+        }
+    } else {
+        while (*p && *p != ' ' && !strchr("=<>\"", *p) && k + 1 < cap) {
+            out[k++] = *p++;
+        }
+    }
+
+    out[k] = '\0';
+    return p;
+}
+
+/* = arithmetic: + - * / and brackets over numbers */
+static double fld_expr(const char** p, int* ok);
+
+static double fld_atom(const char** p, int* ok) {
+    double v;
+    char* e;
+
+    while (**p == ' ') {
+        (*p)++;
+    }
+
+    if (**p == '(') {
+        (*p)++;
+        v = fld_expr(p, ok);
+
+        while (**p == ' ') {
+            (*p)++;
+        }
+
+        *ok &= **p == ')';
+        *p += **p == ')';
+        return v;
+    }
+
+    if (**p == '-') {
+        (*p)++;
+        return -fld_atom(p, ok);
+    }
+
+    v = strtod(*p, &e);
+    *ok &= e != *p;
+    *p = e;
+    return v;
+}
+
+static double fld_term(const char** p, int* ok) {
+    double v = fld_atom(p, ok);
+
+    for (;;) {
+        while (**p == ' ') {
+            (*p)++;
+        }
+
+        if (**p == '*') {
+            (*p)++;
+            v *= fld_atom(p, ok);
+        } else if (**p == '/') {
+            double d;
+
+            (*p)++;
+            d = fld_atom(p, ok);
+            *ok &= d != 0;
+            v = d != 0 ? v / d : 0;
+        } else {
+            return v;
+        }
+    }
+}
+
+static double fld_expr(const char** p, int* ok) {
+    double v = fld_term(p, ok);
+
+    for (;;) {
+        while (**p == ' ') {
+            (*p)++;
+        }
+
+        if (**p == '+') {
+            (*p)++;
+            v += fld_term(p, ok);
+        } else if (**p == '-') {
+            (*p)++;
+            v -= fld_term(p, ok);
+        } else {
+            return v;
+        }
+    }
+}
+
+/* What Parade works out of a field when it is read, as Word would show it: the document's properties (TITLE,
+   AUTHOR, SUBJECT, KEYWORDS, COMMENTS, LASTSAVEDBY, DOCPROPERTY), IF comparing its operands (numbers, else
+   text), = arithmetic. 0 for anything else, or an operand that depends on the page. */
+static int fld_eval(dw* w, const char* instr, char* out, size_t cap) {
+    static const struct {
+        const char* field;
+        const char* key;
+    } props[] = {
+        { "TITLE", "title" }, { "AUTHOR", "author" }, { "SUBJECT", "subject" }, { "KEYWORDS", "keywords" },
+        { "COMMENTS", "description" }, { "LASTSAVEDBY", "lastModifiedBy" }
+    };
+    char flat[512], word[32], a[128];
+    const char* p;
+    size_t k = 0, i, yl = 0;
+    const char* y = pd_doc_metadata(w->X->b->d, &yl);
+
+    if (!fld_flat(instr, flat, sizeof(flat))) {
+        return 0;
+    }
+
+    for (p = flat; *p == ' '; p++) {
+    }
+
+    while (k + 1 < sizeof(word) && p[k] && p[k] != ' ' && p[k] != '\\') {
+        word[k] = (char)toupper((unsigned char)p[k]);
+        k++;
+    }
+
+    word[k] = '\0';
+    p += k;
+
+    if (!strcmp(word, "DOCPROPERTY")) {
+        if (!fld_token(p, a, sizeof(a))) {
+            return 0;
+        }
+
+        for (i = 0; i < sizeof(props) / sizeof(props[0]); i++) {
+            if (same_ci(a, props[i].field) || same_ci(a, props[i].key) || (same_ci(a, "Author") && i == 1)) {
+                snprintf(word, sizeof(word), "%s", props[i].field);
+            }
+        }
+    }
+
+    for (i = 0; i < sizeof(props) / sizeof(props[0]); i++) {
+        if (!strcmp(word, props[i].field)) {
+            if (!y || !yaml_value(y, yl, props[i].key, out, cap)) {
+                out[0] = '\0';
+            }
+
+            return 1;
+        }
+    }
+
+    if (!strcmp(word, "IF")) {
+        char l[128], op[8], r[128], yes[256] = "", no[256] = "";
+        char* e1, *e2;
+        double x1, x2;
+        int c, res;
+
+        if (!(p = fld_token(p, l, sizeof(l))) || !(p = fld_token(p, op, sizeof(op))) ||
+                !(p = fld_token(p, r, sizeof(r)))) {
+            return 0;
+        }
+
+        if ((p = fld_token(p, yes, sizeof(yes))) != NULL) {
+            fld_token(p, no, sizeof(no));
+        }
+
+        x1 = strtod(l, &e1);
+        x2 = strtod(r, &e2);
+        c = *l && *r && !*e1 && !*e2 ? (x1 > x2) - (x1 < x2) : strcmp(l, r);
+        res = !strcmp(op, "=") ? c == 0 : !strcmp(op, "<>") ? c != 0 : !strcmp(op, "<") ? c < 0 : !strcmp(op, ">") ?
+              c > 0 : !strcmp(op, "<=") ? c <= 0 : !strcmp(op, ">=") ? c >= 0 : -1;
+
+        if (res < 0) {
+            return 0;
+        }
+
+        snprintf(out, cap, "%s", res ? yes : no);
+        return 1;
+    }
+
+    if (word[0] == '=') {
+        const char* q = flat + strspn(flat, " ") + 1, *e;
+        int ok = 1;
+        double v = fld_expr(&q, &ok);
+
+        e = strstr(q, "\\#");     /* a number picture after it: not followed */
+        ok &= !*(q + strspn(q, " ")) || (e && e == q + strspn(q, " "));
+
+        if (!ok) {
+            return 0;
+        }
+
+        snprintf(out, cap, v == (double)(long long)v && fabs(v) < 1e15 ? "%.0f" : "%g", v);
+        return 1;
+    }
+
+    return 0;
+}
+
+/* The result of the innermost field begins: what it shows. Parade's own fields (page numbers, references to
+   pages, counters, dates, running headings) are computed and Word's result left out; a link is a link over
+   its result; the rest are kept -- a PD_FIELD_KEPT around the result, Word's or the one worked out here when
+   Parade can (fld_eval) -- and a reference is also a link to what it names. */
+static void dw_fld_separate(dw* w) {
+    char* ins;
+    const char* h, *q, *e, *s;
+    char val[256];
+    int kind;
+
+    if (w->nfs_over || w->nfs <= 0 || w->fs[w->nfs - 1].state != 1) {
+        return;
+    }
+
+    w->fs[w->nfs - 1].state = 2;
+
+    if (w->fs[w->nfs - 1].inner || dw_fld_hidden(w)) {
+        return;     /* in another's instruction, or in a result not shown */
+    }
+
+    ins = w->fs[w->nfs - 1].instr;
+    s = ins + strspn(ins, " ");
+    h = strstr(ins, "HYPERLINK");
+    q = h ? strchr(h, '"') : NULL;
+    e = q ? strchr(q + 1, '"') : NULL;
+
+    if ((kind = page_field(ins)) != 0 && !strstr(ins, FLD_IN)) {
+        dw_field(w, kind, ins);
+        w->fs[w->nfs - 1].suppress = 1;
+    } else if (!strncmp(s, "STYLEREF", 8) && strstr(s, "eading ") && !strstr(ins, FLD_IN)) {
+        dw_field(w, PD_FIELD_HEADING + 1, ins);     /* a running head */
+        w->fs[w->nfs - 1].suppress = 1;
+    } else if (h && q && e && e > q + 1 && !strstr(ins, FLD_IN)) {
+        dw_link(w, q + 1, (size_t)(e - q - 1));
+        w->fs[w->nfs - 1].link = 1;
+    } else if (s[0]) {
+        dw_field(w, PD_FIELD_KEPT + 1, ins);
+        w->fs[w->nfs - 1].kept = 1;
+
+        if (fld_eval(w, ins, val, sizeof(val))) {
+            dw_text(w, val, strlen(val));
+            w->fs[w->nfs - 1].suppress = 1;
+        } else if (!strncmp(s, "REF ", 4) || !strncmp(s, "NOTEREF ", 8)) {
+            char arg[64];   /* a reference: Word's text kept, a link to the place it names */
+
+            arg[0] = '#';
+            field_arg(ins, arg + 1, sizeof(arg) - 1);
+
+            if (arg[1]) {
+                dw_link(w, arg, strlen(arg));
+                w->fs[w->nfs - 1].link = 1;
+            }
+        }
+    }
+}
+
+static void dw_fld_end(dw* w) {
+    int k;
+
+    if (w->nfs_over) {
+        w->nfs_over--;
+        return;
+    }
+
+    if (w->nfs <= 0) {
+        return;
+    }
+
+    if (w->fs[w->nfs - 1].state == 1) {     /* no result part at all */
+        dw_fld_separate(w);
+    }
+
+    k = --w->nfs;
+
+    if (w->fs[k].inner && k > 0) {  /* into its parent's instruction, between FLD_IN and FLD_OUT */
+        char enc[800];
+        int n = snprintf(enc, sizeof(enc), FLD_IN "%s" FLD_SEP "%s" FLD_OUT, w->fs[k].instr, w->fs[k].res);
+
+        if (n > 0 && w->fs[k - 1].n + (size_t)n < sizeof(w->fs[0].instr)) {
+            memcpy(w->fs[k - 1].instr + w->fs[k - 1].n, enc, (size_t)n + 1);
+            w->fs[k - 1].n += (size_t)n;
+        }
+
+        return;
+    }
+
+    if (w->fs[k].link) {
+        dw_link(w, "", 0);
+    }
+
+    if (w->fs[k].kept) {
+        dw_kept_end(w);
     }
 }
 
@@ -11545,17 +12242,33 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         }
 
         if (m.type == MT_TEXT) {
-            if (w->in_t && w->fld != 1 && !w->fld_kind) {
+            if (w->in_t && w->nfs > 0 && w->fs[w->nfs - 1].inner && w->fs[w->nfs - 1].state == 2) {
+                pd_buf txt;     /* a nested field's result: in its parent's instruction */
+
+                memset(&txt, 0, sizeof(txt));
+                mu_decode(m.text, m.tlen, &txt);
+
+                if (w->fs[w->nfs - 1].nres + txt.n < sizeof(w->fs[0].res)) {
+                    memcpy(w->fs[w->nfs - 1].res + w->fs[w->nfs - 1].nres, txt.p ? txt.p : "", txt.n);
+                    w->fs[w->nfs - 1].nres += txt.n;
+                    w->fs[w->nfs - 1].res[w->fs[w->nfs - 1].nres] = '\0';
+                }
+
+                pb_free(&txt);
+            } else if (w->in_t && !dw_fld_hidden(w)) {
                 pd_buf txt;
 
                 memset(&txt, 0, sizeof(txt));
                 mu_decode(m.text, m.tlen, &txt);
                 dw_text(w, txt.p ? txt.p : "", txt.n);
                 pb_free(&txt);
-            } else if (w->in_instr && w->ninstr + m.tlen < sizeof(w->instr)) {
-                memcpy(w->instr + w->ninstr, m.text, m.tlen);
-                w->ninstr += m.tlen;
-                w->instr[w->ninstr] = '\0';
+            } else if (w->in_instr && w->nfs > 0 && w->fs[w->nfs - 1].state == 1) {
+                pd_buf txt;
+
+                memset(&txt, 0, sizeof(txt));
+                mu_decode(m.text, m.tlen, &txt);
+                dw_fld_instr(w, txt.p ? txt.p : "", txt.n);
+                pb_free(&txt);
             }
 
             continue;
@@ -11614,9 +12327,10 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
-        if (m.type == MT_OPEN && w->in_drawing && w->anchor && !w->tbx && strcmp(t, "txbxContent") == 0 &&
+        if (m.type == MT_OPEN && (w->in_drawing || w->in_vml) && !w->tbx && strcmp(t, "txbxContent") == 0 &&
                 X->depth < 3) {
-            /* a floating text box: its paragraphs become a float's, read once the anchoring paragraph ends */
+            /* a text box (floating or in the line, DrawingML's or VML's): its paragraphs become a float's, read
+               once the anchoring paragraph ends */
             pd_markup g;
             int depth = 1;
             size_t end = 0;
@@ -11768,6 +12482,55 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
+        if (open && strcmp(t, "rPrChange") == 0 && w->in_rpr && !w->in_mrpr && !w->in_rprchg) {
+            /* a run's formatting changed: what it had, in the w:rPr inside */
+            w->in_rprchg = m.type == MT_OPEN;
+            memset(&w->old_cp, 0, sizeof(w->old_cp));
+            w->chg_author[0] = w->chg_date[0] = '\0';
+            mu_attr(&m, "w:author", w->chg_author, sizeof(w->chg_author));
+            mu_attr(&m, "w:date", w->chg_date, sizeof(w->chg_date));
+            continue;
+        }
+
+        if (w->in_rprchg) {
+            if (m.type == MT_CLOSE && strcmp(t, "rPrChange") == 0) {
+                pd_revision rv;
+
+                memset(&rv, 0, sizeof(rv));
+                rv.kind = PD_REV_FORMAT;
+                memcpy(rv.author, w->chg_author, sizeof(rv.author));
+                memcpy(rv.date, w->chg_date, sizeof(rv.date));
+                rv.old = w->old_cp;
+                w->in_rprchg = 0;
+
+                if (pd_doc_revision_add(X->b->d, &rv, &w->fmt_rev) != PD_OK) {
+                    w->fmt_rev = 0;
+                }
+            } else if (open && strcmp(t, "rPr") != 0) {
+                rpr_elem(X, &m, t, &w->old_cp, NULL, 0);
+            }
+
+            continue;
+        }
+
+        if (open && (!strcmp(t, "moveFromRangeStart") || !strcmp(t, "moveToRangeStart"))) {
+            int k;      /* a move's two ends share its name: their revisions its number */
+
+            if (!mu_attr(&m, "w:name", v, sizeof(v))) {
+                v[0] = '\0';
+            }
+
+            for (k = 0; k < w->nmove && strcmp(w->move_name[k], v); k++) {
+            }
+
+            if (k == w->nmove && k < 32) {
+                snprintf(w->move_name[w->nmove++], sizeof(w->move_name[0]), "%.39s", v);
+            }
+
+            w->move_cur = k + 1;
+            continue;
+        }
+
         if (open) {
             /* elements whose content is ignored */
             if (strcmp(t, "txbxContent") == 0 || strcmp(t, "Fallback") == 0 ||
@@ -11799,6 +12562,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
                 memset(&rv, 0, sizeof(rv));
                 rv.kind = t[0] == 'd' || !strcmp(t, "moveFrom") ? PD_REV_DELETE : PD_REV_INSERT;
+                rv.move = t[0] == 'm' ? (w->move_cur ? w->move_cur : 33) : 0;
                 mu_attr(&m, "w:author", rv.author, sizeof(rv.author));
                 mu_attr(&m, "w:date", rv.date, sizeof(rv.date));
 
@@ -11868,6 +12632,11 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->sp.gutter = w->sp.gutter < 0 ? 0 : w->sp.gutter;
                     w->X->margin_left = w->sp.margin_left;  /* for the pictures of its headers, read next */
                     w->sp.margin_right = twips(attr_int(&m, "w:right", 1440));
+                    w->X->margin_right = w->sp.margin_right;
+                    w->X->margin_top = w->sp.margin_top;
+                    w->X->margin_bottom = w->sp.margin_bottom;
+                    w->X->page_w = w->sp.page_width;
+                    w->X->page_h = w->sp.page_height;
                     w->sp.header_distance = twips(attr_int(&m, "w:header", 720));
                     w->sp.footer_distance = twips(attr_int(&m, "w:footer", 720));
                 } else if (strcmp(t, "headerReference") == 0 || strcmp(t, "footerReference") == 0) {
@@ -11964,6 +12733,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (strcmp(t, "r") == 0) {
                 memset(&w->rcp, 0, sizeof(w->rcp));
                 w->rstyle[0] = '\0';
+                w->fmt_rev = 0;
             } else if (strcmp(t, "rPr") == 0) {
                 w->in_rpr = m.type == MT_OPEN;
             } else if (w->in_rpr) {
@@ -12029,9 +12799,29 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->in_vml = 1;
                 w->blip[0] = '\0';
                 w->cx = w->cy = 0;
-            } else if (w->in_vml && strcmp(t, "shape") == 0 && w->cx == 0 && mu_attr(&m, "style", v, sizeof(v))) {
-                w->cx = vml_length(v, "width");
-                w->cy = vml_length(v, "height");
+                w->vml_style[0] = w->art[0] = w->art_font[0] = '\0';
+                w->vml_fill = 0;
+                w->vml_opacity = 1000;
+                w->vml_wrap = -1;
+                w->tbx = NULL;
+                w->tbn = 0;
+            } else if (w->in_vml && (strcmp(t, "shape") == 0 || strcmp(t, "rect") == 0 || strcmp(t, "roundrect") == 0 ||
+                                     strcmp(t, "oval") == 0) && !w->vml_style[0] &&
+                       mu_attr(&m, "style", w->vml_style, sizeof(w->vml_style))) {
+                w->cx = w->cx ? w->cx : vml_length(w->vml_style, "width");
+                w->cy = w->cy ? w->cy : vml_length(w->vml_style, "height");
+
+                if (mu_attr(&m, "fillcolor", v, sizeof(v))) {
+                    w->vml_fill = vml_color(v);
+                }
+            } else if (w->in_vml && strcmp(t, "textpath") == 0 && mu_attr(&m, "string", w->art, sizeof(w->art))) {
+                if (mu_attr(&m, "style", v, sizeof(v))) {
+                    vml_prop(v, "font-family", w->art_font, sizeof(w->art_font));
+                }
+            } else if (w->in_vml && strcmp(t, "fill") == 0 && mu_attr(&m, "opacity", v, sizeof(v))) {
+                w->vml_opacity = strchr(v, 'f') ? (int)(atof(v) * 1000 / 65536) : (int)(atof(v) * 1000);
+            } else if (w->in_vml && strcmp(t, "wrap") == 0 && mu_attr(&m, "type", v, sizeof(v))) {
+                w->vml_wrap = !strcmp(v, "topAndBottom") ? PD_WRAP_NONE : !strcmp(v, "none") ? -1 : PD_WRAP_LEFT;
             } else if (w->in_vml && strcmp(t, "imagedata") == 0 && !w->blip[0]) {
                 mu_attr(&m, "r:id", w->blip, sizeof(w->blip));
             } else if (w->in_drawing && strcmp(t, "chart") == 0 && !w->drawing_res && mu_attr(&m, "r:id", v, sizeof(v))) {
@@ -12087,7 +12877,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 int ext = 0;
                 const char* url = mu_attr(&m, "r:id", v, sizeof(v)) ? rel_target(X, v, &ext) : NULL;
 
-                if (url && w->nlinks < 16 && m.type == MT_OPEN) {
+                if (m.type == MT_OPEN && w->nlinks < 16 && w->nfs > 0 && w->fs[w->nfs - 1].link) {
+                    w->link_depth[w->nlinks++] = 0;     /* in a reference's result, which links already */
+                } else if (url && w->nlinks < 16 && m.type == MT_OPEN) {
                     dw_link(w, url, strlen(url));
                     w->link_depth[w->nlinks++] = 1;
                 } else if (m.type == MT_OPEN && w->nlinks < 16 && mu_attr(&m, "w:anchor", v + 1, sizeof(v) - 1) && v[1]) {
@@ -12098,68 +12890,26 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->link_depth[w->nlinks++] = 0;
                 }
             } else if (strcmp(t, "fldSimple") == 0) {
-                int kind;
+                char ins[512];
 
-                w->simple_link = 0;
+                if (!mu_attr(&m, "w:instr", ins, sizeof(ins))) {
+                    ins[0] = '\0';
+                }
 
-                if (mu_attr(&m, "w:instr", v, sizeof(v)) && (kind = page_field(v)) != 0) {
-                    dw_field(w, kind, v);   /* computed here; Word's last result is not kept */
+                dw_fld_begin(w);    /* a field whose instruction is said at once, its result its content */
+                dw_fld_instr(w, ins, strlen(ins));
+                dw_fld_separate(w);
 
-                    if (m.type == MT_OPEN) {
-                        w->skip = 1;
-                    }
-                } else if (mu_attr(&m, "w:instr", v, sizeof(v))) {
-                    const char* h = strstr(v, "HYPERLINK");
-                    const char* q = h ? strchr(h, '"') : NULL, *e = q ? strchr(q + 1, '"') : NULL;
-
-                    if (q && e && e > q + 1 && m.type == MT_OPEN) {
-                        dw_link(w, q + 1, (size_t)(e - q - 1));
-                        w->simple_link = 1;
-                    }
+                if (m.type == MT_EMPTY) {
+                    dw_fld_end(w);
                 }
             } else if (strcmp(t, "fldChar") == 0 && mu_attr(&m, "w:fldCharType", v, sizeof(v))) {
                 if (strcmp(v, "begin") == 0) {
-                    w->fld = 1;
-                    w->ninstr = 0;
-                    w->instr[0] = '\0';
+                    dw_fld_begin(w);
                 } else if (strcmp(v, "separate") == 0) {
-                    const char* h = strstr(w->instr, "HYPERLINK");
-                    const char* q = h ? strchr(h, '"') : NULL, *e = q ? strchr(q + 1, '"') : NULL;
-
-                    w->fld = 2;
-
-                    if ((w->fld_kind = page_field(w->instr)) != 0) {
-                        dw_field(w, w->fld_kind, w->instr);     /* and its cached result is dropped */
-                    }
-
-                    if (q && e && e > q + 1) {
-                        dw_link(w, q + 1, (size_t)(e - q - 1));
-                        w->fld_link = 1;
-                    } else if (!w->fld_kind && (!strncmp(w->instr + strspn(w->instr, " "), "REF ", 4) ||
-                                                !strncmp(w->instr + strspn(w->instr, " "), "NOTEREF ", 8))) {
-                        char arg[64];   /* a reference: Word's text kept, a link to the place it names */
-
-                        arg[0] = '#';
-                        field_arg(w->instr, arg + 1, sizeof(arg) - 1);
-
-                        if (arg[1]) {
-                            dw_link(w, arg, strlen(arg));
-                            w->fld_link = 1;
-                        }
-                    }
+                    dw_fld_separate(w);
                 } else if (strcmp(v, "end") == 0) {
-                    if (w->fld == 1 && page_field(w->instr)) {     /* no result part at all */
-                        dw_field(w, page_field(w->instr), w->instr);
-                    }
-
-                    w->fld_kind = 0;
-
-                    if (w->fld_link) {
-                        dw_link(w, "", 0);
-                        w->fld_link = 0;
-                    }
-
-                    w->fld = 0;
+                    dw_fld_end(w);
                 }
             } else if (strcmp(t, "sym") == 0 && mu_attr(&m, "w:char", v, sizeof(v))) {
                 uint32_t c = (uint32_t)strtoul(v, NULL, 16), sc;
@@ -12442,8 +13192,11 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->anchor = 0;      /* in the line, as Word shows an object */
                 w->drawing_res = 0;
                 dw_image(w);
+            } else if (w->tbx || w->art[0]) {
+                dw_vml_float(w);    /* a text box, WordArt */
             }
 
+            w->tbx = NULL;
             w->in_vml = 0;
             w->blip[0] = '\0';
         } else if (strcmp(t, "drawing") == 0) {
@@ -12475,6 +13228,22 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 if (!w->started) {
                     dw_floats(w);
                 }
+            } else if (w->in_drawing && w->tbx && !w->anchor && w->cx > 0 && !w->blip[0] && !w->drawing_res &&
+                       w->npend_fl < 8) {
+                /* a text box in the line: its own block where it is, as wide as it is */
+                int k = w->npend_fl++;
+
+                memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+                w->pend_fl[k].w = (pd_sp)(w->cx * 65536 / 12700);
+                w->pend_fl[k].h = (pd_sp)(w->cy * 65536 / 12700);
+                w->pend_fl[k].wrap = PD_WRAP_NONE;
+                w->pend_fl[k].rev = deleted_rev(X, w->rev);
+                w->pend_fl[k].tbx = w->tbx;
+                w->pend_fl[k].tbn = w->tbn;
+
+                if (!w->started) {
+                    dw_floats(w);
+                }
             } else if (w->in_drawing && (w->blip[0] || w->drawing_res)) {
                 dw_image(w);
             }
@@ -12485,10 +13254,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 dw_link(w, "", 0);
             }
         } else if (strcmp(t, "fldSimple") == 0) {
-            if (w->simple_link) {
-                dw_link(w, "", 0);
-                w->simple_link = 0;
-            }
+            dw_fld_end(w);
         } else if (strcmp(t, "tblPr") == 0 || strcmp(t, "tblGrid") == 0) {
             w->in_tblpr = w->in_grid = w->in_borders = 0;
             dw_table_props(w);
@@ -12520,6 +13286,10 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             bld_table_end(X->b);
             w->ntab -= w->ntab > 0;
         }
+    }
+
+    for (tk = 0; tk < w->npend_fl; tk++) {
+        free(w->pend_fl[tk].own);
     }
 
     free(w);

@@ -10,6 +10,9 @@
 #include "parade_convert.h"
 #include "pd_internal.h"
 
+/* a date field's value (PD_FIELD_DATE) from its Word instruction, as layout shows it (pd_layout.c) */
+void pd_date_field(const pd_doc* d, const char* instr, int32_t n, char* buf, size_t cap);
+
 /* ------------------------------------------------------------------ */
 /* output                                                             */
 /* ------------------------------------------------------------------ */

@@ -87,6 +87,10 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   settled in a second pass as in LaTeX. List labels hang in the margin.
 - Output: per-page display lists (glyphs, images, object boxes, rules) in
   page coordinates, hit testing and caret positions across pages.
+- Comments as Word prints them (`pd_layout_set_comments`, on in `pd_conv`'s
+  PDF output): pages a pane wider, each comment a balloon there with its
+  author, text and replies, a line out to it from the commented text
+  (deletions too, in balloon markup).
 - Footnotes: a line carries the bodies of the notes it marks; the column
   keeps room for them at its bottom, under a 2in rule (TeX insertions).
   The note opens with its raised number.

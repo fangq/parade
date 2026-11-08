@@ -32,6 +32,7 @@
  */
 
 #include <math.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -212,6 +213,7 @@ struct pd_layout {
     } *fly;
     int32_t nfly, capfly;
     int32_t stable;             /* hybrid line breaking: -1 as the document says, 0 off, 1 on */
+    int32_t comments;           /* PD_LAYOUT_COMMENTS_* */
     int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
     int32_t dtext_rot;          /* the one being placed: how far it is turned (60000ths of a degree, clockwise), */
     pd_sp dtext_rx, dtext_ry;   /* about its middle */
@@ -299,7 +301,8 @@ static int body_field(void* user, const blk* b, const dinline* q, char* buf, siz
     const pd_inline* o = &q->obj;
 
     if (o->kind == PD_INLINE_FOOTNOTE || (o->kind == PD_INLINE_FIELD && (o->field == PD_FIELD_SEQ ||
-                                          o->field == PD_FIELD_REF_NUMBER))) {
+                                          o->field == PD_FIELD_REF_NUMBER || o->field == PD_FIELD_DATE ||
+                                          o->field == PD_FIELD_KEPT))) {
         field_text(L, NULL, b, q, buf, cap);
         return 1;
     }
@@ -3532,6 +3535,36 @@ static pd_sp story_height(pd_layout* L, pd_block_id story, pd_sp tw) {
     return h;
 }
 
+/* the pane comments are drawn in, 0 when there is none */
+static pd_sp comment_pane(const pd_layout* L) {
+    int32_t i;
+    pd_comment c;
+
+    if (L->comments != PD_LAYOUT_COMMENTS_MARGIN) {
+        return 0;
+    }
+
+    for (i = 1; i <= pd_doc_comment_count(L->doc); i++) {
+        if (pd_doc_comment_get(L->doc, (pd_comment_id)i, &c) == PD_OK) {
+            return PD_LAYOUT_COMMENT_PANE;
+        }
+    }
+
+    return 0;
+}
+
+void pd_layout_set_comments(pd_layout* L, int32_t mode) {
+    int32_t i;
+
+    if (L && L->comments != mode) {
+        L->comments = mode == PD_LAYOUT_COMMENTS_MARGIN ? mode : PD_LAYOUT_COMMENTS_NONE;
+
+        for (i = 0; i < L->npages; i++) {
+            L->pages[i].items_ok = 0;
+        }
+    }
+}
+
 void pd_layout_set_stable_breaks(pd_layout* L, int32_t mode) {
     if (L) {
         L->stable = mode < 0 ? -1 : mode > 0;
@@ -3989,7 +4022,7 @@ pd_status pd_layout_page_info(const pd_layout* L, int32_t page, pd_page_info* ou
 
     p = &L->pages[page];
     memset(out, 0, sizeof(*out));
-    out->width = p->w;
+    out->width = p->w + comment_pane(L);
     out->height = p->h;
     out->section = p->section;
     out->number = p->number;
@@ -4165,6 +4198,150 @@ static pd_sp emit_text(const pd_layout* L, dlist_t* D, const char* text, const p
     return end;
 }
 
+/* a date in a Word date picture: d dd ddd dddd, M MM MMM MMMM, yy yyyy, h hh H HH, m mm, s ss, AM/PM am/pm,
+   'quoted' text as it is; wd is the day of the week, 0 Sunday */
+static void date_picture(const char* pic, int y, int mo, int day, int wd, int hh, int mi, int ss, char* buf,
+                         size_t cap) {
+    static const char* const months[12] = { "January", "February", "March", "April", "May", "June", "July",
+                                            "August", "September", "October", "November", "December"
+                                          };
+    static const char* const days[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                                         "Saturday"
+                                       };
+    size_t o = 0;
+
+    buf[0] = '\0';
+
+    while (*pic && o + 1 < cap) {
+        char c = *pic;
+        int n = 1;
+        char t[32];
+
+        if (c == '\'') {   /* literal text */
+            for (pic++; *pic && *pic != '\'' && o + 1 < cap; pic++) {
+                buf[o++] = *pic;
+            }
+
+            pic += *pic == '\'';
+            continue;
+        }
+
+        if (!strncmp(pic, "AM/PM", 5) || !strncmp(pic, "am/pm", 5)) {
+            snprintf(t, sizeof(t), "%s", hh < 12 ? (c == 'A' ? "AM" : "am") : (c == 'A' ? "PM" : "pm"));
+            n = 5;
+        } else if (c == 'd' || c == 'D' || c == 'M' || c == 'y' || c == 'Y' || c == 'h' || c == 'H' || c == 'm' ||
+                   c == 's' || c == 'S') {
+            while (pic[n] == c) {
+                n++;
+            }
+
+            if (c == 'd' || c == 'D') {
+                n > 3 ? snprintf(t, sizeof(t), "%s", days[wd]) : n == 3 ? snprintf(t, sizeof(t), "%.3s", days[wd]) :
+                snprintf(t, sizeof(t), n == 2 ? "%02d" : "%d", day);
+            } else if (c == 'M') {
+                n > 3 ? snprintf(t, sizeof(t), "%s", months[mo - 1]) : n == 3 ? snprintf(t, sizeof(t), "%.3s",
+                        months[mo - 1]) : snprintf(t, sizeof(t), n == 2 ? "%02d" : "%d", mo);
+            } else if (c == 'y' || c == 'Y') {
+                snprintf(t, sizeof(t), n >= 3 ? "%04d" : "%02d", n >= 3 ? y : y % 100);
+            } else if (c == 'h') {
+                snprintf(t, sizeof(t), n >= 2 ? "%02d" : "%d", hh % 12 ? hh % 12 : 12);
+            } else if (c == 'H') {
+                snprintf(t, sizeof(t), n >= 2 ? "%02d" : "%d", hh);
+            } else if (c == 'm') {
+                snprintf(t, sizeof(t), n >= 2 ? "%02d" : "%d", mi);
+            } else {
+                snprintf(t, sizeof(t), n >= 2 ? "%02d" : "%d", ss);
+            }
+        } else {
+            t[0] = c;
+            t[1] = '\0';
+        }
+
+        o += (size_t)snprintf(buf + o, cap - o, "%s", t);
+        o = o < cap ? o : cap - 1;
+        pic += n;
+    }
+}
+
+/* a date field's value: now (DATE, TIME; SOURCE_DATE_EPOCH when it is set, for output that does not change), or
+   the document's created (CREATEDATE) or modified (SAVEDATE, PRINTDATE) metadata, in the instruction's picture */
+void pd_date_field(const pd_doc* d, const char* instr, int32_t n, char* buf, size_t cap) {
+    char ins[256], pic[96] = "", word[16] = "";
+    const char* p, *q;
+    int y = 0, mo = 1, day = 1, hh = 0, mi = 0, ss = 0, k = 0, a, m;
+
+    snprintf(ins, sizeof(ins), "%.*s", n > 0 ? (int)(n < 255 ? n : 255) : 0, instr ? instr : "");
+
+    for (p = ins; *p == ' '; p++) {
+    }
+
+    while (k < 15 && p[k] && p[k] != ' ' && p[k] != '\\') {
+        word[k] = p[k];
+        k++;
+    }
+
+    word[k] = '\0';
+
+    if ((p = strstr(ins, "\\@")) != NULL) {    /* the picture, quoted or a word */
+        for (p += 2; *p == ' '; p++) {
+        }
+
+        q = *p == '"' ? strchr(p + 1, '"') : p + strcspn(p, " \\");
+        p += *p == '"';
+        snprintf(pic, sizeof(pic), "%.*s", q && q > p ? (int)(q - p) : 0, p);
+    }
+
+    if (!pic[0]) {
+        snprintf(pic, sizeof(pic), "%s", !strcmp(word, "TIME") ? "h:mm am/pm" : "M/d/yyyy");
+    }
+
+    if (!strcmp(word, "CREATEDATE") || !strcmp(word, "SAVEDATE") || !strcmp(word, "PRINTDATE")) {
+        size_t yl = 0;
+        const char* yml = pd_doc_metadata(d, &yl), *key = word[0] == 'C' ? "created:" : "modified:", *e;
+        size_t kl = strlen(key);
+
+        for (p = yml; p && p < yml + yl; p = e + 1) {
+            e = memchr(p, '\n', (size_t)(yml + yl - p));
+            e = e ? e : yml + yl;
+
+            if ((size_t)(e - p) > kl && !strncmp(p, key, kl)) {
+                for (p += kl; *p == ' ' || *p == '"' || *p == '\''; p++) {
+                }
+
+                sscanf(p, "%d-%d-%dT%d:%d:%d", &y, &mo, &day, &hh, &mi, &ss);
+                break;
+            }
+        }
+
+        if (y <= 0) {   /* not said: Word shows nothing */
+            buf[0] = '\0';
+            return;
+        }
+    } else {
+        const char* env = getenv("SOURCE_DATE_EPOCH");
+        time_t now = env && *env ? (time_t)strtoll(env, NULL, 10) : time(NULL);
+        struct tm* tm = env && *env ? gmtime(&now) : localtime(&now);
+
+        if (!tm) {
+            buf[0] = '\0';
+            return;
+        }
+
+        y = tm->tm_year + 1900;
+        mo = tm->tm_mon + 1;
+        day = tm->tm_mday;
+        hh = tm->tm_hour;
+        mi = tm->tm_min;
+        ss = tm->tm_sec;
+    }
+
+    mo = mo < 1 ? 1 : mo > 12 ? 12 : mo;
+    a = (14 - mo) / 12;     /* the day of the week (0 Sunday), the Gregorian calendar's */
+    m = mo + 12 * a - 2;
+    k = y - a;
+    date_picture(pic, y, mo, day, (day + k + k / 4 - k / 100 + k / 400 + 31 * m / 12) % 7, hh, mi, ss, buf, cap);
+}
+
 static void field_text(const pd_layout* L, const ppage* p, const blk* b, const dinline* q, char* buf, size_t cap) {
     const pd_inline* o = &q->obj;
     int32_t v;
@@ -4177,6 +4354,13 @@ static void field_text(const pd_layout* L, const ppage* p, const blk* b, const d
     }
 
     switch (o->field) {
+        case PD_FIELD_DATE:
+            pd_date_field(L->doc, o->source, o->source_len, buf, cap);
+            break;
+
+        case PD_FIELD_KEPT:     /* its result is the text after it */
+            break;
+
         case PD_FIELD_PAGE:
             snprintf(buf, cap, "%s", p->label);
             break;
@@ -6284,6 +6468,181 @@ static void turn_items(dlist_t* D, int32_t n0, const pline* l) {
     }
 }
 
+/* the lines of a balloon's text as wide as w, at most n, each into its own 160 bytes: words as they fit, a
+   paragraph ('\n') a line of its own; how many */
+static int32_t balloon_lines(const pd_layout* L, const pd_style* st, const char* s, size_t len, pd_sp w,
+                             char (*out)[160], int32_t n) {
+    int32_t k = 0;
+    size_t i = 0;
+
+    while (i < len && k < n) {
+        size_t j = i, best = i;
+
+        out[k][0] = '\0';
+
+        while (j < len && s[j] != '\n') {    /* the longest run of words that fits */
+            size_t e = j;
+            dlist_t M;
+            char t[160];
+            pd_sp tw;
+
+            while (e < len && s[e] == ' ') {
+                e++;
+            }
+
+            while (e < len && s[e] != ' ' && s[e] != '\n') {
+                e++;
+            }
+
+            if (e - i >= sizeof(t)) {
+                break;
+            }
+
+            memcpy(t, s + i, e - i);
+            t[e - i] = '\0';
+            memset(&M, 0, sizeof(M));
+            tw = emit_text(L, &M, t, st, 0, 0, 0, 0, 6);
+            free(M.d);
+            free(M.pts);
+
+            if (tw > w && best > i) {
+                break;
+            }
+
+            best = e;
+            j = e;
+        }
+
+        if (best == i) {    /* nothing fits: as much as the line holds */
+            best = j > i ? j : i + 1;
+            best = best - i >= 159 ? i + 159 : best;
+
+            while (best < len && best > i + 1 && ((unsigned char)s[best] & 0xC0) == 0x80) {
+                best--;
+            }
+        }
+
+        memcpy(out[k], s + i, best - i);
+        out[k][best - i] = '\0';
+        k++;
+
+        for (i = best; i < len && s[i] == ' '; i++) {
+        }
+
+        i += i < len && s[i] == '\n';
+    }
+
+    return k;
+}
+
+/* The comments starting on a page as balloons in the pane right of it: each a box in its author's colour,
+   lightened, under the last one or level with where its range starts, holding "Author: text" and its replies,
+   and a line from the range's start out to the box. In PD_MARKUP_BALLOONS deleted text is one too. */
+static void emit_comments(const pd_layout* L, dlist_t* D, int32_t page) {
+    const pd_doc* d = L->doc;
+    pd_sp pane = comment_pane(L), x0, bw, last = 0, lh, pad = PD_PT(4);
+    pd_markup_item* mk;
+    int32_t nm = 0, i, j, k;
+    pd_style st;
+    const ppage* pg = &L->pages[page];
+
+    if (!pane || pd_layout_page_markup(L, page, NULL, 0, &nm) != PD_OK || nm <= 0 || pd_doc_default_style(d, &st) != PD_OK ||
+            !(mk = (pd_markup_item*)malloc((size_t)nm * sizeof(*mk)))) {
+        return;
+    }
+
+    pd_layout_page_markup(L, page, mk, nm, &nm);
+    st.size = PD_PT(8);
+    st.color = 0xFF000000u;
+    lh = PD_PT(10);
+    x0 = pg->w + PD_PT(12);
+    bw = pane - PD_PT(24);
+
+    for (i = 0; i < nm; i++) {
+        char (*ln)[160] = (char (*)[160])malloc(64 * 160);
+        int32_t n = 0;
+        uint32_t c = mk[i].color, tint;
+        pd_sp top, h, xy[10];
+        char t[1600];
+        size_t tn = 0;
+
+        if (!ln || (mk[i].kind != PD_MARK_COMMENT && !((mk[i].kind == PD_MARK_DELETION || mk[i].kind == PD_MARK_FORMAT) &&
+                    pd_doc_markup(d) == PD_MARKUP_BALLOONS))) {
+            free(ln);
+            continue;
+        }
+
+        t[0] = '\0';
+
+        if (mk[i].kind == PD_MARK_COMMENT) {    /* the comment, then its replies */
+            for (j = 1; j <= pd_doc_comment_count(d); j++) {
+                pd_comment cm;
+
+                if (pd_doc_comment_get(d, (pd_comment_id)j, &cm) == PD_OK &&
+                        ((uint32_t)j == mk[i].id || cm.parent == (pd_comment_id)mk[i].id)) {
+                    tn += (size_t)snprintf(t + tn, sizeof(t) - tn, "%s%s: %.*s", tn ? "\n" : "",
+                                           cm.author[0] ? cm.author : "Comment", (int)cm.text_len, cm.text ? cm.text : "");
+                    tn = tn < sizeof(t) ? tn : sizeof(t) - 1;
+                }
+            }
+        } else if (mk[i].kind == PD_MARK_FORMAT) {
+            pd_revision rv;
+
+            memset(&rv, 0, sizeof(rv));
+            pd_doc_revision_get(d, mk[i].id, &rv);
+            tn = (size_t)snprintf(t, sizeof(t), "%s%sFormatted", rv.author, rv.author[0] ? ": " : "");
+        } else {    /* the deleted text, objects left out */
+            const blk* b = pd_doc_blk(d, mk[i].range.start.block);
+            pd_revision rv;
+            uint32_t o;
+
+            tn = (size_t)snprintf(t, sizeof(t), "%s: ", pd_doc_revision_get(d, mk[i].id, &rv) == PD_OK && rv.move ?
+                                  "Moved" : "Deleted");
+
+            for (o = mk[i].range.start.offset; b && o < mk[i].range.end.offset && o < b->st.len && tn < 400; o++) {
+                if (o + 2 < b->st.len && !memcmp(b->st.text + o, "\xEF\xBF\xBC", 3)) {
+                    o += 2;
+                } else {
+                    t[tn++] = b->st.text[o];
+                }
+            }
+
+            t[tn] = '\0';
+        }
+
+        n = balloon_lines(L, &st, t, tn, bw - 2 * pad, ln, 64);
+        top = mk[i].top > last ? mk[i].top : last;
+        h = n * lh + 2 * pad;
+        tint = 0xFF000000u | (((c >> 16 & 255) + 3 * 255) / 4) << 16 | (((c >> 8 & 255) + 3 * 255) / 4) << 8 |
+               ((c & 255) + 3 * 255) / 4;
+        xy[0] = x0;
+        xy[1] = top;
+        xy[2] = x0 + bw;
+        xy[3] = top;
+        xy[4] = x0 + bw;
+        xy[5] = top + h;
+        xy[6] = x0;
+        xy[7] = top + h;
+        emit_path(D, xy, 4, 1, tint, c, PD_PT(1) / 2, mk[i].range.start.block, 6);
+        xy[0] = mk[i].x;    /* from the range's start, along under its line, out to the box */
+        xy[1] = mk[i].bottom;
+        xy[2] = pg->w;
+        xy[3] = mk[i].bottom;
+        xy[4] = x0;
+        xy[5] = top + lh / 2 + pad;
+        emit_path(D, xy, 3, 0, 0, c, PD_PT(1) / 2, mk[i].range.start.block, 6);
+
+        for (k = 0; k < n; k++) {
+            emit_text(L, D, ln[k], &st, x0 + pad, top + pad + k * lh + PD_PT(8), mk[i].range.start.block, 0, 6);
+        }
+
+        last = top + h + PD_PT(4);
+        free(ln);
+    }
+
+    free(mk);
+}
+
 pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, int32_t cap, int32_t* count) {
     ppage* pg;
     dlist_t D;
@@ -6336,6 +6695,7 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
         }
 
         emit_line_numbers(L, &D, pg);
+        emit_comments(L, &D, page);
 
         if (D.err) {
             free(D.d);
@@ -6665,7 +7025,8 @@ pd_status pd_layout_page_markup(const pd_layout* L, int32_t page, pd_markup_item
                 r.start.block = r.end.block = cur;
                 r.start.offset = b->st.runs[k].start;
                 r.end.offset = b->st.runs[j].end;
-                past = mark_add(L, &M, page, rv.kind == PD_REV_DELETE ? PD_MARK_DELETION : PD_MARK_INSERTION, ov.revision,
+                past = mark_add(L, &M, page, rv.kind == PD_REV_DELETE ? PD_MARK_DELETION : rv.kind == PD_REV_FORMAT ?
+                                PD_MARK_FORMAT : PD_MARK_INSERTION, ov.revision,
                                 r, rv.author) > page;
                 k = j + 1;
             }
