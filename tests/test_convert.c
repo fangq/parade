@@ -3542,6 +3542,359 @@ static int layout_text(pd_doc* d, int32_t region, char* out, size_t cap) {
     return np;
 }
 
+/* Gradients as Office has them: three stops left to right (red, green half way, blue), a rectangular one out from
+   the middle, and a circle fading from opaque blue to clear. The display list carries the stops and where they run;
+   the rasterizer colours each pixel by them; the PDF uses shadings, a stitching function for three stops and a soft
+   mask for the fading one, not bands. */
+static void test_docx_gradients(void) {
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, lin = -1, rect = -1, fade = -1;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"FF0000\"/></a:gs>"
+                      "<a:gs pos=\"100000\"><a:srgbClr val=\"0000FF\"/></a:gs><a:gs pos=\"50000\"><a:srgbClr val=\"00FF00\"/>"
+                      "</a:gs></a:gsLst><a:lin ang=\"0\" scaled=\"0\"/></a:gradFill><a:ln><a:noFill/></a:ln></wps:spPr>"
+                      "<wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"FFFF00\"/></a:gs>"
+                      "<a:gs pos=\"100000\"><a:srgbClr val=\"000000\"/></a:gs></a:gsLst><a:path path=\"rect\"><a:fillToRect "
+                      "l=\"50000\" t=\"50000\" r=\"50000\" b=\"50000\"/></a:path></a:gradFill><a:ln><a:noFill/></a:ln>"
+                      "</wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"635000\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"ellipse\"/><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"0000FF\"/>"
+                      "</a:gs><a:gs pos=\"100000\"><a:srgbClr val=\"0000FF\"><a:alpha val=\"0\"/></a:srgbClr></a:gs></a:gsLst>"
+                      "<a:path path=\"circle\"><a:fillToRect l=\"50000\" t=\"50000\" r=\"50000\" b=\"50000\"/></a:path>"
+                      "</a:gradFill><a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>", &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        const pd_path_style* st = it[k].kind == PD_DRAW_PATH ? it[k].style : NULL;
+
+        lin = st && st->grad_kind == PD_GRAD_LINEAR ? k : lin;
+        rect = st && st->grad_kind == PD_GRAD_RECT ? k : rect;
+        fade = st && st->grad_kind == PD_GRAD_CIRCLE ? k : fade;
+    }
+
+    CHECK(lin >= 0 && rect >= 0 && fade >= 0);
+
+    if (lin >= 0) {
+        const pd_draw* a = &it[lin];
+        const pd_path_style* st = a->style;
+        int32_t W = 100, H = 10, x;
+        uint8_t* px = (uint8_t*)calloc((size_t)W * H, 4);
+
+        /* the stops in order, the middle one green; the gradient from the box's left edge to its right */
+        CHECK(st->nstops == 3 && st->stop_pos[1] == 50000 && st->stop_color[1] == 0xFF00FF00u &&
+              st->stop_color[2] == 0xFF0000FFu);
+        CHECK(st->grad_x0 == a->x && st->grad_x1 == a->x + PD_PT(100) && st->grad_y0 == st->grad_y1);
+
+        if (px) {   /* a pixel a point: red at the left, green in the middle, blue at the right, mixed between */
+            CHECK(pd_draw_render(a, 1, a->x, a->y + PD_PT(20), 1 << 16, px, W, H, W * 4) == PD_OK);
+            x = 1;
+            CHECK(px[4 * x] > 240 && px[4 * x + 1] < 15 && px[4 * x + 2] == 0);
+            x = 50;
+            CHECK(px[4 * x] < 10 && px[4 * x + 1] > 245 && px[4 * x + 2] < 10);
+            x = 98;
+            CHECK(px[4 * x] == 0 && px[4 * x + 1] < 15 && px[4 * x + 2] > 240);
+            x = 25;
+            CHECK(px[4 * x] > 110 && px[4 * x] < 145 && px[4 * x + 1] > 110 && px[4 * x + 1] < 145);
+            free(px);
+        }
+    }
+
+    if (rect >= 0 && fade >= 0) {
+        const pd_path_style* st = it[rect].style;
+
+        /* the rectangle out from a point in the middle to the box's edges */
+        CHECK(st->grad_x0 == st->grad_x1 && st->grad_x0 == it[rect].x + PD_PT(25) && st->grad_bx0 == it[rect].x &&
+              st->grad_by1 == it[rect].y + PD_PT(50));
+        CHECK(it[fade].style->stop_color[1] == 0x010000FFu);    /* (alpha 1 at the least: 0 is opaque) */
+    }
+
+    {
+        pd_pdf_options opt;
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "/ShadingType 2") && strstr(b.p, "/ShadingType 3"));
+        CHECK(b.p && strstr(b.p, "/FunctionType 3 /Domain [0 1] /Functions [") && strstr(b.p, "/Bounds [0.50000 ]"));
+        CHECK(b.p && strstr(b.p, "/SMask << /Type /Mask /S /Luminosity") && strstr(b.p, "/CS /DeviceGray"));
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* A pattern fill (Office's dark downward diagonal, red on white): its 8-by-8 bitmap reaches the display list, the
+   rasterizer tiles it cell by cell from the page's corner, and the PDF fills with a tiling pattern. */
+static void test_docx_pattern_fill(void) {
+    static const uint8_t dk[8] = { 0xCC, 0x66, 0x33, 0x99, 0xCC, 0x66, 0x33, 0x99 };
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, pat = -1;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:pattFill prst=\"dkDnDiag\"><a:fgClr><a:srgbClr val=\"FF0000\"/></a:fgClr>"
+                      "<a:bgClr><a:srgbClr val=\"FFFFFF\"/></a:bgClr></a:pattFill><a:ln><a:noFill/></a:ln></wps:spPr>"
+                      "<wps:bodyPr/></wps:wsp>", &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        pat = it[k].kind == PD_DRAW_PATH && it[k].style && it[k].style->pattern ? k : pat;
+    }
+
+    CHECK(pat >= 0);
+
+    if (pat >= 0) {
+        const pd_draw* a = &it[pat];
+        pd_sp tile = 8 * PD_PATTERN_CELL, x0 = a->x / tile * tile + tile, y0 = a->y / tile * tile + tile;
+        int32_t W = 48, H = 48, cx, cy, bad = 0;
+        uint8_t* px = (uint8_t*)calloc((size_t)W * H, 4);
+
+        CHECK(!memcmp(a->style->pattern_bits, dk, 8) && a->style->pattern_fg == 0xFFFF0000u &&
+              a->style->pattern_bg == 0xFFFFFFFFu);
+
+        if (px) {   /* 4 pixels a point, a cell 3 pixels: two tiles, from a tile's corner inside the box */
+            CHECK(pd_draw_render(a, 1, x0, y0, 4 << 16, px, W, H, W * 4) == PD_OK);
+
+            for (cy = 0; cy < 16; cy++) {
+                for (cx = 0; cx < 16; cx++) {
+                    const uint8_t* q = px + ((size_t)(3 * cy + 1) * W + (size_t)(3 * cx + 1)) * 4;
+                    int on = (dk[cy & 7] >> (7 - (cx & 7))) & 1;
+
+                    bad += !(q[0] == 255 && q[3] == 255 && (on ? q[1] == 0 : q[1] == 255));
+                }
+            }
+
+            CHECK(bad == 0);
+            free(px);
+        }
+    }
+
+    {
+        pd_pdf_options opt;
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "/PatternType 1 /PaintType 1") && strstr(b.p, "/Pattern cs /Pt"));
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* Shapes filled with a picture: an ellipse with the picture stretched over it and cut to its outline, and a box
+   tiled with the picture at half its size (64 by 40 pixels: 24 pt by 15 pt) from its top left corner. The display
+   list has the pictures, each shown only inside its shape, the outlines over them; the PDF draws them clipped. */
+static void test_docx_picture_fill(void) {
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpg=\"wpg\" xmlns:wps=\"wps\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"2540000\"/><a:graphic><a:graphicData>"
+        "<wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/>"
+        "<a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"2540000\" cy=\"2540000\"/></a:xfrm></wpg:grpSpPr>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"ellipse\"/><a:blipFill><a:blip r:embed=\"rId5\"/><a:stretch><a:fillRect/></a:stretch>"
+        "</a:blipFill><a:ln w=\"12700\"><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></a:ln></wps:spPr>"
+        "<wps:bodyPr/></wps:wsp>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"1270000\"/><a:ext cx=\"1270000\" cy=\"762000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/><a:blipFill><a:blip r:embed=\"rId5\"/><a:tile tx=\"0\" ty=\"0\" sx=\"50000\" "
+        "sy=\"50000\" algn=\"tl\"/></a:blipFill><a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>", NULL);
+    pd_layout* L = NULL;
+    pd_draw* it = NULL;
+    int32_t n = 0, k, stretched = 0, tiles = 0, outline = -1, first = -1;
+
+    if (!d || !have_layout_font()) {
+        pd_doc_free(d);
+        return;
+    }
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &n) == PD_OK &&
+            (it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, n, &n);
+    }
+
+    for (k = 0; it && k < n; k++) {
+        if (it[k].kind == PD_DRAW_IMAGE && it[k].resource && it[k].clip_npoints == 64) {
+            stretched++;
+            first = first < 0 ? k : first;
+            CHECK(it[k].w == PD_PT(100) && it[k].h == PD_PT(50) && it[k].clip_w == PD_PT(100));
+        } else if (it[k].kind == PD_DRAW_IMAGE && it[k].resource && it[k].clip_npoints == 4) {
+            tiles++;
+            CHECK(it[k].clip_w == PD_PT(24) && it[k].clip_h == PD_PT(15));
+        } else if (it[k].kind == PD_DRAW_PATH && it[k].color == 0xFFFF0000u) {
+            outline = k;
+            CHECK(it[k].fill == 0);     /* the picture, not a colour, inside */
+        }
+    }
+
+    /* the picture once in the ellipse; tiles 5 across (100 pt) and 4 down (60 pt); the outline drawn after */
+    CHECK(stretched == 1 && tiles == 20 && outline > first && first >= 0);
+
+    if (L) {
+        pd_pdf_options opt;
+        buf_t b;
+        const char* p;
+        int dos = 0;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+
+        for (p = b.p; p && (p = strstr(p, "W n ")) != NULL; p++) {  /* each picture cut to its shape */
+            dos++;
+        }
+
+        CHECK(dos >= 21 && b.p && strstr(b.p, "/Im0 Do"));
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* the alpha (and its pixel) of an item drawn alone at a pixel a point, at page point (x, y) */
+static int alpha_at(const pd_draw* a, pd_sp x, pd_sp y, uint8_t* rgb) {
+    uint8_t px[4] = { 0, 0, 0, 0 };
+
+    if (pd_draw_render(a, 1, x, y, 1 << 16, px, 1, 1, 4) != PD_OK) {
+        return -1;
+    }
+
+    if (rgb) {
+        memcpy(rgb, px, 3);
+    }
+
+    return px[3];
+}
+
+/* Effects (50 pt white boxes unless said): a black shadow blurred 6 pt cast 6 pt right; a gold glow 6 pt round an
+   ellipse; a soft edge 6 pt deep; a black inner shadow cast down and right; a reflection under the box at full
+   opacity fading to none half the box's height down. The rasterizer draws each as pixels, and the PDF places them
+   as pictures with soft masks. */
+static void test_docx_shape_effects(void) {
+    const char* sp = "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"%d\" y=\"%d\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                     "<a:prstGeom prst=\"%s\"/><a:solidFill><a:srgbClr val=\"%s\"/></a:solidFill><a:ln><a:noFill/></a:ln>"
+                     "<a:effectLst>%s</a:effectLst></wps:spPr><wps:bodyPr/></wps:wsp>";
+    char shapes[8192];
+    size_t sl = 0;
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, sh = -1, gl = -1, so = -1, in = -1, re = -1;
+    pd_draw* it;
+    uint8_t rgb[3];
+
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 0, 0, "rect", "FFFFFF",
+                           "<a:outerShdw blurRad=\"76200\" dist=\"76200\" dir=\"0\"><a:srgbClr val=\"000000\"/></a:outerShdw>");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1016000, 0, "ellipse", "0000FF",
+                           "<a:glow rad=\"76200\"><a:srgbClr val=\"FFC000\"/></a:glow>");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 0, 1016000, "rect", "00FF00", "<a:softEdge rad=\"76200\"/>");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1016000, 1016000, "rect", "FFFFFF",
+                           "<a:innerShdw blurRad=\"25400\" dist=\"76200\" dir=\"2700000\"><a:srgbClr val=\"000000\"/></a:innerShdw>");
+    snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1905000, 0, "rect", "FF0000",
+             "<a:reflection stA=\"100000\" endA=\"0\" endPos=\"50000\" dist=\"0\"/>");
+    it = group_items(shapes, &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        const pd_path_style* st = it[k].kind == PD_DRAW_PATH ? it[k].style : NULL;
+
+        sh = st && st->shadow_color ? k : sh;
+        gl = st && st->glow_color ? k : gl;
+        so = st && st->soft_edge ? k : so;
+        in = st && st->inner_color ? k : in;
+        re = st && st->refl_alpha0 ? k : re;
+    }
+
+    CHECK(sh >= 0 && gl >= 0 && so >= 0 && in >= 0 && re >= 0);
+
+    if (sh >= 0 && gl >= 0 && so >= 0 && in >= 0 && re >= 0) {
+        const pd_draw* a = &it[sh];
+        pd_sp my = a->y + PD_PT(25), r = a->x + a->w;
+        int v;
+
+        CHECK(a->style->shadow_blur == PD_PT(6) && a->style->shadow_dx == PD_PT(6) && a->style->shadow_dy == 0);
+        /* blurred: part dark just past the box's right edge, clear well past the shadow's own */
+        v = alpha_at(a, r + PD_PT(5), my, rgb);
+        CHECK(v > 40 && v < 230 && rgb[0] == 0);
+        CHECK(alpha_at(a, r + PD_PT(20), my, NULL) == 0 && alpha_at(a, a->x - PD_PT(4), my, NULL) == 0);
+        /* the glow gold 3 pt outside the ellipse's right */
+        v = alpha_at(&it[gl], it[gl].x + it[gl].w + PD_PT(3), it[gl].y + PD_PT(25), rgb);
+        CHECK(v > 60 && rgb[0] > rgb[2] && rgb[1] > rgb[2]);
+        /* the soft edge: see-through 1 pt inside, solid in the middle */
+        CHECK(alpha_at(&it[so], it[so].x + PD_PT(1), it[so].y + PD_PT(25), NULL) < 128);
+        CHECK(alpha_at(&it[so], it[so].x + PD_PT(25), it[so].y + PD_PT(25), NULL) == 255);
+        /* the inner shadow dark along the top left inside, the bottom right white */
+        alpha_at(&it[in], it[in].x + PD_PT(2), it[in].y + PD_PT(25), rgb);
+        CHECK(rgb[0] < 100);
+        alpha_at(&it[in], it[in].x + PD_PT(48), it[in].y + PD_PT(25), rgb);
+        CHECK(rgb[0] == 255);
+        /* the reflection: red just under the box, fading, gone past half its height */
+        v = alpha_at(&it[re], it[re].x + PD_PT(25), it[re].y + it[re].h + PD_PT(2), rgb);
+        CHECK(v > 180 && rgb[0] > 180);
+        CHECK(alpha_at(&it[re], it[re].x + PD_PT(25), it[re].y + it[re].h + PD_PT(15), NULL) < v);
+        CHECK(alpha_at(&it[re], it[re].x + PD_PT(25), it[re].y + it[re].h + PD_PT(30), NULL) == 0);
+    }
+
+    {
+        pd_pdf_options opt;
+        buf_t b;
+        int pics = 0;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+
+        for (k = 0; b.p && (size_t)k + 27 <= b.n; k++) {     /* (the pictures' bytes hold zeros: not strstr) */
+            pics += !memcmp(b.p + k, "/BitsPerComponent 8 /SMask ", 27);
+        }
+
+        CHECK(pics == 5);   /* shadow, glow, the softened fill, the inner shadow, the reflection */
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -7895,6 +8248,10 @@ int main(void) {
     test_docx_custgeom_paths();
     test_docx_line_styles();
     test_docx_curves();
+    test_docx_gradients();
+    test_docx_pattern_fill();
+    test_docx_picture_fill();
+    test_docx_shape_effects();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();

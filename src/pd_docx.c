@@ -18,6 +18,7 @@
 #include "pd_conv.h"
 #include "pd_json.h"
 #include "pd_preset.h"
+#include "parade_layout.h"
 
 /* parts kept whole with the document, to write again */
 #define CHART_MIME "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
@@ -9177,7 +9178,17 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     dw_cust* cg = (dw_cust*)calloc(1, sizeof(dw_cust));     /* a custom geometry's paths */
     uint32_t fill2 = 0, shd_clr = 0;    /* a gradient's last stop; a shadow's colour */
     int grad_kind = 0, grad_ang = 0, in_grad = 0, in_shd = 0, has_shd = 0;
+    int ngst = 0, gst_pos[PD_MAX_STOPS], grad_sc = 0, grad_path = 1, grad_rws = 1, gft[4] = { 50000, 50000, 50000, 50000 };
+    uint32_t gst_clr[PD_MAX_STOPS];     /* a gradient's stops, as listed; scaled; its path; turned with the shape */
+    unsigned char patt_bits[8];         /* a pattern fill's bitmap, if it is one Office has (have_patt) */
+    int in_bfill = 0, bf_tile = 0, bf_rect[4] = { 0, 0, 0, 0 }, bf_tl[6] = { 0, 0, 100000, 100000, 0, 0 };
+    char bf_blip[64] = "";              /* a shape's picture fill: stretched into its fillRect, or tiled */
+    int have_patt = 0;
     double shd_dist = 0, shd_dir = 0;
+    double shd_blur = 0, shd_k[4] = { 100000, 100000, 0, 0 };     /* a shadow's blur; its sx, sy, kx, ky */
+    int shd_algn = 7, in_ish = 0, has_ish = 0, in_glow = 0, soft = 0, has_refl = 0;   /* (algn: tl..br 0..8) */
+    double ish_blur = 0, ish_dist = 0, ish_dir = 0, glow_rad = 0, refl[6] = { 0, 0, 0, 0, 0, 0 };
+    uint32_t ish_clr = 0, glow_clr = 0;     /* inner shadow, glow; reflection: blur, stA, endA, stPos, endPos, dist */
     char gprst[32] = "";            /* a picture's geometry, when it is not a rectangle (it is cut to that shape) */
     uint32_t fill = 0, line = 0, sfill = 0, sline = 0, *cur_clr = NULL;
     char cam_prst[48] = "";         /* the shape's 3-D camera (scene3d), seen in parallel */
@@ -9427,6 +9438,16 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             memset(crop, 0, sizeof(crop));
             fill2 = shd_clr = 0;
             grad_kind = grad_ang = in_grad = in_shd = has_shd = 0;
+            shd_blur = 0;
+            shd_algn = 7;
+            in_ish = has_ish = in_glow = soft = has_refl = 0;
+            glow_rad = 0;
+            ngst = grad_sc = have_patt = 0;
+            in_bfill = bf_tile = 0;
+            bf_blip[0] = '\0';
+            memset(bf_rect, 0, sizeof(bf_rect));
+            grad_path = grad_rws = 1;
+            gft[0] = gft[1] = gft[2] = gft[3] = 50000;
             gprst[0] = '\0';
             strcpy(geom, "rect");
             have_fill = have_line = style_fill = style_line = 0;
@@ -9581,12 +9602,30 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 }
             } else if (kind == 2) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
-                char fx[160] = "";  /* the fill's gradient and shadow, for the items that fill */
+                char fx[640] = "";  /* the fill's gradient and shadow, for the items that fill */
                 char lx[160], ax[64];   /* the outline's dashes, ends, corners and lines; its arrowheads */
 
                 if (grad_kind && fill2 && have_fill) {
+                    size_t fl;
+                    int q;
+
                     snprintf(fx, sizeof(fx), ",\"gk\":%d,\"f2\":%u,\"ga\":%d", grad_kind, (unsigned)fill2,
-                             grad_ang + xf.rot);
+                             grad_ang + (grad_rws ? xf.rot : 0));
+
+                    if (ngst >= 2) {    /* every stop, where it is, with its own alpha */
+                        fl = strlen(fx);
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"gsc\":%d,\"gp\":%d,\"gft\":[%d,%d,%d,%d],\"gs\":[",
+                                               grad_sc, grad_path, gft[0], gft[1], gft[2], gft[3]);
+
+                        for (q = 0; q < ngst && fl < sizeof(fx); q++) {
+                            fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, "%s%d,%u", q ? "," : "", gst_pos[q],
+                                                   (unsigned)gst_clr[q]);
+                        }
+
+                        if (fl < sizeof(fx)) {
+                            snprintf(fx + fl, sizeof(fx) - fl, "]");
+                        }
+                    }
                 }
 
                 {   /* the outline's style, for the items it outlines; arrowheads for the open ones */
@@ -9623,12 +9662,81 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     }
                 }
 
+                if (bf_blip[0] && have_fill && fill == 0x01FFFFFFu) {   /* a picture fill: the picture, cut to the shape */
+                    pd_res_id r = dw_resource(X, bf_blip);
+                    size_t fl = strlen(fx);
+                    int seen = 0, q;
+
+                    for (q = 0; q < nrel; q++) {
+                        seen |= !strcmp(rel_id[q], bf_blip);
+                    }
+
+                    if (r && !seen && nrel < 64) {  /* by its id: the XML kept names it so */
+                        snprintf(rel_id[nrel], sizeof(rel_id[0]), "%.23s", bf_blip);
+                        rel_res[nrel++] = r;
+                    } else if (r && !seen) {
+                        rel_ok = 0;
+                    }
+
+                    if (r && bf_tile) {
+                        snprintf(fx + fl, sizeof(fx) - fl, ",\"bimg\":%d,\"btile\":[%d,%d,%d,%d,%d,%d],\"bcrop\":[%d,%d,%d,%d]",
+                                 (int)r, (int)emu_sp(bf_tl[0] * FR->sx), (int)emu_sp(bf_tl[1] * FR->sy), bf_tl[2], bf_tl[3],
+                                 bf_tl[4], bf_tl[5], crop[0], crop[1], crop[2], crop[3]);
+                    } else if (r) {
+                        snprintf(fx + fl, sizeof(fx) - fl, ",\"bimg\":%d,\"bfr\":[%d,%d,%d,%d],\"bcrop\":[%d,%d,%d,%d]",
+                                 (int)r, bf_rect[0], bf_rect[1], bf_rect[2], bf_rect[3], crop[0], crop[1], crop[2], crop[3]);
+                    }
+                }
+
+                if (have_patt && have_fill && !grad_kind) {     /* the pattern itself, its colours mixed in fill */
+                    size_t fl = strlen(fx);
+
+                    snprintf(fx + fl, sizeof(fx) - fl, ",\"patt\":[%d,%d,%d,%d,%d,%d,%d,%d],\"pfg\":%u,\"pbg\":%u",
+                             patt_bits[0], patt_bits[1], patt_bits[2], patt_bits[3], patt_bits[4], patt_bits[5],
+                             patt_bits[6], patt_bits[7], (unsigned)patt_fg, (unsigned)patt_bg);
+                }
+
                 if (has_shd && shd_dist > 0) {
                     size_t fl = strlen(fx);
 
                     snprintf(fx + fl, sizeof(fx) - fl, ",\"shd\":[%d,%d,%u]",
                              (int)emu_sp(shd_dist * cos(shd_dir * 3.14159265358979 / 180) * FR->sx),
                              (int)emu_sp(shd_dist * sin(shd_dir * 3.14159265358979 / 180) * FR->sy), (unsigned)shd_clr);
+                }
+
+                {   /* effects: a blurred, scaled, skewed shadow; an inner one; a glow; a soft edge; a reflection */
+                    size_t fl = strlen(fx);
+                    double fs = (FR->sx + FR->sy) / 2;
+
+                    if (has_shd && (shd_blur > 0 || shd_k[0] != 100000 || shd_k[1] != 100000 || shd_k[2] || shd_k[3])) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"osh\":[%d,%d,%d,%u,%d,%d,%d,%d,%d]",
+                                               (int)emu_sp(shd_blur * fs),
+                                               (int)emu_sp(shd_dist * cos(shd_dir * 3.14159265358979 / 180) * FR->sx),
+                                               (int)emu_sp(shd_dist * sin(shd_dir * 3.14159265358979 / 180) * FR->sy),
+                                               (unsigned)shd_clr, (int)shd_k[0], (int)shd_k[1], (int)shd_k[2], (int)shd_k[3],
+                                               shd_algn);
+                    }
+
+                    if (has_ish && fl < sizeof(fx)) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"ish\":[%d,%d,%d,%u]", (int)emu_sp(ish_blur * fs),
+                                               (int)emu_sp(ish_dist * cos(ish_dir * 3.14159265358979 / 180) * FR->sx),
+                                               (int)emu_sp(ish_dist * sin(ish_dir * 3.14159265358979 / 180) * FR->sy),
+                                               (unsigned)ish_clr);
+                    }
+
+                    if (glow_rad > 0 && fl < sizeof(fx)) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"glow\":[%d,%u]", (int)emu_sp(glow_rad * fs),
+                                               (unsigned)glow_clr);
+                    }
+
+                    if (soft > 0 && fl < sizeof(fx)) {
+                        fl += (size_t)snprintf(fx + fl, sizeof(fx) - fl, ",\"soft\":%d", (int)emu_sp(soft * fs));
+                    }
+
+                    if (has_refl && refl[1] > 0 && fl < sizeof(fx)) {
+                        snprintf(fx + fl, sizeof(fx) - fl, ",\"refl\":[%d,%d,%d,%d,%d,%d]", (int)emu_sp(refl[0] * fs),
+                                 (int)refl[1], (int)refl[2], (int)refl[3], (int)refl[4], (int)emu_sp(refl[5] * fs));
+                    }
                 }
                 int isline = !strcmp(geom, "line"), k;
                 double lwd = lw;    /* a line as wide as it says: a group's scale is not its own (Office does not scale it) */
@@ -10088,6 +10196,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 patt_bg = 0xFFFFFFFFu;
                 patt_pct = 50;
 
+                have_patt = mu_attr(&g, "prst", v, sizeof(v)) && pd_pattern_bits(v, patt_bits);
+
                 if (mu_attr(&g, "prst", v, sizeof(v)) && !strncmp(v, "pct", 3)) {
                     patt_pct = atoi(v + 3);
                 } else if (mu_attr(&g, "prst", v, sizeof(v)) && (!strncmp(v, "lt", 2) || !strncmp(v, "narrow", 6))) {
@@ -10138,17 +10248,52 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             continue;
         }
 
-        if (in_sppr && !in_ln && !strcmp(t, "gradFill")) {     /* a gradient: from its first stop to its last */
+        if (in_sppr && !in_ln && !strcmp(t, "gradFill")) {     /* a gradient: its stops, in order */
             in_grad = g.type == MT_OPEN;
 
             if (open && !have_fill) {
                 grad_kind = 1;
                 grad_ang = 0;
+                ngst = 0;
+                grad_rws = !(mu_attr(&g, "rotWithShape", v, sizeof(v)) && (!strcmp(v, "0") || !strcmp(v, "false")));
+            }
+
+            if (g.type != MT_OPEN && grad_kind && ngst > 0 && !have_fill) {
+                int q, r;
+
+                for (q = 1; q < ngst; q++) {    /* by position, those at one place kept in their order */
+                    for (r = q; r > 0 && gst_pos[r - 1] > gst_pos[r]; r--) {
+                        int tp = gst_pos[r];
+                        uint32_t tc = gst_clr[r];
+
+                        gst_pos[r] = gst_pos[r - 1];
+                        gst_clr[r] = gst_clr[r - 1];
+                        gst_pos[r - 1] = tp;
+                        gst_clr[r - 1] = tc;
+                    }
+                }
+
+                fill = gst_clr[0];      /* a host drawing two colours: the first and the last */
+                fill2 = ngst > 1 ? gst_clr[ngst - 1] : 0;
+                have_fill = 1;
+                grad_kind = ngst > 1 ? grad_kind : 0;
             }
         } else if (in_grad && !strcmp(t, "lin") && open) {
             grad_ang = mu_attr(&g, "ang", v, sizeof(v)) ? atoi(v) : 0;
+            grad_sc = mu_attr(&g, "scaled", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
         } else if (in_grad && !strcmp(t, "path") && open) {
             grad_kind = 2;
+            grad_path = mu_attr(&g, "path", v, sizeof(v)) ? (!strcmp(v, "rect") ? 2 : !strcmp(v, "shape") ? 3 : 1) : 1;
+        } else if (in_grad && !strcmp(t, "fillToRect") && open) {
+            static const char* side[4] = { "l", "t", "r", "b" };
+            int q;
+
+            for (q = 0; q < 4; q++) {
+                gft[q] = mu_attr(&g, side[q], v, sizeof(v)) ? atoi(v) : 0;
+            }
+        } else if (in_grad && grad_kind && !strcmp(t, "gs") && g.type == MT_OPEN && ngst < PD_MAX_STOPS) {
+            gst_pos[ngst] = mu_attr(&g, "pos", v, sizeof(v)) ? atoi(v) : 0;
+            gst_clr[ngst] = 0xFF000000u;
         } else if (in_sppr && !strcmp(t, "outerShdw")) {    /* a shadow cast down and across */
             in_shd = g.type == MT_OPEN;
 
@@ -10157,7 +10302,51 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 shd_dir = mu_attr(&g, "dir", v, sizeof(v)) ? atof(v) / 60000.0 : 45;
                 shd_clr = 0x66000000u;
                 has_shd = 1;
+                shd_blur = mu_attr(&g, "blurRad", v, sizeof(v)) ? atof(v) : 0;
+                shd_k[0] = mu_attr(&g, "sx", v, sizeof(v)) ? atof(v) : 100000;
+                shd_k[1] = mu_attr(&g, "sy", v, sizeof(v)) ? atof(v) : 100000;
+                shd_k[2] = mu_attr(&g, "kx", v, sizeof(v)) ? atof(v) : 0;
+                shd_k[3] = mu_attr(&g, "ky", v, sizeof(v)) ? atof(v) : 0;
+                shd_algn = 7;
+
+                if (mu_attr(&g, "algn", v, sizeof(v))) {
+                    static const char* al[9] = { "tl", "t", "tr", "l", "ctr", "r", "bl", "b", "br" };
+                    int q;
+
+                    for (q = 0; q < 9; q++) {
+                        shd_algn = !strcmp(v, al[q]) ? q : shd_algn;
+                    }
+                }
             }
+        } else if (in_sppr && !strcmp(t, "innerShdw")) {    /* a shadow inside, cast from the edge */
+            in_ish = g.type == MT_OPEN;
+
+            if (open) {
+                ish_blur = mu_attr(&g, "blurRad", v, sizeof(v)) ? atof(v) : 0;
+                ish_dist = mu_attr(&g, "dist", v, sizeof(v)) ? atof(v) : 0;
+                ish_dir = mu_attr(&g, "dir", v, sizeof(v)) ? atof(v) / 60000.0 : 0;
+                ish_clr = 0xFF000000u;
+                has_ish = 1;
+            }
+        } else if (in_sppr && !strcmp(t, "glow")) {
+            in_glow = g.type == MT_OPEN;
+
+            if (open) {
+                glow_rad = mu_attr(&g, "rad", v, sizeof(v)) ? atof(v) : 0;
+                glow_clr = 0xFF000000u;
+            }
+        } else if (in_sppr && !strcmp(t, "softEdge") && open) {
+            soft = mu_attr(&g, "rad", v, sizeof(v)) ? atoi(v) : 0;
+        } else if (in_sppr && !strcmp(t, "reflection") && open) {
+            static const char* ra[6] = { "blurRad", "stA", "endA", "stPos", "endPos", "dist" };
+            static const double rd[6] = { 0, 100000, 0, 0, 100000, 0 };
+            int q;
+
+            for (q = 0; q < 6; q++) {
+                refl[q] = mu_attr(&g, ra[q], v, sizeof(v)) ? atof(v) : rd[q];
+            }
+
+            has_refl = 1;
         } else if (kind == 1 && in_sppr && !strcmp(t, "prstGeom") && open && mu_attr(&g, "prst", v, sizeof(v)) &&
                    strcmp(v, "rect")) {
             snprintf(gprst, sizeof(gprst), "%.31s", v);
@@ -10318,7 +10507,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 cg_w = (long long)cg->path[0].w;
                 cg_h = (long long)cg->path[0].h;
             }
-        } else if (in_sppr && cg && !strcmp(t, "path") && !strcmp(geom, "cust")) {
+        } else if (in_sppr && cg && !in_grad && !strcmp(t, "path") && !strcmp(geom, "cust")) {
             /* a path: its own coordinate space, fill and outline */
             if (cg->np < DW_CG_MAXPATH) {
                 cg->np++;
@@ -10428,10 +10617,21 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             if (in_shd) {
                 shd_clr = (c & 0xFFFFFFu) | 0x66000000u;    /* see-through unless its alpha says */
                 cur_clr = &shd_clr;
+            } else if (in_ish) {
+                ish_clr = c;
+                cur_clr = &ish_clr;
+            } else if (in_glow) {
+                glow_clr = c;
+                cur_clr = &glow_clr;
             } else if (in_ln) {
                 line = c;
                 have_line = 1;
                 cur_clr = &line;
+            } else if (in_sppr && in_grad && in_gs && grad_kind && !have_fill) {
+                if (ngst < PD_MAX_STOPS) {  /* a stop's colour, its modifiers to follow */
+                    gst_clr[ngst] = c;
+                    cur_clr = &gst_clr[ngst++];
+                }
             } else if (in_sppr && in_grad && in_gs && have_fill) {
                 fill2 = c;      /* a later stop: the last one, in the end */
                 cur_clr = &fill2;
@@ -10486,7 +10686,41 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (in_sppr && !in_ln && !strcmp(t, "noFill")) {
             have_fill = 1;
             fill = 0;
-        } else if (kind == 1 && !strcmp(t, "srcRect")) {    /* cropped: by how much of each side */
+        } else if (kind == 2 && in_sppr && !in_ln && !strcmp(t, "blipFill")) {
+            in_bfill = g.type == MT_OPEN;
+
+            if (open && !have_fill) {   /* filled with a picture: a clear fill the layout puts it in */
+                have_fill = 1;
+                fill = 0x01FFFFFFu;
+            }
+        } else if (in_bfill && !strcmp(t, "blip") && open) {
+            mu_attr(&g, "r:embed", bf_blip, sizeof(bf_blip));
+        } else if (in_bfill && !strcmp(t, "fillRect") && open) {
+            static const char* sides[4] = { "l", "t", "r", "b" };
+            int q;
+
+            for (q = 0; q < 4; q++) {
+                bf_rect[q] = mu_attr(&g, sides[q], v, sizeof(v)) ? atoi(v) : 0;
+            }
+        } else if (in_bfill && !strcmp(t, "tile") && open) {
+            bf_tile = 1;
+            bf_tl[0] = mu_attr(&g, "tx", v, sizeof(v)) ? atoi(v) : 0;
+            bf_tl[1] = mu_attr(&g, "ty", v, sizeof(v)) ? atoi(v) : 0;
+            bf_tl[2] = mu_attr(&g, "sx", v, sizeof(v)) ? atoi(v) : 100000;
+            bf_tl[3] = mu_attr(&g, "sy", v, sizeof(v)) ? atoi(v) : 100000;
+            bf_tl[4] = mu_attr(&g, "flip", v, sizeof(v)) ? (!strcmp(v, "x") ? 1 : !strcmp(v, "y") ? 2 : !strcmp(v, "xy") ? 3 :
+                       0) : 0;
+            bf_tl[5] = 0;   /* tl t tr l ctr r bl b br: across 0 1 2, down 0 3 6 */
+
+            if (mu_attr(&g, "algn", v, sizeof(v))) {
+                static const char* al[9] = { "tl", "t", "tr", "l", "ctr", "r", "bl", "b", "br" };
+                int q;
+
+                for (q = 0; q < 9; q++) {
+                    bf_tl[5] = !strcmp(v, al[q]) ? q : bf_tl[5];
+                }
+            }
+        } else if ((kind == 1 || in_bfill) && !strcmp(t, "srcRect")) {    /* cropped: by how much of each side */
             static const char* sides[4] = { "l", "t", "r", "b" };
             int q;
 

@@ -4859,14 +4859,193 @@ static void emit_label(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp 
     }
 }
 
-/* an item's gradient ("f2": its other colour, "gk": 1 linear, 2 radial, "ga": its angle) on the path just made */
+/* item D->d[i]'s style, made (all plain) if it has none; NULL when out of memory. Good until the next one is made */
+static pd_path_style* path_style(dlist_t* D, int32_t i) {
+    if (D->d[i].style) {
+        return D->sty + ((intptr_t)D->d[i].style - 1);
+    }
+
+    if (grow((void**)&D->sty, &D->capsty, (int64_t)D->nsty + 1, sizeof(pd_path_style))) {
+        D->err = 1;
+        return NULL;
+    }
+
+    memset(&D->sty[D->nsty], 0, sizeof(pd_path_style));
+    D->d[i].style = (const pd_path_style*)(intptr_t)(++D->nsty);
+    return &D->sty[D->nsty - 1];
+}
+
+/* an item's pattern fill ("patt": its 8 rows, "pfg", "pbg" its colours) on the path just made */
+static void item_pattern(dlist_t* D, int32_t n0, const pj_node* it) {
+    const pj_node* pt = pj_get(it, "patt"), *q;
+    pd_path_style* st;
+    int k;
+
+    if (D->n > n0 && pt && pt->n == 8 && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].fill &&
+            (st = path_style(D, D->n - 1)) != NULL) {
+        st->pattern = 1;
+        st->pattern_fg = (uint32_t)pj_int_or(pj_get(it, "pfg"), 0xFF000000LL);
+        st->pattern_bg = (uint32_t)pj_int_or(pj_get(it, "pbg"), 0);
+
+        for (q = pt->child, k = 0; q && k < 8; q = q->next, k++) {
+            st->pattern_bits[k] = (uint8_t)pj_int_or(q, 0);
+        }
+    }
+}
+
+/* An item's effects on its path, D->d[i] (lengths in the drawing's units, scaled by sc): "osh" a soft shadow
+   [blur, dx, dy, colour, sx, sy (100000ths), kx, ky (60000ths of a degree), alignment 0..8 tl..br], "ish" an inner
+   shadow [blur, dx, dy, colour], "glow" [radius, colour], "soft" a soft edge's radius, "refl" a reflection [blur,
+   start alpha, end alpha, start, end (100000ths), distance] */
+static void item_effects(dlist_t* D, int32_t i, const pj_node* it, double sx, double sy) {
+    const pj_node* o = pj_get(it, "osh"), *in = pj_get(it, "ish"), *gl = pj_get(it, "glow"), *rf = pj_get(it, "refl");
+    double sc = (sx + sy) / 2;
+    pd_path_style* st;
+    pd_draw* a;
+
+    if (i < 0 || i >= D->n || D->d[i].kind != PD_DRAW_PATH || !(o || in || gl || rf || pj_get(it, "soft")) ||
+            (st = path_style(D, i)) == NULL) {
+        return;
+    }
+
+    a = &D->d[i];
+
+    if (o && o->n >= 9) {
+        int al = (int)pj_int_or(pj_at(o, 8), 7);
+
+        st->shadow_blur = (pd_sp)(pj_int_or(pj_at(o, 0), 0) * sc);
+        st->shadow_dx = (pd_sp)(pj_int_or(pj_at(o, 1), 0) * sx);
+        st->shadow_dy = (pd_sp)(pj_int_or(pj_at(o, 2), 0) * sy);
+        st->shadow_color = (uint32_t)pj_int_or(pj_at(o, 3), 0x66000000LL);
+        st->shadow_sx = (int32_t)(pj_int_or(pj_at(o, 4), 100000) * 65536 / 100000);
+        st->shadow_sy = (int32_t)(pj_int_or(pj_at(o, 5), 100000) * 65536 / 100000);
+        st->shadow_kx = (int32_t)pj_int_or(pj_at(o, 6), 0);
+        st->shadow_ky = (int32_t)pj_int_or(pj_at(o, 7), 0);
+        st->shadow_ox = a->x + (pd_sp)((int64_t)a->w * (al % 3) / 2);   /* the point of the box it is aligned to */
+        st->shadow_oy = a->y + (pd_sp)((int64_t)a->h * (al / 3) / 2);
+    }
+
+    if (in && in->n >= 4) {
+        st->inner_blur = (pd_sp)(pj_int_or(pj_at(in, 0), 0) * sc);
+        st->inner_dx = (pd_sp)(pj_int_or(pj_at(in, 1), 0) * sx);
+        st->inner_dy = (pd_sp)(pj_int_or(pj_at(in, 2), 0) * sy);
+        st->inner_color = (uint32_t)pj_int_or(pj_at(in, 3), 0xFF000000LL);
+    }
+
+    if (gl && gl->n >= 2) {
+        st->glow_radius = (pd_sp)(pj_int_or(pj_at(gl, 0), 0) * sc);
+        st->glow_color = (uint32_t)pj_int_or(pj_at(gl, 1), 0xFF000000LL);
+    }
+
+    st->soft_edge = (pd_sp)(pj_int_or(pj_get(it, "soft"), 0) * sc);
+
+    if (rf && rf->n >= 6) {
+        st->refl_blur = (pd_sp)(pj_int_or(pj_at(rf, 0), 0) * sc);
+        st->refl_alpha0 = (int32_t)pj_int_or(pj_at(rf, 1), 100000);
+        st->refl_alpha1 = (int32_t)pj_int_or(pj_at(rf, 2), 0);
+        st->refl_pos0 = (int32_t)pj_int_or(pj_at(rf, 3), 0);
+        st->refl_pos1 = (int32_t)pj_int_or(pj_at(rf, 4), 100000);
+        st->refl_dist = (pd_sp)(pj_int_or(pj_at(rf, 5), 0) * sc);
+    }
+
+    st->shadow_color = st->shadow_color && !(st->shadow_color >> 24) ? st->shadow_color | 0xFF000000u : st->shadow_color;
+    st->inner_color = st->inner_color && !(st->inner_color >> 24) ? st->inner_color | 0xFF000000u : st->inner_color;
+    st->glow_color = st->glow_color && !(st->glow_color >> 24) ? st->glow_color | 0xFF000000u : st->glow_color;
+}
+
+/* whether an item asks for more than a plain path or box can draw */
+static int item_fancy(const pj_node* it) {
+    return pj_get(it, "gk") || pj_get(it, "shd") || pj_get(it, "patt") || pj_get(it, "bimg") || pj_get(it, "osh") ||
+           pj_get(it, "ish") || pj_get(it, "glow") || pj_get(it, "soft") || pj_get(it, "refl");
+}
+
+/* An item's gradient on the path just made: "f2" its other colour, "gk" 1 linear, 2 radial, "ga" its angle (what
+   a host drawing two colours reads); and where the item has them, its stops ("gs": position in 100000ths, colour,
+   ...), "gsc" a linear one's angle scaled with the box, "gp" a radial one's path (1 circle, 2 rectangle, 3 the
+   shape, drawn as a rectangle) and "gft" its inner rectangle (fillToRect: insets in 100000ths of the box) */
 static void item_grad(dlist_t* D, int32_t n0, const pj_node* it) {
+    item_pattern(D, n0, it);
+
     if (D->n > n0 && pj_get(it, "gk") && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].fill) {
         pd_draw* a = &D->d[D->n - 1];
+        const pj_node* gs = pj_get(it, "gs"), *q;
+        pd_path_style* st;
+        double x = a->x, y = a->y, w = a->w, h = a->h;
+        int k;
 
         a->grad = (int32_t)pj_int_or(pj_get(it, "gk"), 0);
         a->fill2 = (uint32_t)pj_int_or(pj_get(it, "f2"), 0);
         a->grad_angle = (int32_t)pj_int_or(pj_get(it, "ga"), 0);
+
+        if (!gs || gs->n < 2 || (st = path_style(D, D->n - 1)) == NULL) {
+            return;
+        }
+
+        for (q = gs->child, k = 0; q && q->next && k < PD_MAX_STOPS; q = q->next->next, k++) {
+            st->stop_pos[k] = (int32_t)pj_int_or(q, 0);
+            st->stop_color[k] = (uint32_t)pj_int_or(q->next, 0);
+        }
+
+        st->nstops = k;
+
+        if (a->grad == 1) {     /* along the angle, across the box's extent that way */
+            double th = a->grad_angle / 60000.0 * 3.14159265358979 / 180, ux = cos(th), uy = sin(th), l, lo = 1e300,
+                   hi = -1e300, cx = x + w / 2, cy = y + h / 2;
+
+            if (pj_int_or(pj_get(it, "gsc"), 0) && w > 0 && h > 0) {   /* drawn in a square, stretched to the box */
+                double vx = h * ux, vy = w * uy;
+
+                ux = vx;
+                uy = vy;
+            }
+
+            l = sqrt(ux * ux + uy * uy);
+            ux = l > 0 ? ux / l : 1;
+            uy = l > 0 ? uy / l : 0;
+
+            for (k = 0; k < 4; k++) {
+                double t = ((k & 1 ? w : 0) - w / 2) * ux + ((k & 2 ? h : 0) - h / 2) * uy;
+
+                lo = t < lo ? t : lo;
+                hi = t > hi ? t : hi;
+            }
+
+            st->grad_kind = PD_GRAD_LINEAR;
+            st->grad_x0 = (pd_sp)lround(cx + ux * lo);
+            st->grad_y0 = (pd_sp)lround(cy + uy * lo);
+            st->grad_x1 = (pd_sp)lround(cx + ux * hi);
+            st->grad_y1 = (pd_sp)lround(cy + uy * hi);
+        } else {                /* out from the inner rectangle */
+            const pj_node* ft = pj_get(it, "gft");
+            double fl = pj_int_or(pj_at(ft, 0), 50000) / 100000.0, ftp = pj_int_or(pj_at(ft, 1), 50000) / 100000.0;
+            double fr = pj_int_or(pj_at(ft, 2), 50000) / 100000.0, fb = pj_int_or(pj_at(ft, 3), 50000) / 100000.0;
+            double fx0 = x + w * fl, fy0 = y + h * ftp, fx1 = x + w * (1 - fr), fy1 = y + h * (1 - fb);
+            double mx = (fx0 + fx1) / 2, my = (fy0 + fy1) / 2, r = 0;
+
+            if (pj_int_or(pj_get(it, "gp"), 1) == 1) {  /* a circle reaching the farthest corner */
+                for (k = 0; k < 4; k++) {
+                    double dx = x + (k & 1 ? w : 0) - mx, dy = y + (k & 2 ? h : 0) - my;
+
+                    r = sqrt(dx * dx + dy * dy) > r ? sqrt(dx * dx + dy * dy) : r;
+                }
+
+                st->grad_kind = PD_GRAD_CIRCLE;
+                st->grad_x0 = (pd_sp)lround(mx);
+                st->grad_y0 = (pd_sp)lround(my);
+                st->grad_x1 = (pd_sp)lround(mx + r);
+                st->grad_y1 = (pd_sp)lround(my);
+            } else {
+                st->grad_kind = PD_GRAD_RECT;
+                st->grad_x0 = (pd_sp)lround(fx0 < fx1 ? fx0 : fx1);
+                st->grad_y0 = (pd_sp)lround(fy0 < fy1 ? fy0 : fy1);
+                st->grad_x1 = (pd_sp)lround(fx0 < fx1 ? fx1 : fx0);
+                st->grad_y1 = (pd_sp)lround(fy0 < fy1 ? fy1 : fy0);
+                st->grad_bx0 = a->x;
+                st->grad_by0 = a->y;
+                st->grad_bx1 = a->x + a->w;
+                st->grad_by1 = a->y + a->h;
+            }
+        }
     }
 }
 
@@ -4922,27 +5101,23 @@ static void item_style(dlist_t* D, int32_t n0, const pj_node* it) {
 
     for (i = n0; i < D->n; i++) {
         pd_draw* a = &D->d[i];
+        pd_path_style* ps;
         int32_t j;
 
-        if (a->kind != PD_DRAW_PATH || a->line_width <= 0 || a->style) {
+        if (a->kind != PD_DRAW_PATH || a->line_width <= 0 || (ps = path_style(D, i)) == NULL) {
             continue;
         }
 
-        if (grow((void**)&D->sty, &D->capsty, (int64_t)D->nsty + 1, sizeof(pd_path_style))) {
-            D->err = 1;
-            return;
-        }
-
-        D->sty[D->nsty] = st;
+        ps->cap = st.cap;
+        ps->join = st.join;
 
         for (j = 0, q = dn ? dn->child : NULL; q && j < k; q = q->next, j++) {    /* as long as this line is wide */
             int64_t v = (int64_t)pj_int_or(q, 100000) * a->line_width / 100000;
 
-            D->sty[D->nsty].dash[j] = (pd_sp)(v < 1 ? 1 : v > INT32_MAX ? INT32_MAX : v);
+            ps->dash[j] = (pd_sp)(v < 1 ? 1 : v > INT32_MAX ? INT32_MAX : v);
         }
 
-        D->sty[D->nsty].dash_count = k;
-        a->style = (const pd_path_style*)(intptr_t)(++D->nsty);
+        ps->dash_count = k;
     }
 }
 
@@ -5199,17 +5374,126 @@ static void ellipse_curve(dlist_t* D, int32_t n0, pd_sp x, pd_sp y, pd_sp w, pd_
     path_curve(D, n0, cv, n / 2);
 }
 
+/* A shape filled with a picture ("bimg"): the picture stretched over its box inset by "bfr" (fillRect, 100000ths of
+   the box), or tiled ("btile": offset x, y on the page, scale x, y in 100000ths of its own size, flip 1 across
+   2 down, alignment 0..8 tl..br), cropped by "bcrop" (srcRect); each picture cut to the shape's first ring */
+static void item_picture_fill(const pd_layout* L, dlist_t* D, const pj_node* it, const pd_sp* xy, int32_t n,
+                              pd_block_id block, int32_t region) {
+    const pj_node* tl = pj_get(it, "btile"), *fr = pj_get(it, "bfr"), *cr = pj_get(it, "bcrop");
+    pd_res_id res = (pd_res_id)pj_int_or(pj_get(it, "bimg"), 0);
+    pd_sp x0 = INT32_MAX, y0 = INT32_MAX, x1 = INT32_MIN, y1 = INT32_MIN, tw, th, ox, oy;
+    double cl = pj_int_or(pj_at(cr, 0), 0) / 100000.0, ct = pj_int_or(pj_at(cr, 1), 0) / 100000.0;
+    double cr2 = pj_int_or(pj_at(cr, 2), 0) / 100000.0, cb = pj_int_or(pj_at(cr, 3), 0) / 100000.0;
+    int32_t i, ring, tx, ty;
+    pd_draw a;
+
+    for (ring = 0; ring < n && xy[2 * ring] != PD_PATH_BREAK; ring++) {
+        x0 = xy[2 * ring] < x0 ? xy[2 * ring] : x0;
+        x1 = xy[2 * ring] > x1 ? xy[2 * ring] : x1;
+        y0 = xy[2 * ring + 1] < y0 ? xy[2 * ring + 1] : y0;
+        y1 = xy[2 * ring + 1] > y1 ? xy[2 * ring + 1] : y1;
+    }
+
+    if (!res || ring < 3 || x1 <= x0 || y1 <= y0 || cl + cr2 >= 0.999 || ct + cb >= 0.999) {
+        return;
+    }
+
+    memset(&a, 0, sizeof(a));
+    a.kind = PD_DRAW_IMAGE;
+    a.resource = res;
+    a.block = block;
+    a.region = region;
+
+    if (!tl) {          /* stretched over the box less its fillRect */
+        double l = pj_int_or(pj_at(fr, 0), 0) / 100000.0, t = pj_int_or(pj_at(fr, 1), 0) / 100000.0;
+        double r = pj_int_or(pj_at(fr, 2), 0) / 100000.0, b = pj_int_or(pj_at(fr, 3), 0) / 100000.0;
+
+        ox = x0 + (pd_sp)((x1 - x0) * l);
+        oy = y0 + (pd_sp)((y1 - y0) * t);
+        tw = (pd_sp)((x1 - x0) * (1 - l - r));
+        th = (pd_sp)((y1 - y0) * (1 - t - b));
+        tx = ty = 1;
+    } else {            /* tiles of its own size, scaled, placed by the alignment and offset */
+        pd_inline o;
+        pd_sp nw = 0, nh = 0;
+        int al = (int)pj_int_or(pj_at(tl, 5), 0);
+
+        memset(&o, 0, sizeof(o));
+        o.resource = res;
+        pd_doc_image_size(L->doc, &o, &nw, &nh);
+        tw = (pd_sp)(nw * (1 - cl - cr2) * pj_int_or(pj_at(tl, 2), 100000) / 100000.0);
+        th = (pd_sp)(nh * (1 - ct - cb) * pj_int_or(pj_at(tl, 3), 100000) / 100000.0);
+
+        if (tw < PD_PT(1) || th < PD_PT(1)) {
+            return;
+        }
+
+        ox = x0 + (x1 - x0 - tw) * (al % 3) / 2 + (pd_sp)pj_int_or(pj_at(tl, 0), 0);
+        oy = y0 + (y1 - y0 - th) * (al / 3) / 2 + (pd_sp)pj_int_or(pj_at(tl, 1), 0);
+        tx = (int32_t)(((int64_t)ox - x0 + tw - 1) / tw);     /* tiles back to the box's left and top */
+        ty = (int32_t)(((int64_t)oy - y0 + th - 1) / th);
+        ox -= tx * tw;
+        oy -= ty * th;
+        tx = (int32_t)(((int64_t)x1 - ox + tw - 1) / tw);
+        ty = (int32_t)(((int64_t)y1 - oy + th - 1) / th);
+
+        if ((int64_t)tx * ty > 1024) {  /* too fine to draw tile by tile: stretched once */
+            tx = ty = 1;
+            ox = x0;
+            oy = y0;
+            tw = x1 - x0;
+            th = y1 - y0;
+        }
+    }
+
+    for (i = 0; i < tx * ty; i++) {
+        int32_t col = i % tx, row = i / tx, flip = (int32_t)pj_int_or(pj_at(tl, 4), 0), k;
+
+        if (tw <= 0 || th <= 0 || grow((void**)&D->pts, &D->cappts, (int64_t)D->npts + 2 * ring, sizeof(pd_sp))) {
+            return;
+        }
+
+        a.clip_x = ox + col * tw;   /* the tile; the whole picture larger when it is cropped, shown in the tile */
+        a.clip_y = oy + row * th;
+        a.clip_w = tw;
+        a.clip_h = th;
+        a.w = (pd_sp)(tw / (1 - cl - cr2));
+        a.h = (pd_sp)(th / (1 - ct - cb));
+        a.x = a.clip_x - (pd_sp)(cl * a.w);
+        a.y = a.clip_y - (pd_sp)(ct * a.h);
+        a.flip = ((flip & 1) && (col & 1) ? PD_FLIP_H : 0) | ((flip & 2) && (row & 1) ? PD_FLIP_V : 0);
+
+        if (a.clip_x >= x1 || a.clip_y >= y1 || a.clip_x + tw <= x0 || a.clip_y + th <= y0) {
+            continue;
+        }
+
+        for (k = 0; k < 2 * ring; k++) {
+            D->pts[D->npts + k] = xy[k];
+        }
+
+        a.clip_points = (const pd_sp*)(intptr_t)D->npts;
+        a.clip_npoints = ring;
+        D->npts += 2 * ring;
+        emit(D, &a);
+    }
+}
+
 /* A drawing item's path (page points xy, n of them): its shadow (a shape's always, a path's when it is filled),
    fill, gradient, then its outline -- dashed, compound, with arrowheads -- as the item says */
-static void emit_item_path(dlist_t* D, const pj_node* it, pd_sp* xy, int32_t n, int closed, uint32_t fill,
-                           uint32_t line, pd_sp lw, pd_sp ox, pd_sp oy, double sx, double sy, int shape, pd_block_id block,
-                           int32_t region) {
+static void emit_item_path(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp* xy, int32_t n, int closed,
+                           uint32_t fill, uint32_t line, pd_sp lw, pd_sp ox, pd_sp oy, double sx, double sy, int shape,
+                           pd_block_id block, int32_t region) {
     int cmpd = (int)pj_int_or(pj_get(it, "cmpd"), 0);
     arrowhead hd[2];
     int32_t n0;
 
-    if (fill || shape) {
+    if ((fill || shape) && !pj_get(it, "osh")) {    /* (a soft shadow is the path's own, below) */
         item_shadow(D, it, xy, n, sx, sy, block, region);
+    }
+
+    if (fill && pj_get(it, "bimg")) {   /* a picture fill: the picture, then the outline over it */
+        item_picture_fill(L, D, it, xy, n, block, region);
+        fill = 0;
     }
 
     hd[0].type = hd[1].type = 0;
@@ -5226,6 +5510,7 @@ static void emit_item_path(dlist_t* D, const pj_node* it, pd_sp* xy, int32_t n, 
         emit_path(D, xy, n, closed, fill, 0, 0, block, region);
         item_curve(D, n0, it, ox, oy, sx, sy);
         item_grad(D, n0, it);
+        item_effects(D, D->n > n0 ? D->n - 1 : -1, it, sx, sy);
         emit_compound(D, xy, n, closed, line, lw, cmpd, it, block, region);
     } else {
         emit_path(D, xy, n, closed, fill, line, lw, block, region);
@@ -5236,6 +5521,7 @@ static void emit_item_path(dlist_t* D, const pj_node* it, pd_sp* xy, int32_t n, 
 
         item_grad(D, n0, it);
         item_style(D, n0, it);
+        item_effects(D, D->n > n0 ? D->n - 1 : -1, it, sx, sy);
     }
 
     heads_emit(D, hd, line, lw, block, region);
@@ -5356,9 +5642,9 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                     xy[2 * k + 1] = iy + (pd_sp)(ih / 2.0 * (1 + sin(t)));
                 }
 
-                if (item_styled(it)) {
+                if (item_styled(it) || item_fancy(it)) {
                     n0 = D->n;
-                    emit_item_path(D, it, xy, 64, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
+                    emit_item_path(L, D, it, xy, 64, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
 
                     if (D->n > n0 && D->d[D->n - 1].kind == PD_DRAW_PATH && D->d[D->n - 1].npoints == 64) {
                         ellipse_curve(D, D->n - 1, ix, iy, iw, ih);
@@ -5372,11 +5658,11 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                 emit_path(D, xy, 64, 1, fill, line, lw, block, region);
                 ellipse_curve(D, n0, ix, iy, iw, ih);
                 item_grad(D, n0, it);
-            } else if (pj_get(it, "gk") || pj_get(it, "shd") || item_styled(it)) {
+            } else if (item_fancy(it) || item_styled(it)) {
                 /* a box with a gradient, a shadow or a styled outline: as a path */
                 pd_sp xy[8] = { ix, iy, ix + iw, iy, ix + iw, iy + ih, ix, iy + ih };
 
-                emit_item_path(D, it, xy, 4, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
+                emit_item_path(L, D, it, xy, 4, 1, fill, line, lw, x, y, sx, sy, 1, block, region);
             } else {            /* a box: its fill, then its edges */
                 if (fill) {
                     emit_rect(D, ix, iy, iw, ih, fill, block, region);
@@ -5406,7 +5692,7 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
             }
 
             if (xy) {
-                emit_item_path(D, it, xy, n, (int)pj_int_or(pj_get(it, "closed"), 0),
+                emit_item_path(L, D, it, xy, n, (int)pj_int_or(pj_get(it, "closed"), 0),
                                (uint32_t)pj_int_or(pj_get(it, "fill"), 0), (uint32_t)pj_int_or(pj_get(it, "line"), 0),
                                lw > PD_SP_PER_PT / 8 ? lw : PD_SP_PER_PT / 8, x, y, sx, sy, 0, block, region);
                 free(xy);

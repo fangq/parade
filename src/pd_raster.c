@@ -16,6 +16,7 @@
 #include <string.h>
 #include "pd_internal.h"
 #include "parade_layout.h"
+#include "pd_paint.h"
 
 #define ONE 256                 /* subpixels per pixel */
 /* bound for accumulated glyf deltas: real outlines stay within int16, so 26.6 values fit int32 */
@@ -963,45 +964,31 @@ static void rc_dashed(canvas* c, const double* xy, int32_t n, int closed, double
 /* what a pixel is painted with */
 typedef struct {
     uint32_t color;             /* 0xAARRGGBB */
+    const pd_gradient* grad;    /* or a gradient, */
+    const pd_path_style* pat;   /* or a pattern, */
+    pd_sp x0, y0;               /* pixels mapped back to the page: x0 + (x + 1/2) / scale */
+    int32_t scale;
 } rpaint;
 
 static uint32_t rp_color(const rpaint* p, int32_t x, int32_t y) {
-    (void)x;
-    (void)y;
-    return p->color;
-}
+    if (p->pat) {   /* the pattern's cell under the pixel's middle, the cells counted from the page's corner */
+        int64_t k = ((int64_t)1 << 32) / p->scale;     /* sp a subpixel, in 1/256 */
+        int64_t px = p->x0 + (((int64_t)x * ONE + ONE / 2) * k >> 8), py = p->y0 + (((int64_t)y * ONE + ONE / 2) * k >> 8);
+        int64_t cx = px >= 0 ? px / PD_PATTERN_CELL : (px - PD_PATTERN_CELL + 1) / PD_PATTERN_CELL;
+        int64_t cy = py >= 0 ? py / PD_PATTERN_CELL : (py - PD_PATTERN_CELL + 1) / PD_PATTERN_CELL;
+        uint32_t c = (p->pat->pattern_bits[cy & 7] >> (7 - (cx & 7))) & 1 ? p->pat->pattern_fg : p->pat->pattern_bg;
 
-/* the canvas's coverage painted over the image (premultiplied), the canvas's top-left at pixel (px, py) */
-static void rc_composite(const canvas* c, int32_t px, int32_t py, const rpaint* paint, uint8_t* rgba, int32_t stride) {
-    int32_t i, k;
-
-    for (i = 0; i < c->h; i++) {
-        int32_t acc = 0;
-        uint8_t* row = rgba + (size_t)(py + i) * (size_t)stride + (size_t)px * 4;
-
-        for (k = 0; k < c->w; k++) {
-            int32_t v = acc * 2 * ONE + c->cover[i * c->w + k] * 2 * ONE - c->area[i * c->w + k], cov;
-
-            acc += c->cover[i * c->w + k];
-            v = v < 0 ? -v : v;
-            cov = (int32_t)(((int64_t)v * 255 + ONE * ONE) / (2 * ONE * ONE));
-            cov = cov > 255 ? 255 : cov;
-
-            if (cov) {
-                uint32_t col = rp_color(paint, px + k, py + i);
-                int32_t a = (int32_t)((col >> 24) * (uint32_t)cov + 127) / 255, q;
-                uint8_t* d = row + 4 * k;
-
-                for (q = 0; q < 3; q++) {
-                    int32_t s = (int32_t)((col >> (16 - 8 * q)) & 255) * a / 255;
-
-                    d[q] = (uint8_t)(s + d[q] * (255 - a) / 255);
-                }
-
-                d[3] = (uint8_t)(a + d[3] * (255 - a) / 255);
-            }
-        }
+        return c && !(c >> 24) ? c | 0xFF000000u : c;
     }
+
+    if (p->grad) {
+        double k = 16777216.0 / p->scale;   /* sp a subpixel: 2^24 / scale */
+
+        return pd_gradient_color(p->grad, pd_gradient_at(p->grad, p->x0 + (x * ONE + ONE / 2) * k,
+                                 p->y0 + (y * ONE + ONE / 2) * k));
+    }
+
+    return p->color;
 }
 
 /* a page coordinate in subpixels of the image */
@@ -1121,6 +1108,454 @@ static void rc_clear(canvas* c) {
     memset(c->area, 0, (size_t)c->w * (size_t)c->h * sizeof(int32_t));
 }
 
+/* ---- effects: masks blurred, moved and painted, integer only ---- */
+
+/* a canvas's coverage as a mask of bytes */
+static void rc_cover(const canvas* c, uint8_t* m) {
+    int32_t i, k;
+
+    for (i = 0; i < c->h; i++) {
+        int32_t acc = 0;
+
+        for (k = 0; k < c->w; k++) {
+            int32_t v = acc * 2 * ONE + c->cover[i * c->w + k] * 2 * ONE - c->area[i * c->w + k], cov;
+
+            acc += c->cover[i * c->w + k];
+            v = v < 0 ? -v : v;
+            cov = (int32_t)(((int64_t)v * 255 + ONE * ONE) / (2 * ONE * ONE));
+            m[i * c->w + k] = (uint8_t)(cov > 255 ? 255 : cov);
+        }
+    }
+}
+
+/* a mask painted over the image (premultiplied), its top-left at pixel (px, py) */
+static void rc_paint_mask(const uint8_t* m, int32_t w, int32_t h, int32_t px, int32_t py, const rpaint* paint,
+                          uint8_t* rgba, int32_t stride) {
+    int32_t i, k, q;
+
+    for (i = 0; i < h; i++) {
+        uint8_t* row = rgba + (size_t)(py + i) * (size_t)stride + (size_t)px * 4;
+
+        for (k = 0; k < w; k++) {
+            int32_t cov = m[i * w + k];
+
+            if (cov) {
+                uint32_t col = rp_color(paint, px + k, py + i);
+                int32_t al = (int32_t)((col >> 24) * (uint32_t)cov + 127) / 255;
+                uint8_t* d = row + 4 * k;
+
+                for (q = 0; q < 3; q++) {
+                    int32_t sv = (int32_t)((col >> (16 - 8 * q)) & 255) * al / 255;
+
+                    d[q] = (uint8_t)(sv + d[q] * (255 - al) / 255);
+                }
+
+                d[3] = (uint8_t)(al + d[3] * (255 - al) / 255);
+            }
+        }
+    }
+}
+
+/* one box blur of radius r along rows (step 1) or columns (step w), n lines of len */
+static void rc_box(uint8_t* m, uint8_t* tmp, int32_t len, int32_t n, int32_t step, int32_t lstep, int32_t r) {
+    int32_t l, i;
+
+    for (l = 0; l < n; l++) {
+        uint8_t* p = m + (size_t)l * (size_t)lstep;
+        int32_t sum = 0, d = 2 * r + 1;
+
+        for (i = -r; i <= r; i++) {
+            sum += i >= 0 && i < len ? p[(size_t)i * (size_t)step] : 0;
+        }
+
+        for (i = 0; i < len; i++) {
+            int32_t in = i + r + 1, out = i - r;
+
+            tmp[i] = (uint8_t)((sum + d / 2) / d);
+            sum += (in < len ? p[(size_t)in * (size_t)step] : 0) - (out >= 0 ? p[(size_t)out * (size_t)step] : 0);
+        }
+
+        for (i = 0; i < len; i++) {
+            p[(size_t)i * (size_t)step] = tmp[i];
+        }
+    }
+}
+
+/* three box blurs each way, near a Gaussian reaching about 3 r */
+static void rc_blur(uint8_t* m, int32_t w, int32_t h, int32_t r) {
+    uint8_t* tmp;
+    int k;
+
+    if (r < 1 || !(tmp = (uint8_t*)malloc((size_t)(w > h ? w : h)))) {
+        return;
+    }
+
+    for (k = 0; k < 3; k++) {
+        rc_box(m, tmp, w, h, 1, w, r);
+        rc_box(m, tmp, h, w, w, 1, r);
+    }
+
+    free(tmp);
+}
+
+/* the mask moved: out[p] = m[A^-1 (p - o - d) + o], A scaled and skewed, nearest pixel (pixels relative to the
+   mask; o the point it turns about, d the offset) */
+static void rc_warp(const uint8_t* m, uint8_t* out, int32_t w, int32_t h, double sx, double sy, double kx, double ky,
+                    double ox, double oy, double dx, double dy) {
+    double a = sx, b = kx, c = ky, d = sy, det = a * d - b * c;
+    int32_t x, y;
+
+    if (fabs(det) < 1e-9) {
+        memset(out, 0, (size_t)w * (size_t)h);
+        return;
+    }
+
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            double px = x + 0.5 - ox - dx, py = y + 0.5 - oy - dy;
+            double qx = (d * px - b * py) / det + ox, qy = (-c * px + a * py) / det + oy;
+            int32_t ix = (int32_t)floor(qx), iy = (int32_t)floor(qy);
+
+            out[y * w + x] = ix >= 0 && iy >= 0 && ix < w && iy < h ? m[iy * w + ix] : 0;
+        }
+    }
+}
+
+static int rc_has_effects(const pd_path_style* st) {
+    return st && (st->shadow_color || st->inner_color || st->glow_color || st->soft_edge > 0 || st->refl_alpha0 > 0);
+}
+
+int pd_draw_effects(const pd_draw* a) {
+    const pd_path_style* st = a->kind == PD_DRAW_PATH ? a->style : NULL;
+
+    if (!rc_has_effects(st)) {
+        return 0;
+    }
+
+    return (a->fill && (st->shadow_color || st->glow_color) ? PD_LAYER_UNDER : 0) |
+           (a->fill && st->soft_edge > 0 ? PD_LAYER_BODY : 0) | (a->fill && st->inner_color ? PD_LAYER_INNER : 0) |
+           (st->refl_alpha0 > 0 ? PD_LAYER_REFL : 0);
+}
+
+void pd_draw_bounds(const pd_draw* a, pd_sp* x0, pd_sp* y0, pd_sp* x1, pd_sp* y1) {
+    const pd_path_style* st = a && a->kind == PD_DRAW_PATH ? a->style : NULL;
+    int64_t g = 0, l, t, r, b, sh;
+
+    if (!a) {
+        *x0 = *y0 = *x1 = *y1 = 0;
+        return;
+    }
+
+    if (a->kind == PD_DRAW_PATH && a->line_width > 0 && a->color) {
+        g = (int64_t)a->line_width * (st && st->join == PD_JOIN_MITER ? 8 : 1);
+    }
+
+    l = (int64_t)a->x - g;
+    t = (int64_t)a->y - g;
+    r = (int64_t)a->x + a->w + g;
+    b = (int64_t)a->y + a->h + g;
+
+    if (st && st->shadow_color) {   /* the shadow, scaled about its point, moved and blurred */
+        double sx = st->shadow_sx / 65536.0, sy = st->shadow_sy / 65536.0;
+        double kx = tan(st->shadow_kx / 60000.0 * 3.14159265358979 / 180), ky = tan(st->shadow_ky / 60000.0 * 3.14159265358979 / 180);
+        int k;
+
+        sh = st->shadow_blur;
+
+        for (k = 0; k < 4; k++) {
+            double px = (k & 1 ? r : l) - st->shadow_ox, py = (k & 2 ? b : t) - st->shadow_oy;
+            int64_t qx = (int64_t)(st->shadow_ox + sx * px + kx * py) + st->shadow_dx, qy = (int64_t)(st->shadow_oy + ky * px + sy * py) + st->shadow_dy;
+
+            l = qx - sh < l ? qx - sh : l;
+            r = qx + sh > r ? qx + sh : r;
+            t = qy - sh < t ? qy - sh : t;
+            b = qy + sh > b ? qy + sh : b;
+        }
+    }
+
+    if (st && st->glow_color) {
+        l -= st->glow_radius * 2;
+        t -= st->glow_radius * 2;
+        r += st->glow_radius * 2;
+        b += st->glow_radius * 2;
+    }
+
+    if (st && st->refl_alpha0 > 0) {    /* the shape again below its mirror line */
+        b += (int64_t)a->h + 2 * g + st->refl_dist + st->refl_blur;
+    }
+
+    *x0 = (pd_sp)(l < INT32_MIN ? INT32_MIN : l);
+    *y0 = (pd_sp)(t < INT32_MIN ? INT32_MIN : t);
+    *x1 = (pd_sp)(r > INT32_MAX ? INT32_MAX : r);
+    *y1 = (pd_sp)(b > INT32_MAX ? INT32_MAX : b);
+}
+
+/* the stroke of a path on a clear canvas */
+static void rc_stroke(canvas* c, const pd_draw* a, const pd_path_style* st, double hw, pd_sp x0, pd_sp y0, int32_t scale,
+                      int32_t px0, int32_t py0) {
+    rc_job J;
+    int k;
+
+    memset(&J, 0, sizeof(J));
+    J.c = c;
+    J.hw = hw;
+    J.closed = (a->path_flags & PD_PATH_CLOSED) != 0;
+    J.cap = st ? st->cap : PD_CAP_FLAT;
+    J.join = st ? st->join : PD_JOIN_ROUND;
+
+    for (k = 0; st && k < st->dash_count && k < 8; k++) {
+        J.dash[k] = rc_sub(st->dash[k], 0, scale);
+        J.dash[k] = J.dash[k] < ONE / 8 ? ONE / 8 : J.dash[k];
+    }
+
+    J.nd = st && st->dash_count >= 2 ? (st->dash_count > 8 ? 8 : st->dash_count) & ~1 : 0;
+    rc_rings(a, x0, y0, scale, (double)px0 * ONE, (double)py0 * ONE, rc_ring, &J);
+}
+
+/* one item's layers (PD_LAYER_*) into the image */
+static pd_status rc_item(const pd_draw* a, int layers, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba, int32_t width,
+                         int32_t height, int32_t stride) {
+    const pd_path_style* st = a->kind == PD_DRAW_PATH ? a->style : NULL;
+    double hw = 0, bx0, by0, bx1, by1, k = (double)scale / 16777216.0 / ONE;    /* pixels an sp */
+    pd_sp e0, f0, e1, f1;
+    int32_t px0, py0, px1, py1, w, h, i;
+    canvas c;
+    rpaint paint;
+    rc_job J;
+    pd_gradient grad;
+    uint8_t* m = NULL, *t = NULL;
+    pd_status rs = PD_OK;
+
+    if ((a->kind == PD_DRAW_PATH && (!a->points || a->npoints < 1)) ||
+            (a->kind != PD_DRAW_PATH && a->kind != PD_DRAW_RULE)) {
+        return PD_OK;
+    }
+
+    if (a->kind == PD_DRAW_PATH && a->line_width > 0 && a->color) {
+        hw = rc_sub(a->line_width, 0, scale) / 2;
+        hw = hw < ONE / 4 ? ONE / 4 : hw;   /* no thinner than a quarter pixel */
+    }
+
+    pd_draw_bounds(a, &e0, &f0, &e1, &f1);
+    bx0 = rc_sub(e0, x0, scale) - 2 * ONE - hw;
+    by0 = rc_sub(f0, y0, scale) - 2 * ONE - hw;
+    bx1 = rc_sub(e1, x0, scale) + 2 * ONE + hw;
+    by1 = rc_sub(f1, y0, scale) + 2 * ONE + hw;
+    px0 = bx0 < 0 ? 0 : bx0 > (double)width * ONE ? width : (int32_t)(bx0 / ONE);
+    py0 = by0 < 0 ? 0 : by0 > (double)height * ONE ? height : (int32_t)(by0 / ONE);
+    px1 = bx1 < 0 ? 0 : bx1 >= (double)width * ONE ? width : (int32_t)(bx1 / ONE) + 1;
+    py1 = by1 < 0 ? 0 : by1 >= (double)height * ONE ? height : (int32_t)(by1 / ONE) + 1;
+
+    if (px1 <= px0 || py1 <= py0) {
+        return PD_OK;
+    }
+
+    if (rc_has_effects(st) && (bx0 < 0 || by0 < 0 || bx1 >= (double)width * ONE || by1 >= (double)height * ONE)) {
+        /* effects need the whole shape (a blur reaches across the image's edge): drawn whole, then the part seen */
+        int32_t ux = (int32_t)floor(bx0 / ONE), uy = (int32_t)floor(by0 / ONE), uw = (int32_t)(bx1 / ONE) + 1 - ux,
+                uh = (int32_t)(by1 / ONE) + 1 - uy, x, y, q;
+        double spp = 4294967296.0 / scale;      /* sp a pixel */
+        uint8_t* full;
+
+        if ((int64_t)uw * uh > 64 * 1024 * 1024 || !(full = (uint8_t*)calloc((size_t)uw * uh, 4))) {
+            return PD_ERR_NOMEM;
+        }
+
+        rs = rc_item(a, layers, x0 + (pd_sp)lround(ux * spp), y0 + (pd_sp)lround(uy * spp), scale, full, uw, uh, uw * 4);
+
+        for (y = py0; y < py1 && rs == PD_OK; y++) {
+            for (x = px0; x < px1; x++) {
+                const uint8_t* sv = full + ((size_t)(y - uy) * uw + (size_t)(x - ux)) * 4;
+                uint8_t* d = rgba + (size_t)y * stride + (size_t)x * 4;
+
+                for (q = 0; q < 4 && sv[3]; q++) {
+                    d[q] = (uint8_t)(sv[q] + d[q] * (255 - sv[3]) / 255);
+                }
+            }
+        }
+
+        free(full);
+        return rs;
+    }
+
+    w = c.w = px1 - px0;
+    h = c.h = py1 - py0;
+    c.cover = (int32_t*)calloc((size_t)w * (size_t)h, sizeof(int32_t));
+    c.area = (int32_t*)calloc((size_t)w * (size_t)h, sizeof(int32_t));
+    m = (uint8_t*)malloc((size_t)w * (size_t)h);
+    t = (uint8_t*)malloc((size_t)w * (size_t)h);
+
+    if (!c.cover || !c.area || !m || !t) {
+        rs = PD_ERR_NOMEM;
+        goto out;
+    }
+
+    memset(&J, 0, sizeof(J));
+    memset(&paint, 0, sizeof(paint));
+    J.c = &c;
+    paint.x0 = x0;
+    paint.y0 = y0;
+    paint.scale = scale;
+
+    if (a->kind == PD_DRAW_RULE) {
+        double q[8];
+
+        q[0] = q[6] = rc_sub(a->x, x0, scale) - (double)px0 * ONE;
+        q[1] = q[3] = rc_sub(a->y, y0, scale) - (double)py0 * ONE;
+        q[2] = q[4] = rc_sub(a->x + a->w, x0, scale) - (double)px0 * ONE;
+        q[5] = q[7] = rc_sub(a->y + a->h, y0, scale) - (double)py0 * ONE;
+        rc_ring(&J, q, 4);
+        rc_cover(&c, m);
+        paint.color = a->color;
+        rc_paint_mask(m, w, h, px0, py0, &paint, rgba, stride);
+        goto out;
+    }
+
+    if (a->fill) {  /* the fill's coverage: the shape the effects are made from */
+        rc_rings(a, x0, y0, scale, (double)px0 * ONE, (double)py0 * ONE, rc_ring, &J);
+        rc_cover(&c, m);
+    } else {
+        memset(m, 0, (size_t)w * (size_t)h);
+    }
+
+    if ((layers & PD_LAYER_UNDER) && a->fill && st && st->glow_color) {    /* the glow: the shape spread and blurred */
+        memcpy(t, m, (size_t)w * (size_t)h);
+        rc_blur(t, w, h, (int32_t)(st->glow_radius * k / 2 + 0.5));
+
+        for (i = 0; i < w * h; i++) {
+            t[i] = (uint8_t)(t[i] * 2 > 255 ? 255 : t[i] * 2);
+        }
+
+        paint.color = st->glow_color;
+        rc_paint_mask(t, w, h, px0, py0, &paint, rgba, stride);
+    }
+
+    if ((layers & PD_LAYER_UNDER) && a->fill && st && st->shadow_color) {  /* the shadow: moved, scaled, blurred */
+        rc_warp(m, t, w, h, st->shadow_sx / 65536.0, st->shadow_sy / 65536.0,
+                tan(st->shadow_kx / 60000.0 * 3.14159265358979 / 180), tan(st->shadow_ky / 60000.0 * 3.14159265358979 / 180),
+                rc_sub(st->shadow_ox, x0, scale) / ONE - px0, rc_sub(st->shadow_oy, y0, scale) / ONE - py0,
+                st->shadow_dx * k, st->shadow_dy * k);
+        rc_blur(t, w, h, (int32_t)(st->shadow_blur * k / 3 + 0.5));
+        paint.color = st->shadow_color;
+        rc_paint_mask(t, w, h, px0, py0, &paint, rgba, stride);
+    }
+
+    if ((layers & PD_LAYER_BODY) && a->fill) {     /* the fill, its edge softened */
+        if (st && st->soft_edge > 0) {
+            memcpy(t, m, (size_t)w * (size_t)h);
+            rc_blur(t, w, h, (int32_t)(st->soft_edge * k / 3 + 0.5));
+
+            for (i = 0; i < w * h; i++) {
+                int32_t f = 2 * t[i] - 255;
+
+                m[i] = (uint8_t)(f <= 0 ? 0 : m[i] * f / 255);
+            }
+        }
+
+        paint.color = a->fill;
+        paint.grad = pd_draw_gradient(a, &grad) ? &grad : NULL;
+        paint.pat = st && st->pattern ? st : NULL;
+        rc_paint_mask(m, w, h, px0, py0, &paint, rgba, stride);
+        paint.grad = NULL;
+        paint.pat = NULL;
+    }
+
+    if ((layers & PD_LAYER_INNER) && a->fill && st && st->inner_color) {   /* inside, the shape's outside moved in */
+        uint8_t* u = (uint8_t*)malloc((size_t)w * (size_t)h);
+
+        if (u) {
+            rc_warp(m, u, w, h, 1, 1, 0, 0, 0, 0, st->inner_dx * k, st->inner_dy * k);
+
+            for (i = 0; i < w * h; i++) {
+                u[i] = (uint8_t)(255 - u[i]);
+            }
+
+            rc_blur(u, w, h, (int32_t)(st->inner_blur * k / 3 + 0.5));
+
+            for (i = 0; i < w * h; i++) {
+                u[i] = (uint8_t)(u[i] * m[i] / 255);
+            }
+
+            paint.color = st->inner_color;
+            rc_paint_mask(u, w, h, px0, py0, &paint, rgba, stride);
+            free(u);
+        }
+    }
+
+    if ((layers & PD_LAYER_STROKE) && hw > 0) {
+        rc_clear(&c);
+        rc_stroke(&c, a, st, hw, x0, y0, scale, px0, py0);
+        rc_cover(&c, t);
+        paint.color = a->color;
+        rc_paint_mask(t, w, h, px0, py0, &paint, rgba, stride);
+    }
+
+    if ((layers & PD_LAYER_REFL) && st && st->refl_alpha0 > 0) {
+        /* the shape drawn again on its own, turned over about its mirror line, fading as it goes down */
+        uint8_t* img = (uint8_t*)calloc((size_t)w * (size_t)h, 4);
+        double mirror = rc_sub(a->y + a->h + (a->line_width > 0 && a->color ? a->line_width / 2 : 0) + st->refl_dist,
+                               y0, scale) / ONE - py0, sh = a->h * k > 1 ? a->h * k : 1;
+        int32_t x, y;
+
+        if (img) {
+            rc_item(a, PD_LAYER_BODY | PD_LAYER_STROKE | PD_LAYER_INNER, x0 + (pd_sp)(px0 * ONE / k / ONE),
+                    y0 + (pd_sp)(py0 * ONE / k / ONE), scale, img, w, h, w * 4);
+
+            for (y = 0; y < h; y++) {
+                int32_t sy = (int32_t)floor(2 * mirror - (y + 0.5));
+                double f = (y + 0.5 - mirror) / sh * 100000, al;
+                uint8_t* row = rgba + (size_t)(py0 + y) * (size_t)stride + (size_t)px0 * 4;
+
+                if (sy < 0 || sy >= h || f < 0) {
+                    continue;
+                }
+
+                al = f <= st->refl_pos0 ? st->refl_alpha0 : f >= st->refl_pos1 ? st->refl_alpha1 :
+                     st->refl_alpha0 + (st->refl_alpha1 - st->refl_alpha0) * (f - st->refl_pos0) /
+                     (st->refl_pos1 - st->refl_pos0 > 0 ? st->refl_pos1 - st->refl_pos0 : 1);
+
+                if (f > st->refl_pos1) {
+                    continue;
+                }
+
+                for (x = 0; x < w; x++) {
+                    const uint8_t* s = img + ((size_t)sy * w + x) * 4;
+                    int32_t sa = (int32_t)(s[3] * al / 100000), q;
+                    uint8_t* d = row + 4 * x;
+
+                    if (sa <= 0) {
+                        continue;
+                    }
+
+                    for (q = 0; q < 3; q++) {
+                        d[q] = (uint8_t)(s[q] * sa / (s[3] ? s[3] : 1) + d[q] * (255 - sa) / 255);
+                    }
+
+                    d[3] = (uint8_t)(sa + d[3] * (255 - sa) / 255);
+                }
+            }
+
+            free(img);
+        }
+    }
+
+out:
+    free(c.cover);
+    free(c.area);
+    free(m);
+    free(t);
+    return rs;
+}
+
+pd_status pd_draw_render_layers(const pd_draw* a, int layers, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba,
+                                int32_t width, int32_t height, int32_t stride) {
+    if (!a || !rgba || width <= 0 || height <= 0 || stride < 4 * width || scale <= 0 || scale > (256 << 16)) {
+        return PD_ERR_ARG;
+    }
+
+    return rc_item(a, layers, x0, y0, scale, rgba, width, height, stride);
+}
+
 pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba,
                          int32_t width, int32_t height, int32_t stride) {
     int32_t i;
@@ -1131,96 +1566,165 @@ pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, in
     }
 
     for (i = 0; i < n; i++) {
-        const pd_draw* a = &items[i];
-        const pd_path_style* st = a->kind == PD_DRAW_PATH ? a->style : NULL;
-        double hw = 0, grow, bx0, by0, bx1, by1;
-        int32_t px0, py0, px1, py1;
-        canvas c;
-        rpaint paint;
-        rc_job J;
+        pd_status r = rc_item(&items[i], PD_LAYER_ALL, x0, y0, scale, rgba, width, height, stride);
 
-        if (a->kind == PD_DRAW_PATH && (!a->points || a->npoints < 1)) {
-            continue;
+        if (r != PD_OK) {
+            return r;
         }
-
-        if (a->kind != PD_DRAW_PATH && a->kind != PD_DRAW_RULE) {
-            continue;
-        }
-
-        if (a->kind == PD_DRAW_PATH && a->line_width > 0 && a->color) {
-            hw = rc_sub(a->line_width, 0, scale) / 2;
-            hw = hw < ONE / 4 ? ONE / 4 : hw;   /* no thinner than a quarter pixel */
-        }
-
-        grow = hw * (st && st->join == PD_JOIN_MITER ? 8 : 1.5) + 2 * ONE;
-        bx0 = rc_sub(a->x, x0, scale) - grow;
-        by0 = rc_sub(a->y, y0, scale) - grow;
-        bx1 = rc_sub(a->x + a->w, x0, scale) + grow;
-        by1 = rc_sub(a->y + a->h, y0, scale) + grow;
-        px0 = bx0 < 0 ? 0 : bx0 > (double)width * ONE ? width : (int32_t)(bx0 / ONE);
-        py0 = by0 < 0 ? 0 : by0 > (double)height * ONE ? height : (int32_t)(by0 / ONE);
-        px1 = bx1 < 0 ? 0 : bx1 >= (double)width * ONE ? width : (int32_t)(bx1 / ONE) + 1;
-        py1 = by1 < 0 ? 0 : by1 >= (double)height * ONE ? height : (int32_t)(by1 / ONE) + 1;
-
-        if (px1 <= px0 || py1 <= py0) {
-            continue;
-        }
-
-        c.w = px1 - px0;
-        c.h = py1 - py0;
-        c.cover = (int32_t*)calloc((size_t)c.w * (size_t)c.h, sizeof(int32_t));
-        c.area = (int32_t*)calloc((size_t)c.w * (size_t)c.h, sizeof(int32_t));
-
-        if (!c.cover || !c.area) {
-            free(c.cover);
-            free(c.area);
-            return PD_ERR_NOMEM;
-        }
-
-        memset(&J, 0, sizeof(J));
-        J.c = &c;
-
-        if (a->kind == PD_DRAW_RULE) {
-            double q[8];
-
-            q[0] = q[6] = rc_sub(a->x, x0, scale) - (double)px0 * ONE;
-            q[1] = q[3] = rc_sub(a->y, y0, scale) - (double)py0 * ONE;
-            q[2] = q[4] = rc_sub(a->x + a->w, x0, scale) - (double)px0 * ONE;
-            q[5] = q[7] = rc_sub(a->y + a->h, y0, scale) - (double)py0 * ONE;
-            rc_ring(&J, q, 4);
-            paint.color = a->color;
-            rc_composite(&c, px0, py0, &paint, rgba, stride);
-        } else {
-            if (a->fill) {
-                rc_rings(a, x0, y0, scale, (double)px0 * ONE, (double)py0 * ONE, rc_ring, &J);
-                paint.color = a->fill;
-                rc_composite(&c, px0, py0, &paint, rgba, stride);
-            }
-
-            if (hw > 0) {
-                int k;
-
-                rc_clear(&c);
-                J.hw = hw;
-                J.closed = (a->path_flags & PD_PATH_CLOSED) != 0;
-                J.cap = st ? st->cap : PD_CAP_FLAT;
-                J.join = st ? st->join : PD_JOIN_ROUND;
-
-                for (k = 0; st && k < st->dash_count && k < 8; k++) {
-                    J.dash[k] = rc_sub(st->dash[k], 0, scale);
-                    J.dash[k] = J.dash[k] < ONE / 8 ? ONE / 8 : J.dash[k];
-                }
-
-                J.nd = st && st->dash_count >= 2 ? (st->dash_count > 8 ? 8 : st->dash_count) & ~1 : 0;
-                rc_rings(a, x0, y0, scale, (double)px0 * ONE, (double)py0 * ONE, rc_ring, &J);
-                paint.color = a->color;
-                rc_composite(&c, px0, py0, &paint, rgba, stride);
-            }
-        }
-
-        free(c.cover);
-        free(c.area);
     }
 
     return PD_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* gradients                                                          */
+/* ------------------------------------------------------------------ */
+
+int pd_draw_gradient(const pd_draw* a, pd_gradient* g) {
+    const pd_path_style* st = a->kind == PD_DRAW_PATH ? a->style : NULL;
+    int i, k;
+
+    memset(g, 0, sizeof(*g));
+
+    if (a->kind != PD_DRAW_PATH || !a->fill) {
+        return 0;
+    }
+
+    if (st && st->grad_kind >= PD_GRAD_LINEAR && st->grad_kind <= PD_GRAD_RECT && st->nstops >= 1) {
+        int n = st->nstops > PD_MAX_STOPS ? PD_MAX_STOPS : st->nstops;
+
+        g->kind = st->grad_kind;
+
+        for (i = 0; i < n; i++) {   /* in order, held to 0..1, the ends made stops if they are not */
+            int32_t p = (int32_t)((int64_t)(st->stop_pos[i] < 0 ? 0 : st->stop_pos[i] > 100000 ? 100000 :
+                                            st->stop_pos[i]) * 65536 / 100000);
+
+            if (g->n == 0 && p > 0) {
+                g->color[g->n] = st->stop_color[i];
+                g->pos[g->n++] = 0;
+            }
+
+            p = g->n && p < g->pos[g->n - 1] ? g->pos[g->n - 1] : p;
+            g->color[g->n] = st->stop_color[i];
+            g->pos[g->n++] = p;
+        }
+
+        if (g->pos[g->n - 1] < 65536) {
+            g->color[g->n] = g->color[g->n - 1];
+            g->pos[g->n++] = 65536;
+        }
+
+        if (g->n == 1) {
+            g->color[1] = g->color[0];
+            g->pos[1] = 65536;
+            g->n = 2;
+        }
+
+        g->x0 = st->grad_x0;
+        g->y0 = st->grad_y0;
+        g->x1 = st->grad_x1;
+        g->y1 = st->grad_y1;
+        g->bx0 = st->grad_bx0;
+        g->by0 = st->grad_by0;
+        g->bx1 = st->grad_bx1;
+        g->by1 = st->grad_by1;
+    } else if (a->grad && a->fill2) {   /* the plain two colours: across the box at an angle, or out from its middle */
+        double cx = a->x + a->w / 2.0, cy = a->y + a->h / 2.0;
+
+        g->n = 2;
+        g->color[0] = a->fill;
+        g->color[1] = a->fill2;
+        g->pos[1] = 65536;
+
+        if (a->grad == 2) {
+            g->kind = PD_GRAD_CIRCLE;
+            g->x0 = cx;
+            g->y0 = cy;
+            g->x1 = a->x;
+            g->y1 = a->y;
+        } else {
+            double th = a->grad_angle / 60000.0 * 3.14159265358979 / 180, ux = cos(th), uy = sin(th), lo = 1e300,
+                   hi = -1e300;
+            double cs[4][2] = { { (double)a->x, (double)a->y }, { (double)a->x + a->w, (double)a->y },
+                { (double)a->x, (double)a->y + a->h }, { (double)a->x + a->w, (double)a->y + a->h }
+            };
+
+            for (k = 0; k < 4; k++) {
+                double t = (cs[k][0] - cx) * ux + (cs[k][1] - cy) * uy;
+
+                lo = t < lo ? t : lo;
+                hi = t > hi ? t : hi;
+            }
+
+            g->kind = PD_GRAD_LINEAR;
+            g->x0 = cx + ux * lo;
+            g->y0 = cy + uy * lo;
+            g->x1 = cx + ux * hi;
+            g->y1 = cy + uy * hi;
+        }
+    } else {
+        return 0;
+    }
+
+    for (i = 0; i < g->n; i++) {
+        g->color[i] |= (g->color[i] >> 24) == 0 ? 0xFF000000u : 0;    /* (no alpha given: opaque) */
+        g->alpha |= (g->color[i] >> 24) != 255;
+    }
+
+    return 1;
+}
+
+int32_t pd_gradient_at(const pd_gradient* g, double x, double y) {
+    double t = 0;
+
+    if (g->kind == PD_GRAD_LINEAR) {
+        double dx = g->x1 - g->x0, dy = g->y1 - g->y0, l2 = dx * dx + dy * dy;
+
+        t = l2 > 0 ? ((x - g->x0) * dx + (y - g->y0) * dy) / l2 : 0;
+    } else if (g->kind == PD_GRAD_CIRCLE) {
+        double r = sqrt((g->x1 - g->x0) * (g->x1 - g->x0) + (g->y1 - g->y0) * (g->y1 - g->y0));
+
+        t = r > 0 ? sqrt((x - g->x0) * (x - g->x0) + (y - g->y0) * (y - g->y0)) / r : 0;
+    } else if (g->kind == PD_GRAD_RECT) {   /* how far out from the inner rectangle towards the outer, the larger way */
+        double tx = 0, ty = 0;
+
+        if (x < g->x0) {
+            tx = g->x0 > g->bx0 ? (g->x0 - x) / (g->x0 - g->bx0) : 1;
+        } else if (x > g->x1) {
+            tx = g->bx1 > g->x1 ? (x - g->x1) / (g->bx1 - g->x1) : 1;
+        }
+
+        if (y < g->y0) {
+            ty = g->y0 > g->by0 ? (g->y0 - y) / (g->y0 - g->by0) : 1;
+        } else if (y > g->y1) {
+            ty = g->by1 > g->y1 ? (y - g->y1) / (g->by1 - g->y1) : 1;
+        }
+
+        t = tx > ty ? tx : ty;
+    }
+
+    return t <= 0 ? 0 : t >= 1 ? 65536 : (int32_t)(t * 65536);
+}
+
+uint32_t pd_gradient_color(const pd_gradient* g, int32_t t) {
+    int i, k;
+    uint32_t o = 0;
+
+    for (i = 1; i < g->n - 1 && t > g->pos[i]; i++) {
+    }
+
+    {
+        uint32_t a = g->color[i - 1], b = g->color[i];
+        int32_t span = g->pos[i] - g->pos[i - 1], f = span > 0 ? (int32_t)((int64_t)(t - g->pos[i - 1]) * 256 / span) : 256;
+
+        f = f < 0 ? 0 : f > 256 ? 256 : f;
+
+        for (k = 0; k < 32; k += 8) {
+            uint32_t ca = (a >> k) & 255, cb = (b >> k) & 255;
+
+            o |= ((ca * (uint32_t)(256 - f) + cb * (uint32_t)f + 128) >> 8) << k;
+        }
+    }
+
+    return o;
 }

@@ -1389,16 +1389,18 @@ end;
 procedure RenderPathImg(Img: TLazIntfImage; const D: pd_draw; OX, OY, PxScale: Double);
 var
   Grow: Double;
+  BX0, BY0, BX1, BY1: pd_sp;
   X0, Y0, X1, Y1, W, H, X, Y, A: Integer;
   Buf: array of Byte;
   P: PPixel;
   Q: PByte;
 begin
-  Grow := D.line_width * 8 + 4 / PxScale;
-  X0 := Max(0, Floor(OX + (D.x - Grow) * PxScale));
-  Y0 := Max(0, Floor(OY + (D.y - Grow) * PxScale));
-  X1 := Min(Img.Width, Ceil(OX + (D.x + D.w + Grow) * PxScale));
-  Y1 := Min(Img.Height, Ceil(OY + (D.y + D.h + Grow) * PxScale));
+  pd_draw_bounds(@D, BX0, BY0, BX1, BY1);   { with its stroke and its shadow, glow, reflection }
+  Grow := 2 / PxScale;
+  X0 := Max(0, Floor(OX + (BX0 - Grow) * PxScale));
+  Y0 := Max(0, Floor(OY + (BY0 - Grow) * PxScale));
+  X1 := Min(Img.Width, Ceil(OX + (BX1 + Grow) * PxScale));
+  Y1 := Min(Img.Height, Ceil(OY + (BY1 + Grow) * PxScale));
   W := X1 - X0;
   H := Y1 - Y0;
   if (W <= 0) or (H <= 0) or (Int64(W) * H > 64 * 1024 * 1024) then

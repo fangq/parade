@@ -143,6 +143,23 @@ turns into display-list paths, the same for the screen and for PDF.
   stealth, diamond, oval, open; three widths and lengths). A path's style
   is `pd_draw.style`; PDF strokes it with its own dash, cap and join
   operators.
+- **Gradients**: up to ten stops with their own alpha, linear at an angle
+  (scaled with the box or not, turned with the shape or not), and out
+  from an inner rectangle (fillToRect) in circles or rectangles. PDF uses
+  shadings (axial, radial; a stitching function for more than two
+  stops) under a soft mask when stops are see-through.
+- **Patterns**: Office's 54 pattern fills (pct5 ... zigZag) and metafile
+  hatched brushes as 8-by-8 bitmaps of 3/4 pt cells, tiled from the
+  page's corner; PDF fills with a tiling pattern.
+- **Picture fills**: a shape's blipFill stretched into its fillRect or
+  tiled (offset, scale, alignment, mirrored tiles), cropped by its
+  srcRect, each picture an image item cut to the shape's outline.
+- **Effects**: soft outer shadows (blur, distance and direction, scale
+  and skew about their alignment), inner shadows, glow, soft edges and
+  reflections, drawn by the rasterizer with integer box blurs (three
+  passes, near a Gaussian); PDF places them as pictures with soft masks
+  under or over the vector shape. `pd_draw_bounds` gives what an item
+  covers with them.
 - **Rasterizer**: `pd_draw_render` draws display-list paths into an RGBA
   image with Parade's integer coverage rasterizer, so a host gets the
   library's pixels rather than drawing styles itself.

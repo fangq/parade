@@ -42,6 +42,10 @@ int pd_preset_flatten(const char* name, double w, double h, const char* adj, pd_
    each, up to 24) in p; how many */
 int pd_preset_arc(double cx, double cy, double wr, double hr, double st_ang, double sw_ang, double* p);
 
+/* an Office pattern fill (prstPattern: pct5 ... zigZag) as 8 rows of 8 pixels, the high bit leftmost, a set bit
+   the foreground; 0 for none */
+int pd_pattern_bits(const char* name, unsigned char* out);
+
 /* the name of a preset's IDX-th adjustment (from 1: "adj", "adj1", ...); 0 for none */
 int pd_preset_adj_name(const char* name, int idx, char* buf, size_t cap);
 

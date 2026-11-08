@@ -57,7 +57,11 @@ STRUCTS = {
     "pd_page_info": "width height section number label float_page first last",
     "pd_draw": "kind x y w h glyph font size color resource block offset region text scale points npoints path_flags "
                "line_width fill clip_x clip_y clip_w clip_h fill2 grad grad_angle rotation flip clip_points clip_npoints style curve ncurve",
-    "pd_path_style": "dash_count dash cap join",
+    "pd_path_style": "dash_count dash cap join grad_kind nstops stop_color stop_pos grad_x0 grad_y0 grad_x1 grad_y1 "
+                     "grad_bx0 grad_by0 grad_bx1 grad_by1 pattern pattern_fg pattern_bg pattern_bits shadow_color shadow_blur "
+                     "shadow_dx shadow_dy shadow_sx shadow_sy shadow_kx shadow_ky shadow_ox shadow_oy inner_color "
+                     "inner_blur inner_dx inner_dy glow_color glow_radius soft_edge refl_alpha0 refl_alpha1 refl_pos0 "
+                     "refl_pos1 refl_blur refl_dist",
     "pd_markup_item": "kind id range x y top bottom color",
     "pd_pdf_options": "compress outlines title author",
 }
