@@ -3,8 +3,10 @@
  * text from the page's corner, as the .pptx reader and an editor's slides make them) a slide of the canvas's shapes,
  * from the DrawingML the drawing keeps -- Word's wps/wpg/pic made PowerPoint's sp/grpSp/cxnSp/pic, the text boxes'
  * text from their stories as they are now -- or, when it keeps none, from what the drawing draws. A section that is
- * no canvas is a slide of one text box holding its text. One master, one blank layout, the document's theme; the
- * slides are as big as the first page. No timestamps: the same document gives the same bytes.
+ * no canvas is a slide of one text box holding its text. A document read from a .pptx goes back on the masters and
+ * layouts it came with (what the reader kept of them), the shapes they draw left to them; another gets one master,
+ * one blank layout and the document's theme. The slides are as big as the first page. No timestamps: the same
+ * document gives the same bytes.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,9 @@ static const char NS[] = "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/
                          "xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"";
 static const char DECL[] = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
 static const char REL[] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/";
+static const char TABLE_STYLES[] = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<a:tblStyleLst "
+                                   "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
+                                   "def=\"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}\"/>";
 static const char* const SLOT[12] = { "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4",
                                       "accent5", "accent6", "hlink", "folHlink"
                                     };
@@ -50,6 +55,11 @@ typedef struct {
     int nst, next_st;
     char link[16];              /* the hyperlink the text is in: its relationship id, "" none */
     int kept;                   /* the masters and layouts the presentation came with are written (else one blank) */
+    const unsigned char* kdata; /* they, as the reader kept them (PD_PPTX_KEEP_MIME) */
+    size_t klen;
+    int own_bg, has_rec;        /* the slide being written: it has a background of its own; what the reader saw */
+    long rec_bg;                /* the background colour it read (with has_rec) */
+    const char* pfx;            /* before the names of the parts written beside kept ones ("pd"), else "" */
     pd_numbers nb;              /* the numbers fields and notes show */
     struct {
         pd_res_id chart, data;  /* the chart's part, its workbook (0 none) */
@@ -114,7 +124,8 @@ static int media_of(pw* P, pd_res_id res) {
     }
 
     P->media[P->nmedia].res = res;
-    snprintf(P->media[P->nmedia].name, sizeof(P->media[0].name), "image%d.%s", P->nmedia + 1, ext);
+    snprintf(P->media[P->nmedia].name, sizeof(P->media[0].name), "%simage%d.%s", P->pfx, P->nmedia + 1,
+             ext);
     return P->nmedia++;
 }
 
@@ -187,6 +198,133 @@ static void put_fill(pd_buf* o, uint32_t c) {
         pb_puts(o, "</a:solidFill>");
     } else {
         pb_puts(o, "<a:noFill/>");
+    }
+}
+
+/* ---- what the reader kept of the package ---- */
+
+#define PD_PPTX_KEEP_MIME "application/vnd.parade.pptx-kept-parts"
+
+typedef struct {
+    const char* name, *ctype, *src, *extra;
+    const unsigned char* data;
+    size_t len;
+} pkept;
+
+/* the next entry of the kept parts at *pos (pd_pptx.c's pkeep_entry); 0 at their end or where they are broken */
+static int kept_next(const pw* P, size_t* pos, pkept* e) {
+    const unsigned char* p = P->kdata;
+    size_t n = P->klen, i = *pos, len;
+    const char* f[4];
+    int k;
+
+    for (k = 0; k < 4; k++) {
+        const unsigned char* z = i < n ? (const unsigned char*)memchr(p + i, 0, n - i) : NULL;
+
+        if (!z) {
+            return 0;
+        }
+
+        f[k] = (const char*)p + i;
+        i = (size_t)(z - p) + 1;
+    }
+
+    if (i + 4 > n) {
+        return 0;
+    }
+
+    len = (size_t)p[i] | ((size_t)p[i + 1] << 8) | ((size_t)p[i + 2] << 16) | ((size_t)p[i + 3] << 24);
+    i += 4;
+
+    if (len > n - i) {
+        return 0;
+    }
+
+    e->name = f[0];
+    e->ctype = f[1];
+    e->src = f[2];
+    e->extra = f[3];
+    e->data = p + i;
+    e->len = len;
+    *pos = i + len;
+    return 1;
+}
+
+/* a kept entry by its source ("map", "pres"), 0 none */
+static int kept_find(const pw* P, const char* src, pkept* e) {
+    size_t pos = 0;
+
+    while (kept_next(P, &pos, e)) {
+        if (!strcmp(e->src, src)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* the line of the reader's map for a key (a section's block id as text, or "theme"): its fields after the key, tab
+   separated, into f (up to nf, each up to 256 bytes); how many, 0 when there is no such line */
+static int kept_line(const pw* P, const char* key, char f[][256], int nf) {
+    pkept e;
+    const char* s, *end;
+    size_t kl = strlen(key);
+
+    if (!kept_find(P, "map", &e)) {
+        return 0;
+    }
+
+    for (s = (const char*)e.data, end = s + e.len; s < end;) {
+        const char* nl = memchr(s, '\n', (size_t)(end - s));
+        const char* le = nl ? nl : end;
+
+        if ((size_t)(le - s) > kl && !memcmp(s, key, kl) && s[kl] == '\t') {
+            const char* q = s + kl + 1;
+            int n = 0;
+
+            while (n < nf && q <= le) {
+                const char* t = memchr(q, '\t', (size_t)(le - q));
+                const char* fe = t ? t : le;
+
+                snprintf(f[n++], 256, "%.*s", (int)(fe - q), q);
+                q = fe + 1;
+
+                if (!t) {
+                    break;
+                }
+            }
+
+            return n;
+        }
+
+        s = le + 1;
+    }
+
+    return 0;
+}
+
+/* the first line of the map after the theme's: the layout the first page was on, into out ("" none) */
+static void kept_first_layout(const pw* P, char* out, size_t cap) {
+    pkept e;
+    const char* s, *end;
+
+    out[0] = '\0';
+
+    if (!kept_find(P, "map", &e)) {
+        return;
+    }
+
+    for (s = (const char*)e.data, end = s + e.len; s < end;) {
+        const char* nl = memchr(s, '\n', (size_t)(end - s));
+        const char* le = nl ? nl : end, *t1 = memchr(s, '\t', (size_t)(le - s));
+        const char* t2 = t1 ? memchr(t1 + 1, '\t', (size_t)(le - t1 - 1)) : NULL;
+
+        if (t1 && t2 && strncmp(s, "theme\t", 6) && t2 > t1 + 1) {
+            snprintf(out, cap, "%.*s", (int)(t2 - t1 - 1), t1 + 1);
+            return;
+        }
+
+        s = le + 1;
     }
 }
 
@@ -340,8 +478,7 @@ static int put_span(void* user, const pd_span* s) {
         return 0;
     }
 
-    {
-        /* text: a line break its own element */
+    {   /* text: a line break its own element */
         const char* t = s->text;
         uint32_t n = s->len, i, j = 0;
 
@@ -735,8 +872,7 @@ static void put_table(pw* P, pd_block_id tbl, const char* name, long long x, lon
             pb_printf(o, "</a:txBody><a:tcPr marL=\"%lld\" marR=\"%lld\" marT=\"%lld\" marB=\"%lld\"%s>", pad, pad,
                       padv, padv, cp.valign == 1 ? " anchor=\"ctr\"" : cp.valign == 2 ? " anchor=\"b\"" : "");
 
-            {
-                /* rules: the table's grid, or the cell's own */
+            {   /* rules: the table's grid, or the cell's own */
                 static const char* const el[4] = { "lnL", "lnR", "lnT", "lnB" };
                 static const int side[4] = { PD_BORDER_LEFT, PD_BORDER_RIGHT, PD_BORDER_TOP, PD_BORDER_BOTTOM };
                 static const int edge[4] = { 3, 1, 0, 2 };
@@ -1385,6 +1521,61 @@ static pd_res_id section_canvas(const pd_doc* d, pd_block_id sec) {
     return ob.resource;
 }
 
+/* a top-level shape of a canvas that its slide's layout or master draws, or the background the reader made a shape
+   (put back as the slide's own background, or left to its layout's) */
+static int from_master(const xdoc* d, int n) {
+    int cnv = xd_kid(d, n, "cNvPr"), e;
+    char v[16];
+
+    if (cnv < 0) {
+        cnv = xd_path(d, n, "nvPicPr/cNvPr");
+    }
+
+    if ((e = shape_mark(d, cnv)) < 0) {
+        return 0;
+    }
+
+    return (xd_attr(d, e, "from", v, sizeof(v)) && strcmp(v, "slide")) || (xd_attr(d, e, "bg", v, sizeof(v)) &&
+            !strcmp(v, "1"));
+}
+
+/* a slide on a layout of its own presentation: its background when it has one of its own (a picture or a gradient
+   the reader made a shape, else the canvas's colour), or when its colour is not what was read (changed since) */
+static void put_kept_background(pw* P, int wpc) {
+    const xdoc* d = P->x;
+    int k, bg = xd_kid(d, wpc, "bg"), fill;
+    char v[16], hex[16] = "";
+
+    for (k = d->v[wpc].kid; P->own_bg && k >= 0; k = d->v[k].next) {   /* its picture or gradient */
+        int cnv = xd_kid(d, k, "cNvPr") >= 0 ? xd_kid(d, k, "cNvPr") : xd_path(d, k, "nvPicPr/cNvPr");
+        int e = shape_mark(d, cnv), f = -1;
+
+        if (e < 0 || !xd_attr(d, e, "bg", v, sizeof(v)) || !xd_attr(d, e, "from", v, sizeof(v)) || strcmp(v, "slide")) {
+            continue;
+        }
+
+        if (!strcmp(d->v[k].name, "pic")) {
+            f = xd_kid(d, k, "blipFill");
+        } else {
+            f = xd_path(d, k, "spPr/gradFill");
+        }
+
+        if (f >= 0) {
+            pb_puts(P->o, "<p:bg><p:bgPr>");
+            put_copy(P, f, !strcmp(d->v[f].name, "blipFill") ? "a:blipFill" : NULL);
+            pb_puts(P->o, "<a:effectLst/></p:bgPr></p:bg>");
+            return;
+        }
+    }
+
+    fill = bg >= 0 ? xd_path(d, bg, "solidFill/srgbClr") : -1;
+    xd_attr(d, fill, "val", hex, sizeof(hex));
+
+    if (P->own_bg || (P->has_rec && fill >= 0 && strtol(hex, NULL, 16) != P->rec_bg)) {
+        put_background(P, bg);
+    }
+}
+
 /* a canvas's shapes on the slide */
 static void put_canvas(pw* P, pd_res_id res) {
     const char* mime;
@@ -1430,13 +1621,27 @@ static void put_canvas(pw* P, pd_res_id res) {
             P->next_id += ncnv;
             wpc = !strcmp(x.v[0].name, "wpc") ? 0 : xd_find(&x, "wpc");
             pb_puts(P->o, "<p:cSld>");
-            put_background(P, wpc >= 0 ? xd_kid(&x, wpc, "bg") : -1);
+
+            if (!P->kept) {
+                put_background(P, wpc >= 0 ? xd_kid(&x, wpc, "bg") : -1);
+            } else if (wpc >= 0) {
+                put_kept_background(P, wpc);
+            }
+
             pb_puts(P->o, "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"
                     "<p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/>"
                     "<a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>");
 
-            if (wpc >= 0) {
-                put_kids(P, wpc);
+            for (k = wpc >= 0 ? x.v[wpc].kid : -1; k >= 0; k = x.v[k].next) {
+                if (!P->kept || !from_master(&x, k)) {
+                    put_shape(P, k);
+                } else {    /* left to its layout: its text boxes' stories passed over */
+                    int q;
+
+                    for (q = k; q < x.nv && x.v[q].a < x.v[k].b; q++) {
+                        P->next_st += !strcmp(x.v[q].name, "txbxContent");
+                    }
+                }
             }
 
             free(P->ids);
@@ -1538,8 +1743,8 @@ static void put_floats(pw* P, pd_block_id sec) {
             }
 
             P->nrel++;
-            pb_printf(&P->rels, "<Relationship Id=\"rId%d\" Type=\"%schart\" Target=\"../charts/chart%d.xml\"/>",
-                      P->nrel, REL, no);
+            pb_printf(&P->rels, "<Relationship Id=\"rId%d\" Type=\"%schart\" Target=\"../charts/%schart%d.xml\"/>",
+                      P->nrel, REL, P->pfx, no);
             pb_printf(P->o, "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"%d\" name=\"Chart %d\"/>"
                       "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"%lld\" y=\"%lld\"/>"
                       "<a:ext cx=\"%lld\" cy=\"%lld\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas."
@@ -1609,6 +1814,143 @@ static void zadds(void* z, const char* name, const char* s, int* err) {
     }
 }
 
+static void zadd(void* z, const char* name, const pd_buf* b, int* err);
+
+/* an element of kept XML by its start ("<p:notesSz"): from it to its end, as it is, onto o; 0 when it is not there */
+static int put_raw_element(pd_buf* o, const char* s, size_t n, const char* start, const char* close) {
+    const char* a = NULL, *e;
+    size_t sl = strlen(start), i;
+
+    for (i = 0; i + sl < n && !a; i++) {
+        if (!memcmp(s + i, start, sl) && (s[i + sl] == ' ' || s[i + sl] == '>' || s[i + sl] == '/')) {
+            a = s + i;
+        }
+    }
+
+    if (!a) {
+        return 0;
+    }
+
+    e = memchr(a, '>', n - (size_t)(a - s));
+
+    if (e && e[-1] != '/') {    /* not empty: to its closing tag */
+        size_t cl = strlen(close);
+
+        for (e = a; e + cl <= s + n && memcmp(e, close, cl); e++) {
+        }
+
+        e = e + cl <= s + n ? e + cl - 1 : NULL;
+    }
+
+    if (!e) {
+        return 0;
+    }
+
+    pb_put(o, a, (size_t)(e + 1 - a));
+    return 1;
+}
+
+/* A presentation on the masters and layouts it came with: those parts as they were kept (the first master's theme
+   as the document's theme is now), the presentation naming its masters by their ids, its default text style and
+   its notes size as they were. */
+static void put_kept_package(pw* P, void* z, pd_buf* ct, long long sw, long long sh, int nslides, int* err) {
+    pd_buf b, prels;
+    pkept e, pres;
+    size_t pos = 0;
+    char f[1][256], theme[256] = "";
+    int nm = 0, s, have_pres = kept_find(P, "pres", &pres), have_ts = kept_find(P, "tablestyles", &e);
+
+    memset(&b, 0, sizeof(b));
+    memset(&prels, 0, sizeof(prels));
+
+    if (kept_line(P, "theme", f, 1) == 1) {
+        snprintf(theme, sizeof(theme), "%s", f[0]);
+    }
+
+    while (kept_next(P, &pos, &e)) {
+        size_t nl = strlen(e.name);
+
+        if (!strcmp(e.src, "map") || !strcmp(e.src, "pres")) {
+            continue;
+        }
+
+        if (theme[0] && !strcmp(e.name, theme)) {   /* the document's theme, as it is now */
+            pd_docx_theme_part(P->d, &b);
+            zadd(z, e.name, &b, err);
+            pb_free(&b);
+        } else if (pd_zipw_add(z, e.name, e.data, e.len)) {
+            *err = 1;
+        }
+
+        if (e.ctype[0] && !(nl > 5 && !strcmp(e.name + nl - 5, ".rels"))) {
+            pb_puts(ct, "<Override PartName=\"/");
+            escs(ct, e.name);
+            pb_puts(ct, "\" ContentType=\"");
+            escs(ct, e.ctype);
+            pb_puts(ct, "\"/>");
+        }
+    }
+
+    if (!have_ts) {
+        zadds(z, "ppt/tableStyles.xml", TABLE_STYLES, err);
+        pb_puts(ct, "<Override PartName=\"/ppt/tableStyles.xml\" ContentType=\"application/vnd.openxmlformats-"
+                "officedocument.presentationml.tableStyles+xml\"/>");
+    }
+
+    pb_puts(&b, DECL);
+    pb_printf(&b, "<p:presentation %s saveSubsetFonts=\"1\"><p:sldMasterIdLst>", NS);
+    pb_puts(&prels, DECL);
+    pb_puts(&prels, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+
+    for (pos = 0; kept_next(P, &pos, &e);) {
+        if (strcmp(e.src, "master") || strncmp(e.name, "ppt/", 4)) {
+            continue;
+        }
+
+        nm++;
+        pb_printf(&b, "<p:sldMasterId id=\"%s\" r:id=\"rIdM%d\"/>", e.extra[0] ? e.extra : "2147483648", nm);
+        pb_printf(&prels, "<Relationship Id=\"rIdM%d\" Type=\"%sslideMaster\" Target=\"", nm, REL);
+        escs(&prels, e.name + 4);
+        pb_puts(&prels, "\"/>");
+    }
+
+    pb_puts(&b, "</p:sldMasterIdLst><p:sldIdLst>");
+
+    for (s = 0; s < nslides; s++) {
+        pb_printf(&b, "<p:sldId id=\"%d\" r:id=\"rId%d\"/>", 256 + s, s + 2);
+        pb_printf(&prels, "<Relationship Id=\"rId%d\" Type=\"%sslide\" Target=\"slides/slide%d.xml\"/>", s + 2, REL,
+                  s + 1);
+    }
+
+    pb_printf(&b, "</p:sldIdLst><p:sldSz cx=\"%lld\" cy=\"%lld\"/>", sw, sh);
+
+    if (!have_pres || !put_raw_element(&b, (const char*)pres.data, pres.len, "<p:notesSz", "</p:notesSz>")) {
+        pb_puts(&b, "<p:notesSz cx=\"6858000\" cy=\"9144000\"/>");
+    }
+
+    if (!have_pres || !put_raw_element(&b, (const char*)pres.data, pres.len, "<p:defaultTextStyle",
+                                       "</p:defaultTextStyle>")) {
+        pb_puts(&b, "<p:defaultTextStyle><a:defPPr><a:defRPr lang=\"en-US\"/></a:defPPr></p:defaultTextStyle>");
+    }
+
+    pb_puts(&b, "</p:presentation>");
+    pb_printf(&prels, "<Relationship Id=\"rIdP1\" Type=\"%spresProps\" Target=\"presProps.xml\"/>"
+              "<Relationship Id=\"rIdP2\" Type=\"%sviewProps\" Target=\"viewProps.xml\"/>"
+              "<Relationship Id=\"rIdP3\" Type=\"%stableStyles\" Target=\"tableStyles.xml\"/>", REL, REL, REL);
+
+    if (theme[0] && !strncmp(theme, "ppt/", 4)) {
+        pb_printf(&prels, "<Relationship Id=\"rIdP4\" Type=\"%stheme\" Target=\"", REL);
+        escs(&prels, theme + 4);
+        pb_puts(&prels, "\"/>");
+    }
+
+    pb_puts(&prels, "</Relationships>");
+    zadd(z, "ppt/presentation.xml", &b, err);
+    zadd(z, "ppt/_rels/presentation.xml.rels", &prels, err);
+    pb_free(&b);
+    pb_free(&prels);
+}
+
 pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     pw* P = (pw*)calloc(1, sizeof(pw));
     pd_block_info ri;
@@ -1616,14 +1958,33 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     pd_buf b, ct, prels;
     void* z;
     int s, nslides, err = 0, i;
-    char name[64];
+    char name[200], layout[256];
 
     if (!P) {
         return PD_ERR_NOMEM;
     }
 
     P->d = d;
+    P->pfx = "";
     pd_numbers_init(&P->nb, d);
+
+    {   /* the masters and layouts it came with, when it came from a presentation */
+        const char* mime;
+        const void* data;
+        size_t len;
+        pd_res_id r;
+        pkept e;
+
+        for (r = 1; pd_doc_resource(d, r, &mime, &data, &len) == PD_OK; r++) {
+            if (!strcmp(mime, PD_PPTX_KEEP_MIME)) {     /* the latest */
+                P->kdata = (const unsigned char*)data;
+                P->klen = len;
+            }
+        }
+
+        P->kept = P->kdata && kept_find(P, "master", &e) && kept_find(P, "map", &e);
+        P->pfx = P->kept ? "pd" : "";
+    }
     pd_doc_block_info(d, pd_doc_root(d), &ri);
     nslides = ri.child_count;
 
@@ -1674,22 +2035,23 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
             "sheet\"/>"
             "<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "presentationml.presentation.main+xml\"/>"
-            "<Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-"
-            "officedocument.presentationml.slideMaster+xml\"/>"
-            "<Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-"
-            "officedocument.presentationml.slideLayout+xml\"/>"
-            "<Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
-            "theme+xml\"/>"
             "<Override PartName=\"/ppt/presProps.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "presentationml.presProps+xml\"/>"
             "<Override PartName=\"/ppt/viewProps.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "presentationml.viewProps+xml\"/>"
-            "<Override PartName=\"/ppt/tableStyles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
-            "presentationml.tableStyles+xml\"/>"
             "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-"
             "properties+xml\"/>"
             "<Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "extended-properties+xml\"/>");
+
+    if (!P->kept) {
+        pb_puts(&ct, "<Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd."
+                "openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/"
+                "slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml."
+                "slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd."
+                "openxmlformats-officedocument.theme+xml\"/><Override PartName=\"/ppt/tableStyles.xml\" ContentType="
+                "\"application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml\"/>");
+    }
 
     for (s = 0; s < nslides; s++) {
         pb_printf(&ct, "<Override PartName=\"/ppt/slides/slide%d.xml\" ContentType=\"application/vnd.openxmlformats-"
@@ -1710,8 +2072,31 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         P->slide_no = s + 1;
         P->next_id = 2;
         P->nfld = 0;
+        P->own_bg = P->has_rec = 0;
+        layout[0] = '\0';
         pb_puts(&slide, DECL);
-        pb_printf(&slide, "<p:sld %s>", NS);
+
+        if (P->kept) {  /* the layout it was on, and what it had of its own */
+            char f[4][256], key[16];
+
+            snprintf(key, sizeof(key), "%u", (unsigned)sec);
+
+            if (kept_line(P, key, f, 4) == 4 && f[0][0]) {
+                snprintf(layout, sizeof(layout), "%s", f[0]);
+                P->own_bg = atoi(f[1]);
+                P->has_rec = 1;
+                P->rec_bg = strtol(f[3], NULL, 16);
+                pb_printf(&slide, "<p:sld %s%s>", NS, atoi(f[2]) ? " showMasterSp=\"0\"" : "");
+            } else {
+                pb_printf(&slide, "<p:sld %s>", NS);
+            }
+
+            if (!layout[0]) {   /* a slide made since: on the first's */
+                kept_first_layout(P, layout, sizeof(layout));
+            }
+        } else {
+            pb_printf(&slide, "<p:sld %s>", NS);
+        }
 
         if (cv) {
             put_canvas(P, cv);
@@ -1726,7 +2111,8 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         memset(&b, 0, sizeof(b));
         pb_puts(&b, DECL);
         pb_printf(&b, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-                  "<Relationship Id=\"rId1\" Type=\"%sslideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/>", REL);
+                  "<Relationship Id=\"rId1\" Type=\"%sslideLayout\" Target=\"../%s\"/>", REL,
+                  P->kept && !strncmp(layout, "ppt/", 4) ? layout + 4 : "slideLayouts/slideLayout1.xml");
         pb_put(&b, P->rels.p ? P->rels.p : "", P->rels.n);
         pb_puts(&b, "</Relationships>");
         snprintf(name, sizeof(name), "ppt/slides/_rels/slide%d.xml.rels", s + 1);
@@ -1746,7 +2132,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
             break;
         }
 
-        snprintf(name, sizeof(name), "ppt/charts/chart%d.xml", i + 1);
+        snprintf(name, sizeof(name), "ppt/charts/%schart%d.xml", P->pfx, i + 1);
 
         if (pd_zipw_add(z, name, data, len)) {
             err = 1;
@@ -1759,8 +2145,8 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
             escs(&b, P->charts[i].rid);
 
             if (P->charts[i].data) {
-                pb_printf(&b, "\" Type=\"%spackage\" Target=\"../embeddings/Microsoft_Excel_Worksheet%d.xlsx\"/>", REL,
-                          i + 1);
+                pb_printf(&b, "\" Type=\"%spackage\" Target=\"../embeddings/%sMicrosoft_Excel_Worksheet%d.xlsx\"/>",
+                          REL, P->pfx, i + 1);
             } else {
                 pb_printf(&b, "\" Type=\"%soleObject\" Target=\"", REL);
                 escs(&b, P->charts[i].link);
@@ -1768,12 +2154,12 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
             }
 
             pb_puts(&b, "</Relationships>");
-            snprintf(name, sizeof(name), "ppt/charts/_rels/chart%d.xml.rels", i + 1);
+            snprintf(name, sizeof(name), "ppt/charts/_rels/%schart%d.xml.rels", P->pfx, i + 1);
             zadd(z, name, &b, &err);
             pb_free(&b);
 
             if (P->charts[i].data && pd_doc_resource(d, P->charts[i].data, &mime, &data, &len) == PD_OK) {
-                snprintf(name, sizeof(name), "ppt/embeddings/Microsoft_Excel_Worksheet%d.xlsx", i + 1);
+                snprintf(name, sizeof(name), "ppt/embeddings/%sMicrosoft_Excel_Worksheet%d.xlsx", P->pfx, i + 1);
 
                 if (pd_zipw_add(z, name, data, len)) {
                     err = 1;
@@ -1794,76 +2180,80 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         }
     }
 
-    /* the presentation */
-    pb_puts(&b, DECL);
-    pb_printf(&b, "<p:presentation %s saveSubsetFonts=\"1\"><p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" "
-              "r:id=\"rId1\"/></p:sldMasterIdLst><p:sldIdLst>", NS);
-    pb_puts(&prels, DECL);
-    pb_printf(&prels, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-              "<Relationship Id=\"rId1\" Type=\"%sslideMaster\" Target=\"slideMasters/slideMaster1.xml\"/>", REL);
+    if (P->kept) {
+        put_kept_package(P, z, &ct, P->sw, P->sh, nslides, &err);
+    } else {   /* the presentation */
+        pb_puts(&b, DECL);
+        pb_printf(&b, "<p:presentation %s saveSubsetFonts=\"1\"><p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" "
+                  "r:id=\"rId1\"/></p:sldMasterIdLst><p:sldIdLst>", NS);
+        pb_puts(&prels, DECL);
+        pb_printf(&prels, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                  "<Relationship Id=\"rId1\" Type=\"%sslideMaster\" Target=\"slideMasters/slideMaster1.xml\"/>", REL);
 
-    for (s = 0; s < nslides; s++) {
-        pb_printf(&b, "<p:sldId id=\"%d\" r:id=\"rId%d\"/>", 256 + s, s + 2);
-        pb_printf(&prels, "<Relationship Id=\"rId%d\" Type=\"%sslide\" Target=\"slides/slide%d.xml\"/>", s + 2, REL,
-                  s + 1);
+        for (s = 0; s < nslides; s++) {
+            pb_printf(&b, "<p:sldId id=\"%d\" r:id=\"rId%d\"/>", 256 + s, s + 2);
+            pb_printf(&prels, "<Relationship Id=\"rId%d\" Type=\"%sslide\" Target=\"slides/slide%d.xml\"/>", s + 2, REL,
+                      s + 1);
+        }
+
+        pb_printf(&b, "</p:sldIdLst><p:sldSz cx=\"%lld\" cy=\"%lld\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/>"
+                  "<p:defaultTextStyle><a:defPPr><a:defRPr lang=\"en-US\"/></a:defPPr></p:defaultTextStyle>"
+                  "</p:presentation>", P->sw, P->sh);
+        pb_printf(&prels, "<Relationship Id=\"rId%d\" Type=\"%spresProps\" Target=\"presProps.xml\"/>"
+                  "<Relationship Id=\"rId%d\" Type=\"%sviewProps\" Target=\"viewProps.xml\"/>"
+                  "<Relationship Id=\"rId%d\" Type=\"%stheme\" Target=\"theme/theme1.xml\"/>"
+                  "<Relationship Id=\"rId%d\" Type=\"%stableStyles\" Target=\"tableStyles.xml\"/></Relationships>",
+                  nslides + 2, REL, nslides + 3, REL, nslides + 4, REL, nslides + 5, REL);
+        zadd(z, "ppt/presentation.xml", &b, &err);
+        zadd(z, "ppt/_rels/presentation.xml.rels", &prels, &err);
+        pb_free(&b);
+        pb_free(&prels);
+
+        /* one master, one blank layout: what every slide's shapes are drawn over (nothing) */
+        pb_puts(&b, DECL);
+        pb_printf(&b, "<p:sldMaster %s><p:cSld><p:bg><p:bgRef idx=\"1001\"><a:schemeClr val=\"bg1\"/></p:bgRef></p:bg>"
+                  "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr>"
+                  "<a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" "
+                  "cy=\"0\"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" "
+                  "tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" "
+                  "accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst>"
+                  "<p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/></p:sldLayoutIdLst><p:txStyles>"
+                  "<p:titleStyle><a:lvl1pPr algn=\"l\"><a:defRPr sz=\"4400\" kern=\"1200\"><a:solidFill><a:schemeClr "
+                  "val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mj-lt\"/><a:ea typeface=\"+mj-ea\"/><a:cs "
+                  "typeface=\"+mj-cs\"/></a:defRPr></a:lvl1pPr></p:titleStyle>"
+                  "<p:bodyStyle><a:lvl1pPr><a:defRPr sz=\"1800\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/>"
+                  "</a:solidFill><a:latin typeface=\"+mn-lt\"/><a:ea typeface=\"+mn-ea\"/><a:cs typeface=\"+mn-cs\"/>"
+                  "</a:defRPr></a:lvl1pPr></p:bodyStyle>"
+                  "<p:otherStyle><a:lvl1pPr><a:defRPr sz=\"1800\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/>"
+                  "</a:solidFill><a:latin typeface=\"+mn-lt\"/><a:ea typeface=\"+mn-ea\"/><a:cs typeface=\"+mn-cs\"/>"
+                  "</a:defRPr></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>", NS);
+        zadd(z, "ppt/slideMasters/slideMaster1.xml", &b, &err);
+        pb_free(&b);
+        pb_puts(&b, DECL);
+        pb_printf(&b, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                  "<Relationship Id=\"rId1\" Type=\"%sslideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/>"
+                  "<Relationship Id=\"rId2\" Type=\"%stheme\" Target=\"../theme/theme1.xml\"/></Relationships>", REL, REL);
+        zadd(z, "ppt/slideMasters/_rels/slideMaster1.xml.rels", &b, &err);
+        pb_free(&b);
+        pb_puts(&b, DECL);
+        pb_printf(&b, "<p:sldLayout %s type=\"blank\" preserve=\"1\"><p:cSld name=\"Blank\"><p:spTree><p:nvGrpSpPr>"
+                  "<p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" "
+                  "y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm>"
+                  "</p:grpSpPr></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>", NS);
+        zadd(z, "ppt/slideLayouts/slideLayout1.xml", &b, &err);
+        pb_free(&b);
+        pb_puts(&b, DECL);
+        pb_printf(&b, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+                  "<Relationship Id=\"rId1\" Type=\"%sslideMaster\" Target=\"../slideMasters/slideMaster1.xml\"/>"
+                  "</Relationships>", REL);
+        zadd(z, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", &b, &err);
+        pb_free(&b);
+
+        pd_docx_theme_part(d, &b);
+        zadd(z, "ppt/theme/theme1.xml", &b, &err);
+        pb_free(&b);
     }
 
-    pb_printf(&b, "</p:sldIdLst><p:sldSz cx=\"%lld\" cy=\"%lld\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/>"
-              "<p:defaultTextStyle><a:defPPr><a:defRPr lang=\"en-US\"/></a:defPPr></p:defaultTextStyle>"
-              "</p:presentation>", P->sw, P->sh);
-    pb_printf(&prels, "<Relationship Id=\"rId%d\" Type=\"%spresProps\" Target=\"presProps.xml\"/>"
-              "<Relationship Id=\"rId%d\" Type=\"%sviewProps\" Target=\"viewProps.xml\"/>"
-              "<Relationship Id=\"rId%d\" Type=\"%stheme\" Target=\"theme/theme1.xml\"/>"
-              "<Relationship Id=\"rId%d\" Type=\"%stableStyles\" Target=\"tableStyles.xml\"/></Relationships>",
-              nslides + 2, REL, nslides + 3, REL, nslides + 4, REL, nslides + 5, REL);
-    zadd(z, "ppt/presentation.xml", &b, &err);
-    zadd(z, "ppt/_rels/presentation.xml.rels", &prels, &err);
-    pb_free(&b);
-    pb_free(&prels);
-
-    /* one master, one blank layout: what every slide's shapes are drawn over (nothing) */
-    pb_puts(&b, DECL);
-    pb_printf(&b, "<p:sldMaster %s><p:cSld><p:bg><p:bgRef idx=\"1001\"><a:schemeClr val=\"bg1\"/></p:bgRef></p:bg>"
-              "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr>"
-              "<a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" "
-              "cy=\"0\"/></a:xfrm></p:grpSpPr></p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" "
-              "tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" "
-              "accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst>"
-              "<p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/></p:sldLayoutIdLst><p:txStyles>"
-              "<p:titleStyle><a:lvl1pPr algn=\"l\"><a:defRPr sz=\"4400\" kern=\"1200\"><a:solidFill><a:schemeClr "
-              "val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mj-lt\"/><a:ea typeface=\"+mj-ea\"/><a:cs "
-              "typeface=\"+mj-cs\"/></a:defRPr></a:lvl1pPr></p:titleStyle>"
-              "<p:bodyStyle><a:lvl1pPr><a:defRPr sz=\"1800\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/>"
-              "</a:solidFill><a:latin typeface=\"+mn-lt\"/><a:ea typeface=\"+mn-ea\"/><a:cs typeface=\"+mn-cs\"/>"
-              "</a:defRPr></a:lvl1pPr></p:bodyStyle>"
-              "<p:otherStyle><a:lvl1pPr><a:defRPr sz=\"1800\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/>"
-              "</a:solidFill><a:latin typeface=\"+mn-lt\"/><a:ea typeface=\"+mn-ea\"/><a:cs typeface=\"+mn-cs\"/>"
-              "</a:defRPr></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>", NS);
-    zadd(z, "ppt/slideMasters/slideMaster1.xml", &b, &err);
-    pb_free(&b);
-    pb_puts(&b, DECL);
-    pb_printf(&b, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-              "<Relationship Id=\"rId1\" Type=\"%sslideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/>"
-              "<Relationship Id=\"rId2\" Type=\"%stheme\" Target=\"../theme/theme1.xml\"/></Relationships>", REL, REL);
-    zadd(z, "ppt/slideMasters/_rels/slideMaster1.xml.rels", &b, &err);
-    pb_free(&b);
-    pb_puts(&b, DECL);
-    pb_printf(&b, "<p:sldLayout %s type=\"blank\" preserve=\"1\"><p:cSld name=\"Blank\"><p:spTree><p:nvGrpSpPr>"
-              "<p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" "
-              "y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm>"
-              "</p:grpSpPr></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>", NS);
-    zadd(z, "ppt/slideLayouts/slideLayout1.xml", &b, &err);
-    pb_free(&b);
-    pb_puts(&b, DECL);
-    pb_printf(&b, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-              "<Relationship Id=\"rId1\" Type=\"%sslideMaster\" Target=\"../slideMasters/slideMaster1.xml\"/>"
-              "</Relationships>", REL);
-    zadd(z, "ppt/slideLayouts/_rels/slideLayout1.xml.rels", &b, &err);
-    pb_free(&b);
-
-    pd_docx_theme_part(d, &b);
-    zadd(z, "ppt/theme/theme1.xml", &b, &err);
-    pb_free(&b);
     pb_puts(&b, DECL);
     pb_printf(&b, "<p:presentationPr %s/>", NS);
     zadd(z, "ppt/presProps.xml", &b, &err);
@@ -1873,9 +2263,10 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
               "</p:normalViewPr><p:gridSpacing cx=\"76200\" cy=\"76200\"/></p:viewPr>", NS);
     zadd(z, "ppt/viewProps.xml", &b, &err);
     pb_free(&b);
-    zadds(z, "ppt/tableStyles.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<a:tblStyleLst "
-          "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
-          "def=\"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}\"/>", &err);
+
+    if (!P->kept) {
+        zadds(z, "ppt/tableStyles.xml", TABLE_STYLES, &err);
+    }
 
     /* the package's properties: no dates, so that the same document writes the same bytes */
     zadds(z, "docProps/core.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
@@ -1896,8 +2287,8 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     pb_free(&b);
 
     for (i = 0; i < P->ncharts; i++) {
-        pb_printf(&ct, "<Override PartName=\"/ppt/charts/chart%d.xml\" ContentType=\"application/vnd.openxmlformats-"
-                  "officedocument.drawingml.chart+xml\"/>", i + 1);
+        pb_printf(&ct, "<Override PartName=\"/ppt/charts/%schart%d.xml\" ContentType=\"application/vnd.openxmlformats-"
+                  "officedocument.drawingml.chart+xml\"/>", P->pfx, i + 1);
     }
 
     pb_puts(&ct, "</Types>");

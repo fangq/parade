@@ -5277,7 +5277,17 @@ static void test_pptx_write_roundtrip(void) {
             CHECK(s2 && strstr(s2, "<p:pic>") && strstr(s2, "<a:blip r:embed=\"rId2\"/>") && strstr(s2, "<a:tbl>"));
             free(s2);
             s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/_rels/slide2.xml.rels", &n);
-            CHECK(s2 && strstr(s2, "Target=\"../media/image1.png\""));
+            CHECK(s2 && strstr(s2, "Target=\"../media/pdimage1.png\""));
+            free(s2);
+            /* on its own master and layout again: the master's band drawn by the master, not on the slide */
+            s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/_rels/slide1.xml.rels", &n);
+            CHECK(s2 && strstr(s2, "Target=\"../slideLayouts/slideLayout1.xml\""));
+            free(s2);
+            s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide1.xml", &n);
+            CHECK(s2 && !strstr(s2, "name=\"Band\"") && strstr(s2, "name=\"Title 1\""));
+            free(s2);
+            s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slideMasters/slideMaster1.xml", &n);
+            CHECK(s2 && strstr(s2, "name=\"Band\""));
             free(s2);
             s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/presentation.xml", &n);
             CHECK(s2 && strstr(s2, "<p:sldSz cx=\"9144000\" cy=\"5143500\"/>"));
@@ -5306,6 +5316,21 @@ static void test_pptx_write_roundtrip(void) {
 
             CHECK(js && strstr(js, "from=\\\"slide\\\" ph=\\\"title\\\""));
             free(js);
+
+            {   /* the document's theme changed: the master's theme part as it is now */
+                pd_theme th;
+                buf_t t;
+                char* part;
+
+                pd_doc_theme(d, &th);
+                th.color[PD_THEME_ACCENT1] = 0xFF123456u;
+                memset(&t, 0, sizeof(t));
+                CHECK(pd_doc_set_theme(d, &th) == PD_OK && pd_doc_export(d, PD_CONV_PPTX, to_buf, &t) == PD_OK);
+                part = t.p ? (char*)pd_zip_get((const unsigned char*)t.p, t.n, "ppt/theme/theme1.xml", &n) : NULL;
+                CHECK(part && strstr(part, "<a:accent1><a:srgbClr val=\"123456\"/>"));
+                free(part);
+                free(t.p);
+            }
             free(docxml);
             free(x.p);
             pd_doc_free(dd);
@@ -5446,6 +5471,104 @@ static void test_pptx_write_made(void) {
     free(b.p);
     pd_doc_free(back);
     pd_doc_free(d);
+}
+
+
+static pd_doc* pres_doc(const char* first, ...) {
+    va_list ap;
+    pd_doc* d;
+
+    va_start(ap, first);
+    d = parts_doc(PD_CONV_PPTX, NULL, 0, first, ap);
+    va_end(ap);
+    return d;
+}
+
+/* A deck written back on the master and layouts it came with: each slide on its own layout again, what the master
+   and the layouts draw left to them (not copied onto the slides), a slide's own background and its hiding of the
+   master's shapes kept, its title a placeholder of the layout's; read back, the same slides */
+static void test_pptx_write_kept_masters(void) {
+#define KSP(id, name, ph, x) "<p:sp><p:nvSpPr><p:cNvPr id=\"" id "\" name=\"" name "\"/><p:cNvSpPr/><p:nvPr>" ph \
+    "</p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"" x "\" y=\"254000\"/><a:ext cx=\"2540000\" cy=\"635000\"/></a:xfrm>" \
+    "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val=\"70AD47\"/></a:solidFill></p:spPr>" \
+    "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz=\"2000\"/><a:t>" name "</a:t></a:r></a:p></p:txBody></p:sp>"
+#define KTREE(body) "<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>" \
+    "<p:grpSpPr/>" body "</p:spTree></p:cSld>"
+#define KNS "xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas." \
+    "openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\""
+#define KREL(id, t) "<Relationship Id=\"" id "\" Type=\"x\" Target=\"" t "\"/>"
+    pd_doc* d = pres_doc(
+                    "ppt/presentation.xml", "<p:presentation " KNS "><p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" "
+                    "r:id=\"rIdM\"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id=\"256\" r:id=\"rIdA\"/><p:sldId id=\"257\" "
+                    "r:id=\"rIdB\"/></p:sldIdLst><p:sldSz cx=\"9144000\" cy=\"6858000\"/><p:notesSz cx=\"6858000\" "
+                    "cy=\"9144000\"/></p:presentation>",
+                    "ppt/_rels/presentation.xml.rels", "<Relationships>" KREL("rIdM", "slideMasters/slideMaster1.xml")
+                    KREL("rIdA", "slides/slide1.xml") KREL("rIdB", "slides/slide2.xml") "</Relationships>",
+                    "ppt/slideMasters/slideMaster1.xml", "<p:sldMaster " KNS ">" KTREE(KSP("4", "Band", "", "254000"))
+                    "<p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/><p:sldLayoutId id=\"2147483650\" "
+                    "r:id=\"rId2\"/></p:sldLayoutIdLst></p:sldMaster>",
+                    "ppt/slideMasters/_rels/slideMaster1.xml.rels", "<Relationships>"
+                    KREL("rId1", "../slideLayouts/slideLayout1.xml") KREL("rId2", "../slideLayouts/slideLayout2.xml")
+                    "</Relationships>",
+                    "ppt/slideLayouts/slideLayout1.xml", "<p:sldLayout " KNS ">" KTREE("") "</p:sldLayout>",
+                    "ppt/slideLayouts/_rels/slideLayout1.xml.rels", "<Relationships>"
+                    KREL("rId1", "../slideMasters/slideMaster1.xml") "</Relationships>",
+                    "ppt/slideLayouts/slideLayout2.xml", "<p:sldLayout " KNS ">" KTREE(KSP("5", "Logo", "", "5080000")
+                            KSP("2", "Title", "<p:ph type=\"title\"/>", "2540000")) "</p:sldLayout>",
+                    "ppt/slideLayouts/_rels/slideLayout2.xml.rels", "<Relationships>"
+                    KREL("rId1", "../slideMasters/slideMaster1.xml") "</Relationships>",
+                    "ppt/slides/slide1.xml", "<p:sld " KNS ">" KTREE(KSP("3", "One", "", "254000")) "</p:sld>",
+                    "ppt/slides/_rels/slide1.xml.rels", "<Relationships>" KREL("rId1", "../slideLayouts/slideLayout1.xml")
+                    "</Relationships>",
+                    "ppt/slides/slide2.xml", "<p:sld " KNS " showMasterSp=\"0\"><p:cSld><p:bg><p:bgPr><a:solidFill>"
+                    "<a:srgbClr val=\"FF0000\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr>"
+                    "<p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>"
+                    KSP("2", "Two", "<p:ph type=\"title\"/>", "2540000") "</p:spTree></p:cSld></p:sld>",
+                    "ppt/slides/_rels/slide2.xml.rels", "<Relationships>" KREL("rId1", "../slideLayouts/slideLayout2.xml")
+                    "</Relationships>", NULL);
+    pd_doc* back = NULL;
+    buf_t b;
+    size_t n = 0;
+    char* s1, *s2, *r2;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    back = pptx_again(d, &b);
+    CHECK(back && slides_same(d, back));
+    s1 = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide1.xml", &n) : NULL;
+    s2 = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide2.xml", &n) : NULL;
+    r2 = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/_rels/slide2.xml.rels", &n) : NULL;
+    CHECK(s1 && strstr(s1, "name=\"One\"") && !strstr(s1, "name=\"Band\"") && !strstr(s1, "<p:bg>"));
+    CHECK(s2 && strstr(s2, "showMasterSp=\"0\"") && strstr(s2, "<p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"FF0000\"/>"));
+    CHECK(s2 && strstr(s2, "name=\"Two\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"title\"/></p:nvPr>") &&
+          !strstr(s2, "name=\"Logo\""));
+    CHECK(r2 && strstr(r2, "Target=\"../slideLayouts/slideLayout2.xml\""));
+    free(r2);
+    r2 = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slideLayouts/slideLayout2.xml", &n) : NULL;
+    CHECK(r2 && strstr(r2, "name=\"Logo\""));
+
+    {   /* read back: the first slide has the master's band and its own box, the second its title and not the
+           layout's logo (it hides them), on red */
+        slide_sum sa;
+
+        CHECK(back && slide_of(back, 0, &sa) && !strcmp(sa.text, "Band|/One|/"));
+        CHECK(back && slide_of(back, 1, &sa) && !strcmp(sa.text, "Two|/"));
+    }
+
+    free(s1);
+    free(s2);
+    free(r2);
+    free(b.p);
+    pd_doc_free(back);
+    pd_doc_free(d);
+#undef KSP
+#undef KTREE
+#undef KNS
+#undef KREL
 }
 
 /* SmartArt in a Word document: a cycle with no drawing laid out from its definition, a diagram with a drawing
@@ -7943,6 +8066,7 @@ int main(void) {
     printf("pptx writer\n");
     test_pptx_write_roundtrip();
     test_pptx_write_made();
+    test_pptx_write_kept_masters();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

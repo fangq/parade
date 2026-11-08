@@ -59,6 +59,12 @@ typedef struct {
     int nlinks;                 /* the links made relationships of the .docx */
     int ncharts;
     char charts[64][128];       /* the charts put in it so far: their parts' paths in the package */
+    struct pslide {             /* each slide made a page: its layout, its own background, its colour, whether it */
+        char layout[256];       /* shows its master's shapes -- for a writer to put it back on its layout */
+        int own_bg, no_master;
+        long bg;
+    } *rec;
+    int nrec, caprec;
 } pptx;
 
 /* a path relative to a part's folder ("../media/a.png" from "ppt/slides/slide1.xml") */
@@ -3005,6 +3011,25 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
         put_tree(&C, &slide, tree, 0);
     }
 
+    if (P->nrec >= P->caprec) {     /* what the slide is on, for a writer */
+        int nc = P->caprec ? P->caprec * 2 : 32;
+        struct pslide* r = (struct pslide*)realloc(P->rec, sizeof(*r) * (size_t)nc);
+
+        if (r) {
+            P->rec = r;
+            P->caprec = nc;
+        }
+    }
+
+    if (P->nrec < P->caprec) {
+        struct pslide* r = &P->rec[P->nrec++];
+
+        snprintf(r->layout, sizeof(r->layout), "%s", have_l ? layout.path : "");
+        r->own_bg = xd_find(&slide.x, "bg") >= 0;
+        r->no_master = !show;
+        r->bg = bg >= 0 ? bg : 0xFFFFFF;
+    }
+
     /* the slide: a page as big as it, its canvas in front of an empty paragraph, from the page's corner */
     P->docpr++;
     pb_printf(&P->doc, "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/>");
@@ -3062,6 +3087,243 @@ static int slide_hidden(pptx* P, const char* path) {
     }
 
     return hidden;
+}
+
+/* ---- the package's masters kept for a writer ---- */
+
+/* The masters, layouts and themes a presentation came with, kept so that a writer can put its slides back on them:
+   one resource of the document (PD_PPTX_KEEP_MIME), entries of name NUL content-type NUL source NUL extra NUL
+   length(4, little endian) bytes, as the .docx reader keeps parts. Sources: "master" (extra: its id in the
+   presentation), "" (a part a master reaches: its layouts, theme, pictures, and their relationships), "pres"
+   (presentation.xml, for its default text style and notes size), "tablestyles", "map" (a line per page: its
+   section's block id, its layout, its own background (1/0), whether it hides the master's shapes, its background
+   colour; first a line "theme" and the first master's theme, which the document's theme is). */
+#define PD_PPTX_KEEP_MIME "application/vnd.parade.pptx-kept-parts"
+
+typedef struct {
+    pd_buf b;
+    char (*names)[160];
+    int n, cap;
+} pkeep;
+
+static int pkeep_has(const pkeep* k, const char* name) {
+    int i;
+
+    for (i = 0; i < k->n; i++) {
+        if (!strcmp(k->names[i], name)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void pkeep_entry(pkeep* k, const char* name, const char* ctype, const char* src, const char* extra,
+                        const void* data, size_t len) {
+    unsigned char l4[4];
+
+    if (strlen(name) >= 160 || pkeep_has(k, name)) {
+        return;
+    }
+
+    if (k->n >= k->cap) {
+        int nc = k->cap ? k->cap * 2 : 64;
+        char (*t)[160] = (char (*)[160])realloc(k->names, sizeof(*t) * (size_t)nc);
+
+        if (!t) {
+            return;
+        }
+
+        k->names = t;
+        k->cap = nc;
+    }
+
+    snprintf(k->names[k->n++], 160, "%s", name);
+    pb_put(&k->b, name, strlen(name) + 1);
+    pb_put(&k->b, ctype, strlen(ctype) + 1);
+    pb_put(&k->b, src, strlen(src) + 1);
+    pb_put(&k->b, extra, strlen(extra) + 1);
+    l4[0] = (unsigned char)(len & 255);
+    l4[1] = (unsigned char)((len >> 8) & 255);
+    l4[2] = (unsigned char)((len >> 16) & 255);
+    l4[3] = (unsigned char)((len >> 24) & 255);
+    pb_put(&k->b, l4, 4);
+    pb_put(&k->b, data, len);
+}
+
+static int ext_eq(const char* a, const char* b) {
+    for (; *a && *b; a++, b++) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return 0;
+        }
+    }
+
+    return *a == *b;
+}
+
+/* a part's content type in the package: its override, else its extension's default */
+static void ctype_of(const xdoc* ct, const char* name, char* out, size_t cap) {
+    const char* dot = strrchr(name, '.');
+    char v[300];
+    int k;
+
+    out[0] = '\0';
+
+    for (k = 0; ct && k < ct->nv; k++) {
+        if (!strcmp(ct->v[k].name, "Override") && xd_attr(ct, k, "PartName", v, sizeof(v)) &&
+                !strcmp(v[0] == '/' ? v + 1 : v, name)) {
+            xd_attr(ct, k, "ContentType", out, cap);
+            return;
+        }
+    }
+
+    for (k = 0; ct && dot && k < ct->nv; k++) {
+        if (!strcmp(ct->v[k].name, "Default") && xd_attr(ct, k, "Extension", v, sizeof(v)) &&
+                ext_eq(v, dot + 1)) {
+            xd_attr(ct, k, "ContentType", out, cap);
+            return;
+        }
+    }
+
+    {   /* a package that does not say: what the part is, by where it is */
+        static const char* const by_dir[][2] = {
+            { "/slideMasters/", "application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml" },
+            { "/slideLayouts/", "application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml" },
+            { "/theme/", "application/vnd.openxmlformats-officedocument.theme+xml" },
+            { "/tags/", "application/vnd.openxmlformats-officedocument.presentationml.tags+xml" }
+        };
+
+        for (k = 0; k < 4; k++) {
+            if (strstr(name, by_dir[k][0]) && dot && ext_eq(dot + 1, "xml")) {
+                snprintf(out, cap, "%s", by_dir[k][1]);
+                return;
+            }
+        }
+    }
+}
+
+/* a part kept, with its relationships and the parts they reach */
+static void pkeep_part(pptx* P, pkeep* k, const xdoc* ct, const char* name, const char* src, const char* extra,
+                       int depth) {
+    unsigned char* data;
+    size_t len = 0;
+    char ctype[256], rn[300];
+    const char* slash = strrchr(name, '/');
+    ppart pt;
+    int i;
+
+    if (depth > 4 || pkeep_has(k, name) || (data = pd_zip_get(P->zip, P->zn, name, &len)) == NULL) {
+        return;
+    }
+
+    ctype_of(ct, name, ctype, sizeof(ctype));
+    pkeep_entry(k, name, ctype, src, extra, data, len);
+    free(data);
+    snprintf(rn, sizeof(rn), "%.*s_rels/%s.rels", slash ? (int)(slash - name + 1) : 0, name, slash ? slash + 1 : name);
+
+    if ((data = pd_zip_get(P->zip, P->zn, rn, &len)) == NULL) {
+        return;
+    }
+
+    pkeep_entry(k, rn, "application/vnd.openxmlformats-package.relationships+xml", "", "", data, len);
+    free(data);
+    memset(&pt, 0, sizeof(pt));
+    snprintf(pt.path, sizeof(pt.path), "%s", name);
+    part_rels(P, &pt);  /* (an external target names no part of the package: not found, nothing kept) */
+
+    for (i = 0; i < pt.nrels; i++) {
+        if (!strstr(pt.rels[i].target, "slides/slide")) {   /* not the slides themselves */
+            pkeep_part(P, k, ct, pt.rels[i].target, "", "", depth + 1);
+        }
+    }
+
+    free(pt.rels);
+}
+
+/* the presentation's masters and what they reach, and what each page of d was on, made a resource of d */
+static void pkeep_read(pptx* P, pd_doc* d) {
+    pkeep k;
+    ppart pres;
+    xdoc ct;
+    size_t len = 0;
+    char* cts = (char*)pd_zip_get(P->zip, P->zn, "[Content_Types].xml", &len);
+    int have_ct = cts && xd_parse(&ct, cts, len), lst, m, i, nmasters = 0;
+    pd_block_info ri;
+    pd_buf map;
+
+    memset(&k, 0, sizeof(k));
+    memset(&map, 0, sizeof(map));
+
+    if (!have_ct && cts) {
+        xd_free(&ct);
+    }
+
+    if (pd_doc_block_info(d, pd_doc_root(d), &ri) != PD_OK || ri.child_count != P->nrec ||
+            !part_load(P, &pres, "ppt/presentation.xml")) {
+        if (have_ct) {
+            xd_free(&ct);
+        }
+
+        return;
+    }
+
+    lst = xd_find(&pres.x, "sldMasterIdLst");
+
+    for (m = lst >= 0 ? pres.x.v[lst].kid : -1; m >= 0; m = pres.x.v[m].next) {
+        char rid[64], id[32] = "";
+        const char* path;
+
+        if (xd_attr(&pres.x, m, "r:id", rid, sizeof(rid)) && (path = rel_of(&pres, rid)) != NULL) {
+            xd_attr(&pres.x, m, "id", id, sizeof(id));
+            pkeep_part(P, &k, have_ct ? &ct : NULL, path, "master", id, 0);
+            nmasters++;
+        }
+    }
+
+    for (i = 0; nmasters && i < P->nrec; i++) {     /* the layouts the slides are on (a master may not list them) */
+        if (P->rec[i].layout[0]) {
+            pkeep_part(P, &k, have_ct ? &ct : NULL, P->rec[i].layout, "", "", 1);
+        }
+    }
+
+    if (nmasters) {
+        unsigned char* data;
+
+        if ((data = pd_zip_get(P->zip, P->zn, "ppt/presentation.xml", &len)) != NULL) {
+            pkeep_entry(&k, "ppt/presentation.xml", "", "pres", "", data, len);
+            free(data);
+        }
+
+        if ((data = pd_zip_get(P->zip, P->zn, "ppt/tableStyles.xml", &len)) != NULL) {
+            pkeep_entry(&k, "ppt/tableStyles.xml", "application/vnd.openxmlformats-officedocument.presentationml."
+                        "tableStyles+xml", "tablestyles", "", data, len);
+            free(data);
+        }
+
+        pb_printf(&map, "theme\t%s\n", P->doc_theme);
+
+        for (i = 0; i < P->nrec; i++) {
+            pb_printf(&map, "%u\t%s\t%d\t%d\t%06lX\n", (unsigned)pd_doc_child(d, pd_doc_root(d), i), P->rec[i].layout,
+                      P->rec[i].own_bg, P->rec[i].no_master, (unsigned long)P->rec[i].bg & 0xFFFFFFul);
+        }
+
+        pkeep_entry(&k, "map", "", "map", "", map.p ? map.p : "", map.n);
+
+        if (!k.b.err) {
+            pd_res_id r;
+
+            pd_doc_add_resource(d, PD_PPTX_KEEP_MIME, k.b.p, k.b.n, &r);
+        }
+    }
+
+    pb_free(&map);
+    pb_free(&k.b);
+    free(k.names);
+    part_free(&pres);
+
+    if (have_ct) {
+        xd_free(&ct);
+    }
 }
 
 pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
@@ -3261,6 +3523,12 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
     st = pd_docx_import(d, (const unsigned char*)zip.p, zip.n);
     pb_free(&zip);
+
+    if (st == PD_OK) {
+        pkeep_read(&P, d);
+    }
+
+    free(P.rec);
     return st;
 }
 
