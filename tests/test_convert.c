@@ -9365,6 +9365,51 @@ static void test_unequal_columns(void) {
     pd_doc_free(d);
 }
 
+/* A section that starts in the next column (w:type nextColumn): its text at the top of the second column of the
+   page the section before it ended on, not on a new page; also after .docx and native round trips */
+static void test_next_column_section(void) {
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>ALPHA</w:t></w:r></w:p>"
+                         "<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" "
+                         "w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" "
+                         "w:gutter=\"0\"/><w:cols w:num=\"2\" w:space=\"720\"/></w:sectPr></w:pPr></w:p>"
+                         "<w:p><w:r><w:t>BETA</w:t></w:r></w:p><w:sectPr><w:type w:val=\"nextColumn\"/><w:pgSz "
+                         "w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" "
+                         "w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/><w:cols w:num=\"2\" "
+                         "w:space=\"720\"/></w:sectPr></w:body></w:document>", NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pa, pb;
+            pd_sp xa, ya, xb, yb;
+
+            CHECK(text_drawn(d, L, "ALPHA", &pa, &xa, &ya) && text_drawn(d, L, "BETA", &pb, &xb, &yb));
+            CHECK(pa == 0 && pb == 0 && pd_layout_page_count(L) == 1 && yb == ya && xb == PD_PT(72 + 252));
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9404,6 +9449,7 @@ int main(void) {
     test_wrap_both_sides();
     test_anchor_follows_paragraph();
     test_unequal_columns();
+    test_next_column_section();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

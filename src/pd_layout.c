@@ -232,6 +232,7 @@ struct pd_layout {
     int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
     int32_t dtext_rot;          /* the one being placed: how far it is turned (60000ths of a degree, clockwise), */
     pd_sp dtext_rx, dtext_ry;   /* about its middle */
+    int32_t last_col;           /* paginating: the column the section before ended in */
     int32_t turn_rot;           /* lines placed now are turned this far (a table cell's turned text), */
     pd_sp turn_rx, turn_ry;     /* about this point */
 };
@@ -280,6 +281,7 @@ typedef struct {
     int32_t page_start_item;    /* first item of the current page (balancing) */
     int32_t page_start_n, page_start_nrules;
     int resume;                 /* fill: continue on the current page */
+    int32_t resume_col;         /* in this column of it (a section starting in the next column) */
     pd_block_id prev_para;      /* building: the paragraph just before, for the space between */
     pd_sp top;                  /* where the text starts: the top margin, or below a header taller than it */
 } filler;
@@ -3331,8 +3333,8 @@ static pd_status fill(filler* F, int32_t start) {
     pd_sp used = 0, fn = 0, avail;
     int empty = 1;
 
-    if (F->resume) {    /* below what is already on this page */
-        F->col = 0;
+    if (F->resume) {    /* below what is already on this page (or in its next column) */
+        F->col = F->resume_col;
         F->top_used = col_floor(F);
         F->page_start_n = F->L->pages[F->page].n;
         F->page_start_nrules = F->L->pages[F->page].nrules;
@@ -4541,6 +4543,18 @@ static pd_status paginate(pd_layout* L) {
             }
         }
 
+        /* starting in the next column: on the page the section before ended on, if it has one more (same size) */
+        if (s > 0 && !F.sp->continuous && F.sp->start == PD_BREAK_COLUMN && L->npages > 0 &&
+                L->last_col + 1 < F.ncols && L->pages[L->npages - 1].w == F.sp->page_width &&
+                L->pages[L->npages - 1].h == F.sp->page_height && !L->pages[L->npages - 1].float_page) {
+            F.floor_page = F.page = L->npages - 1;
+            F.floor_y = 0;
+            F.resume = 1;
+            F.resume_col = L->last_col + 1;
+            F.number = number;
+            F.section_page = 1;
+        }
+
         /* starting on an odd (or even) page: a blank one first, the previous section's, when the next is not */
         if (s > 0 && F.floor_page < 0 && L->npages > 0 && (F.sp->start == PD_BREAK_ODD_PAGE ||
                 F.sp->start == PD_BREAK_EVEN_PAGE) && (F.number % 2 == 0) == (F.sp->start == PD_BREAK_ODD_PAGE)) {
@@ -4590,6 +4604,7 @@ static pd_status paginate(pd_layout* L) {
         }
 
         F.resume = 0;
+        L->last_col = F.col;
 
         /* columns before a continuous section are balanced */
         if (st == PD_OK && nsec && nsec->st.sp.continuous && nsec->st.sp.page_width == F.sp->page_width &&

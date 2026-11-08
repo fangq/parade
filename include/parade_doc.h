@@ -728,7 +728,8 @@ typedef struct {
     pd_sp col_space[PD_SECTION_MAX_COLS];   /**< and the space after it */
     int32_t start;              /**< where it starts, unless continuous: PD_BREAK_PAGE (the next page),
                                      PD_BREAK_ODD_PAGE / PD_BREAK_EVEN_PAGE (a blank page put in when needed),
-                                     PD_BREAK_COLUMN (the next column: laid out as a new page) */
+                                     PD_BREAK_COLUMN (the next column of the page the section before ended on,
+                                     when it has one; else a new page) */
     uint32_t page_color;        /**< its pages' background, 0 = none (Word's w:background, document-wide) */
     int32_t text_flow;          /**< PD_CELLTEXT_*: Word's section w:textDirection (kept; laid out across) */
 } pd_section_props;
