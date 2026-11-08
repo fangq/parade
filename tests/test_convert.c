@@ -4377,6 +4377,48 @@ static void test_pptx_ph_inherit(void) {
     pd_doc_free(d);
 }
 
+/* a run's capitals and small capitals, its letter spacing, its East Asian face, its highlight; a link to an address
+   a link of the document's */
+static void test_pptx_run_props(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PSP("2",
+                         "<a:p><a:r><a:rPr sz=\"2000\" cap=\"all\" spc=\"300\"/><a:t>Start </a:t></a:r>"
+                         "<a:r><a:rPr sz=\"2000\" cap=\"small\"><a:hlinkClick r:id=\"rIdL\"/></a:rPr><a:t>linked</a:t></a:r>"
+                         "<a:r><a:rPr sz=\"2000\"><a:highlight><a:srgbClr val=\"FFFF00\"/></a:highlight>"
+                         "<a:ea typeface=\"Noto Sans CJK JP\"/></a:rPr><a:t>\xE6\x97\xA5\xE6\x9C\xAC</a:t></a:r></a:p>")),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdL\" "
+                         "Target=\"https://example.com/x?a=1&amp;b=2\" TargetMode=\"External\"/></Relationships>", NULL);
+    pd_block_id p = d ? story_para_with(d, "Start") : 0;
+    const char* t;
+    uint32_t n = 0, i, ln = 0, ja = 0;
+    pd_char_props a, b, c;
+    pd_inline o;
+
+    CHECK(p != 0);
+
+    if (!p) {
+        pd_doc_free(d);
+        return;
+    }
+
+    pd_doc_para_text(d, p, &t, &n);
+
+    for (i = 0; i + 2 < n; i++) {
+        ln = !ln && t[i] == 'l' && !memcmp(t + i, "linked", 6) ? i : ln;
+        ja = !ja && (unsigned char)t[i] == 0xE6 ? i : ja;
+    }
+
+    a = chars_at(d, p, 0);
+    b = chars_at(d, p, ln);
+    c = chars_at(d, p, ja);
+    CHECK(a.caps && !a.small_caps && a.letter_space == PD_PT(3));
+    CHECK(ln && b.small_caps && !b.caps && b.letter_space == 0);
+    CHECK(ja && (c.background & 0xFFFFFFu) == 0xFFFF00u && !strcmp(c.family_ea, "Noto Sans CJK JP") &&
+          (b.background & 0xFFFFFFu) == 0);
+    CHECK(object_in(d, p, PD_INLINE_LINK, &o) && o.source_len == 29 && !memcmp(o.source, "https://example.com/x?a=1&b=2",
+            29));
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5922,6 +5964,7 @@ int main(void) {
     test_pptx_ole();
     test_pptx_chart();
     test_pptx_ph_inherit();
+    test_pptx_run_props();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

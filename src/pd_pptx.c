@@ -19,7 +19,8 @@
 /* ---- the package ---- */
 
 typedef struct {
-    char id[64], target[256];   /* the target as a path in the package */
+    char id[64], target[256];   /* the target as a path in the package (an external one as it is: a URL) */
+    int external;
 } prel;
 
 typedef struct {
@@ -40,6 +41,7 @@ typedef struct {
     uint32_t theme[12];         /* dk1 lt1 dk2 lt2 accent1-6 hlink folHlink */
     char major[64], minor[64];  /* the theme's fonts: headings, body */
     char major_cs[64], minor_cs[64];    /* and for complex scripts (cs, else its Arabic or Hebrew font), "" none */
+    char major_ea[64], minor_ea[64];    /* and for East Asian text, "" none */
     double line_w[3];           /* the theme's line widths (EMU) */
     char theme_path[256];       /* the theme's part, "" none */
     char doc_theme[256];        /* the theme the .docx made carries (the first master's): colours of the slides with
@@ -54,6 +56,7 @@ typedef struct {
     const xdoc* tstyles;        /* ppt/tableStyles.xml, NULL if none */
     int cells;                  /* tables' cell fills made shapes: their ids */
     int docx;                   /* a .docx's SmartArt: pictures named by the package's own paths (in rels) */
+    int nlinks;                 /* the links made relationships of the .docx */
     int ncharts;
     char charts[64][128];       /* the charts put in it so far: their parts' paths in the package */
 } pptx;
@@ -107,7 +110,7 @@ static void part_rels(pptx* P, ppart* pt) {
         pt->rels = (prel*)calloc((size_t)r.nv, sizeof(prel));
 
         for (k = 0; pt->rels && k < r.nv; k++) {
-            char tgt[256];
+            char tgt[256], mode[16];
 
             if (strcmp(r.v[k].name, "Relationship")) {
                 continue;
@@ -115,7 +118,14 @@ static void part_rels(pptx* P, ppart* pt) {
 
             xd_attr(&r, k, "Id", pt->rels[pt->nrels].id, sizeof(pt->rels[0].id));
             xd_attr(&r, k, "Target", tgt, sizeof(tgt));
-            resolve(pt->path, tgt, pt->rels[pt->nrels].target, sizeof(pt->rels[0].target));
+            pt->rels[pt->nrels].external = xd_attr(&r, k, "TargetMode", mode, sizeof(mode)) && !strcmp(mode, "External");
+
+            if (pt->rels[pt->nrels].external) {
+                snprintf(pt->rels[pt->nrels].target, sizeof(pt->rels[0].target), "%s", tgt);
+            } else {
+                resolve(pt->path, tgt, pt->rels[pt->nrels].target, sizeof(pt->rels[0].target));
+            }
+
             pt->nrels++;
         }
 
@@ -371,7 +381,7 @@ static void theme_load(pptx* P, const char* path) {
     P->line_w[2] = 19050;
     snprintf(P->major, sizeof(P->major), "Calibri Light");
     snprintf(P->minor, sizeof(P->minor), "Calibri");
-    P->major_cs[0] = P->minor_cs[0] = '\0';
+    P->major_cs[0] = P->minor_cs[0] = P->major_ea[0] = P->minor_ea[0] = '\0';
     P->theme_path[0] = '\0';
 
     if (!path || !part_load(P, &t, path)) {
@@ -404,6 +414,9 @@ static void theme_load(pptx* P, const char* path) {
     xd_attr(&t.x, f, "typeface", P->major, sizeof(P->major));
     f = xd_path(&t.x, xd_find(&t.x, "minorFont"), "latin");
     xd_attr(&t.x, f, "typeface", P->minor, sizeof(P->minor));
+
+    xd_attr(&t.x, xd_path(&t.x, xd_find(&t.x, "majorFont"), "ea"), "typeface", P->major_ea, sizeof(P->major_ea));
+    xd_attr(&t.x, xd_path(&t.x, xd_find(&t.x, "minorFont"), "ea"), "typeface", P->minor_ea, sizeof(P->minor_ea));
 
     for (k = 0; k < 2; k++) {   /* the complex scripts' faces: cs, else the Arabic script's, else the Hebrew */
         int ft = xd_find(&t.x, k ? "minorFont" : "majorFont"), e;
@@ -769,6 +782,22 @@ static void rpr_cs_font(const tctx* T, const xdoc* d, int rpr, char* face, size_
     }
 }
 
+/* a run's face for East Asian text: its own ea, its list styles', the theme's when it names it; "" none */
+static void rpr_ea_font(const tctx* T, const xdoc* d, int rpr, char* face, size_t cap) {
+    int k;
+
+    face[0] = '\0';
+    xd_attr(d, rpr >= 0 ? xd_kid(d, rpr, "ea") : -1, "typeface", face, cap);
+
+    for (k = 0; !face[0] && k < T->nlvl; k++) {
+        xd_attr(T->lvl[k].d, xd_path(T->lvl[k].d, T->lvl[k].n, "defRPr/ea"), "typeface", face, cap);
+    }
+
+    if (!strcmp(face, "+mn-ea") || !strcmp(face, "+mj-ea")) {
+        snprintf(face, cap, "%s", face[2] == 'j' ? T->P->major_ea : T->P->minor_ea);
+    }
+}
+
 static void put_esc(pd_buf* o, const char* s) {
     for (; *s; s++) {
         if (*s == '&') {
@@ -850,6 +879,17 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
         put_esc(o, cs[0] ? cs : v);
     }
     pb_putc(o, '"');
+    {   /* East Asian text's face: its own ea, its list styles', the theme's ("" none: the text's) */
+        char ea[64];
+
+        rpr_ea_font(T, d, rpr, ea, sizeof(ea));
+
+        if (ea[0]) {
+            pb_puts(o, " w:eastAsia=\"");
+            put_esc(o, ea);
+            pb_putc(o, '"');
+        }
+    }
 
     if (th && !heavy) {
         pb_printf(o, " w:asciiTheme=\"%sHAnsi\" w:hAnsiTheme=\"%sHAnsi\"", th == PD_FONT_THEME_MAJOR ? "major" : "minor",
@@ -878,6 +918,23 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
 
     if (rpr_attr(T, d, rpr, "baseline", v, sizeof(v)) && atoi(v) != 0) {
         pb_printf(o, "<w:vertAlign w:val=\"%s\"/>", atoi(v) > 0 ? "superscript" : "subscript");
+    }
+
+    if (rpr_attr(T, d, rpr, "cap", v, sizeof(v)) && strcmp(v, "none")) {     /* all, small */
+        pb_puts(o, !strcmp(v, "small") ? "<w:smallCaps/>" : "<w:caps/>");
+    }
+
+    if (rpr_attr(T, d, rpr, "spc", v, sizeof(v)) && atol(v) != 0) {    /* hundredths of a point: twips */
+        pb_printf(o, "<w:spacing w:val=\"%ld\"/>", (long)floor(atol(v) * T->scale / 5 + 0.5));
+    }
+
+    if (!T->bullet && rpr >= 0 && xd_kid(d, rpr, "highlight") >= 0) {     /* a colour behind the text */
+        int h = xd_kid(d, rpr, "highlight");
+        long hc = d->v[h].kid >= 0 ? colour_of(T->P, d, d->v[h].kid) : -1;
+
+        if (hc >= 0) {
+            pb_printf(o, "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%06lX\"/>", (unsigned long)hc & 0xFFFFFFul);
+        }
     }
 
     /* a link in the theme's link colour */
@@ -1246,8 +1303,28 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
         const char* n = d->v[k].name;
 
         if (!strcmp(n, "r") || !strcmp(n, "fld")) {
-            int t = xd_kid(d, k, "t");
+            int t = xd_kid(d, k, "t"), hl = xd_path(d, k, "rPr/hlinkClick"), q;
             char ft[32];
+            const prel* link = NULL;
+
+            for (q = 0; q < 3 && hl >= 0 && !link && xd_attr(d, hl, "r:id", ft, sizeof(ft)); q++) {
+                const ppart* pp = T->parts[q];
+                int i;
+
+                for (i = 0; pp && &pp->x == d && i < pp->nrels; i++) {
+                    if (!strcmp(pp->rels[i].id, ft) && pp->rels[i].external) {
+                        link = &pp->rels[i];
+                    }
+                }
+            }
+
+            if (link) {     /* a link to a page or an address: the .docx's own */
+                pb_printf(&T->P->rels, "<Relationship Id=\"rIdPh%d\" Type=\"http://schemas.openxmlformats.org/"
+                          "officeDocument/2006/relationships/hyperlink\" Target=\"", ++T->P->nlinks);
+                put_esc(&T->P->rels, link->target);
+                pb_printf(&T->P->rels, "\" TargetMode=\"External\"/>");
+                pb_printf(o, "<w:hyperlink r:id=\"rIdPh%d\">", T->P->nlinks);
+            }
 
             pb_puts(o, "<w:r>");
             put_rpr(o, T, d, xd_kid(d, k, "rPr"));
@@ -1259,7 +1336,7 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
                 xd_inner(o, d, t);  /* already escaped */
             }
 
-            pb_puts(o, "</w:t></w:r>");
+            pb_puts(o, link ? "</w:t></w:r></w:hyperlink>" : "</w:t></w:r>");
         } else if (!strcmp(n, "br")) {
             pb_puts(o, "<w:r>");
             put_rpr(o, T, d, xd_kid(d, k, "rPr"));
