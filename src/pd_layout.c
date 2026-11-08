@@ -259,6 +259,7 @@ typedef struct {
     pd_sp wrap_rem, wrap_w;     /* building: height still beside a wrapping float */
     int32_t wrap_fl;            /* and that float (its index in fl), when text follows its outline; -1 its box */
     int32_t wrap_both;          /* text on both sides of it: left of wrap_lw, right of wrap_rx */
+    int anchor_keep;            /* building: a float that takes no room just pushed, kept with what follows */
     pd_sp wrap_lw, wrap_rx;
     pd_sp wrap_total, wrap_ox;  /* its whole height beside the text, where it is across the column */
     pd_sp wrap_skip;            /* and before that, the height of text above it (a float lower down) */
@@ -2398,9 +2399,10 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 push(F, VI_BREAK, 0, 0, NULL, 0, 0);
                 F->it[F->n - 1].brk = PD_BREAK_PAGE;
             } else if (!*first) {
-                push(F, VI_PEN, 0, *prev_keep || F->wrap_rem > 0 ? INF_PEN : 0, NULL, 0, 0);
+                push(F, VI_PEN, 0, *prev_keep || F->wrap_rem > 0 || F->anchor_keep ? INF_PEN : 0, NULL, 0, 0);
             }
 
+            F->anchor_keep = 0;
             push(F, VI_GLUE, gl, 0, NULL, 0, 0);
             gs = F->gap_h > 0 ? F->gap_skip - gl : 0;     /* counted down only while there is such a float */
 
@@ -2512,6 +2514,14 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 }
             }
 
+            if ((f->fp.wrap != PD_WRAP_NONE || f->fp.offset_y > 0) && !*first) {
+                /* a float taking no room in the flow goes with the paragraph it is anchored in: the page may break
+                   before it, not between it and that paragraph's first line */
+                push(F, VI_PEN, 0, *prev_keep || F->anchor_keep || F->wrap_rem > 0 ? INF_PEN : 0, NULL, 0, 0);
+            }
+
+            F->anchor_keep = f->fp.wrap != PD_WRAP_NONE || f->fp.offset_y > 0;
+
             if (f->fp.wrap >= PD_WRAP_FRONT) {
                 push(F, VI_FLOAT, 0, 0, NULL, 0, b->id);     /* over or under the text: no room of its own */
             } else if (f->fp.wrap != PD_WRAP_NONE) {
@@ -2582,6 +2592,7 @@ static pd_status rebuild_flow(filler* F) {
     }
 
     F->n = F->nfl = F->nnotes = F->ntb = 0;
+    F->anchor_keep = 0;
     F->wrap_rem = 0;
     F->wrap_skip = 0;
     F->gap_h = 0;

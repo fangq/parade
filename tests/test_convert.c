@@ -9223,6 +9223,75 @@ static void test_wrap_both_sides(void) {
     pd_doc_free(d);
 }
 
+/* A drawing over the text (wrapNone), placed 15pt below the paragraph it is anchored in: when that paragraph's
+   first line goes over to the next page, the drawing goes with it rather than staying at the foot of the page
+   before (where it would run off it). Laid out with as many lines before it as fill the first page to the line */
+static void test_anchor_follows_paragraph(void) {
+    int n, found = 0;
+
+    for (n = 40; n < 70 && !found; n++) {
+        char* body = (char*)malloc(32768), *p;
+        pd_doc* d;
+        pd_layout* L;
+        int i;
+
+        if (!body) {
+            return;
+        }
+
+        p = body + sprintf(body, "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" "
+                           "xmlns:r=\"r\"><w:body>");
+
+        for (i = 0; i < n; i++) {
+            p += sprintf(p, "<w:p><w:r><w:t>filler %d</w:t></w:r></w:p>", i);
+        }
+
+        sprintf(p, "<w:p><w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" behindDoc=\"0\">"
+                "<wp:positionH relativeFrom=\"column\"><wp:posOffset>0</wp:posOffset></wp:positionH>"
+                "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>190500</wp:posOffset></wp:positionV>"
+                "<wp:extent cx=\"2540000\" cy=\"2540000\"/><wp:wrapNone/><wp:docPr id=\"1\" name=\"p\"/><a:graphic>"
+                "<a:graphicData><pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic>"
+                "</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r><w:r><w:t>ANCHOR</w:t></w:r></w:p>"
+                "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" "
+                "w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>"
+                "</w:body></w:document>");
+        d = docx_doc("word/_rels/document.xml.rels",
+                     "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                     "</Relationships>", "word/media/image1.png", "tests/data/rgba.png", "word/document.xml", body, NULL);
+        free(body);
+
+        if (d && (L = laid_out(d)) != NULL) {
+            int32_t pa, pf, pg, k, m, img = -1;
+            pd_sp x, y;
+            char last[32];
+
+            snprintf(last, sizeof(last), "filler %d", n - 1);
+
+            if (text_drawn(d, L, "ANCHOR", &pa, &x, &y) && text_drawn(d, L, last, &pf, &x, &y) && pa == 1 && pf == 0) {
+                found = 1;
+
+                for (pg = 0; pg < pd_layout_page_count(L); pg++) {
+                    pd_draw* it = page_draws(L, pg, &m);
+
+                    for (k = 0; it && k < m; k++) {
+                        img = it[k].kind == PD_DRAW_IMAGE ? pg : img;
+                    }
+
+                    free(it);
+                }
+
+                CHECK(img == pa);
+            }
+
+            pd_layout_free(L);
+        }
+
+        pd_doc_free(d);
+    }
+
+    CHECK(found || !have_layout_font());
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9260,6 +9329,7 @@ int main(void) {
     test_para_border_lines();
     test_wrap_outline();
     test_wrap_both_sides();
+    test_anchor_follows_paragraph();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");
