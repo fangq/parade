@@ -86,6 +86,9 @@ typedef struct {                /* a filled rectangle: rules, borders, cell back
     uint32_t color;
     int32_t region;
     pd_block_id block;
+    int32_t diag;               /* 0 a rectangle; a line across it, 1 top left to bottom right, 2 top right to bottom
+                                   left, lw wide */
+    pd_sp lw;
 } prule;
 
 typedef struct {                /* a line (or a whole paragraph region) on a page */
@@ -217,6 +220,8 @@ struct pd_layout {
     int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
     int32_t dtext_rot;          /* the one being placed: how far it is turned (60000ths of a degree, clockwise), */
     pd_sp dtext_rx, dtext_ry;   /* about its middle */
+    int32_t turn_rot;           /* lines placed now are turned this far (a table cell's turned text), */
+    pd_sp turn_rx, turn_ry;     /* about this point */
 };
 
 /* filler state for one section */
@@ -589,7 +594,245 @@ static int add_rule(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp
     r->color = color;
     r->region = region;
     r->block = block;
+    r->diag = 0;
+    r->lw = 0;
     return 0;
+}
+
+/* how thick a border line is drawn, all its strokes and gaps */
+static pd_sp line_thickness(const pd_border_line* l) {
+    pd_sp w = l->width, thin = w / 4 > PD_PT(0.5) ? w / 4 : PD_PT(0.5);
+
+    switch (l->style) {
+        case PD_LINE_NONE:
+            return 0;
+
+        case PD_LINE_DOUBLE:
+            return 3 * w;
+
+        case PD_LINE_TRIPLE:
+            return 5 * w;
+
+        case PD_LINE_THIN_THICK:
+        case PD_LINE_THICK_THIN:
+            return w + 2 * thin;
+
+        default:
+            return w;
+    }
+}
+
+/* A paragraph's border as lines: its own edges' (top, right, bottom, left, between, bar), or the single lines its
+   colour, width, sides and space say */
+static void para_lines(const pd_para_props* pp, pd_border_line* out) {
+    int32_t k, sides = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM |
+                       PD_BORDER_LEFT;
+    static const int bit[5] = { PD_BORDER_TOP, PD_BORDER_RIGHT, PD_BORDER_BOTTOM, PD_BORDER_LEFT, PD_BORDER_BETWEEN };
+
+    memcpy(out, pp->border_line, 6 * sizeof(pd_border_line));
+
+    for (k = 0; k < 6; k++) {
+        if (out[k].style != PD_LINE_NONE) {
+            return;
+        }
+    }
+
+    for (k = 0; pp->border_color && pp->border_width > 0 && k < 5; k++) {
+        if (sides & bit[k]) {
+            out[k].style = PD_LINE_SINGLE;
+            out[k].width = pp->border_width;
+            out[k].color = pp->border_color;
+            out[k].space = k < 4 ? pp->border_space : 0;
+        }
+    }
+}
+
+/* the room a border edge takes: its strokes and its space */
+static pd_sp line_room(const pd_border_line* l) {
+    return l->style != PD_LINE_NONE ? line_thickness(l) + l->space : 0;
+}
+
+/* what draws a border line's strokes: a filled rectangle each */
+typedef void (*stroke_fn)(void* ctx, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color);
+
+/* A border line's strokes in the band x, y, w by h (horiz: running across, its strokes stacked down the band; else
+   running down, stacked across), outer: its first stroke at the band's top or left (the side away from what it
+   surrounds) -- thin and thick strokes in their order from there; dots and dashes as short rectangles */
+static void line_strokes(pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l, int horiz, int outer,
+                         stroke_fn fn, void* ctx) {
+    pd_sp lw = l->width, thin = lw / 4 > PD_PT(0.5) ? lw / 4 : PD_PT(0.5), off[3], th[3], len = horiz ? w : h;
+    int32_t n = 1, k;
+
+    off[0] = 0;
+    th[0] = lw;
+
+    if (l->style == PD_LINE_NONE || lw <= 0 || len <= 0) {
+        return;
+    }
+
+    if (l->style == PD_LINE_DOUBLE || l->style == PD_LINE_TRIPLE) {     /* strokes as wide as gaps */
+        n = l->style == PD_LINE_DOUBLE ? 2 : 3;
+
+        for (k = 0; k < n; k++) {
+            off[k] = 2 * k * lw;
+            th[k] = lw;
+        }
+    } else if (l->style == PD_LINE_THIN_THICK || l->style == PD_LINE_THICK_THIN) {
+        int thick_first = (l->style == PD_LINE_THIN_THICK) == !!outer;  /* thin inside thick: thick outermost */
+
+        n = 2;
+        th[0] = thick_first ? lw : thin;
+        th[1] = thick_first ? thin : lw;
+        off[1] = th[0] + thin;
+    }
+
+    for (k = 0; k < n; k++) {
+        pd_sp at = horiz ? y + off[k] : x + off[k];
+
+        if (l->style == PD_LINE_DOTTED || l->style == PD_LINE_DASHED || l->style == PD_LINE_DOT_DASH) {
+            pd_sp dot = th[k] > PD_PT(0.5) ? th[k] : PD_PT(0.5), d, pos = 0;
+            int32_t i = 0;
+
+            while (pos < len && i < 100000) {   /* dashes three dots long, a dot apart */
+                d = l->style == PD_LINE_DOTTED ? dot : l->style == PD_LINE_DASHED ? 3 * dot : (i % 2 ? dot : 3 * dot);
+                d = pos + d > len ? len - pos : d;
+
+                if (horiz) {
+                    fn(ctx, x + pos, at, d, th[k], l->color);
+                } else {
+                    fn(ctx, at, y + pos, th[k], d, l->color);
+                }
+
+                pos += d + (l->style == PD_LINE_DOTTED ? dot : 2 * dot);
+                i++;
+            }
+        } else if (horiz) {
+            fn(ctx, x, at, len, th[k], l->color);
+        } else {
+            fn(ctx, at, y, th[k], len, l->color);
+        }
+    }
+}
+
+typedef struct {
+    pd_layout* L;
+    int32_t page, region;
+    pd_block_id block;
+} rule_ctx;
+
+static void stroke_rule(void* ctx, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color) {
+    rule_ctx* c = (rule_ctx*)ctx;
+
+    add_rule(c->L, c->page, x, y, w, h, color, c->region, c->block);
+}
+
+/* a border line as rules of a page (line_strokes) */
+static void border_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l,
+                        int horiz, int outer, int32_t region, pd_block_id block) {
+    rule_ctx c;
+
+    c.L = L;
+    c.page = page;
+    c.region = region;
+    c.block = block;
+    line_strokes(x, y, w, h, l, horiz, outer, stroke_rule, &c);
+}
+
+/* the rules a page got from FROM on moved to AT, before those there (under what is drawn after them) */
+static void rules_to_front(pd_layout* L, int32_t page, int32_t from, int32_t at) {
+    ppage* p = &L->pages[page];
+    int32_t n = p->nrules - from;
+    prule* tmp;
+
+    if (n <= 0 || from <= at || (tmp = (prule*)malloc((size_t)n * sizeof(prule))) == NULL) {
+        return;
+    }
+
+    memcpy(tmp, p->rules + from, (size_t)n * sizeof(prule));
+    memmove(p->rules + at + n, p->rules + at, (size_t)(from - at) * sizeof(prule));
+    memcpy(p->rules + at, tmp, (size_t)n * sizeof(prule));
+    free(tmp);
+}
+
+/* A page's colour, its section's page borders and the lines between its columns */
+static void page_frame(pd_layout* L, int32_t page) {
+    ppage* pg = &L->pages[page];
+    const pd_section_props* sp = pg->sp;
+    int32_t n0 = pg->nrules, i, f = sp->page_border_flags;
+    const pd_border_line* b = sp->page_border;
+
+    if (sp->page_color && add_rule(L, page, 0, 0, pg->w, pg->h, sp->page_color, 0, pg->section) == 0) {
+        rules_to_front(L, page, n0, 0);     /* under everything */
+        n0 = pg->nrules;
+    }
+
+    if ((b[0].style || b[1].style || b[2].style || b[3].style) && !((f & PD_PGBORDER_FIRST) && pg->section_index > 0) &&
+            !((f & PD_PGBORDER_NOT_FIRST) && pg->section_index == 0)) {
+        pd_sp t[4], x0, y0, x1, y1;
+
+        for (i = 0; i < 4; i++) {
+            t[i] = line_thickness(&b[i]);
+        }
+
+        if (f & PD_PGBORDER_FROM_TEXT) {    /* outside the text by each one's space */
+            x0 = pg->text_x - b[3].space - t[3];
+            x1 = pg->text_x + pg->text_w + b[1].space + t[1];
+            y0 = sp->margin_top - b[0].space - t[0];
+            y1 = pg->h - sp->margin_bottom + b[2].space + t[2];
+        } else {    /* in from the page's edges */
+            x0 = b[3].space;
+            x1 = pg->w - b[1].space;
+            y0 = b[0].space;
+            y1 = pg->h - b[2].space;
+        }
+
+        if (b[0].style) {
+            border_band(L, page, x0, y0, x1 - x0, t[0], &b[0], 1, 1, 0, pg->section);
+        }
+
+        if (b[2].style) {
+            border_band(L, page, x0, y1 - t[2], x1 - x0, t[2], &b[2], 1, 0, 0, pg->section);
+        }
+
+        if (b[3].style) {
+            border_band(L, page, x0, y0, t[3], y1 - y0, &b[3], 0, 1, 0, pg->section);
+        }
+
+        if (b[1].style) {
+            border_band(L, page, x1 - t[1], y0, t[1], y1 - y0, &b[1], 0, 0, 0, pg->section);
+        }
+
+        if (f & PD_PGBORDER_BEHIND) {   /* under the text, over the colour */
+            rules_to_front(L, page, n0, sp->page_color ? 1 : 0);
+        }
+    }
+
+    if (sp->column_rule && sp->columns > 1) {   /* between the columns, as far down as the text goes */
+        pd_sp top = INT32_MAX, bottom = INT32_MIN, colw;
+
+        for (i = 0; i < pg->n; i++) {
+            if (pg->lines[i].region == 0) {
+                top = pg->lines[i].top < top ? pg->lines[i].top : top;
+                bottom = pg->lines[i].bottom > bottom ? pg->lines[i].bottom : bottom;
+            }
+        }
+
+        colw = (pg->text_w - (sp->columns - 1) * sp->column_gap) / sp->columns;
+
+        for (i = 1; top < bottom && i < sp->columns; i++) {
+            add_rule(L, page, pg->text_x + i * (colw + sp->column_gap) - sp->column_gap / 2 - PD_PT(0.25), top,
+                     PD_PT(0.5), bottom - top, 0xFF000000u, 0, pg->section);
+        }
+    }
+}
+
+/* a line corner to corner across the box x, y, w by h (diag 1: from top left, 2: from top right), lw wide */
+static void add_diag(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, int32_t diag, pd_sp lw,
+                     uint32_t color, int32_t region, pd_block_id block) {
+    if (lw > 0 && add_rule(L, page, x, y, w, h, color, region, block) == 0) {
+        L->pages[page].rules[L->pages[page].nrules - 1].diag = diag;
+        L->pages[page].rules[L->pages[page].nrules - 1].lw = lw;
+    }
 }
 
 static void place_stack(pd_layout* L, pd_block_id container, pd_sp width, int32_t page, pd_sp x, pd_sp y,
@@ -631,6 +874,12 @@ static int add_line(pd_layout* L, int32_t page, pcache* pc, int32_t line, pd_sp 
     l->rot = region == 5 && L->dtext_depth > 0 ? L->dtext_rot : 0;
     l->rx = L->dtext_rx;
     l->ry = L->dtext_ry;
+
+    if (!l->rot && L->turn_rot) {
+        l->rot = L->turn_rot;
+        l->rx = L->turn_rx;
+        l->ry = L->turn_ry;
+    }
 
     if (region == 0 || region == 3 || region == 4) {
         blk* b = pd_doc_blk(L->doc, pc->block);
@@ -830,8 +1079,11 @@ static pd_sp para_gap(const pd_doc* d, pd_block_id prev, pd_sp prev_after, pd_bl
     const pd_section_props* sp = section_of(d, cur);
     pd_sp before = pp->space_before, room = 0;
     pd_para_props ap;
-    int top = pp->border_color && pp->border_width > 0 &&
-              (!pp->border_sides || (pp->border_sides & PD_BORDER_TOP));
+    pd_border_line bl[6], al[6];
+    int top;
+
+    para_lines(pp, bl);
+    top = bl[0].style != PD_LINE_NONE;
 
     if (a && b && a->kind == PD_BLOCK_PARAGRAPH) {
         pd_style_id normal = pd_doc_style_find(d, "Normal");
@@ -848,15 +1100,17 @@ static pd_sp para_gap(const pd_doc* d, pd_block_id prev, pd_sp prev_after, pd_bl
         }
 
         /* borders take room: a box's top and bottom edges and their space, a rule between */
+        para_lines(&ap, al);
+
         if (has_box(&ap) && same_box(&ap, pp)) {
             top = 0;
-            room = (pp->border_sides & PD_BORDER_BETWEEN) && pp->border_color ? pp->border_width : 0;
-        } else if (ap.border_color && ap.border_width > 0 && (!ap.border_sides || (ap.border_sides & PD_BORDER_BOTTOM))) {
-            room = ap.border_width + ap.border_space;
+            room = line_room(&bl[PD_BORDER_LINE_BETWEEN]);
+        } else {
+            room = line_room(&al[2]);
         }
     }
 
-    room += top ? pp->border_width + pp->border_space : 0;
+    room += top ? line_room(&bl[0]) : 0;
     return room + (sp && sp->add_spacing ? before + prev_after : before > prev_after ? before : prev_after);
 }
 
@@ -1403,17 +1657,71 @@ static int row_alone(const pd_doc* d, const ptable* T, const blk* t, int32_t r) 
     return 1;
 }
 
-/* some cell of a row has its content in the middle or at the bottom (which slices of it would not keep) */
+/* some cell of a row has its content in the middle or at the bottom, or turned (which slices of it would not keep) */
 static int row_valigned(const pd_doc* d, const blk* row) {
     int32_t k;
 
     for (k = 0; k < row->nkids; k++) {
-        if (d->tab[row->kids[k]]->st.cell.valign) {
+        if (d->tab[row->kids[k]]->st.cell.valign || d->tab[row->kids[k]]->st.cell.text_dir) {
             return 1;
         }
     }
 
     return 0;
+}
+
+/* The length of the lines of a cell whose text is turned: what is left of its row's height, when that is set,
+   else the length of its longest line unbroken */
+static pd_sp cell_vlen(pd_layout* L, const blk* cell, pd_sp padv) {
+    const blk* row = pd_doc_blk(L->doc, cell->parent);
+    pd_sp h = row && row->st.row.height_exact ? row->st.row.height : cell->st.cell.min_height, a, b;
+
+    if (h > 2 * padv + PD_PT(1)) {
+        return h - 2 * padv;
+    }
+
+    cell_minmax(L, cell->id, &a, &b);
+    return b + PD_PT(0.5) > PD_PT(1) ? b + PD_PT(0.5) : PD_PT(1);
+}
+
+/* how far a cell's turned text is across it: its lines' stack, laid out cell_vlen long */
+static pd_sp cell_across(pd_layout* L, const blk* cell, pd_sp padv) {
+    pd_status st;
+    pd_sp h = stack_height(L, cell->id, cell_vlen(L, cell, padv), &st);
+
+    return h > 0 ? h : 0;
+}
+
+/* A cell's turned text placed in its box (x, y, w by h, padding pad and padv): its lines laid out cell_vlen long,
+   turned a quarter, and set in the box by the cell's alignment (top: its first line at the box's left for btLr,
+   at its right for tbRl) */
+static void place_turned(pd_layout* L, const blk* cell, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, pd_sp pad,
+                         pd_sp padv, int32_t region) {
+    pd_sp v = cell_vlen(L, cell, padv), across = cell_across(L, cell, padv), room = w - 2 * pad - across, cx, cy;
+    int32_t rot0 = L->turn_rot;
+    pd_sp rx0 = L->turn_rx, ry0 = L->turn_ry;
+    int up = cell->st.cell.text_dir == PD_CELLTEXT_BTLR, cut = room < 0;
+
+    if (cut) {  /* more lines than the cell is wide: those past its far side cut off */
+        across = w - 2 * pad > 0 ? w - 2 * pad : 0;
+    }
+
+    room = room > 0 ? room : 0;
+    room = cell->st.cell.valign == 1 ? room / 2 : cell->st.cell.valign == 2 ? room : 0;
+    cx = up ? x + pad + room + across / 2 : x + w - pad - room - across / 2;
+    cy = y + h / 2;
+    L->turn_rot = up ? 16200000 : 5400000;
+    L->turn_rx = cx;
+    L->turn_ry = cy;
+    if (cut) {
+        place_stack_clip(L, cell->id, v, page, cx - v / 2, cy - across / 2, 0, across, 1, region);
+    } else {
+        place_stack(L, cell->id, v, page, cx - v / 2, cy - across / 2, region);
+    }
+
+    L->turn_rot = rot0;
+    L->turn_rx = rx0;
+    L->turn_ry = ry0;
 }
 
 /* Where a row of height rowh may be cut: the ends of its tallest cell's lines (from the row's top) that no line of
@@ -1532,7 +1840,7 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
     pd_sp* mn, *mx, *w, *pref, avail, fixed = 0;
     int64_t smin = 0, smax = 0;
     int32_t r, k, c, j, pass, nauto = 0;
-    pd_sp pad = tp->cell_padding;
+    pd_sp pad = tp->cell_padding + tp->cell_spacing;   /* (cells apart: the room around one is like padding) */
 
     memset(T, 0, sizeof(*T));
     T->block = t->id;
@@ -1591,7 +1899,12 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
                     continue;
                 }
 
-                cell_minmax(L, cell->id, &a, &b);
+                if (cell->st.cell.text_dir) {   /* turned: as wide as its lines' stack */
+                    a = b = cell_across(L, cell, tp->cell_padding_v >= 0 ? tp->cell_padding_v + tp->cell_spacing : pad);
+                } else {
+                    cell_minmax(L, cell->id, &a, &b);
+                }
+
                 a += 2 * pad;
                 b += 2 * pad;
 
@@ -1682,6 +1995,9 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
     pd_sp pad = tp->cell_padding, padv = tp->cell_padding_v >= 0 ? tp->cell_padding_v : pad;
     pd_status st = PD_OK;
 
+    pad += tp->cell_spacing;
+    padv += tp->cell_spacing;
+
     table_grid(F->L, t, F->colw, &T);
 
     if (T.ncols == 0) {
@@ -1731,7 +2047,8 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
                     continue;
                 }
 
-                h = stack_height(F->L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, &st);
+                h = cell->st.cell.text_dir ? cell_vlen(F->L, cell, padv) :
+                    stack_height(F->L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, &st);
 
                 if (h < 0) {
                     return st;
@@ -2036,8 +2353,8 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
 
             f->item = F->n;
 
-            if (f->fp.offset_from != PD_FROM_PARAGRAPH && f->fp.wrap < PD_WRAP_FRONT) {
-                f->fp.offset_y = 0;     /* text round it: where it is anchored (the page's top is not known here) */
+            if (f->fp.offset_from != PD_FROM_PARAGRAPH && f->fp.wrap == PD_WRAP_NONE) {
+                f->fp.offset_y = 0;     /* text above and below: where it is anchored */
             } else if (f->fp.offset_from != PD_FROM_PARAGRAPH) {
                 /* from the page's top (or its margin): that far below where it was anchored the last time, a
                    second pass when that is not known yet */
@@ -2328,6 +2645,9 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
     pd_sp* rowh;
     int32_t r, k, c;
 
+    pad += t->st.tp.cell_spacing;
+    padv += t->st.tp.cell_spacing;
+
     table_grid(L, t, width, &T);
     T.block = t->id;
 
@@ -2352,7 +2672,8 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                 continue;
             }
 
-            ch = stack_walk(L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, 0, 0, 0, 0, 0, st);
+            ch = cell->st.cell.text_dir ? cell_vlen(L, cell, padv) :
+                 stack_walk(L, cell->id, inner < PD_PT(1) ? PD_PT(1) : inner, 0, 0, 0, 0, 0, st);
 
             if (ch < 0) {
                 free(rowh);
@@ -2395,7 +2716,9 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                 add_rule(L, page, cx, ry, cw, rowh[r], cell_fill(L->doc, cell), region, cell->id);
             }
 
-            if (!cell->st.cell.merge_up) {
+            if (!cell->st.cell.merge_up && cell->st.cell.text_dir) {
+                place_turned(L, cell, page, cx, ry, cw, rowh[r], pad, padv, region);
+            } else if (!cell->st.cell.merge_up) {
                 ch = stack_walk(L, cell->id, inner, 0, 0, 0, 0, 0, st);
                 off = cell->st.cell.valign == 1 ? (rowh[r] - 2 * padv - ch) / 2 : cell->st.cell.valign == 2 ?
                       rowh[r] - 2 * padv - ch : 0;
@@ -2406,6 +2729,17 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                                      1, region);
                 } else {
                     stack_walk(L, cell->id, inner, 1, page, cx + pad, ry + padv + off, region, st);
+                }
+            }
+
+            if (!cell->st.cell.merge_up) {     /* corner to corner */
+                pd_cell_props dp;
+                int e;
+
+                pd_doc_cell_effective(d, cell, &dp);
+
+                for (e = 0; e < 2; e++) {
+                    add_diag(L, page, cx, ry, cw, rowh[r], e + 1, dp.diag_width[e], dp.diag_color[e], region, cell->id);
                 }
             }
 
@@ -2450,6 +2784,60 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
     return h;
 }
 
+/* The rules of a cell of a table whose cells are apart (cell_spacing): its own box, inset by the spacing (top and
+   bot: how far, 0 for a slice's cut edge), its edges its own or the table's inner rules; and the part of the
+   table's frame beside it, its outer rules */
+static void spaced_rules(filler* F, const ptable* T, const blk* row, const blk* cell, int32_t c, int32_t span,
+                         int32_t k, pd_sp cx, pd_sp y, pd_sp cw, pd_sp h, pd_sp top, pd_sp bot, int first, int last) {
+    pd_sp sp = T->tp.cell_spacing, bw;
+    pd_sp bx = cx + sp, bwid = cw - 2 * sp, by = y + top, bh = h - top - bot;
+    uint32_t bc;
+
+    if (cell->st.cell.merge_up) {
+        return;
+    }
+
+    bw = edge_rule(T, cell, PD_BORDER_LEFT, NULL, 0, PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, 0, &bc);
+    add_rule(F->L, F->page, bx, by, bw, bh, bc, 0, cell->id);
+    bw = edge_rule(T, cell, PD_BORDER_RIGHT, NULL, 0, PD_TBORDER_RIGHT, PD_TBORDER_INSIDE_V, 0, &bc);
+    add_rule(F->L, F->page, bx + bwid - bw, by, bw, bh, bc, 0, cell->id);
+
+    if (top) {
+        bw = edge_rule(T, cell, PD_BORDER_TOP, NULL, 0, PD_TBORDER_TOP, PD_TBORDER_INSIDE_H, 0, &bc);
+        add_rule(F->L, F->page, bx, by, bwid, bw, bc, 0, cell->id);
+    }
+
+    if (bot) {
+        bw = edge_rule(T, cell, PD_BORDER_BOTTOM, NULL, 0, PD_TBORDER_BOTTOM, PD_TBORDER_INSIDE_H, 0, &bc);
+        add_rule(F->L, F->page, bx, by + bh - bw, bwid, bw, bc, 0, cell->id);
+    }
+
+    /* the frame: the table's outer rules, not a cell's */
+    bw = edge_rule(T, NULL, 0, NULL, 0, PD_TBORDER_LEFT, 0, 1, &bc);
+
+    if (c == row_c0(row) && bw > 0) {
+        add_rule(F->L, F->page, cx, y, bw, h, bc, 0, cell->id);
+    }
+
+    bw = edge_rule(T, NULL, 0, NULL, 0, PD_TBORDER_RIGHT, 0, 1, &bc);
+
+    if ((c + span >= T->ncols || k + 1 == row->nkids) && bw > 0) {
+        add_rule(F->L, F->page, cx + cw - bw, y, bw, h, bc, 0, cell->id);
+    }
+
+    bw = edge_rule(T, NULL, 0, NULL, 0, PD_TBORDER_TOP, 0, 1, &bc);
+
+    if (first && top && bw > 0) {
+        add_rule(F->L, F->page, cx, y, cw, bw, bc, 0, cell->id);
+    }
+
+    bw = edge_rule(T, NULL, 0, NULL, 0, PD_TBORDER_BOTTOM, 0, 1, &bc);
+
+    if (last && bot && bw > 0) {
+        add_rule(F->L, F->page, cx, y + h - bw, cw, bw, bc, 0, cell->id);
+    }
+}
+
 /* one table row: cell backgrounds, contents and grid rules */
 static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
     const pd_doc* d = F->L->doc;
@@ -2459,12 +2847,16 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
     const blk* next = t && v->line + 1 < t->nkids ? d->tab[t->kids[v->line + 1]] : NULL;
     const blk* prev = t && v->line > 0 ? d->tab[t->kids[v->line - 1]] : NULL;
     pd_sp pad = T->tp.cell_padding, padv = T->tp.cell_padding_v >= 0 ? T->tp.cell_padding_v : pad, tx = x + T->x;
+    pd_sp sp = T->tp.cell_spacing, top = v->part <= 1 ? sp : 0, bot = v->part == 0 || v->part == 3 ? sp : 0;
     int32_t k, c = 0;
     pd_status st;
 
     if (!row) {
         return;
     }
+
+    pad += sp;
+    padv += sp;
 
     for (k = 0, c = row_c0(row); k < row->nkids && c < T->ncols; k++) {
         const blk* cell = d->tab[row->kids[k]];
@@ -2483,14 +2875,23 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
         if (v->part && !cell->st.cell.merge_up) {     /* a slice: the lines that start in it, from the top */
             if (cell_fill(F->L->doc, cell)) {
-                add_rule(F->L, F->page, cx, y, cw, v->h, cell_fill(F->L->doc, cell), 0, cell->id);
+                add_rule(F->L, F->page, cx + sp, y + top, cw - 2 * sp, v->h - top - bot, cell_fill(F->L->doc, cell), 0,
+                         cell->id);
             }
 
             place_stack_clip(F->L, cell->id, inner, F->page, cx + pad, y - v->from + padv, v->from - padv,
                              v->from - padv + v->h, 0, 0);
+        } else if (!cell->st.cell.merge_up && cell->st.cell.text_dir) {
+            if (cell_fill(F->L->doc, cell)) {
+                add_rule(F->L, F->page, cx + sp, y + sp, cw - 2 * sp, ch - 2 * sp, cell_fill(F->L->doc, cell), 0,
+                         cell->id);
+            }
+
+            place_turned(F->L, cell, F->page, cx, y, cw, ch, pad, padv, 0);
         } else if (!cell->st.cell.merge_up) {
             if (cell_fill(F->L->doc, cell)) {
-                add_rule(F->L, F->page, cx, y, cw, ch, cell_fill(F->L->doc, cell), 0, cell->id);
+                add_rule(F->L, F->page, cx + sp, y + sp, cw - 2 * sp, ch - 2 * sp, cell_fill(F->L->doc, cell), 0,
+                         cell->id);
             }
 
             h = stack_height(F->L, cell->id, inner, &st);
@@ -2508,6 +2909,23 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
             } else {
                 place_stack(F->L, cell->id, inner, F->page, cx + pad, y + padv + (off > 0 ? off : 0), 0);
             }
+        }
+
+        if (!cell->st.cell.merge_up && v->part == 0) {     /* corner to corner */
+            pd_cell_props dp;
+            int e;
+
+            pd_doc_cell_effective(d, cell, &dp);
+
+            for (e = 0; e < 2; e++) {
+                add_diag(F->L, F->page, cx, y, cw, ch, e + 1, dp.diag_width[e], dp.diag_color[e], 0, cell->id);
+            }
+        }
+
+        if (sp > 0) {   /* cells apart: each its own box of rules, the table's frame round them all */
+            spaced_rules(F, T, row, cell, c, span, k, cx, y, cw, v->h, top, bot, v->line == 0, !next);
+            c += span;
+            continue;
         }
 
         /* left edge: every cell's; right edge: the last one's (the next cell's left is the rest) */
@@ -3799,6 +4217,18 @@ static pd_status paginate(pd_layout* L) {
             }
         }
 
+        /* starting on an odd (or even) page: a blank one first, the previous section's, when the next is not */
+        if (s > 0 && F.floor_page < 0 && L->npages > 0 && (F.sp->start == PD_BREAK_ODD_PAGE ||
+                F.sp->start == PD_BREAK_EVEN_PAGE) && (F.number % 2 == 0) == (F.sp->start == PD_BREAK_ODD_PAGE)) {
+            if (!new_page(L, d->tab[root->kids[s - 1]], number, L->pages[L->npages - 1].section_index + 1)) {
+                st = PD_ERR_NOMEM;
+                break;
+            }
+
+            F.number += F.sp->first_page_number > 0 ? 0 : 1;
+            number++;
+        }
+
         st = rebuild_flow(&F);
 
         if (st == PD_OK && F.sp->page_breaking == PD_PAGES_OPTIMAL) {
@@ -3844,6 +4274,7 @@ static pd_status paginate(pd_layout* L) {
 
         place_story(L, i, first_page ? sp->header_first : even ? sp->header_even : sp->header, 0);
         place_story(L, i, first_page ? sp->footer_first : even ? sp->footer_even : sp->footer, 1);
+        page_frame(L, i);
     }
 
     return st;
@@ -4619,14 +5050,28 @@ static void emit_leaders(const pd_layout* L, dlist_t* D, const pline* l, const p
 
 /* a paragraph border or shading */
 static int has_box(const pd_para_props* pp) {
-    return (pp->border_color && pp->border_width > 0) || pp->shading;
+    pd_border_line l[6];
+    int k;
+
+    para_lines(pp, l);
+
+    for (k = 0; k < 6; k++) {
+        if (l[k].style != PD_LINE_NONE) {
+            return 1;
+        }
+    }
+
+    return pp->shading != 0;
 }
 
 /* paragraphs one after another that share one box */
 static int same_box(const pd_para_props* a, const pd_para_props* b) {
-    return a->border_color == b->border_color && a->border_width == b->border_width &&
-           a->border_sides == b->border_sides && a->border_space == b->border_space && a->shading == b->shading &&
-           a->indent_left == b->indent_left && a->indent_right == b->indent_right;
+    pd_border_line la[6], lb[6];
+
+    para_lines(a, la);
+    para_lines(b, lb);
+    return memcmp(la, lb, sizeof(la)) == 0 && a->shading == b->shading && a->indent_left == b->indent_left &&
+           a->indent_right == b->indent_right;
 }
 
 static void emit_rect(dlist_t* D, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color, pd_block_id block, int32_t region) {
@@ -5893,6 +6338,18 @@ static int emit_drawing(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, 
     return emit_drawing_at(L, D, res, x, y, w, h, block, off, region, 0);
 }
 
+typedef struct {
+    dlist_t* D;
+    pd_block_id block;
+    int32_t region;
+} emit_ctx;
+
+static void stroke_emit(void* ctx, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t color) {
+    emit_ctx* c = (emit_ctx*)ctx;
+
+    emit_rect(c->D, x, y, w, h, color, c->block, c->region);
+}
+
 /* Paragraph shading and borders, under the text: one box round the lines of
    paragraphs that share it, its top edge only where the first of them
    starts and its bottom where the last ends (a box broken by the page stays
@@ -5920,9 +6377,10 @@ static void emit_para_boxes(dlist_t* D, const ppage* p) {
         const pline* l = &p->lines[i];
         const pd_para_props* pp;
         const pline* e;
-        pd_sp x0, x1, y0, y1, bw;
-        int sides;
-        uint32_t bc;
+        pd_sp x0, x1, y0, y1, t[6];
+        pd_border_line bl[6];
+        emit_ctx ec;
+        int first, last;
 
         if (!l->pc || l->line < 0 || !has_box(&l->pc->pp)) {
             i++;
@@ -5942,42 +6400,57 @@ static void emit_para_boxes(dlist_t* D, const ppage* p) {
         }
 
         e = &p->lines[j - 1];
-        sides = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM | PD_BORDER_LEFT;
-        bw = pp->border_color ? pp->border_width : 0;
-        bc = pp->border_color;
-        x0 = l->ox + pp->indent_left - ((sides & PD_BORDER_LEFT) && bw ? pp->border_space : 0);
-        x1 = l->ox + l->pc->width - pp->indent_right + ((sides & PD_BORDER_RIGHT) && bw ? pp->border_space : 0);
-        y0 = l->top - (l->line == 0 && (sides & PD_BORDER_TOP) && bw ? pp->border_space : 0);
-        y1 = e->bottom + (e->line == e->pc->nlines - 1 && (sides & PD_BORDER_BOTTOM) && bw ? pp->border_space : 0);
+        para_lines(pp, bl);
+
+        for (k = 0; k < 6; k++) {
+            t[k] = bl[k].style != PD_LINE_NONE ? line_thickness(&bl[k]) : 0;
+        }
+
+        first = l->line == 0;
+        last = e->line == e->pc->nlines - 1;
+        x0 = l->ox + pp->indent_left - (t[3] ? bl[3].space : 0);
+        x1 = l->ox + l->pc->width - pp->indent_right + (t[1] ? bl[1].space : 0);
+        y0 = l->top - (first && t[0] ? bl[0].space : 0);
+        y1 = e->bottom + (last && t[2] ? bl[2].space : 0);
+        ec.D = D;
+        ec.block = l->pc->block;
+        ec.region = l->region;
 
         if (pp->shading) {
             emit_rect(D, x0, y0, x1 - x0, y1 - y0, pp->shading, l->pc->block, l->region);
         }
 
-        if (bw > 0) {
-            pd_sp lx = x0 - ((sides & PD_BORDER_LEFT) ? bw : 0), rx = x1 + ((sides & PD_BORDER_RIGHT) ? bw : 0);
+        {
+            pd_sp lx = x0 - t[3], rx = x1 + t[1];
 
-            if ((sides & PD_BORDER_TOP) && l->line == 0) {
-                emit_rect(D, lx, y0 - bw, rx - lx, bw, bc, l->pc->block, l->region);
+            if (t[0] && first) {
+                line_strokes(lx, y0 - t[0], rx - lx, t[0], &bl[0], 1, 1, stroke_emit, &ec);
             }
 
-            if ((sides & PD_BORDER_BOTTOM) && e->line == e->pc->nlines - 1) {
-                emit_rect(D, lx, y1, rx - lx, bw, bc, l->pc->block, l->region);
+            if (t[2] && last) {
+                line_strokes(lx, y1, rx - lx, t[2], &bl[2], 1, 0, stroke_emit, &ec);
             }
 
-            if (sides & PD_BORDER_LEFT) {
-                emit_rect(D, x0 - bw, y0, bw, y1 - y0, bc, l->pc->block, l->region);
+            if (t[3]) {
+                line_strokes(x0 - t[3], y0, t[3], y1 - y0, &bl[3], 0, 1, stroke_emit, &ec);
             }
 
-            if (sides & PD_BORDER_RIGHT) {
-                emit_rect(D, x1, y0, bw, y1 - y0, bc, l->pc->block, l->region);
+            if (t[1]) {
+                line_strokes(x1, y0, t[1], y1 - y0, &bl[1], 0, 0, stroke_emit, &ec);
             }
 
-            for (k = i + 1; (sides & PD_BORDER_BETWEEN) && k < j; k++) {
+            if (t[PD_BORDER_LINE_BAR]) {    /* a bar left of the text, its space from it */
+                line_strokes(l->ox + pp->indent_left - bl[PD_BORDER_LINE_BAR].space - t[PD_BORDER_LINE_BAR], y0,
+                             t[PD_BORDER_LINE_BAR], y1 - y0, &bl[PD_BORDER_LINE_BAR], 0, 1, stroke_emit, &ec);
+            }
+
+            for (k = i + 1; t[PD_BORDER_LINE_BETWEEN] && k < j; k++) {
                 const pline* a = &p->lines[k - 1], *b = &p->lines[k];
 
                 if (a->pc->block != b->pc->block) {     /* half way between the two */
-                    emit_rect(D, x0, (a->bottom + b->top - bw) / 2, x1 - x0, bw, bc, b->pc->block, b->region);
+                    ec.block = b->pc->block;
+                    line_strokes(x0, (a->bottom + b->top - t[PD_BORDER_LINE_BETWEEN]) / 2, x1 - x0,
+                                 t[PD_BORDER_LINE_BETWEEN], &bl[PD_BORDER_LINE_BETWEEN], 1, 1, stroke_emit, &ec);
                 }
             }
         }
@@ -6374,6 +6847,18 @@ static void emit_rules(dlist_t* D, const ppage* pg, int32_t from, int32_t to, in
         pd_draw a;
 
         if ((only == 5 && r->region != 5) || (only == 0 && r->region == 5)) {
+            continue;
+        }
+
+        if (r->diag) {
+            pd_sp q[4] = { r->x, r->y, r->x + r->w, r->y + r->h };
+
+            if (r->diag == 2) {
+                q[0] = r->x + r->w;
+                q[2] = r->x;
+            }
+
+            emit_path(D, q, 2, 0, 0, r->color, r->lw, r->block, r->region);
             continue;
         }
 

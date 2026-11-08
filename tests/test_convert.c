@@ -8471,6 +8471,384 @@ static void test_chart_kinds(void) {
     free(js);
 }
 
+/* the first two glyphs drawn of the paragraph holding s, on page 0: 1 if there are two */
+static int two_glyphs(const pd_doc* d, const pd_layout* L, const char* s, pd_draw* g) {
+    pd_block_id p = find_para(d, s);
+    int32_t k, n, got = 0;
+    pd_draw* it = page_draws(L, 0, &n);
+
+    for (k = 0; it && k < n && got < 2; k++) {
+        if (it[k].kind == PD_DRAW_GLYPH && it[k].block == p) {
+            g[got++] = it[k];
+        }
+    }
+
+    free(it);
+    return got == 2;
+}
+
+/* Text turned in a cell (w:textDirection): btLr runs up the cell, its glyphs turned a quarter left, tbRl runs
+   down, turned a quarter right, each within its cell; also after .docx and native round trips */
+static void test_cell_text_dir(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblGrid><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"1000\"/></w:tblGrid><w:tr>"
+                             "<w:trPr><w:trHeight w:val=\"2000\" w:hRule=\"exact\"/></w:trPr>"
+                             "<w:tc><w:tcPr><w:textDirection w:val=\"btLr\"/></w:tcPr><w:p><w:r><w:t>UPWARD</w:t></w:r>"
+                             "</w:p></w:tc><w:tc><w:tcPr><w:textDirection w:val=\"tbRl\"/></w:tcPr><w:p><w:r><w:t>"
+                             "DOWNWARD</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>below</w:t></w:r></w:p>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            pd_draw u[2], w[2];
+            int32_t pg;
+            pd_sp bx, by;
+
+            CHECK(two_glyphs(d, L, "UPWARD", u) && two_glyphs(d, L, "DOWNWARD", w) &&
+                  text_drawn(d, L, "below", &pg, &bx, &by));
+            CHECK(u[0].rotation == 16200000 && u[1].y < u[0].y - PD_PT(4) && u[1].x == u[0].x);
+            CHECK(w[0].rotation == 5400000 && w[1].y > w[0].y + PD_PT(4) && w[1].x == w[0].x);
+            CHECK(u[0].x > bx && u[0].x < bx + PD_PT(50) && w[0].x > bx + PD_PT(50) && w[0].x < bx + PD_PT(100));
+            CHECK(u[0].y < by && w[0].y < by - PD_PT(20));      /* in the row, above the next paragraph */
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
+/* Rules corner to corner across a cell (tl2br, tr2bl): a line from its top left to its bottom right in the first
+   colour, one from top right to bottom left in the second, also after .docx and native round trips */
+static void test_cell_diagonals(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblGrid><w:gridCol w:w=\"3000\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcBorders>"
+                             "<w:tl2br w:val=\"single\" w:sz=\"8\" w:color=\"FF0000\"/>"
+                             "<w:tr2bl w:val=\"single\" w:sz=\"8\" w:color=\"0000FF\"/></w:tcBorders></w:tcPr>"
+                             "<w:p><w:r><w:t>X</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, down = 0, up = 0;
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                const pd_sp* q = it[k].points;
+
+                if (it[k].kind != PD_DRAW_PATH || it[k].npoints != 2 || it[k].line_width != PD_PT(1)) {
+                    continue;
+                }
+
+                down += it[k].color == 0xFFFF0000u && q[0] < q[2] - PD_PT(140) && q[1] < q[3] - PD_PT(5);
+                up += it[k].color == 0xFF0000FFu && q[0] > q[2] + PD_PT(140) && q[1] < q[3] - PD_PT(5);
+            }
+
+            CHECK(down == 1 && up == 1);
+            free(it);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
+/* Cells apart (tblCellSpacing): each cell its own box of rules, 5pt in from the table's frame and 10pt from the
+   next cell, so a row shows six upright rules where shared edges would show three; also after .docx and native
+   round trips, and HTML spaces its cells */
+static void test_cell_spacing(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblPr><w:tblCellSpacing w:w=\"100\" w:type=\"dxa\"/><w:tblBorders>"
+                             "<w:top w:val=\"single\" w:sz=\"4\"/><w:left w:val=\"single\" w:sz=\"4\"/>"
+                             "<w:bottom w:val=\"single\" w:sz=\"4\"/><w:right w:val=\"single\" w:sz=\"4\"/>"
+                             "<w:insideH w:val=\"single\" w:sz=\"4\"/><w:insideV w:val=\"single\" w:sz=\"4\"/>"
+                             "</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w=\"3000\"/><w:gridCol w:w=\"3000\"/>"
+                             "</w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B"
+                             "</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, j, nx = 0;
+            pd_sp xs[16];
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind == PD_DRAW_RULE && it[k].h > PD_PT(5) && it[k].w < PD_PT(2)) {
+                    for (j = 0; j < nx && xs[j] != it[k].x; j++) {
+                    }
+
+                    if (j == nx && nx < 16) {
+                        xs[nx++] = it[k].x;
+                    }
+                }
+            }
+
+            CHECK(nx == 6);
+            free(it);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    if (d) {
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK && b.p && strstr(b.p, "border-spacing:10.00pt"));
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
+/* A floating table (w:tblpPr) 350pt from the page's left and 100pt from its top: drawn there, with the text
+   beside it on its left and none running under it; also after .docx and native round trips */
+static void test_floating_table(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblPr><w:tblpPr w:leftFromText=\"180\" w:rightFromText=\"180\" "
+                             "w:vertAnchor=\"page\" w:horzAnchor=\"page\" w:tblpX=\"7000\" w:tblpY=\"2000\"/>"
+                             "<w:tblW w:w=\"2500\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"2500\"/>"
+                             "</w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>FLOATING</w:t></w:r></w:p><w:p><w:r><w:t>two"
+                             "</w:t></w:r></w:p><w:p><w:r><w:t>three</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+                             "<w:p><w:r><w:t>Body text beside the table and on below it, Body text beside the table and "
+                             "on below it, Body text beside the table and on below it, Body text beside the table and on "
+                             "below it, Body text beside the table and on below it, Body text beside the table and on "
+                             "below it, Body text beside the table and on below it.</w:t></w:r></w:p>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pg, n, k, beside = 0, under = 0;
+            pd_sp x, y;
+            pd_block_id body = find_para(d, "Body text");
+            pd_draw* it = page_draws(L, 0, &n);
+
+            CHECK(text_drawn(d, L, "FLOATING", &pg, &x, &y) && pg == 0);
+            CHECK(x > PD_PT(350) && x < PD_PT(360) && y > PD_PT(100) && y < PD_PT(120));
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind == PD_DRAW_GLYPH && it[k].block == body && it[k].y > PD_PT(102) &&
+                        it[k].y < PD_PT(140)) {
+                    beside += it[k].x < PD_PT(330);
+                    under += it[k].x >= PD_PT(330);
+                }
+            }
+
+            CHECK(beside > 10 && under == 0);
+            free(it);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
+/* Page features of a section: the pages' colour under everything, a page border 24pt in from the edge, a line
+   between two columns, and a section that starts on an odd page getting a blank page before it; also after
+   .docx and native round trips */
+static void test_page_features(void) {
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:background w:color=\"FFFFCC\"/><w:body>"
+                         "<w:p><w:r><w:t>FIRST one two three four five six seven eight nine ten eleven twelve thirteen "
+                         "fourteen fifteen sixteen seventeen eighteen nineteen twenty one two three four five six seven "
+                         "eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen "
+                         "twenty</w:t></w:r></w:p>"
+                         "<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" "
+                         "w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" "
+                         "w:gutter=\"0\"/><w:pgBorders w:offsetFrom=\"page\"><w:top w:val=\"single\" w:sz=\"8\" "
+                         "w:space=\"24\" w:color=\"FF0000\"/></w:pgBorders><w:cols w:num=\"2\" w:space=\"720\" "
+                         "w:sep=\"1\"/></w:sectPr></w:pPr></w:p>"
+                         "<w:p><w:r><w:t>SECOND</w:t></w:r></w:p>"
+                         "<w:sectPr><w:type w:val=\"oddPage\"/><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar "
+                         "w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" "
+                         "w:footer=\"720\" w:gutter=\"0\"/></w:sectPr></w:body></w:document>", NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, pg, border = 0, sep = 0;
+            pd_sp x, y;
+            pd_draw* it = page_draws(L, 0, &n);
+
+            CHECK(it && n > 0 && it[0].kind == PD_DRAW_RULE && it[0].color == 0xFFFFFFCCu && it[0].x == 0 &&
+                  it[0].w == PD_PT(612) && it[0].h == PD_PT(792));
+
+            for (k = 0; it && k < n; k++) {
+                border += it[k].kind == PD_DRAW_RULE && it[k].color == 0xFFFF0000u && it[k].y == PD_PT(24) &&
+                          it[k].h == PD_PT(1) && it[k].w > PD_PT(500);
+                sep += it[k].kind == PD_DRAW_RULE && it[k].color == 0xFF000000u && it[k].w == PD_PT(0.5) &&
+                       it[k].h > PD_PT(5) && it[k].x > PD_PT(300) && it[k].x < PD_PT(312);
+            }
+
+            CHECK(border == 1 && sep == 1);
+            free(it);
+            CHECK(pd_layout_page_count(L) == 3 && text_drawn(d, L, "SECOND", &pg, &x, &y) && pg == 2);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
+/* Paragraph borders, each edge its own line: a double blue top (two strokes 1.5pt apart), dashed red left
+   (dashes, longer than wide), a thick-thin green bottom (a 3pt and a thinner stroke), a dotted right (square
+   dots); two paragraphs sharing a box with a rule between them; a bar left of a paragraph. Also after .docx and
+   native round trips */
+static void test_para_border_lines(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:p><w:pPr><w:pBdr><w:top w:val=\"double\" w:sz=\"6\" w:space=\"1\" w:color=\"0000FF\"/>"
+                             "<w:left w:val=\"dashed\" w:sz=\"6\" w:space=\"4\" w:color=\"FF0000\"/>"
+                             "<w:bottom w:val=\"thickThinSmallGap\" w:sz=\"24\" w:space=\"1\" w:color=\"00FF00\"/>"
+                             "<w:right w:val=\"dotted\" w:sz=\"6\" w:space=\"4\" w:color=\"112233\"/></w:pBdr></w:pPr>"
+                             "<w:r><w:t>BOXED</w:t></w:r></w:p><w:p/>"
+                             "<w:p><w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"8\" w:color=\"445566\"/><w:between "
+                             "w:val=\"single\" w:sz=\"8\" w:color=\"778899\"/></w:pBdr></w:pPr><w:r><w:t>PAIR1</w:t></w:r>"
+                             "</w:p><w:p><w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"8\" w:color=\"445566\"/><w:between "
+                             "w:val=\"single\" w:sz=\"8\" w:color=\"778899\"/></w:pBdr></w:pPr><w:r><w:t>PAIR2</w:t></w:r>"
+                             "</w:p><w:p/><w:p><w:pPr><w:ind w:left=\"720\"/><w:pBdr><w:bar w:val=\"single\" w:sz=\"16\" "
+                             "w:space=\"6\" w:color=\"AA00AA\"/></w:pBdr></w:pPr><w:r><w:t>BARRED</w:t></w:r></w:p>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, blue = 0, red = 0, green3 = 0, greenthin = 0, dots = 0, between = 0, tops = 0, bar = 0;
+            pd_sp by[2] = { 0, 0 };
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                const pd_draw* a = &it[k];
+
+                if (a->kind != PD_DRAW_RULE) {
+                    continue;
+                }
+
+                if (a->color == 0xFF0000FFu && a->h == PD_PT(0.75) && blue < 2) {
+                    by[blue++] = a->y;
+                }
+
+                red += a->color == 0xFFFF0000u && a->w == PD_PT(0.75) && a->h == PD_PT(2.25);
+                green3 += a->color == 0xFF00FF00u && a->h == PD_PT(3);
+                greenthin += a->color == 0xFF00FF00u && a->h == PD_PT(0.75);
+                dots += a->color == 0xFF112233u && a->w == PD_PT(0.75) && a->h == PD_PT(0.75);
+                tops += a->color == 0xFF445566u;
+                between += a->color == 0xFF778899u;
+                bar += a->color == 0xFFAA00AAu && a->w == PD_PT(2) && a->x < PD_PT(108 - 6) &&
+                       a->x > PD_PT(108 - 10);
+            }
+
+            CHECK(blue == 2 && by[1] - by[0] == PD_PT(1.5));
+            CHECK(red >= 3 && green3 == 1 && greenthin == 1 && dots > 3);
+            CHECK(tops == 1 && between == 1 && bar == 1);
+            free(it);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -8500,6 +8878,12 @@ int main(void) {
     test_exact_row();
     test_cant_split();
     test_cell_width();
+    test_cell_text_dir();
+    test_cell_diagonals();
+    test_cell_spacing();
+    test_floating_table();
+    test_page_features();
+    test_para_border_lines();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

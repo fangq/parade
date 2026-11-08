@@ -306,6 +306,26 @@ typedef struct {
 #define PD_PP_CONTEXTUAL   (1u << 19) /**< no space between this and a neighbour of the same style */
 #define PD_PP_SNAP_GRID    (1u << 20) /**< lines on the section's grid (pd_section_props.line_pitch) */
 
+/* how a border line is drawn */
+#define PD_LINE_NONE       0
+#define PD_LINE_SINGLE     1
+#define PD_LINE_DOUBLE     2    /**< two lines, each a third of the width, a third apart */
+#define PD_LINE_DOTTED     3
+#define PD_LINE_DASHED     4
+#define PD_LINE_THICK      5    /**< one line (Word's "thick": as single, its width as said) */
+#define PD_LINE_THIN_THICK 6    /**< a thin line inside a thick one (outermost thick) */
+#define PD_LINE_THICK_THIN 7    /**< a thick line inside a thin one */
+#define PD_LINE_TRIPLE     8
+#define PD_LINE_DOT_DASH   9
+
+/** one side of a border: how it is drawn, its width, colour and distance from what it surrounds */
+typedef struct {
+    int32_t style;              /**< PD_LINE_*, PD_LINE_NONE = no line */
+    pd_sp width;
+    uint32_t color;             /**< 0xAARRGGBB */
+    pd_sp space;                /**< from the text (or the page's edge) to the line */
+} pd_border_line;
+
 typedef struct {
     uint32_t mask;              /**< PD_PP_* bits that are set */
     int32_t align;              /**< pd_align */
@@ -338,12 +358,17 @@ typedef struct {
     uint32_t shading_theme;     /**< pd_theme_color reference of the shading (with PD_PP_SHADING), 0 = none */
     int32_t line_rule;          /**< PD_LINE_*: what sets the line height (with PD_PP_LINE_SPACING) */
     pd_sp line_height;          /**< PD_LINE_AT_LEAST, PD_LINE_EXACT: that height, baseline to baseline */
+    pd_border_line border_line[6];  /**< with PD_PP_BORDER, each edge's own line: top, right, bottom, left, between
+                                         (PD_BORDER_LINE_*), and a bar in the left margin; when all are PD_LINE_NONE,
+                                         border_color, border_width, border_sides and border_space say (single) */
 } pd_para_props;
 
 /* line spacing: a multiple of the font's line height (line_spacing), or a length (line_height) */
 #define PD_LINE_MULTIPLE 0
 #define PD_LINE_AT_LEAST 1      /**< the font's single line height, but no less than line_height */
 #define PD_LINE_EXACT    2      /**< exactly line_height, whatever the text's size */
+#define PD_BORDER_LINE_BETWEEN 4    /**< border_line: the rule between paragraphs that share a box */
+#define PD_BORDER_LINE_BAR     5    /**< the bar left of the paragraph (Word's w:bar) */
 
 /* the edges of a paragraph border; paragraphs one after another with the
    same border share one box, and BETWEEN rules them off from each other */
@@ -649,6 +674,8 @@ typedef struct {
 #define PD_FROM_PAGE 1          /**< the top edge of the page its anchor is on */
 #define PD_FROM_MARGIN 2        /**< the top margin of that page (where its text starts) */
 
+#define PD_SECTION_MAX_COLS 16
+
 typedef struct {
     pd_sp page_width, page_height;
     pd_sp margin_top, margin_bottom, margin_left, margin_right;
@@ -681,12 +708,28 @@ typedef struct {
     int32_t note_format[2];     /**< pd_num_format; PD_NUM_BULLET (0) = the usual: 1, 2, 3 and i, ii, iii */
     int32_t note_start[2];      /**< the first number, 0 = 1 */
     int32_t note_restart[2];    /**< PD_NOTES_*: where they count from note_start again */
+    pd_border_line page_border[4];  /**< round its pages: top, right, bottom, left */
+    int32_t page_border_flags;  /**< PD_PGBORDER_* */
+    int32_t column_rule;        /**< 1: a line between its columns (Word's w:cols w:sep) */
+    int32_t ncol_widths;        /**< columns of their own widths (Word's equalWidth="0"), 0 = all column_gap apart,
+                                     equal; laid out as equal columns of the same total (kept, read and written) */
+    pd_sp col_width[PD_SECTION_MAX_COLS];   /**< each column's width */
+    pd_sp col_space[PD_SECTION_MAX_COLS];   /**< and the space after it */
+    int32_t start;              /**< where it starts, unless continuous: PD_BREAK_PAGE (the next page),
+                                     PD_BREAK_ODD_PAGE / PD_BREAK_EVEN_PAGE (a blank page put in when needed),
+                                     PD_BREAK_COLUMN (the next column: laid out as a new page) */
+    uint32_t page_color;        /**< its pages' background, 0 = none (Word's w:background, document-wide) */
+    int32_t text_flow;          /**< PD_CELLTEXT_*: Word's section w:textDirection (kept; laid out across) */
 } pd_section_props;
 
 /* where notes are numbered from the start again */
 #define PD_NOTES_CONTINUOUS 0   /**< never: through the document */
 #define PD_NOTES_SECTION    1   /**< at each section */
 #define PD_NOTES_PAGE       2   /**< on each page (footnotes) */
+#define PD_PGBORDER_FROM_TEXT   1   /**< the border's space measured from the text, not the page's edge */
+#define PD_PGBORDER_FIRST       2   /**< only on the section's first page */
+#define PD_PGBORDER_NOT_FIRST   4   /**< on all its pages but the first */
+#define PD_PGBORDER_BEHIND      8   /**< under the text (Word's zOrder="back") */
 
 typedef enum {
     PD_PAGES_GREEDY = 0,        /**< fill each column, best break on it (TeX) */
@@ -717,6 +760,8 @@ typedef struct {
     int32_t look;               /**< PD_TLOOK_*: which of the style's conditional parts apply */
     int32_t border_given;       /**< with a style: the PD_TBORDER_* rules the table sets itself (border, border_sides,
                                      border_color); the others are the style's */
+    pd_sp cell_spacing;         /**< room around every cell, inside the table's frame (Word's tblCellSpacing): each
+                                     cell then has its own box of rules, 0 = cells share their edges */
 } pd_table_props;
 
 /* which parts of a table style a table shows (Word's tblLook) */
@@ -760,7 +805,16 @@ typedef struct {
     pd_sp width;                /**< its preferred width (Word's tcW), for a column the table does not size itself;
                                      0 = automatic */
     int32_t width_pct;          /**< or that in per-mille of the table's width (width 0) */
+    int32_t text_dir;           /**< PD_CELLTEXT_*: its text across, or turned to run up or down the cell */
+    pd_sp diag_width[2];        /**< rules across it, corner to corner: [0] top left to bottom right (tl2br),
+                                     [1] top right to bottom left (tr2bl); 0 = none */
+    uint32_t diag_color[2];
 } pd_cell_props;
+
+/* which way a cell's text runs (Word's w:textDirection) */
+#define PD_CELLTEXT_LRTB 0      /**< across, lines down the cell */
+#define PD_CELLTEXT_BTLR 1      /**< turned a quarter left: lines run up, the first at the left (btLr) */
+#define PD_CELLTEXT_TBRL 2      /**< turned a quarter right: lines run down, the first at the right (tbRl) */
 
 /** a table row's own properties (Word's w:trPr) */
 typedef struct {

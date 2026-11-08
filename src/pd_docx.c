@@ -379,6 +379,8 @@ typedef struct {
     int move_range;             /* the id of the move's range being written */
     pd_block_id pending[8];     /* picture floats to anchor in the next paragraph */
     int npending;
+    pd_block_id tblp;           /* the float the table being written floats as (w:tblpPr), 0 none */
+    uint32_t page_color;        /* a section's page colour: the document's w:background */
     int page_break;             /* a page break opens the next paragraph */
     pd_block_id reft[1024];     /* paragraphs referred to that have no bookmark: given _RefPd<id> */
     int nreft;
@@ -2734,12 +2736,16 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
     pd_block_info ti, ri;
     pd_table_props tp;
     pd_row_props rp;
+    pd_float_props fp;
+    pd_block_id fl;
     int32_t r, c, k, ncols = 0, col;
     pd_buf* o = x->o;
     int colw, fixed = 0;
 
     pd_doc_block_info(x->d, t, &ti);
     pd_doc_table_props(x->d, t, &tp);
+    fl = x->tblp;
+    x->tblp = 0;
 
     for (r = 0; r < ti.child_count; r++) {
         int32_t w = 0;
@@ -2779,6 +2785,24 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         pb_puts(o, "<w:tbl><w:tblPr><w:tblStyle w:val=\"TableGrid\"/>");
     }
 
+    if (fl && pd_doc_float_props(x->d, fl, &fp) == PD_OK) {    /* floating, beside the text */
+        int gap = TW(fp.gap);
+
+        pb_printf(o, "<w:tblpPr w:leftFromText=\"%d\" w:rightFromText=\"%d\" w:vertAnchor=\"%s\" "
+                  "w:horzAnchor=\"%s\"", fp.wrap == PD_WRAP_LEFT ? 0 : gap, fp.wrap == PD_WRAP_RIGHT ? 0 : gap,
+                  fp.offset_from == PD_FROM_PAGE ? "page" : fp.offset_from == PD_FROM_MARGIN ? "margin" : "text",
+                  (fp.placement & PD_PLACE_OFFSET) ? "text" : "margin");
+
+        if (fp.placement & PD_PLACE_OFFSET) {
+            pb_printf(o, " w:tblpX=\"%d\"", TW(fp.offset_x));
+        } else {
+            pb_printf(o, " w:tblpXSpec=\"%s\"", fp.wrap == PD_WRAP_RIGHT ? "right" : fp.wrap == PD_WRAP_LEFT ? "left" :
+                      "center");
+        }
+
+        pb_printf(o, " w:tblpY=\"%d\"/>", TW(fp.offset_y));
+    }
+
     if (tp.width_pct > 0) {
         pb_printf(o, "<w:tblW w:w=\"%d\" w:type=\"pct\"/>", (int)tp.width_pct * 5);     /* fiftieths of a percent */
     } else if (tp.width > 0) {
@@ -2793,7 +2817,13 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
     if (tp.align == PD_ALIGN_CENTER || tp.align == PD_ALIGN_RIGHT) {
         pb_puts(o, tp.align == PD_ALIGN_CENTER ? "<w:jc w:val=\"center\"/>" : "<w:jc w:val=\"right\"/>");
-    } else if (tp.indent) {
+    }
+
+    if (tp.cell_spacing > 0) {
+        pb_printf(o, "<w:tblCellSpacing w:w=\"%d\" w:type=\"dxa\"/>", TW(tp.cell_spacing));
+    }
+
+    if (tp.align != PD_ALIGN_CENTER && tp.align != PD_ALIGN_RIGHT && tp.indent) {
         pb_printf(o, "<w:tblInd w:w=\"%d\" w:type=\"dxa\"/>", TW(tp.indent));
     }
 
@@ -2941,7 +2971,7 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 pb_puts(o, "<w:vMerge w:val=\"restart\"/>");
             }
 
-            if (cp.border_set) {
+            if (cp.border_set || cp.diag_width[0] || cp.diag_width[1]) {
                 static const char* edge[] = { "top", "left", "bottom", "right" };
                 static const int bit[] = { PD_BORDER_TOP, PD_BORDER_LEFT, PD_BORDER_BOTTOM, PD_BORDER_RIGHT };
                 static const int slot[] = { 0, 3, 2, 1 };  /* edge_width's order: top, right, bottom, left */
@@ -2963,11 +2993,24 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                     }
                 }
 
+                for (e = 0; e < 2; e++) {   /* corner to corner, after the edges (insideH and insideV between) */
+                    if (cp.diag_width[e] > 0) {
+                        sz = (int)SCALE(cp.diag_width[e], 8, 65536);
+                        pb_printf(o, "<w:%s w:val=\"single\" w:sz=\"%d\" w:space=\"0\" w:color=\"%06X\"/>",
+                                  e ? "tr2bl" : "tl2br", sz < 2 ? 2 : sz, (unsigned)(cp.diag_color[e] & 0xFFFFFF));
+                    }
+                }
+
                 pb_puts(o, "</w:tcBorders>");
             }
 
             if (cp.background) {
                 dx_shd(o, cp.background, cp.background_theme);
+            }
+
+            if (cp.text_dir) {
+                pb_puts(o, cp.text_dir == PD_CELLTEXT_BTLR ? "<w:textDirection w:val=\"btLr\"/>" :
+                        "<w:textDirection w:val=\"tbRl\"/>");
             }
 
             if (cp.valign) {
@@ -3038,6 +3081,7 @@ static void dx_block(dxo* x, pd_block_id id) {
         case PD_BLOCK_FLOAT: {
             pd_inline ob;
             pd_float_props fp;
+            pd_block_info ki;
 
             (void)ob;
 
@@ -3049,6 +3093,14 @@ static void dx_block(dxo* x, pd_block_id id) {
                 }
 
                 x->frame = NULL;
+                break;
+            }
+
+            if (bi.child_count == 1 && pd_doc_block_info(x->d, pd_doc_child(x->d, id, 0), &ki) == PD_OK &&
+                    ki.kind == PD_BLOCK_TABLE) {     /* a table alone: a floating table */
+                dx_flush_anchors(x);
+                x->tblp = id;
+                dx_table(x, ki.id, dx_text_width(x));
                 break;
             }
 
@@ -3115,6 +3167,28 @@ static int dx_story_part(dxo* x, pd_block_id story, int footer) {
     return x->nhf++;
 }
 
+/* Parade's line styles as Word's border styles */
+static const char* line_style_name(int32_t style) {
+    static const char* names[] = { "nil", "single", "double", "dotted", "dashed", "thick", "thinThickSmallGap",
+                                   "thickThinSmallGap", "triple", "dotDash"
+                                 };
+
+    return style >= 0 && style <= PD_LINE_DOT_DASH ? names[style] : "single";
+}
+
+/* one side of a border as Word's element NAME (space in points) */
+static void dx_border_line(pd_buf* o, const char* name, const pd_border_line* l) {
+    int sz = (int)SCALE(l->width, 8, 65536);
+
+    if (l->style == PD_LINE_NONE) {
+        return;
+    }
+
+    pb_printf(o, "<w:%s w:val=\"%s\" w:sz=\"%d\" w:space=\"%d\" w:color=\"%06X\"/>", name,
+              line_style_name(l->style), sz < 2 ? 2 : sz, (int)((l->space + 32768) / 65536),
+              (unsigned)(l->color & 0xFFFFFF));
+}
+
 static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
     static const char* types[3] = { "default", "first", "even" };
     pd_block_id hs[3], fs[3];
@@ -3163,8 +3237,9 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
         }
     }
 
-    if (sp->continuous) {
-        pb_puts(o, "<w:type w:val=\"continuous\"/>");
+    if (sp->continuous || sp->start != PD_BREAK_PAGE) {
+        pb_printf(o, "<w:type w:val=\"%s\"/>", sp->continuous ? "continuous" : sp->start == PD_BREAK_ODD_PAGE ?
+                  "oddPage" : sp->start == PD_BREAK_EVEN_PAGE ? "evenPage" : "nextColumn");
     }
 
     pb_printf(o, "<w:pgSz w:w=\"%d\" w:h=\"%d\"/>", TW(sp->page_width), TW(sp->page_height));
@@ -3173,6 +3248,22 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
               TW(sp->header_distance), TW(sp->footer_distance), TW(sp->gutter));
 
     x->mirror |= sp->mirror_margins > 0;
+
+    if (sp->page_border[0].style || sp->page_border[1].style || sp->page_border[2].style || sp->page_border[3].style) {
+        static const char* side[4] = { "top", "left", "bottom", "right" };
+        static const int at[4] = { 0, 3, 2, 1 };    /* the schema's order of Parade's top, right, bottom, left */
+        int f = sp->page_border_flags;
+
+        pb_printf(o, "<w:pgBorders w:offsetFrom=\"%s\"%s%s>", (f & PD_PGBORDER_FROM_TEXT) ? "text" : "page",
+                  (f & PD_PGBORDER_FIRST) ? " w:display=\"firstPage\"" : (f & PD_PGBORDER_NOT_FIRST) ?
+                  " w:display=\"notFirstPage\"" : "", (f & PD_PGBORDER_BEHIND) ? " w:zOrder=\"back\"" : "");
+
+        for (k = 0; k < 4; k++) {
+            dx_border_line(o, side[k], &sp->page_border[at[k]]);
+        }
+
+        pb_puts(o, "</w:pgBorders>");
+    }
 
     if (sp->line_numbers > 0) {     /* Word's start is one less than the first number */
         pb_printf(o, "<w:lnNumType w:countBy=\"%d\" w:start=\"%d\" w:distance=\"%d\" w:restart=\"%s\"/>",
@@ -3199,14 +3290,29 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
         pb_puts(o, "/>");
     }
 
-    if (sp->columns > 1) {
-        pb_printf(o, "<w:cols w:num=\"%d\" w:space=\"%d\"/>", (int)sp->columns, TW(sp->column_gap));
+    if (sp->columns > 1 && sp->ncol_widths > 0) {   /* columns of their own widths */
+        pb_printf(o, "<w:cols w:num=\"%d\" w:space=\"%d\"%s w:equalWidth=\"0\">", (int)sp->columns,
+                  TW(sp->column_gap), sp->column_rule ? " w:sep=\"1\"" : "");
+
+        for (k = 0; k < sp->ncol_widths; k++) {
+            pb_printf(o, "<w:col w:w=\"%d\" w:space=\"%d\"/>", TW(sp->col_width[k]), TW(sp->col_space[k]));
+        }
+
+        pb_puts(o, "</w:cols>");
+    } else if (sp->columns > 1) {
+        pb_printf(o, "<w:cols w:num=\"%d\" w:space=\"%d\"%s/>", (int)sp->columns, TW(sp->column_gap),
+                  sp->column_rule ? " w:sep=\"1\"" : "");
     } else {    /* the gap too, as Word always writes it: read again, it would be the default */
         pb_printf(o, "<w:cols w:space=\"%d\"/>", TW(sp->column_gap));
     }
 
     if (sp->page_valign) {
         pb_puts(o, sp->page_valign == 1 ? "<w:vAlign w:val=\"center\"/>" : "<w:vAlign w:val=\"bottom\"/>");
+    }
+
+    if (sp->text_flow) {
+        pb_puts(o, sp->text_flow == PD_CELLTEXT_BTLR ? "<w:textDirection w:val=\"btLr\"/>" :
+                "<w:textDirection w:val=\"tbRl\"/>");
     }
 
     if (sp->title_page) {
@@ -3328,8 +3434,29 @@ static void dx_ppr_head(pd_buf* o, const pd_para_props* pp, uint32_t m) {
 
 /* ... and those after it, in the schema's order; hyph_auto: the document hyphenates (settings.xml) */
 static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph_auto, const pd_para_props* base) {
-    if ((m & PD_PP_BORDER) && pp->border_color && pp->border_width > 0) {
-        int sz = (int)SCALE(pp->border_width, 8, 65536), side;
+    int lines = 0, side;
+
+    for (side = 0; side < 6; side++) {
+        lines |= pp->border_line[side].style != PD_LINE_NONE;
+    }
+
+    if ((m & PD_PP_BORDER) && lines) {  /* each edge its own line */
+        static const char* names[] = { "top", "left", "bottom", "right", "between", "bar" };
+        static const int at[] = { 0, 3, 2, 1, PD_BORDER_LINE_BETWEEN, PD_BORDER_LINE_BAR };
+
+        pb_puts(o, "<w:pBdr>");
+
+        for (side = 0; side < 6; side++) {
+            if (pp->border_line[at[side]].style != PD_LINE_NONE) {
+                dx_border_line(o, names[side], &pp->border_line[at[side]]);
+            } else if (base && base->border_color && base->border_width > 0 && side < 5) {
+                pb_printf(o, "<w:%s w:val=\"nil\"/>", names[side]);
+            }
+        }
+
+        pb_puts(o, "</w:pBdr>");
+    } else if ((m & PD_PP_BORDER) && pp->border_color && pp->border_width > 0) {
+        int sz = (int)SCALE(pp->border_width, 8, 65536);
         int has = pp->border_sides ? pp->border_sides : PD_BORDER_TOP | PD_BORDER_RIGHT | PD_BORDER_BOTTOM | PD_BORDER_LEFT;
         static const char* names[] = { "top", "left", "bottom", "right", "between" };
         static const int bits[] = { PD_BORDER_TOP, PD_BORDER_LEFT, PD_BORDER_BOTTOM, PD_BORDER_RIGHT, PD_BORDER_BETWEEN };
@@ -4998,7 +5125,18 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     /* document.xml; sections end in the pPr of their last paragraph, the last one in the body */
     x->o = &doc;
     pb_puts(&doc, XML_DECL);
-    pb_printf(&doc, "<w:document %s><w:body>", W_NS);
+    pb_printf(&doc, "<w:document %s>", W_NS);
+
+    {   /* the pages' colour (Word's is the document's): the first section's */
+        pd_section_props fsp;
+
+        if (pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &fsp) == PD_OK && fsp.page_color) {
+            pb_printf(&doc, "<w:background w:color=\"%06X\"/>", (unsigned)(fsp.page_color & 0xFFFFFF));
+            x->page_color = fsp.page_color;
+        }
+    }
+
+    pb_puts(&doc, "<w:body>");
     pd_doc_block_info(d, pd_doc_root(d), &ri);
 
     for (s = 0; s < ri.child_count; s++) {
@@ -5201,6 +5339,10 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
         pd_para_props np;
 
         pd_doc_style_resolve(d, pd_doc_style_find(d, "Normal"), &np, NULL);
+
+        if (x->page_color) {    /* the pages' colour shown */
+            pb_puts(&part, "<w:displayBackgroundShape/>");
+        }
 
         if (x->mirror) {
             pb_puts(&part, "<w:mirrorMargins/>");
@@ -5578,6 +5720,7 @@ typedef struct {
     uint32_t theme_clr[12];     /* the theme's colours: dk1 lt1 dk2 lt2 accent1..6 hlink folHlink */
     pd_sp margin_left;          /* the section's, for pictures placed from the page's edge */
     pd_sp page_w, page_h, margin_right, margin_top, margin_bottom;  /* ... and for VML shapes placed in it */
+    uint32_t page_color;        /* w:background: every page's colour */
     struct {                    /* bookmarks read: where they are */
         char name[32];
         pd_block_id para;
@@ -6027,6 +6170,56 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     }
 }
 
+/* Word's border styles as Parade's line styles: the art ones (apples, ...) and others as single */
+static int32_t line_style_of(const char* v) {
+    static const struct {
+        const char* name;
+        int32_t style;
+    } map[] = {
+        { "nil", PD_LINE_NONE }, { "none", PD_LINE_NONE }, { "double", PD_LINE_DOUBLE }, { "dotted", PD_LINE_DOTTED },
+        { "dashed", PD_LINE_DASHED }, { "dashSmallGap", PD_LINE_DASHED }, { "thick", PD_LINE_THICK },
+        { "dotDash", PD_LINE_DOT_DASH }, { "dotDotDash", PD_LINE_DOT_DASH }, { "triple", PD_LINE_TRIPLE },
+        { "thinThickSmallGap", PD_LINE_THIN_THICK }, { "thinThickMediumGap", PD_LINE_THIN_THICK },
+        { "thinThickLargeGap", PD_LINE_THIN_THICK }, { "thickThinSmallGap", PD_LINE_THICK_THIN },
+        { "thickThinMediumGap", PD_LINE_THICK_THIN }, { "thickThinLargeGap", PD_LINE_THICK_THIN },
+        { "thinThickThinSmallGap", PD_LINE_TRIPLE }, { "thinThickThinMediumGap", PD_LINE_TRIPLE },
+        { "thinThickThinLargeGap", PD_LINE_TRIPLE }, { "doubleWave", PD_LINE_DOUBLE },
+        { "threeDEmboss", PD_LINE_THICK }, { "threeDEngrave", PD_LINE_THICK }
+    };
+    size_t k;
+
+    for (k = 0; k < sizeof(map) / sizeof(map[0]); k++) {
+        if (!strcmp(v, map[k].name)) {
+            return map[k].style;
+        }
+    }
+
+    return PD_LINE_SINGLE;
+}
+
+/* one side of a w:pBdr or w:pgBorders (space in points; on a page from its edge or the text) as a border line */
+static void border_line(const dxi* X, const pd_markup* m, pd_border_line* l, int page) {
+    char v[40];
+    uint32_t ref = 0;
+
+    memset(l, 0, sizeof(*l));
+
+    if (!mu_attr(m, "w:val", v, sizeof(v)) || (l->style = line_style_of(v)) == PD_LINE_NONE) {
+        return;
+    }
+
+    l->width = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
+    l->width = l->width > 0 ? l->width > PD_PT(100) ? PD_PT(100) : l->width : PD_PT(0.25);
+    l->space = (pd_sp)attr_int(m, "w:space", 0) * 65536;
+    l->space = l->space < 0 ? 0 : l->space > PD_PT(page ? 1000 : 31) ? PD_PT(page ? 1000 : 31) : l->space;
+    l->color = 0xFF000000u;
+
+    if (mu_attr(m, "w:color", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+        wcolor_ref(X, m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &l->color, &ref);
+        l->color = l->color ? l->color : 0xFF000000u;
+    }
+}
+
 /* one child of a w:pPr into pr */
 static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr) {
     pd_para_props* pp = &pr->pp;
@@ -6107,12 +6300,20 @@ static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr
         pp->border_width = 0;
         pp->border_sides = 0;
         pp->border_space = 0;
+        memset(pp->border_line, 0, sizeof(pp->border_line));
+    } else if (strcmp(t, "bar") == 0) {     /* a line in the left margin */
+        pp->mask |= PD_PP_BORDER;
+        border_line(X, m, &pp->border_line[PD_BORDER_LINE_BAR], 0);
     } else if (strcmp(t, "top") == 0 || strcmp(t, "bottom") == 0 || strcmp(t, "left") == 0 ||
                strcmp(t, "right") == 0 || strcmp(t, "start") == 0 || strcmp(t, "end") == 0 ||
                strcmp(t, "between") == 0) {
         /* an edge of w:pBdr (no other w:pPr child has these names) */
         int side = t[0] == 't' ? PD_BORDER_TOP : t[0] == 'b' && t[1] == 'o' ? PD_BORDER_BOTTOM : t[0] == 'b' ?
                    PD_BORDER_BETWEEN : t[0] == 'r' || t[0] == 'e' ? PD_BORDER_RIGHT : PD_BORDER_LEFT;
+        int slot = side == PD_BORDER_TOP ? 0 : side == PD_BORDER_RIGHT ? 1 : side == PD_BORDER_BOTTOM ? 2 :
+                   side == PD_BORDER_LEFT ? 3 : PD_BORDER_LINE_BETWEEN;
+
+        border_line(X, m, &pp->border_line[slot], 0);     /* each edge its own; the summary below */
 
         if (mu_attr(m, "w:val", v, sizeof(v)) && strcmp(v, "none") != 0 && strcmp(v, "nil") != 0) {
             pd_sp bw = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
@@ -6194,6 +6395,7 @@ static void pr_over(dprops* d, const dprops* s) {
         dp->border_width = sp->border_width;
         dp->border_sides = sp->border_sides;
         dp->border_space = sp->border_space;
+        memcpy(dp->border_line, sp->border_line, sizeof(dp->border_line));
     }
 
     if (sp->mask & PD_PP_LINE_SPACING) {
@@ -7075,6 +7277,9 @@ typedef struct {               /* a table being read */
     pd_sp ind, width_pct;
     int has_ind;
     int rtl;                    /* w:bidiVisual: its columns from the right */
+    pd_sp spacing;              /* w:tblCellSpacing */
+    pd_block_id fl;             /* w:tblpPr: the float it is in, its props (width set at its end), else 0 */
+    pd_float_props fp;
     pd_style_id sid;            /* its style as one of the document's: the cells and their text take it there */
     pd_sp row_h;                /* w:trHeight of the row under way */
     int cspan;                  /* the grid columns the cell under way takes */
@@ -7162,6 +7367,11 @@ typedef struct {
     pd_row_props row_pr;        /* the row's w:trPr, for the row when its first cell makes it */
     pd_sp cell_w;               /* the cell's w:tcW: twips made sp, or (cell_wpct) per-mille */
     int32_t cell_wpct;
+    int32_t cell_dir;           /* its w:textDirection, PD_CELLTEXT_* */
+    int in_pgb;                 /* in the section's w:pgBorders */
+    int in_cols;                /* in its w:cols of unequal columns */
+    pd_sp cell_diag[2];         /* its w:tl2br and w:tr2bl rules' widths, and colours */
+    uint32_t cell_diag_c[2];
     uint32_t cell_bg, cell_bg_ref;
     int in_tblpr, in_grid, in_borders, in_mar, in_cb;
     pd_sp t_width, grid[PD_TABLE_MAX_COLS];
@@ -7306,6 +7516,66 @@ static void dw_cell_style(dw* w, dtab* T) {
     T->cell.given = 1;
 }
 
+/* A table's w:tblpPr, looked for ahead of the reader (it comes in w:tblPr, after the table has begun): where Word
+   floats it, as a float's props (its width left for the table's end); 0 if it does not float */
+static int dw_tblp(dw* w, const pd_markup* at, pd_float_props* fp) {
+    pd_markup q = *at;
+    char v[32];
+    int depth = 0;
+
+    while (mu_next(&q) != MT_END) {
+        const char* t = mu_local(q.name);
+
+        if (q.type == MT_CLOSE && --depth < 0) {
+            return 0;
+        }
+
+        if (q.type == MT_OPEN) {
+            depth++;
+        }
+
+        if (!strcmp(t, "tr") || !strcmp(t, "tblGrid") || (q.type == MT_CLOSE && !strcmp(t, "tblPr"))) {
+            return 0;
+        }
+
+        if ((q.type == MT_OPEN || q.type == MT_EMPTY) && depth <= 2 && !strcmp(t, "tblpPr")) {
+            pd_sp x = twips(attr_int(&q, "w:tblpX", 0)), y = twips(attr_int(&q, "w:tblpY", 0));
+            pd_sp lgap = twips(attr_int(&q, "w:leftFromText", 0)), rgap = twips(attr_int(&q, "w:rightFromText", 0));
+            pd_sp textw = w->sp.page_width - w->X->margin_left - w->sp.margin_right;
+            char spec[16] = "";
+
+            fp->placement = PD_PLACE_HERE | PD_PLACE_FORCE;
+            mu_attr(&q, "w:tblpXSpec", spec, sizeof(spec));
+
+            if (mu_attr(&q, "w:horzAnchor", v, sizeof(v)) && !strcmp(v, "page")) {
+                x -= w->X->margin_left;     /* from the page's edge: the column's is the margin's */
+            }
+
+            if (!strcmp(spec, "right") || !strcmp(spec, "outside")) {
+                fp->wrap = PD_WRAP_RIGHT;
+            } else if (!strcmp(spec, "center")) {
+                fp->wrap = PD_WRAP_NONE;
+            } else if (spec[0]) {
+                fp->wrap = PD_WRAP_LEFT;
+            } else {    /* at an offset: beside the text on the side it is nearer */
+                fp->wrap = x > textw / 3 ? PD_WRAP_RIGHT : PD_WRAP_LEFT;
+                fp->placement |= PD_PLACE_OFFSET;
+                fp->offset_x = x;
+            }
+
+            fp->gap = fp->wrap == PD_WRAP_RIGHT ? lgap : rgap;
+            fp->gap = fp->gap > 0 ? fp->gap : 0;
+            fp->offset_y = y;
+            fp->offset_from = !mu_attr(&q, "w:vertAnchor", v, sizeof(v)) || !strcmp(v, "margin") ? PD_FROM_MARGIN :
+                              !strcmp(v, "page") ? PD_FROM_PAGE : PD_FROM_PARAGRAPH;
+            strcpy(fp->sequence, "Table");
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* the row whose first cell is coming, with what its w:trPr said */
 static void dw_row_begin(dw* w) {
     pd_bld* b = w->X->b;
@@ -7383,10 +7653,18 @@ static void dw_begin_cell(dw* w) {
             bld_cell_merge_up(b);
         }
 
-        if (w->cell_valign || w->cell_w || w->cell_wpct) {
+        if (w->cell_valign || w->cell_w || w->cell_wpct || w->cell_dir || w->cell_diag[0] || w->cell_diag[1]) {
             pd_cell_props cp;
 
             if (pd_doc_cell_props(b->d, bld_container(b), &cp) == PD_OK) {
+                int dk;
+
+                for (dk = 0; dk < 2; dk++) {
+                    cp.diag_width[dk] = w->cell_diag[dk];
+                    cp.diag_color[dk] = w->cell_diag[dk] ? w->cell_diag_c[dk] : 0;
+                }
+
+                cp.text_dir = w->cell_dir;
                 cp.width = w->cell_w;
                 cp.width_pct = w->cell_w ? 0 : w->cell_wpct;
                 cp.valign = w->cell_valign;
@@ -7594,11 +7872,24 @@ static void dw_table_props(dw* w) {
         tp.cell_padding_v = T->mar[0] >= 0 ? T->mar[0] : T->st.mar[0] >= 0 ? T->st.mar[0] : 0;
         tp.indent = T->has_ind ? T->ind : T->st.has_ind ? T->st.ind : 0;
         tp.direction = T->rtl ? PD_DIR_RTL : PD_DIR_AUTO;
+        tp.cell_spacing = T->spacing;
         tp.width_pct = (int32_t)T->width_pct;
 
         if (tp.width_pct > 0) {
             tp.width = 0;
         }
+    }
+
+    if (w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].fl) {  /* floating: its float as wide as it */
+        dtab* T = &w->tabs[w->ntab - 1];
+        pd_sp tw = 0;
+
+        for (k = 0; k < w->ngrid; k++) {
+            tw += w->grid[k];
+        }
+
+        T->fp.width = T->width_pct > 0 ? 0 : w->t_width > tw ? w->t_width : tw;
+        T->fp.width_fraction = T->width_pct > 0 ? (int32_t)T->width_pct : 1000;
     }
 
     if (w->ngrid > 0 && !w->t_autofit) {    /* Word lays a table out on its grid */
@@ -7721,7 +8012,8 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid, const
 
         if ((sty.pp.mask & PD_PP_BORDER) && sty.pp.border_color == rp.border_color && sty.pp.border_theme == rp.border_theme &&
                 sty.pp.border_width == rp.border_width && sty.pp.border_sides == rp.border_sides &&
-                sty.pp.border_space == rp.border_space) {
+                sty.pp.border_space == rp.border_space &&
+                memcmp(sty.pp.border_line, rp.border_line, sizeof(rp.border_line)) == 0) {
             sty.pp.mask &= ~PD_PP_BORDER;
         }
 
@@ -7920,13 +8212,15 @@ static void dw_begin_para(dw* w) {
 
         if ((f->mask & PD_PP_BORDER) && (f->border_color != rp.border_color || f->border_width != rp.border_width ||
                                          f->border_sides != rp.border_sides || f->border_space != rp.border_space ||
-                                         f->border_theme != rp.border_theme)) {
+                                         f->border_theme != rp.border_theme ||
+                                         memcmp(f->border_line, rp.border_line, sizeof(rp.border_line)) != 0)) {
             b->pp.mask |= PD_PP_BORDER;
             b->pp.border_theme = f->border_theme;
             b->pp.border_color = f->border_color;
             b->pp.border_width = f->border_width;
             b->pp.border_sides = f->border_sides;
             b->pp.border_space = f->border_space;
+            memcpy(b->pp.border_line, f->border_line, sizeof(b->pp.border_line));
         }
 
         if ((f->mask & PD_PP_TABS) && (f->ntabs != rp.ntabs || f->tab_interval != rp.tab_interval ||
@@ -12610,6 +12904,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 memcpy(w->sp.note_start, X->note_start, sizeof(X->note_start));
                 memcpy(w->sp.note_restart, X->note_restart, sizeof(X->note_restart));
                 w->in_notepr = 0;
+                w->sp.page_color = X->page_color;
+                w->sp.first_page_number = 0;    /* numbered on from the section before, unless w:pgNumType says */
+                w->in_pgb = 0;
                 memset(w->hf_ref, 0, sizeof(w->hf_ref));
 
                 if (w->in_ppr) {
@@ -12648,15 +12945,6 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     mu_attr(&m, "r:id", w->hf_ref[k], sizeof(w->hf_ref[0]));
                 } else if (strcmp(t, "titlePg") == 0) {
                     w->sp.title_page = attr_on(&m);
-                } else if (strcmp(t, "tcW") == 0) {
-                    if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
-                        w->cell_w = twips(attr_int(&m, "w:w", 0));
-                        w->cell_w = w->cell_w > 0 ? w->cell_w : 0;
-                    } else if (strcmp(v, "pct") == 0 && mu_attr(&m, "w:w", v, sizeof(v))) {
-                        double pct = strchr(v, '%') ? atof(v) * 10 : atof(v) / 5;
-
-                        w->cell_wpct = (int32_t)(pct < 0 ? 0 : pct > 1000 ? 1000 : pct);
-                    }
                 } else if (strcmp(t, "vAlign") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->sp.page_valign = !strcmp(v, "center") ? 1 : !strcmp(v, "bottom") ? 2 : 0;
                 } else if (strcmp(t, "bidi") == 0) {    /* right to left: its columns from the right */
@@ -12694,8 +12982,47 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
                     w->sp.columns = nc < 1 ? 1 : nc > 16 ? 16 : nc;
                     w->sp.column_gap = attr_int(&m, "w:space", 720) * 65536 / 20;
+                    w->sp.column_rule = attr_int(&m, "w:sep", 0) != 0 || (mu_attr(&m, "w:sep", v, sizeof(v)) &&
+                                        (!strcmp(v, "true") || !strcmp(v, "on")));
+                    w->sp.ncol_widths = 0;
+                    w->in_cols = m.type == MT_OPEN && mu_attr(&m, "w:equalWidth", v, sizeof(v)) &&
+                                 (!strcmp(v, "0") || !strcmp(v, "false") || !strcmp(v, "off"));
+                } else if (strcmp(t, "col") == 0 && w->in_cols && w->sp.ncol_widths < PD_SECTION_MAX_COLS) {
+                    pd_sp cw = twips(attr_int(&m, "w:w", 0)), cs = twips(attr_int(&m, "w:space", 0));
+
+                    w->sp.col_width[w->sp.ncol_widths] = cw > 0 ? cw : 0;
+                    w->sp.col_space[w->sp.ncol_widths++] = cs > 0 ? cs : 0;
                 } else if (strcmp(t, "type") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
                     w->sp.continuous = strcmp(v, "continuous") == 0;
+                    w->sp.start = !strcmp(v, "oddPage") ? PD_BREAK_ODD_PAGE : !strcmp(v, "evenPage") ?
+                                  PD_BREAK_EVEN_PAGE : !strcmp(v, "nextColumn") ? PD_BREAK_COLUMN : PD_BREAK_PAGE;
+                } else if (strcmp(t, "textDirection") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
+                    w->sp.text_flow = !strcmp(v, "btLr") ? PD_CELLTEXT_BTLR : !strcmp(v, "tbRl") ||
+                                      !strcmp(v, "tbRlV") || !strcmp(v, "rl") || !strcmp(v, "rlV") ? PD_CELLTEXT_TBRL :
+                                      PD_CELLTEXT_LRTB;
+                } else if (strcmp(t, "pgBorders") == 0) {
+                    w->in_pgb = m.type == MT_OPEN;
+                    w->sp.page_border_flags = 0;
+
+                    if (mu_attr(&m, "w:offsetFrom", v, sizeof(v)) && !strcmp(v, "text")) {
+                        w->sp.page_border_flags |= PD_PGBORDER_FROM_TEXT;
+                    }
+
+                    if (mu_attr(&m, "w:display", v, sizeof(v))) {
+                        w->sp.page_border_flags |= !strcmp(v, "firstPage") ? PD_PGBORDER_FIRST :
+                                                   !strcmp(v, "notFirstPage") ? PD_PGBORDER_NOT_FIRST : 0;
+                    }
+
+                    if (mu_attr(&m, "w:zOrder", v, sizeof(v)) && !strcmp(v, "back")) {
+                        w->sp.page_border_flags |= PD_PGBORDER_BEHIND;
+                    }
+                } else if (w->in_pgb) {
+                    int side = !strcmp(t, "top") ? 0 : !strcmp(t, "right") ? 1 : !strcmp(t, "bottom") ? 2 :
+                               !strcmp(t, "left") ? 3 : -1;
+
+                    if (side >= 0) {
+                        border_line(w->X, &m, &w->sp.page_border[side], 1);
+                    }
                 }
             } else if (w->in_ppr) {
                 if (strcmp(t, "pStyle") == 0) {
@@ -12956,10 +13283,30 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
 
                 dw_begin_cell(w);
-                bld_table_begin(X->b);
+
+                {   /* floating (w:tblpPr): in a float of its own, where one may be */
+                    pd_float_props fp;
+                    pd_block_info ci;
+                    pd_block_id fl = 0;
+
+                    memset(&fp, 0, sizeof(fp));
+                    fp.width_fraction = 1000;
+
+                    if (w->ntab < 8 && pd_doc_block_info(X->b->d, bld_container(X->b), &ci) == PD_OK &&
+                            (ci.kind == PD_BLOCK_SECTION || ci.kind == PD_BLOCK_STORY) && dw_tblp(w, &m, &fp)) {
+                        fl = bld_float_begin(X->b);
+                    }
+
+                    bld_table_begin(X->b);
+
+                    if (w->ntab < 8) {
+                        memset(&w->tabs[w->ntab], 0, sizeof(w->tabs[0]));
+                        w->tabs[w->ntab].fl = fl;
+                        w->tabs[w->ntab].fp = fp;
+                    }
+                }
 
                 if (w->ntab < 8) {
-                    memset(&w->tabs[w->ntab], 0, sizeof(w->tabs[0]));
                     w->tabs[w->ntab].look = 0x04A0;     /* Word's when it says nothing: header row, first column */
                     w->tabs[w->ntab].row = -1;
 
@@ -13004,6 +13351,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->tabs[w->ntab - 1].look = look;
             } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "bidiVisual") == 0) {
                 w->tabs[w->ntab - 1].rtl = attr_on(&m);
+            } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblCellSpacing") == 0) {
+                if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
+                    pd_sp sp = twips(attr_int(&m, "w:w", 0));
+
+                    w->tabs[w->ntab - 1].spacing = sp > 0 && sp < PD_PT(1000) ? sp : 0;
+                }
             } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblInd") == 0) {
                 w->tabs[w->ntab - 1].ind = twips(attr_int(&m, "w:w", 0));
                 w->tabs[w->ntab - 1].has_ind = 1;
@@ -13082,6 +13435,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->cell_valign = 0;
                 w->cell_w = 0;
                 w->cell_wpct = 0;
+                w->cell_dir = 0;
+                w->cell_diag[0] = w->cell_diag[1] = 0;
                 memset(&w->cell_edges, 0, sizeof(w->cell_edges));
             } else if (strcmp(t, "tcPr") == 0) {
                 w->in_tcpr = m.type == MT_OPEN;
@@ -13090,6 +13445,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->span = attr_int(&m, "w:val", 1);
                 } else if (strcmp(t, "vMerge") == 0) {   /* no value: continues the cell above */
                     w->cell_merge = !(mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "restart") == 0);
+                } else if (strcmp(t, "textDirection") == 0 && mu_attr(&m, "w:val", v, sizeof(v))) {
+                    w->cell_dir = !strcmp(v, "btLr") ? PD_CELLTEXT_BTLR : !strcmp(v, "tbRl") || !strcmp(v, "tbRlV") ||
+                                  !strcmp(v, "rl") || !strcmp(v, "rlV") ? PD_CELLTEXT_TBRL : PD_CELLTEXT_LRTB;
                 } else if (strcmp(t, "tcW") == 0) {
                     if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
                         w->cell_w = twips(attr_int(&m, "w:w", 0));
@@ -13104,6 +13462,20 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 } else if (strcmp(t, "shd") == 0 && shd_color_ref(w->X, &m, &w->cell_bg, &w->cell_bg_ref)) {
                 } else if (strcmp(t, "tcBorders") == 0) {
                     w->in_cb = m.type == MT_OPEN;
+                } else if (w->in_cb && (!strcmp(t, "tl2br") || !strcmp(t, "tr2bl"))) {     /* corner to corner */
+                    int e = t[1] == 'r';
+                    uint32_t ref = 0;
+
+                    w->cell_diag[e] = 0;
+                    w->cell_diag_c[e] = 0xFF000000u;
+
+                    if (mu_attr(&m, "w:val", v, sizeof(v)) && strcmp(v, "nil") != 0 && strcmp(v, "none") != 0) {
+                        w->cell_diag[e] = (pd_sp)((int64_t)attr_int(&m, "w:sz", 4) * 65536 / 8);
+                        w->cell_diag[e] = w->cell_diag[e] > 0 ? w->cell_diag[e] : PD_PT(0.25);
+                        wcolor_ref(w->X, &m, "w:color", "w:themeColor", "w:themeTint", "w:themeShade",
+                                   &w->cell_diag_c[e], &ref);
+                        w->cell_diag_c[e] = w->cell_diag_c[e] ? w->cell_diag_c[e] : 0xFF000000u;
+                    }
                 } else if (w->in_cb) {
                     edge_elem(w->X, &m, t, &w->cell_edges);
                 }
@@ -13153,8 +13525,13 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             w->in_ppr = 0;
         } else if (strcmp(t, "footnotePr") == 0 || strcmp(t, "endnotePr") == 0) {
             w->in_notepr = 0;
+        } else if (strcmp(t, "pgBorders") == 0) {
+            w->in_pgb = 0;
+        } else if (strcmp(t, "cols") == 0) {
+            w->in_cols = 0;
         } else if (strcmp(t, "sectPr") == 0) {
             w->in_sect = 0;
+            w->in_pgb = w->in_cols = 0;
 
             if (!w->sect_here && !w->note && !w->in_p) {    /* the body's last section */
                 pd_block_info bi;
@@ -13284,6 +13661,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             }
         } else if (strcmp(t, "tbl") == 0) {
             bld_table_end(X->b);
+
+            if (w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].fl) {  /* floating: as wide as the table */
+                pd_doc_set_float_props(X->b->d, w->tabs[w->ntab - 1].fl, &w->tabs[w->ntab - 1].fp);
+                bld_float_end(X->b);
+            }
+
             w->ntab -= w->ntab > 0;
         }
     }
@@ -13671,6 +14054,21 @@ pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all
 
     if (all_styles) {
         dx_define_all_styles(&X, &b);
+    }
+
+    {   /* the pages' colour, before the body */
+        pd_markup pm;
+
+        mu_init(&pm, xml, len, 0);
+
+        while (mu_next(&pm) != MT_END && strcmp(mu_local(pm.name), "body") != 0) {
+            if ((pm.type == MT_OPEN || pm.type == MT_EMPTY) && !strcmp(mu_local(pm.name), "background")) {
+                uint32_t ref = 0;
+
+                wcolor_ref(&X, &pm, "w:color", "w:themeColor", "w:themeTint", "w:themeShade", &X.page_color, &ref);
+                break;
+            }
+        }
     }
 
     dw_parse(&X, xml, len, 0);

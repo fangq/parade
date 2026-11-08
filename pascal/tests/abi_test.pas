@@ -25,6 +25,7 @@ var
   v_pd_font_info: pd_font_info;
   v_pd_float_props: pd_float_props;
   v_pd_section_props: pd_section_props;
+  v_pd_border_line: pd_border_line;
   v_pd_table_props: pd_table_props;
   v_pd_row_props: pd_row_props;
   v_pd_cell_props: pd_cell_props;
@@ -215,6 +216,7 @@ begin
   WriteLn('pd_para_props.snap_grid ', PtrUInt(@v_pd_para_props.snap_grid) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.border_theme ', PtrUInt(@v_pd_para_props.border_theme) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_para_props.shading_theme ', PtrUInt(@v_pd_para_props.shading_theme) - PtrUInt(@v_pd_para_props));
+  WriteLn('pd_para_props.border_line ', PtrUInt(@v_pd_para_props.border_line) - PtrUInt(@v_pd_para_props));
   WriteLn('pd_tab_stop ', SizeOf(pd_tab_stop));
   WriteLn('pd_tab_stop.position ', PtrUInt(@v_pd_tab_stop.position) - PtrUInt(@v_pd_tab_stop));
   WriteLn('pd_tab_stop.align ', PtrUInt(@v_pd_tab_stop.align) - PtrUInt(@v_pd_tab_stop));
@@ -310,6 +312,20 @@ begin
   WriteLn('pd_section_props.page_valign ', PtrUInt(@v_pd_section_props.page_valign) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.line_pitch ', PtrUInt(@v_pd_section_props.line_pitch) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.direction ', PtrUInt(@v_pd_section_props.direction) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.page_border ', PtrUInt(@v_pd_section_props.page_border) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.page_border_flags ', PtrUInt(@v_pd_section_props.page_border_flags) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.column_rule ', PtrUInt(@v_pd_section_props.column_rule) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.ncol_widths ', PtrUInt(@v_pd_section_props.ncol_widths) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.col_width ', PtrUInt(@v_pd_section_props.col_width) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.col_space ', PtrUInt(@v_pd_section_props.col_space) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.start ', PtrUInt(@v_pd_section_props.start) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.page_color ', PtrUInt(@v_pd_section_props.page_color) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.text_flow ', PtrUInt(@v_pd_section_props.text_flow) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_border_line ', SizeOf(pd_border_line));
+  WriteLn('pd_border_line.style ', PtrUInt(@v_pd_border_line.style) - PtrUInt(@v_pd_border_line));
+  WriteLn('pd_border_line.width ', PtrUInt(@v_pd_border_line.width) - PtrUInt(@v_pd_border_line));
+  WriteLn('pd_border_line.color ', PtrUInt(@v_pd_border_line.color) - PtrUInt(@v_pd_border_line));
+  WriteLn('pd_border_line.space ', PtrUInt(@v_pd_border_line.space) - PtrUInt(@v_pd_border_line));
   WriteLn('pd_table_props ', SizeOf(pd_table_props));
   WriteLn('pd_table_props.width ', PtrUInt(@v_pd_table_props.width) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.align ', PtrUInt(@v_pd_table_props.align) - PtrUInt(@v_pd_table_props));
@@ -328,6 +344,7 @@ begin
   WriteLn('pd_table_props.style ', PtrUInt(@v_pd_table_props.style) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.look ', PtrUInt(@v_pd_table_props.look) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.border_given ', PtrUInt(@v_pd_table_props.border_given) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.cell_spacing ', PtrUInt(@v_pd_table_props.cell_spacing) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_row_props ', SizeOf(pd_row_props));
   WriteLn('pd_row_props.grid_before ', PtrUInt(@v_pd_row_props.grid_before) - PtrUInt(@v_pd_row_props));
   WriteLn('pd_row_props.grid_after ', PtrUInt(@v_pd_row_props.grid_after) - PtrUInt(@v_pd_row_props));
@@ -351,6 +368,9 @@ begin
   WriteLn('pd_cell_props.border_theme ', PtrUInt(@v_pd_cell_props.border_theme) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.width ', PtrUInt(@v_pd_cell_props.width) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_cell_props.width_pct ', PtrUInt(@v_pd_cell_props.width_pct) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.text_dir ', PtrUInt(@v_pd_cell_props.text_dir) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.diag_width ', PtrUInt(@v_pd_cell_props.diag_width) - PtrUInt(@v_pd_cell_props));
+  WriteLn('pd_cell_props.diag_color ', PtrUInt(@v_pd_cell_props.diag_color) - PtrUInt(@v_pd_cell_props));
   WriteLn('pd_theme ', SizeOf(pd_theme));
   WriteLn('pd_theme.name ', PtrUInt(@v_pd_theme.name) - PtrUInt(@v_pd_theme));
   WriteLn('pd_theme.color ', PtrUInt(@v_pd_theme.color) - PtrUInt(@v_pd_theme));

@@ -714,7 +714,13 @@ static void hx_table(hx* x, pd_block_id t) {
 
     pd_doc_block_info(x->d, t, &ti);
     pd_doc_table_resolve(x->d, t, &tp);
-    pb_printf(x->o, "<table%s%s>\n", tp.border ? " class=\"grid\"" : "", tp.direction == PD_DIR_RTL ? " dir=\"rtl\"" : "");
+    pb_printf(x->o, "<table%s%s", tp.border ? " class=\"grid\"" : "", tp.direction == PD_DIR_RTL ? " dir=\"rtl\"" : "");
+
+    if (tp.cell_spacing > 0) {  /* cells apart */
+        pb_printf(x->o, " style=\"border-collapse:separate;border-spacing:%.2fpt\"", 2 * tp.cell_spacing / 65536.0);
+    }
+
+    pb_puts(x->o, ">\n");
 
     for (r = 0; r < ti.child_count; r++) {
         pd_block_id row = pd_doc_child(x->d, t, r);

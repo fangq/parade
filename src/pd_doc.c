@@ -229,6 +229,7 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
         z.border_width = pp->border_width;
         z.border_sides = pp->border_sides & 31;
         z.border_space = pp->border_space;
+        memcpy(z.border_line, pp->border_line, sizeof(z.border_line));
         z.border_theme = pd_theme_color_parts(pp->border_theme, NULL, NULL, NULL) ? pp->border_theme : 0;
     }
 
@@ -386,6 +387,7 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
         dst->border_sides = src->border_sides;
         dst->border_space = src->border_space;
         dst->border_theme = src->border_theme;
+        memcpy(dst->border_line, src->border_line, sizeof(dst->border_line));
     }
 
     SET(PD_PP_SHADING, shading);
@@ -3901,6 +3903,34 @@ static int story_ok(const pd_doc* d, pd_block_id id) {
     return id == 0 || (b && b->kind == PD_BLOCK_STORY);
 }
 
+/* a border side's line is one Parade draws */
+int pd_doc_line_ok(const pd_border_line* l) {
+    return l->style >= PD_LINE_NONE && l->style <= PD_LINE_DOT_DASH && l->width >= 0 && l->width <= PD_PT(100) &&
+           l->space >= 0 && l->space <= PD_PT(1000);
+}
+
+/* the page borders, columns of their own widths, start, colour and text flow of a section are sound */
+static int section_extras_ok(const pd_section_props* sp) {
+    int32_t k;
+
+    for (k = 0; k < 4; k++) {
+        if (!pd_doc_line_ok(&sp->page_border[k])) {
+            return 0;
+        }
+    }
+
+    for (k = 0; k < sp->ncol_widths && k < PD_SECTION_MAX_COLS; k++) {
+        if (sp->col_width[k] < 0 || sp->col_space[k] < 0) {
+            return 0;
+        }
+    }
+
+    return (sp->page_border_flags & ~15) == 0 && (sp->page_border_flags & 6) != 6 && (sp->column_rule == 0 ||
+            sp->column_rule == 1) && sp->ncol_widths >= 0 && sp->ncol_widths <= PD_SECTION_MAX_COLS &&
+           (sp->start == PD_BREAK_PAGE || sp->start == PD_BREAK_COLUMN || sp->start == PD_BREAK_ODD_PAGE ||
+            sp->start == PD_BREAK_EVEN_PAGE) && sp->text_flow >= PD_CELLTEXT_LRTB && sp->text_flow <= PD_CELLTEXT_TBRL;
+}
+
 pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_props* sp) {
     blk* b = d ? pd_doc_blk(d, id) : NULL;
 
@@ -3917,7 +3947,7 @@ pd_status pd_doc_set_section_props(pd_doc* d, pd_block_id id, const pd_section_p
              sp->direction >= PD_DIR_AUTO && sp->direction <= PD_DIR_RTL &&
              sp->mirror_margins >= -1 && sp->mirror_margins <= 1 && sp->gutter >= 0 &&
              (int64_t)sp->margin_left + sp->margin_right + sp->gutter < sp->page_width && sp->page_valign >= 0 &&
-             sp->page_valign <= 2,
+             sp->page_valign <= 2 && section_extras_ok(sp),
              b->st.sp = *sp);
 }
 
@@ -3928,7 +3958,8 @@ int pd_doc_table_props_ok(const pd_table_props* tp) {
             tp->header_rows > 1000 || tp->cell_padding < 0 || tp->border < 0 || tp->ncols < 0 ||
             tp->ncols > PD_TABLE_MAX_COLS || tp->indent < -PD_PT(10000) || tp->indent > PD_PT(10000) ||
             tp->width_pct < 0 || tp->width_pct > 1000 || tp->border_sides < 0 || tp->border_sides > 63 ||
-            tp->direction < PD_DIR_AUTO || tp->direction > PD_DIR_RTL) {
+            tp->direction < PD_DIR_AUTO || tp->direction > PD_DIR_RTL || tp->cell_spacing < 0 ||
+            tp->cell_spacing > PD_PT(1000)) {
         return 0;
     }
 
@@ -3958,7 +3989,9 @@ pd_status pd_doc_set_cell_props(pd_doc* d, pd_block_id id, const pd_cell_props* 
              cp->col_span <= PD_TABLE_MAX_GRID && cp->valign >= 0 && cp->valign <= 2 && cp->merge_up >= 0 &&
              cp->merge_up <= 1 && cp->min_height >= 0 && cp->border_width >= 0 && cp->edge_width[0] >= 0 && cp->edge_width[1] >= 0 &&
              cp->edge_width[2] >= 0 && cp->edge_width[3] >= 0 && (cp->border_set & ~15) == 0 &&
-             (cp->border_on & ~cp->border_set) == 0 && cp->width >= 0 && cp->width_pct >= 0 && cp->width_pct <= 1000,
+             (cp->border_on & ~cp->border_set) == 0 && cp->width >= 0 && cp->width_pct >= 0 && cp->width_pct <= 1000 &&
+             cp->text_dir >= PD_CELLTEXT_LRTB && cp->text_dir <= PD_CELLTEXT_TBRL && cp->diag_width[0] >= 0 &&
+             cp->diag_width[1] >= 0,
              b->st.cell = *cp);
 }
 

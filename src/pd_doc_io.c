@@ -95,6 +95,22 @@ static void put_bool(pj_writer* w, const char* k, int v) {
     pj_bool(w, v != 0);
 }
 
+/* border lines, as rows of style, width, colour, space */
+static void put_lines(pj_writer* w, const char* key, const pd_border_line* l, int n) {
+    int64_t m[4 * 6];
+    int k;
+
+    for (k = 0; k < n && k < 6; k++) {
+        m[4 * k] = l[k].style;
+        m[4 * k + 1] = l[k].width;
+        m[4 * k + 2] = l[k].color;
+        m[4 * k + 3] = l[k].space;
+    }
+
+    pj_key(w, key);
+    pj_int_matrix(w, m, n, 4);
+}
+
 static void save_pp(pj_writer* w, const pd_para_props* p) {
     uint32_t m = p->mask;
 
@@ -179,6 +195,18 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
 
         if (p->border_theme) {
             put_int(w, "BorderTheme", p->border_theme);
+        }
+
+        {
+            int k, any = 0;
+
+            for (k = 0; k < 6; k++) {
+                any |= p->border_line[k].style != PD_LINE_NONE;
+            }
+
+            if (any) {
+                put_lines(w, "BorderLines", p->border_line, 6);
+            }
         }
     }
 
@@ -653,6 +681,41 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 }
             }
 
+            if (p->page_border[0].style || p->page_border[1].style || p->page_border[2].style ||
+                    p->page_border[3].style) {
+                put_lines(w, "PageBorders", p->page_border, 4);
+                put_int(w, "PageBorderFlags", p->page_border_flags);
+            }
+
+            if (p->column_rule) {
+                put_bool(w, "ColumnRule", p->column_rule);
+            }
+
+            if (p->ncol_widths) {
+                int64_t cw[2 * PD_SECTION_MAX_COLS];
+                int q;
+
+                for (q = 0; q < p->ncol_widths; q++) {
+                    cw[2 * q] = p->col_width[q];
+                    cw[2 * q + 1] = p->col_space[q];
+                }
+
+                pj_key(w, "ColumnWidths");
+                pj_int_matrix(w, cw, p->ncol_widths, 2);
+            }
+
+            if (p->start) {
+                put_str(w, "Start", name_of(NAMES(break_names), p->start));
+            }
+
+            if (p->page_color) {
+                put_int(w, "PageColor", (int64_t)p->page_color);
+            }
+
+            if (p->text_flow) {
+                put_int(w, "TextFlow", p->text_flow);
+            }
+
             if (p->line_numbers) {
                 put_int(w, "LineNumbers", p->line_numbers);
                 put_int(w, "LineNumberStart", p->line_number_start);
@@ -709,6 +772,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "BorderGiven", p->border_given);
             }
 
+            if (p->cell_spacing) {
+                put_int(w, "CellSpacing", p->cell_spacing);
+            }
+
             if (p->ncols) {
                 pj_key(w, "ColumnWidths");
                 pj_arr_begin(w);
@@ -728,7 +795,7 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
             const pd_cell_props* p = &s->cell;
 
             if (p->col_span != 1 || p->valign || p->background || p->merge_up || p->min_height || p->border_set ||
-                    p->width || p->width_pct) {
+                    p->width || p->width_pct || p->text_dir || p->diag_width[0] || p->diag_width[1]) {
                 pj_key(w, "Cell");
                 pj_obj_begin(w);
                 put_int(w, "ColumnSpan", p->col_span);
@@ -757,6 +824,20 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
 
                 if (p->width_pct) {
                     put_int(w, "WidthPerMille", p->width_pct);
+                }
+
+                if (p->text_dir) {
+                    put_int(w, "TextDirection", p->text_dir);
+                }
+
+                if (p->diag_width[0]) {
+                    put_int(w, "DiagonalDown", p->diag_width[0]);
+                    put_int(w, "DiagonalDownColor", (int64_t)p->diag_color[0]);
+                }
+
+                if (p->diag_width[1]) {
+                    put_int(w, "DiagonalUp", p->diag_width[1]);
+                    put_int(w, "DiagonalUpColor", (int64_t)p->diag_color[1]);
                 }
 
                 if (p->border_set) {
@@ -1349,6 +1430,26 @@ static void copy_name(const pj_node* x, char* dst, size_t cap, loader* L) {
 #define SP_MAX 0x7FFFFFFF
 #define SP_MIN (-0x7FFFFFFF - 1)
 
+static void load_lines(loader* L, const pj_node* x, pd_border_line* l, int n) {
+    int k;
+
+    if (!x) {
+        return;
+    }
+
+    REQUIRE(x->type == PJ_ARR && (int)x->n <= n);
+
+    for (k = 0; k < (int)x->n; k++) {
+        const pj_node* r = pj_at(x, k);
+
+        REQUIRE(r && r->type == PJ_ARR);
+        l[k].style = (int32_t)int_or(pj_at(r, 0), 0, 0, PD_LINE_DOT_DASH, L);
+        l[k].width = (pd_sp)int_or(pj_at(r, 1), 0, 0, PD_PT(100), L);
+        l[k].color = (uint32_t)int_or(pj_at(r, 2), 0, 0, 0xFFFFFFFFLL, L);
+        l[k].space = (pd_sp)int_or(pj_at(r, 3), 0, 0, PD_PT(1000), L);
+    }
+}
+
 static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
     const pj_node* x;
 
@@ -1400,6 +1501,11 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
         p->border_sides = (int32_t)int_or(pj_get(o, "BorderSides"), 0, 0, 31, L);
         p->border_space = (pd_sp)int_or(pj_get(o, "BorderSpace"), 0, 0, SP_MAX, L);
         p->border_theme = (uint32_t)int_or(pj_get(o, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
+    }
+
+    if ((x = pj_get(o, "BorderLines"))) {
+        p->mask |= PD_PP_BORDER;
+        load_lines(L, x, p->border_line, 6);
     }
 
     if ((x = pj_get(o, "Shading"))) {
@@ -1815,6 +1921,7 @@ static void load_paragraph(loader* L, const pj_node* o, bstate* s) {
     }
 }
 
+
 static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
     const pj_node* x = pj_get(o, "Page");
 
@@ -1875,6 +1982,33 @@ static void load_section(loader* L, const pj_node* o, pd_section_props* p) {
         }
     }
 
+    load_lines(L, pj_get(x, "PageBorders"), p->page_border, 4);
+    p->page_border_flags = (int32_t)int_or(pj_get(x, "PageBorderFlags"), 0, 0, 15, L);
+    p->column_rule = (int32_t)int_or(pj_get(x, "ColumnRule"), 0, 0, 1, L);
+    p->page_color = (uint32_t)int_or(pj_get(x, "PageColor"), 0, 0, 0xFFFFFFFFLL, L);
+    p->text_flow = (int32_t)int_or(pj_get(x, "TextFlow"), 0, 0, PD_CELLTEXT_TBRL, L);
+
+    if (pj_get(x, "Start")) {
+        p->start = enum_of(pj_get(x, "Start"), NAMES(break_names));
+        REQUIRE(p->start == PD_BREAK_PAGE || p->start == PD_BREAK_COLUMN || p->start == PD_BREAK_ODD_PAGE ||
+                p->start == PD_BREAK_EVEN_PAGE);
+    }
+
+    {
+        const pj_node* cw = pj_get(x, "ColumnWidths");
+        int32_t k;
+
+        if (cw) {
+            REQUIRE(cw->type == PJ_ARR && cw->n <= PD_SECTION_MAX_COLS);
+            p->ncol_widths = (int32_t)cw->n;
+
+            for (k = 0; k < p->ncol_widths; k++) {
+                p->col_width[k] = (pd_sp)int_or(pj_at(pj_at(cw, k), 0), 0, 0, SP_MAX, L);
+                p->col_space[k] = (pd_sp)int_or(pj_at(pj_at(cw, k), 1), 0, 0, SP_MAX, L);
+            }
+        }
+    }
+
     if (pj_get(x, "PageBreaking")) {
         static const char* const pb_names[] = { "greedy", "optimal" };
 
@@ -1918,6 +2052,7 @@ static void load_table(loader* L, const pj_node* o, pd_table_props* p) {
     REQUIRE(!p->style || L->d->styles[p->style - 1].kind == PD_STYLE_TABLE);
     p->look = (int32_t)int_or(pj_get(x, "Look"), 0, 0, 63, L);
     p->border_given = (int32_t)int_or(pj_get(x, "BorderGiven"), 0, 0, 63, L);
+    p->cell_spacing = (pd_sp)int_or(pj_get(x, "CellSpacing"), 0, 0, PD_PT(1000), L);
 
     if ((c = pj_get(x, "ColumnWidths")) != NULL) {
         int32_t i;
@@ -1969,6 +2104,11 @@ static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {
     p->border_theme = (uint32_t)int_or(pj_get(x, "BorderTheme"), 0, 0, 0xFFFFFFFFLL, L);
     p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);
     p->width_pct = (int32_t)int_or(pj_get(x, "WidthPerMille"), 0, 0, 1000, L);
+    p->text_dir = (int32_t)int_or(pj_get(x, "TextDirection"), 0, 0, PD_CELLTEXT_TBRL, L);
+    p->diag_width[0] = (pd_sp)int_or(pj_get(x, "DiagonalDown"), 0, 0, SP_MAX, L);
+    p->diag_color[0] = (uint32_t)int_or(pj_get(x, "DiagonalDownColor"), 0, 0, 0xFFFFFFFFLL, L);
+    p->diag_width[1] = (pd_sp)int_or(pj_get(x, "DiagonalUp"), 0, 0, SP_MAX, L);
+    p->diag_color[1] = (uint32_t)int_or(pj_get(x, "DiagonalUpColor"), 0, 0, 0xFFFFFFFFLL, L);
 
     {
         const pj_node* ew = pj_get(x, "EdgeWidths");

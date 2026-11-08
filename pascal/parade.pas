@@ -249,6 +249,26 @@ const
   PD_ROWSPLIT_TALL = 0;
   PD_ROWSPLIT_NEVER = 1;
   PD_ROWSPLIT_ANY = 2;
+  PD_CELLTEXT_LRTB = 0;
+  PD_CELLTEXT_BTLR = 1;
+  PD_CELLTEXT_TBRL = 2;
+  PD_SECTION_MAX_COLS = 16;
+  PD_LINE_NONE = 0;
+  PD_LINE_SINGLE = 1;
+  PD_LINE_DOUBLE = 2;
+  PD_LINE_DOTTED = 3;
+  PD_LINE_DASHED = 4;
+  PD_LINE_THICK = 5;
+  PD_LINE_THIN_THICK = 6;
+  PD_LINE_THICK_THIN = 7;
+  PD_LINE_TRIPLE = 8;
+  PD_LINE_DOT_DASH = 9;
+  PD_PGBORDER_FROM_TEXT = 1;
+  PD_PGBORDER_FIRST = 2;
+  PD_PGBORDER_NOT_FIRST = 4;
+  PD_PGBORDER_BEHIND = 8;
+  PD_BORDER_LINE_BETWEEN = 4;
+  PD_BORDER_LINE_BAR = 5;
 
   PD_MAX_TABS = 16;
   PD_TAB_LEFT = 0;
@@ -535,6 +555,15 @@ type
   end;
   Ppd_tab_stop = ^pd_tab_stop;
 
+  { one side of a border }
+  pd_border_line = record
+    style: Int32;             { PD_LINE_* }
+    width: pd_sp;
+    color: UInt32;
+    space: pd_sp;
+  end;
+  Ppd_border_line = ^pd_border_line;
+
   pd_para_props = record
     mask: UInt32;
     align: Int32;
@@ -556,6 +585,7 @@ type
     shading_theme: UInt32;    { pd_theme_color reference of the shading, 0 = none }
     line_rule: Int32;         { PD_LINE_*: a multiple (line_spacing), at least or exactly line_height }
     line_height: pd_sp;
+    border_line: array[0..5] of pd_border_line;  { each edge's own: top, right, bottom, left, between, bar }
   end;
   Ppd_para_props = ^pd_para_props;
 
@@ -648,6 +678,14 @@ type
     note_format: array[0..1] of Int32;   { footnotes', endnotes' pd_num_format; 0 the usual }
     note_start: array[0..1] of Int32;    { the first number, 0 = 1 }
     note_restart: array[0..1] of Int32;  { PD_NOTES_* }
+    page_border: array[0..3] of pd_border_line;   { top, right, bottom, left }
+    page_border_flags: Int32; { PD_PGBORDER_* }
+    column_rule: Int32;       { 1: a line between the columns }
+    ncol_widths: Int32;       { columns of their own widths, 0 = equal }
+    col_width, col_space: array[0..PD_SECTION_MAX_COLS - 1] of pd_sp;
+    start: Int32;             { PD_BREAK_PAGE, _ODD_PAGE, _EVEN_PAGE, _COLUMN }
+    page_color: UInt32;       { 0 = none }
+    text_flow: Int32;         { PD_CELLTEXT_* }
   end;
   Ppd_section_props = ^pd_section_props;
 
@@ -666,6 +704,7 @@ type
     style: pd_style_id;      { its table style (PD_STYLE_TABLE), 0 = none }
     look: Int32;             { PD_TLOOK_*: the style's conditional parts it shows }
     border_given: Int32;     { with a style: the PD_TBORDER_* rules it sets itself }
+    cell_spacing: pd_sp;     { room around every cell inside the table's frame (tblCellSpacing) }
   end;
   Ppd_table_props = ^pd_table_props;
 
@@ -681,6 +720,9 @@ type
     background_theme, border_theme: UInt32;     { pd_theme_color references, 0 = none }
     width: pd_sp;            { preferred width (Word's tcW), 0 = automatic }
     width_pct: Int32;        { or per-mille of the table's width }
+    text_dir: Int32;         { PD_CELLTEXT_* }
+    diag_width: array[0..1] of pd_sp;   { corner to corner: tl2br, tr2bl; 0 = none }
+    diag_color: array[0..1] of UInt32;
   end;
   Ppd_cell_props = ^pd_cell_props;
 
