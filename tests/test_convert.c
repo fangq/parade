@@ -1099,20 +1099,24 @@ static void check_docx_styles(const pd_doc* d) {
     CHECK(strcmp(cp.family, "Calibri Light") == 0 && cp.size == PD_PT(10) && cp.weight == 400);
 }
 
-/* a document from the parts of a .docx: name, text, name, text, ..., NULL.
-   A word/media/ part names a file whose bytes it holds. */
-static pd_doc* docx_doc(const char* first, ...) {
+/* a document from the parts of a package in format FMT: PRE's NPRE names and texts, then name, text, name, text,
+   ..., NULL. A word/media/ (ppt/media/) part names a file whose bytes it holds. */
+static pd_doc* parts_doc(int fmt, const char* const* pre, int npre, const char* first, va_list ap) {
     const char* names[16];
     const char* texts[16];
     size_t lens[16];
     char* files[16];
     int n = 0, i;
-    va_list ap;
     const char* nm;
     buf_t z;
     pd_doc* d = NULL;
 
-    va_start(ap, first);
+    for (; n < npre; n++) {
+        names[n] = pre[2 * n];
+        texts[n] = pre[2 * n + 1];
+        lens[n] = strlen(texts[n]);
+        files[n] = NULL;
+    }
 
     for (nm = first; nm && n < 16; nm = va_arg(ap, const char*)) {
         names[n] = nm;
@@ -1120,7 +1124,8 @@ static pd_doc* docx_doc(const char* first, ...) {
         lens[n] = strlen(texts[n]);
         files[n] = NULL;
 
-        if (strncmp(nm, "word/media/", 11) == 0 || strncmp(nm, "word/fonts/", 11) == 0) {
+        if (strncmp(nm, "word/media/", 11) == 0 || strncmp(nm, "word/fonts/", 11) == 0 ||
+                strncmp(nm, "ppt/media/", 10) == 0) {
             FILE* f = fopen(texts[n], "rb");
             long sz;
 
@@ -1138,7 +1143,6 @@ static pd_doc* docx_doc(const char* first, ...) {
         n++;
     }
 
-    va_end(ap);
     z = stored_zip_n(names, texts, lens, n);
 
     for (i = 0; i < n; i++) {
@@ -1146,11 +1150,49 @@ static pd_doc* docx_doc(const char* first, ...) {
     }
 
 
-    if (pd_doc_import(z.p, z.n, PD_CONV_DOCX, &d) != PD_OK) {
+    if (pd_doc_import(z.p, z.n, fmt, &d) != PD_OK) {
         d = NULL;
     }
 
     free(z.p);
+    return d;
+}
+
+/* a document from the parts of a .docx: name, text, name, text, ..., NULL */
+static pd_doc* docx_doc(const char* first, ...) {
+    va_list ap;
+    pd_doc* d;
+
+    va_start(ap, first);
+    d = parts_doc(PD_CONV_DOCX, NULL, 0, first, ap);
+    va_end(ap);
+    return d;
+}
+
+/* a presentation of N slides, ppt/slides/slide1.xml.., from the parts given (name, text, ..., NULL); its
+   presentation part made here, its slides 10 by 7.5 inches */
+static pd_doc* pptx_doc(int nslides, const char* first, ...) {
+    static char pres[2048], prels[2048];
+    const char* pre[4] = { "ppt/presentation.xml", pres, "ppt/_rels/presentation.xml.rels", prels };
+    va_list ap;
+    pd_doc* d;
+    size_t a, b;
+    int k;
+
+    a = (size_t)snprintf(pres, sizeof(pres), "<p:presentation xmlns:p=\"p\" xmlns:r=\"r\"><p:sldIdLst>");
+    b = (size_t)snprintf(prels, sizeof(prels), "<Relationships>");
+
+    for (k = 1; k <= nslides; k++) {
+        a += (size_t)snprintf(pres + a, sizeof(pres) - a, "<p:sldId id=\"%d\" r:id=\"rIdS%d\"/>", 255 + k, k);
+        b += (size_t)snprintf(prels + b, sizeof(prels) - b, "<Relationship Id=\"rIdS%d\" Target=\"slides/slide%d.xml\"/>",
+                              k, k);
+    }
+
+    snprintf(pres + a, sizeof(pres) - a, "</p:sldIdLst><p:sldSz cx=\"9144000\" cy=\"6858000\"/></p:presentation>");
+    snprintf(prels + b, sizeof(prels) - b, "</Relationships>");
+    va_start(ap, first);
+    d = parts_doc(PD_CONV_PPTX, pre, 2, first, ap);
+    va_end(ap);
     return d;
 }
 
@@ -4061,6 +4103,53 @@ static void test_pptx(void) {
     pd_doc_free(d);
 }
 
+/* a slide of a presentation made by pptx_doc: its attributes, its shapes */
+#define PSLD(attrs, body) "<p:sld xmlns:p=\"p\" xmlns:a=\"a\" xmlns:r=\"r\"" attrs "><p:cSld><p:spTree>" body \
+    "</p:spTree></p:cSld></p:sld>"
+/* a text box (ID a string) at the slide's corner, 4 by 2 inches, with paragraphs BODY */
+#define PSP(id, body) "<p:sp><p:nvSpPr><p:cNvPr id=\"" id "\" name=\"s\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>" \
+    "<p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"3657600\" cy=\"1828800\"/></a:xfrm><a:prstGeom prst=\"rect\">" \
+    "<a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>" body "</p:txBody></p:sp>"
+#define PP(text) "<a:p><a:r><a:t>" text "</a:t></a:r></a:p>"
+
+/* the drawing items of slide K's canvas, as text (caller frees); NULL if none */
+static char* slide_json(const pd_doc* d, int k) {
+    pd_block_id fl = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), k), 0);
+    pd_inline o;
+
+    return pd_doc_inline_at(d, at(pd_doc_child(d, fl, 0), 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE ?
+           drawing_json(d, o.resource) : NULL;
+}
+
+/* a hidden slide (show="0") is not shown in the slide show: no page of it, the slides after it numbered as
+   PowerPoint numbers them */
+static void test_pptx_hidden(void) {
+    pd_doc* d = pptx_doc(3,
+                         "ppt/slides/slide1.xml", PSLD("", PSP("2", PP("One"))),
+                         "ppt/slides/slide2.xml", PSLD(" show=\"0\"", PSP("2", PP("Two"))),
+                         "ppt/slides/slide3.xml", PSLD("", PSP("2", PP("Three")
+                                 "<a:p><a:fld id=\"{1}\" type=\"slidenum\"><a:t>9</a:t></a:fld></a:p>")),
+                         NULL);
+    pd_block_info ri;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    CHECK(pd_doc_block_info(d, pd_doc_root(d), &ri) == PD_OK && ri.child_count == 2);
+    CHECK(story_para_with(d, "One") && story_para_with(d, "Three") && !story_para_with(d, "Two"));
+    CHECK(story_para_with(d, "3") && text_is(d, story_para_with(d, "3"), "3"));
+    {   /* the second page the third slide's */
+        char* js = slide_json(d, 1);
+
+        CHECK(js != NULL);
+        free(js);
+    }
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5599,6 +5688,7 @@ int main(void) {
     test_docx_float_from_page();
     test_pptx();
     test_pptx_smartart();
+    test_pptx_hidden();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

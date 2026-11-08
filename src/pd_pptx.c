@@ -2249,12 +2249,31 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
     part_free(&slide);
 }
 
+/* whether a slide is hidden (show="0"): not shown in the slide show, so not a page */
+static int slide_hidden(pptx* P, const char* path) {
+    size_t len = 0;
+    char* s = (char*)pd_zip_get(P->zip, P->zn, path, &len);
+    char v[16];
+    int hidden = 0;
+    xdoc x;
+
+    if (s) {
+        if (xd_parse(&x, s, len)) {
+            hidden = x.nv > 0 && xd_attr(&x, 0, "show", v, sizeof(v)) && (!strcmp(v, "0") || !strcmp(v, "false"));
+        }
+
+        xd_free(&x);
+    }
+
+    return hidden;
+}
+
 pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     pptx P;
     ppart pres, ts;
     int have_ts = 0;
     pd_buf zip;
-    int lst, k, nslides = 0, idx = 0, ds;
+    int lst, k, nslides = 0, idx = 0, ds, no, nos[1024];
     const char* paths[1024];
     char tp[300];
     pd_status st;
@@ -2304,8 +2323,11 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
 
     lst = xd_find(&pres.x, "sldIdLst");
 
-    for (k = lst >= 0 ? pres.x.v[lst].kid : -1; k >= 0 && nslides < 1024; k = pres.x.v[k].next) {
-        if (xd_attr(&pres.x, k, "r:id", tp, sizeof(tp)) && rel_of(&pres, tp)) {
+    /* the slides shown: a hidden one is left out (its number kept: those after it count it, as PowerPoint's do) */
+    for (k = lst >= 0 ? pres.x.v[lst].kid : -1, no = 0; k >= 0 && nslides < 1024; k = pres.x.v[k].next) {
+        if (xd_attr(&pres.x, k, "r:id", tp, sizeof(tp)) && rel_of(&pres, tp) && ++no &&
+                !slide_hidden(&P, rel_of(&pres, tp))) {
+            nos[nslides] = no;
             paths[nslides++] = rel_of(&pres, tp);
         }
     }
@@ -2337,7 +2359,7 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
             "theme\" Target=\"theme/theme1.xml\"/>");
 
     for (idx = 0; idx < nslides; idx++) {
-        put_slide(&P, &pres.x, ds, paths[idx], idx + 1, idx == nslides - 1);
+        put_slide(&P, &pres.x, ds, paths[idx], nos[idx], idx == nslides - 1);
     }
 
     if (nslides == 0) {
