@@ -1357,6 +1357,51 @@ begin
 end;
 
 { a polyline stroked at a width: a filled quad along each segment }
+{ a path with a style of its own (dashes, ends, corners) drawn by Parade's own rasterizer, the same pixels the
+  library gives every host: into a buffer over its box, then onto the page }
+procedure RenderPathImg(Img: TLazIntfImage; const D: pd_draw; OX, OY, PxScale: Double);
+var
+  Grow: Double;
+  X0, Y0, X1, Y1, W, H, X, Y, A: Integer;
+  Buf: array of Byte;
+  P: PPixel;
+  Q: PByte;
+begin
+  Grow := D.line_width * 8 + 4 / PxScale;
+  X0 := Max(0, Floor(OX + (D.x - Grow) * PxScale));
+  Y0 := Max(0, Floor(OY + (D.y - Grow) * PxScale));
+  X1 := Min(Img.Width, Ceil(OX + (D.x + D.w + Grow) * PxScale));
+  Y1 := Min(Img.Height, Ceil(OY + (D.y + D.h + Grow) * PxScale));
+  W := X1 - X0;
+  H := Y1 - Y0;
+  if (W <= 0) or (H <= 0) or (Int64(W) * H > 64 * 1024 * 1024) then
+    Exit;
+  SetLength(Buf, W * H * 4);
+  FillChar(Buf[0], Length(Buf), 0);
+  if pd_draw_render(@D, 1, Round((X0 - OX) / PxScale), Round((Y0 - OY) / PxScale), Round(PxScale * 65536.0 * 65536.0),
+    @Buf[0], W, H, W * 4) <> PD_OK then
+    Exit;
+  for Y := 0 to H - 1 do
+  begin
+    P := PPixel(Img.GetDataLineStart(Y0 + Y));
+    Inc(P, X0);
+    Q := @Buf[Y * W * 4];
+    for X := 0 to W - 1 do
+    begin
+      A := Q[3];
+      if A > 0 then
+      begin   { premultiplied: its colour plus what shows through }
+        P^.R := Q[0] + P^.R * (255 - A) div 255;
+        P^.G := Q[1] + P^.G * (255 - A) div 255;
+        P^.B := Q[2] + P^.B * (255 - A) div 255;
+        P^.A := 255;
+      end;
+      Inc(P);
+      Inc(Q, 4);
+    end;
+  end;
+end;
+
 procedure StrokePolylineImg(Img: TLazIntfImage; const P: TPtDArray; Closed: Boolean; W: Double; Col: UInt32);
 var
   I, J, N, Last: Integer;
@@ -12947,7 +12992,9 @@ begin
           FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale),
             OY + Round((y + h) * PxScale), $00FBE3C0, 255);
         PD_DRAW_PATH:
-          if (points <> nil) and (npoints >= 2) then
+          if (points <> nil) and (npoints >= 2) and (style <> nil) then
+            RenderPathImg(Img, Items[I], OX, OY, PxScale)
+          else if (points <> nil) and (npoints >= 2) then
           begin
             { rings: split where the points say }
             SetLength(Rings, 1);

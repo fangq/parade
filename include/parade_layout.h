@@ -84,6 +84,21 @@ typedef enum {
 #define PD_PATH_BREAK  INT32_MIN /**< a point (PD_PATH_BREAK, PD_PATH_BREAK) ends one ring and starts the next:
                                       rings filled together, non-zero winding, so holes stay holes */
 
+#define PD_CAP_FLAT    0        /**< a stroke's ends square at its end points */
+#define PD_CAP_ROUND   1        /**< half a disc past each end */
+#define PD_CAP_SQUARE  2        /**< half the width past each end */
+#define PD_JOIN_ROUND  0        /**< corners rounded (what a path without a style has) */
+#define PD_JOIN_BEVEL  1        /**< corners cut across */
+#define PD_JOIN_MITER  2        /**< corners pointed, cut across where the point would pass 8 line widths */
+
+/** A path's further paint, where it has one (pd_draw.style): what the plain fields cannot say */
+typedef struct {
+    int32_t dash_count;         /**< 0: a solid stroke; else the lengths in dash, dash first, then gap, ... */
+    pd_sp dash[8];              /**< on the page */
+    int32_t cap;                /**< PD_CAP_* (of each dash too) */
+    int32_t join;               /**< PD_JOIN_* */
+} pd_path_style;
+
 typedef struct {
     int32_t kind;               /**< pd_draw_kind */
     pd_sp x, y, w, h;
@@ -112,6 +127,7 @@ typedef struct {
     int32_t flip;               /**< images: PD_FLIP_H, PD_FLIP_V */
     const pd_sp* clip_points;   /**< images: shown only inside this polygon (x, y pairs on the page, as paths' are) */
     int32_t clip_npoints;
+    const pd_path_style* style; /**< paths: dashes, caps, joins, ...; NULL for none (valid as points are) */
 } pd_draw;
 
 #define PD_FLIP_H 1             /**< mirrored left to right */
@@ -155,6 +171,17 @@ PD_API pd_status pd_layout_caret(const pd_layout* layout, pd_pos pos, int32_t* p
 /** the position one step left (dir < 0) or right (dir > 0) of pos as its line is shown: in right-to-left text
     left goes forward; PD_ERR_RANGE at that end of the line (the caller goes on to the next or previous line) */
 PD_API pd_status pd_layout_caret_step(const pd_layout* layout, pd_pos pos, int32_t dir, pd_pos* out);
+
+/**
+ * Draw display-list items into an RGBA image (8 bits a channel, R G B A,
+ * premultiplied by alpha, rows stride bytes apart), over what it holds:
+ * paths (with their styles) and rules; glyphs and images are left to the
+ * caller. The image's top-left pixel is the page point (x0, y0); scale is
+ * pixels per point in 16.16 (65536: 72 dpi). Integer arithmetic for the
+ * coverage, so the same items give the same pixels everywhere.
+ */
+PD_API pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba,
+                                int32_t width, int32_t height, int32_t stride);
 
 /* ------------------------------------------------------------------ */
 /* PDF                                                                */

@@ -7861,6 +7861,39 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
     }
 }
 
+/* a preset dash (prstDash) as its lengths, dash, gap, ..., in 100000ths of the line's width (ECMA's patterns);
+   how many, 0 for solid */
+static int dw_dash_preset(const char* v, int* out) {
+    static const struct {
+        const char* n;
+        int k, d[6];
+    } t[] = {
+        { "dash", 2, { 4, 3 } }, { "dashDot", 4, { 4, 3, 1, 3 } }, { "dot", 2, { 1, 3 } }, { "lgDash", 2, { 8, 3 } },
+        { "lgDashDot", 4, { 8, 3, 1, 3 } }, { "lgDashDotDot", 6, { 8, 3, 1, 3, 1, 3 } }, { "sysDash", 2, { 3, 1 } },
+        { "sysDashDot", 4, { 3, 1, 1, 1 } }, { "sysDashDotDot", 6, { 3, 1, 1, 1, 1, 1 } }, { "sysDot", 2, { 1, 1 } }
+    };
+    int i, k;
+
+    for (i = 0; i < (int)(sizeof(t) / sizeof(t[0])); i++) {
+        if (!strcmp(v, t[i].n)) {
+            for (k = 0; k < t[i].k; k++) {
+                out[k] = t[i].d[k] * 100000;
+            }
+
+            return t[i].k;
+        }
+    }
+
+    return 0;
+}
+
+/* an arrowhead's type (headEnd, tailEnd) as the drawing resource numbers it: 1 triangle, 2 stealth, 3 diamond,
+   4 oval, 5 an open arrow; 0 none */
+static int dw_arrow_type(const char* v) {
+    return !strcmp(v, "triangle") ? 1 : !strcmp(v, "stealth") ? 2 : !strcmp(v, "diamond") ? 3 : !strcmp(v, "oval") ?
+           4 : !strcmp(v, "arrow") ? 5 : 0;
+}
+
 /* A custom geometry as read: each path's commands in its own space (m, l, c, z: arcs and quadratic curves made
    cubics), with its own size, fill and outline, so each is drawn as it says */
 #define DW_CG_MAXCMD 2048
@@ -7962,7 +7995,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int nfr = 1, depth = 1, in_grpsppr = 0, root_frame = !canvas, kind = 0, in_sppr = 0, in_ln = 0, in_txbx = 0;
     int in_rpr = 0, in_body_t = 0, para_open = 0, first_item = 1, have_fill = 0, have_line = 0, style_fill = 0;
     int style_line = 0, in_fillref = 0, in_lnref = 0, in_gs = 0, nopara = 1, head_arrow = 0, tail_arrow = 0;
-    int arrow_w[2] = { 3, 3 }, arrow_len[2] = { 3, 3 };  /* head, tail: in line widths, Word's sm 2, med 3, lg 5 */
+    int arrow_w[2] = { 2, 2 }, arrow_len[2] = { 2, 2 };  /* head, tail: 1 sm, 2 med, 3 lg */
+    int dash[8], ndash = 0, lcap = 0, ljoin = 0, lcmpd = 0;   /* the outline's dashes, ends, corners, lines */
     long long ext_h = 0, adj1 = -1;                     /* extrusion depth; a preset's first adjustment */
     char prst[32] = "";                                 /* the shape's preset, for one whose corners its adjustments move */
     uint32_t ext_clr = 0, patt_fg = 0, patt_bg = 0, cv_bg = 0, cv_line = 0;
@@ -8243,7 +8277,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             head_arrow = tail_arrow = 0;
             tx_a = tx_b = NULL;
             tx_depth = 0;
-            arrow_w[0] = arrow_w[1] = arrow_len[0] = arrow_len[1] = 3;
+            arrow_w[0] = arrow_w[1] = arrow_len[0] = arrow_len[1] = 2;
+            ndash = lcap = ljoin = lcmpd = 0;
             ext_h = 0;
             ext_clr = 0;
             adj1 = -1;
@@ -8391,10 +8426,45 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             } else if (kind == 2) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
                 char fx[160] = "";  /* the fill's gradient and shadow, for the items that fill */
+                char lx[160], ax[64];   /* the outline's dashes, ends, corners and lines; its arrowheads */
 
                 if (grad_kind && fill2 && have_fill) {
                     snprintf(fx, sizeof(fx), ",\"gk\":%d,\"f2\":%u,\"ga\":%d", grad_kind, (unsigned)fill2,
                              grad_ang + xf.rot);
+                }
+
+                {   /* the outline's style, for the items it outlines; arrowheads for the open ones */
+                    size_t ll = 0;
+                    int q;
+
+                    lx[0] = ax[0] = '\0';
+
+                    if (ndash) {
+                        ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, ",\"dash\":[");
+
+                        for (q = 0; q < ndash; q++) {
+                            ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, "%s%d", q ? "," : "", dash[q]);
+                        }
+
+                        ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, "]");
+                    }
+
+                    if (lcap) {
+                        ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, ",\"cap\":%d", lcap);
+                    }
+
+                    if (ljoin) {
+                        ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, ",\"join\":%d", ljoin);
+                    }
+
+                    if (lcmpd) {
+                        snprintf(lx + ll, sizeof(lx) - ll, ",\"cmpd\":%d", lcmpd);
+                    }
+
+                    if (head_arrow || tail_arrow) {
+                        snprintf(ax, sizeof(ax), ",\"he\":[%d,%d,%d],\"te\":[%d,%d,%d]", head_arrow, arrow_w[0],
+                                 arrow_len[0], tail_arrow, arrow_w[1], arrow_len[1]);
+                    }
                 }
 
                 if (has_shd && shd_dist > 0) {
@@ -8522,9 +8592,10 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                             }
                         }
 
-                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", pf->path[i].closed && pfl,
+                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s}", pf->path[i].closed && pfl,
                                   (unsigned)pfl, (unsigned)pln, (int)emu_sp(lwd),
-                                  pfl && !strcmp(pf->path[i].fill, "norm") ? fx : "");
+                                  pfl && !strcmp(pf->path[i].fill, "norm") ? fx : "", pln ? lx : "",
+                                  pln && !pf->path[i].closed ? ax : "");
                     }
 
                     f = l = 0;
@@ -8562,8 +8633,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                             }
                         }
 
-                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", closed, (unsigned)pfl,
-                                  (unsigned)pln, (int)emu_sp(lwd), pfl && !strcmp(cg->path[i].fill, "norm") ? fx : "");
+                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s}", closed, (unsigned)pfl,
+                                  (unsigned)pln, (int)emu_sp(lwd), pfl && !strcmp(cg->path[i].fill, "norm") ? fx : "",
+                                  pln ? lx : "", pln && !closed ? ax : "");
                     }
 
                     f = l = 0;
@@ -8584,8 +8656,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         }
                     }
 
-                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", cg_closed, (unsigned)f, (unsigned)l,
-                              (int)emu_sp(lwd), f && cg_closed ? fx : "");
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s}", cg_closed, (unsigned)f, (unsigned)l,
+                              (int)emu_sp(lwd), f && cg_closed ? fx : "", l ? lx : "");
                     f = l = 0;
                 }
 
@@ -8678,29 +8750,6 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         py[k] = ry;
                     }
 
-                    /* arrowheads: a filled triangle at the end the line says, as long and wide as Word makes them
-                       (2, 3 or 5 line widths: sm, med, lg); the line stops short of its point */
-                    for (k = 0; isline && l && np >= 2 && k < 2; k++) {
-                        if ((k == 0 && head_arrow) || (k == 1 && tail_arrow)) {
-                            int ti = k ? np - 1 : 0, fi = k ? np - 2 : 1;
-                            double tx = px[ti], ty = py[ti], dx = tx - px[fi], dy = ty - py[fi],
-                                   len = sqrt(dx * dx + dy * dy), unit = lwd > 19050 ? lwd : 19050,
-                                   hl = unit * arrow_len[k], hw = unit * arrow_w[k] / 2;
-
-                            if (len > 0) {
-                                dx /= len;
-                                dy /= len;
-                                ITEM_SEP();
-                                pb_printf(&o, "{\"path\":[%d,%d,%d,%d,%d,%d],\"closed\":1,\"fill\":%u,\"line\":0,\"lw\":0}",
-                                          (int)emu_sp(tx), (int)emu_sp(ty), (int)emu_sp(tx - dx * hl - dy * hw),
-                                          (int)emu_sp(ty - dy * hl + dx * hw), (int)emu_sp(tx - dx * hl + dy * hw),
-                                          (int)emu_sp(ty - dy * hl - dx * hw), (unsigned)l);
-                                px[ti] = tx - dx * hl * 0.8;
-                                py[ti] = ty - dy * hl * 0.8;
-                            }
-                        }
-                    }
-
                     ITEM_SEP();
                     pb_puts(&o, "{\"path\":[");
 
@@ -8708,8 +8757,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(px[k]), (int)emu_sp(py[k]));
                     }
 
-                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", isline ? 0 : 1,
-                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd), isline ? "" : fx);
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s}", isline ? 0 : 1,
+                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd), isline ? "" : fx, l ? lx : "",
+                              isline && l ? ax : "");
                     f = l = 0;  /* drawn */
                 }
 
@@ -8719,9 +8769,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     fr_pt(&sm, bx0, by0, &x0, &y0);
                     fr_pt(&sm, bx0 + bw, by0 + bh, &x1, &y1);
                     ITEM_SEP();
-                    pb_printf(&o, "{\"shape\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}",
+                    pb_printf(&o, "{\"shape\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s}",
                               geom, (int)emu_sp(x0), (int)emu_sp(y0), (int)emu_sp(x1 - x0), (int)emu_sp(y1 - y0), (unsigned)f,
-                              (unsigned)l, (int)emu_sp(lwd), f ? fx : "");
+                              (unsigned)l, (int)emu_sp(lwd), f ? fx : "", l ? lx : "");
                 }
 
                 if (tx_a && tx_b > tx_a && X->depth < 3) {
@@ -8950,8 +9000,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (!strcmp(t, "ln") && in_sppr) {
             in_ln = g.type == MT_OPEN;
 
-            if (open) {     /* its colour, if it says one (else the style's, lnRef); its width */
+            if (open) {     /* its colour, if it says one (else the style's, lnRef); its width, ends and lines */
                 lw = mu_attr(&g, "w", v, sizeof(v)) ? atoll(v) : 9525;
+                lcap = mu_attr(&g, "cap", v, sizeof(v)) ? (!strcmp(v, "rnd") ? 1 : !strcmp(v, "sq") ? 2 : 0) : 0;
+                lcmpd = mu_attr(&g, "cmpd", v, sizeof(v)) ? (!strcmp(v, "dbl") ? 1 : !strcmp(v, "thickThin") ? 2 :
+                        !strcmp(v, "thinThick") ? 3 : !strcmp(v, "tri") ? 4 : 0) : 0;
             }
         } else if (!strcmp(t, "txbxContent")) {
             in_txbx = g.type == MT_OPEN;
@@ -9234,8 +9287,17 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (cur_clr && (!strcmp(t, "lumMod") || !strcmp(t, "lumOff") || !strcmp(t, "tint") ||
                                !strcmp(t, "shade") || !strcmp(t, "alpha"))) {
             *cur_clr = pd_conv_clr_modify(*cur_clr, t, &g);
+        } else if (in_ln && !strcmp(t, "prstDash") && mu_attr(&g, "val", v, sizeof(v))) {
+            ndash = dw_dash_preset(v, dash);
+        } else if (in_ln && !strcmp(t, "custDash")) {
+            ndash = 0;
+        } else if (in_ln && !strcmp(t, "ds") && ndash < 8) {    /* a dash of a pattern of its own and its gap */
+            dash[ndash++] = mu_attr(&g, "d", v, sizeof(v)) ? atoi(v) : 100000;
+            dash[ndash++] = mu_attr(&g, "sp", v, sizeof(v)) ? atoi(v) : 100000;
+        } else if (in_ln && (!strcmp(t, "round") || !strcmp(t, "bevel") || !strcmp(t, "miter"))) {
+            ljoin = t[0] == 'r' ? 0 : t[0] == 'b' ? 1 : 2;
         } else if (in_ln && (!strcmp(t, "headEnd") || !strcmp(t, "tailEnd"))) {
-            int arrow = mu_attr(&g, "type", v, sizeof(v)) && strcmp(v, "none") != 0, e = t[0] == 'h' ? 0 : 1;
+            int arrow = mu_attr(&g, "type", v, sizeof(v)) ? dw_arrow_type(v) : 0, e = t[0] == 'h' ? 0 : 1;
 
             if (t[0] == 'h') {
                 head_arrow = arrow;
@@ -9244,11 +9306,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
 
             if (mu_attr(&g, "w", v, sizeof(v))) {
-                arrow_w[e] = !strcmp(v, "sm") ? 2 : !strcmp(v, "lg") ? 5 : 3;
+                arrow_w[e] = !strcmp(v, "sm") ? 1 : !strcmp(v, "lg") ? 3 : 2;
             }
 
             if (mu_attr(&g, "len", v, sizeof(v))) {
-                arrow_len[e] = !strcmp(v, "sm") ? 2 : !strcmp(v, "lg") ? 5 : 3;
+                arrow_len[e] = !strcmp(v, "sm") ? 1 : !strcmp(v, "lg") ? 3 : 2;
             }
         } else if (in_ln && !strcmp(t, "noFill")) {
             have_line = 1;  /* no line */

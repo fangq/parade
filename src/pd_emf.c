@@ -27,6 +27,7 @@ typedef struct {
     uint32_t color;             /* 0xAARRGGBB; pens and brushes */
     int null;                   /* a null pen or brush */
     double width;               /* pens: logical units */
+    uint32_t style;             /* pens: PS_ dash, end cap and join bits */
     double height;              /* fonts: logical units; < 0 character height */
     int weight, italic;
     char face[64];
@@ -154,8 +155,29 @@ static void out_path(mf* M, const double* xy, int n, int closed, int fill, int s
         }
     }
 
-    pb_printf(M->o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d}", closed, (unsigned)fc, (unsigned)lc,
+    pb_printf(M->o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d", closed, (unsigned)fc, (unsigned)lc,
               (int)(lw < 1 ? 1 : lw));
+
+    if (lc) {   /* the pen's dashes (as GDI's, in line widths), ends and corners */
+        static const char* dash[5] = { "", "300000,100000", "100000,100000", "300000,100000,100000,100000",
+                                       "300000,100000,100000,100000,100000,100000"
+                                     };
+        uint32_t ps = M->g.pen.style, cap = ps & 0xF00, join = ps & 0xF000;
+
+        if ((ps & 15) >= 1 && (ps & 15) <= 4) {
+            pb_printf(M->o, ",\"dash\":[%s]", dash[ps & 15]);
+        }
+
+        if ((ps & 0x10000) && cap != 0x200) {   /* a geometric pen's ends are round unless flat */
+            pb_printf(M->o, ",\"cap\":%d", cap == 0x100 ? 2 : 1);
+        }
+
+        if (join) {
+            pb_printf(M->o, ",\"join\":%d", join == 0x1000 ? 1 : 2);
+        }
+    }
+
+    pb_putc(M->o, '}');
 }
 
 /* the path being built, or straight out: points in logical units */
@@ -839,6 +861,7 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
                     o->kind = 1;
                     o->null = (u32(r + 12) & 15) == 5;
                     o->width = s32(r + 16);
+                    o->style = u32(r + 12) | (o->width > 1 ? 0x10000 : 0);   /* wider than a pixel: geometric */
                     o->color = colorref(u32(r + 24));
                 }
 
@@ -851,6 +874,7 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
                     memset(o, 0, sizeof(*o));
                     o->kind = 1;
                     o->null = (u32(r + 28) & 15) == 5 || u32(r + 36) == 1;    /* PS_NULL, or a null brush */
+                    o->style = u32(r + 28);
                     o->width = u32(r + 32);
                     o->color = colorref(u32(r + 40));
                 }
@@ -1331,6 +1355,7 @@ static void wmf_play(mf* M, const unsigned char* p, size_t n) {
                     o->kind = 1;
                     o->null = (P16(0) & 15) == 5;
                     o->width = P16(1);
+                    o->style = (uint32_t)(uint16_t)P16(0) | (o->width > 1 ? 0x10000 : 0);
                     o->color = colorref((uint32_t)(uint16_t)P16(3) | ((uint32_t)(uint16_t)P16(4) << 16));
                 }
 

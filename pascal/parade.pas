@@ -333,6 +333,12 @@ const
   PD_DRAW_LINK = 4;
   PD_DRAW_PATH = 5;
   PD_PATH_CLOSED = 1;
+  PD_CAP_FLAT = 0;
+  PD_CAP_ROUND = 1;
+  PD_CAP_SQUARE = 2;
+  PD_JOIN_ROUND = 0;
+  PD_JOIN_BEVEL = 1;
+  PD_JOIN_MITER = 2;
   PD_PATH_BREAK = Low(Int32);
 
 type
@@ -691,6 +697,14 @@ type
   end;
   Ppd_page_info = ^pd_page_info;
 
+  pd_path_style = record     { a path's dashes, ends and corners (pd_draw.style) }
+    dash_count: Int32;       { 0: solid; else dash, gap, ... lengths in dash }
+    dash: array[0..7] of pd_sp;
+    cap: Int32;              { PD_CAP_* }
+    join: Int32;             { PD_JOIN_* }
+  end;
+  Ppd_path_style = ^pd_path_style;
+
   pd_draw = record
     kind: Int32;
     x, y, w, h: pd_sp;
@@ -715,6 +729,7 @@ type
                                the pen }
     clip_points: Ppd_sp;     { images: shown only inside this polygon }
     clip_npoints: Int32;
+    style: Ppd_path_style;   { paths: dashes, caps, joins; nil for none }
   end;
   Ppd_draw = ^pd_draw;
 
@@ -941,6 +956,8 @@ procedure pd_layout_set_stable_breaks(layout: Ppd_layout; mode: Int32); cdecl; P
 function pd_layout_page_count(layout: Ppd_layout): Int32; cdecl; PDEXT;
 function pd_layout_page_info(layout: Ppd_layout; page: Int32; out info: pd_page_info): pd_status; cdecl; PDEXT;
 function pd_layout_page_items(layout: Ppd_layout; page: Int32; buf: Ppd_draw; cap: Int32; out count: Int32): pd_status; cdecl; PDEXT;
+function pd_draw_render(items: Ppd_draw; n: Int32; x0, y0: pd_sp; scale: Int32; rgba: PByte; width, height,
+  stride: Int32): pd_status; cdecl; PDEXT;
 function pd_layout_page_markup(layout: Ppd_layout; page: Int32; buf: Ppd_markup_item; cap: Int32;
   out count: Int32): pd_status; cdecl; PDEXT;
 function pd_layout_hit_test(layout: Ppd_layout; page: Int32; x, y: pd_sp; out pos: pd_pos): pd_status; cdecl; PDEXT;

@@ -3239,6 +3239,123 @@ static int count_draws(pd_doc* d, int32_t kind, uint32_t color) {
     return c;
 }
 
+/* a docx of one group (2540000 EMU square) holding SHAPES (wps:wsp elements), laid out; its page 0 items */
+static pd_draw* group_items(const char* shapes, pd_doc** dp, pd_layout** lp, int32_t* np) {
+    char xml[16384];
+    pd_draw* it = NULL;
+
+    snprintf(xml, sizeof(xml),
+             "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpg=\"wpg\" xmlns:wps=\"wps\"><w:body>"
+             "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"2540000\"/><a:graphic><a:graphicData>"
+             "<wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/>"
+             "<a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"2540000\" cy=\"2540000\"/></a:xfrm></wpg:grpSpPr>%s</wpg:wgp>"
+             "</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>", shapes);
+    *dp = docx_doc("word/document.xml", xml, NULL);
+    *lp = NULL;
+    *np = 0;
+
+    if (!*dp || !have_layout_font()) {
+        return NULL;
+    }
+
+    pd_doc_set_font_resolver(*dp, layout_resolver, NULL);
+
+    if (pd_layout_new(*dp, lp) == PD_OK && pd_layout_update(*lp, NULL) == PD_OK &&
+            pd_layout_page_items(*lp, 0, NULL, 0, np) == PD_OK &&
+            (it = (pd_draw*)malloc(((size_t)*np + 1) * sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(*lp, 0, it, *np, np);
+    }
+
+    return it;
+}
+
+/* Outline styles: a red line 2 pt wide, dashed (Office's "dash": 4 widths on, 3 off) with round corners, an oval
+   at its start and a large stealth arrowhead at its end; a box outlined in a double line 6 pt wide (two lines a
+   third of that, a third apart). The dashes are in the display list, Parade's rasterizer leaves the gaps empty,
+   and the PDF strokes with a dash array. */
+static void test_docx_line_styles(void) {
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, line = -1, oval = -1, stealth = -1, dbl[2] = { -1, -1 }, nd = 0;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"635000\"/><a:ext cx=\"1270000\" cy=\"0\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"line\"/><a:ln w=\"25400\"><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill>"
+                      "<a:prstDash val=\"dash\"/><a:round/><a:headEnd type=\"oval\"/><a:tailEnd type=\"stealth\" w=\"lg\" "
+                      "len=\"lg\"/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"635000\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"635000\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"rect\"/><a:noFill/><a:ln w=\"76200\" cmpd=\"dbl\"><a:solidFill>"
+                      "<a:srgbClr val=\"0000FF\"/></a:solidFill></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>", &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind != PD_DRAW_PATH) {
+            continue;
+        }
+
+        if (it[k].color == 0xFFFF0000u && it[k].line_width == PD_PT(2)) {
+            line = k;
+        } else if (it[k].fill == 0xFFFF0000u && it[k].npoints == 24) {
+            oval = k;
+        } else if (it[k].fill == 0xFFFF0000u && it[k].npoints == 4) {
+            stealth = k;
+        } else if (it[k].color == 0xFF0000FFu && it[k].line_width == PD_PT(2) && nd < 2) {
+            dbl[nd++] = k;
+        }
+    }
+
+    CHECK(line >= 0 && oval >= 0 && stealth >= 0 && nd == 2);
+
+    if (line >= 0 && oval >= 0 && stealth >= 0) {
+        const pd_draw* a = &it[line];
+        pd_sp x0 = a->points[0], y0 = a->points[1], xe = a->points[2 * a->npoints - 2];
+        uint8_t* px;
+        int32_t W, H;
+
+        CHECK(a->style && a->style->dash_count == 2 && a->style->dash[0] == PD_PT(8) && a->style->dash[1] == PD_PT(6));
+        CHECK(a->style && a->style->join == PD_JOIN_ROUND && a->style->cap == PD_CAP_FLAT);
+        /* the oval about the line's start; the stealth's point 100 pt along, the line stopping short of it */
+        CHECK(llabs((long long)it[oval].x + it[oval].w / 2 - x0) <= 2 && llabs((long long)it[oval].y + it[oval].h / 2 - y0) <= 2);
+        CHECK(llabs((long long)it[stealth].x + it[stealth].w - (x0 + PD_PT(100))) <= 2 && xe < x0 + PD_PT(100) - PD_PT(5));
+        /* drawn at 4 pixels a point: the first dash covers 4 pt along, the first gap 11 pt along is empty */
+        W = 4 * 40;
+        H = 4 * 8;
+        px = (uint8_t*)calloc((size_t)W * H, 4);
+
+        if (px) {
+            CHECK(pd_draw_render(a, 1, x0, y0 - PD_PT(4), 4 << 16, px, W, H, W * 4) == PD_OK);
+            CHECK(px[(16 * W + 16) * 4 + 3] == 255 && px[(16 * W + 16) * 4 + 0] == 255);
+            CHECK(px[(16 * W + 44) * 4 + 3] == 0 && px[(16 * W + 60) * 4 + 3] == 255);
+            CHECK(px[(8 * W + 16) * 4 + 3] == 0);   /* 2 pt wide: 4 pt off the line is clear */
+            free(px);
+        }
+    }
+
+    if (nd == 2) {  /* the double line's two lines 4 pt apart (each a third of 6 pt wide, a third between) */
+        CHECK(llabs((long long)it[dbl[0]].w - it[dbl[1]].w) == PD_PT(4) || llabs((long long)it[dbl[0]].x - it[dbl[1]].x) == PD_PT(4));
+    }
+
+    {   /* the PDF strokes the line with its dashes and round corners */
+        pd_pdf_options opt;
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        pd_pdf_options_init(&opt);
+        opt.compress = 0;
+        CHECK(pd_layout_write_pdf(L, &opt, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "w 0 J 1 j 8 M [8 6 ] 0 d") != NULL);
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -5727,6 +5844,7 @@ int main(void) {
     test_docx_group_turned_shapes();
     test_docx_canvas_3d();
     test_docx_custgeom_paths();
+    test_docx_line_styles();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();

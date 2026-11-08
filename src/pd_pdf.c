@@ -1582,16 +1582,30 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
                         sb_rgb(&c, a->fill, "rg");
                     }
 
-                    if (stroke) {
+                    if (stroke && a->style) {   /* dashes, ends and corners: for this path only */
+                        const pd_path_style* ps = a->style;
+
+                        sb_fmt(&c, "q ");
+                        sb_rgb(&c, a->color, "RG");
+                        sb_num(&c, a->line_width);
+                        sb_fmt(&c, "w %d J %d j 8 M [", ps->cap == PD_CAP_ROUND ? 1 : ps->cap == PD_CAP_SQUARE ? 2 : 0,
+                               ps->join == PD_JOIN_MITER ? 0 : ps->join == PD_JOIN_BEVEL ? 2 : 1);
+
+                        for (q = 0; q < ps->dash_count && q < 8; q++) {
+                            sb_num(&c, ps->dash[q]);
+                        }
+
+                        sb_fmt(&c, "] 0 d ");
+                    } else if (stroke) {
                         sb_rgb(&c, a->color, "RG");
                         sb_num(&c, a->line_width);
                         sb_fmt(&c, "w 1 j ");
                     }
 
-                    (void)q;
                     (void)first;
                     sb_rings(&c, a->points, a->npoints, (a->path_flags & PD_PATH_CLOSED) != 0, (int64_t)pi.height);
-                    sb_fmt(&c, fill && stroke ? "B\n" : fill ? "f\n" : "S\n");
+                    sb_fmt(&c, fill && stroke ? "B" : fill ? "f" : "S");
+                    sb_fmt(&c, stroke && a->style ? " Q\n" : "\n");
 
                     if (ga >= 0) {
                         sb_fmt(&c, "Q\n");
