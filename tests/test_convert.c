@@ -9028,6 +9028,122 @@ static void test_para_border_lines(void) {
     pd_doc_free(d);
 }
 
+#define TIGHT_PIC(id, x, wrap) \
+    "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"114300\" distR=\"114300\">" \
+    "<wp:positionH relativeFrom=\"column\"><wp:posOffset>" x "</wp:posOffset></wp:positionH>" \
+    "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset></wp:positionV>" \
+    "<wp:extent cx=\"1828800\" cy=\"1828800\"/>" wrap "<wp:docPr id=\"" id "\" name=\"p\"/>" \
+    "<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic>" \
+    "</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"
+
+/* the leftmost glyph of the paragraph holding s on each of its lines on page 0, top down: up to cap of them */
+static int para_line_starts(const pd_doc* d, const pd_layout* L, const char* s, pd_sp* xs, pd_sp* ys, int cap) {
+    pd_block_id p = find_para(d, s);
+    int32_t k, n, j, got = 0;
+    pd_draw* it = page_draws(L, 0, &n);
+
+    for (k = 0; it && k < n; k++) {
+        if (it[k].kind != PD_DRAW_GLYPH || it[k].block != p) {
+            continue;
+        }
+
+        for (j = 0; j < got && ys[j] != it[k].y; j++) {
+        }
+
+        if (j == got && got < cap) {
+            xs[got] = it[k].x;
+            ys[got++] = it[k].y;
+        } else if (j < got && it[k].x < xs[j]) {
+            xs[j] = it[k].x;
+        }
+    }
+
+    free(it);
+    return got;
+}
+
+/* Text round a float's outline (wrapTight with a wrapPolygon): beside a picture whose outline is a triangle
+   narrow at its top and full width at its bottom, the lines start near the column's edge at the top and past
+   most of the picture lower down. A float with wrapText "largest" a little left of the middle has the text on its
+   left, the wider side. Ten pictures anchored in one paragraph are ten floats. Also after .docx and native round trips */
+static void test_wrap_outline(void) {
+    char body[16384], *p;
+    pd_doc* d;
+    int pass, i;
+
+    p = body + sprintf(body, "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\">"
+                       "<w:body><w:p>%s<w:r><w:t>OUTLINED", TIGHT_PIC("1", "0", "<wp:wrapTight wrapText=\"right\">"
+                               "<wp:wrapPolygon edited=\"1\"><wp:start x=\"0\" y=\"0\"/><wp:lineTo x=\"0\" y=\"21600\"/>"
+                               "<wp:lineTo x=\"21600\" y=\"21600\"/><wp:lineTo x=\"0\" y=\"0\"/></wp:wrapPolygon>"
+                               "</wp:wrapTight>"));
+
+    for (i = 0; i < 80; i++) {
+        p += sprintf(p, " words to wrap round it");
+    }
+
+    p += sprintf(p, "</w:t></w:r></w:p><w:p>%s<w:r><w:t>LARGEST beside</w:t></w:r></w:p><w:p>",
+                 TIGHT_PIC("2", "2103120", "<wp:wrapSquare wrapText=\"largest\"/>"));
+
+    for (i = 0; i < 10; i++) {
+        p += sprintf(p, "%s", TIGHT_PIC("3", "0", "<wp:wrapTopAndBottom/>"));
+    }
+
+    sprintf(p, "<w:r><w:t>TEN</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar "
+            "w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" "
+            "w:gutter=\"0\"/></w:sectPr></w:body></w:document>");
+    d = docx_doc("word/_rels/document.xml.rels",
+                 "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                 "</Relationships>", "word/media/image1.png", "tests/data/rgba.png", "word/document.xml", body, NULL);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        pd_block_id sec = pd_doc_child(d, pd_doc_root(d), 0);
+        pd_block_info si, bi;
+        int32_t k, nfl = 0;
+        buf_t b;
+
+        pd_doc_block_info(d, sec, &si);
+
+        for (k = 0; k < si.child_count; k++) {
+            nfl += pd_doc_block_info(d, pd_doc_child(d, sec, k), &bi) == PD_OK && bi.kind == PD_BLOCK_FLOAT;
+        }
+
+        CHECK(nfl == 12);
+
+        if (L) {
+            pd_sp xs[64], ys[64], top = 0, low = 0, lx, ly;
+            int32_t n = para_line_starts(d, L, "OUTLINED", xs, ys, 64), pg;
+
+            for (k = 0; k < n; k++) {
+                if (ys[k] < PD_PT(72 + 20)) {
+                    top = xs[k];
+                } else if (ys[k] > PD_PT(72 + 100) && ys[k] < PD_PT(72 + 125)) {
+                    low = xs[k];
+                }
+            }
+
+            CHECK(n > 10 && top > PD_PT(72) && top < PD_PT(72 + 40) && low > PD_PT(72 + 95));
+            CHECK(text_drawn(d, L, "LARGEST", &pg, &lx, &ly) && lx < PD_PT(80));     /* left of it: more room */
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9063,6 +9179,7 @@ int main(void) {
     test_floating_table();
     test_page_features();
     test_para_border_lines();
+    test_wrap_outline();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

@@ -71,6 +71,8 @@ typedef struct pcache {         /* one paragraph laid out at one width */
     int32_t loose;              /* \looseness of this variant */
     pd_sp ws_w;                 /* wrap shape: lines ws_k0 to ws_k (not that one) are ws_w narrower */
     int32_t ws_side, ws_k, ws_k0;
+    uint32_t ws_sig;            /* with an outline: each line's own narrowing, ws_tk[line - ws_k0], hashed */
+    pd_sp ws_tk[64];
     struct pcache* next;        /* other layouts (variants, shapes) of the same paragraph */
 } pcache;
 
@@ -79,6 +81,8 @@ typedef struct {                /* lines narrowed beside a wrapping float */
     int32_t side;               /* PD_WRAP_LEFT: the float is on the left */
     int32_t k;                  /* the lines before this one ... */
     int32_t k0;                 /* ... from this one (the float lower down the paragraph) */
+    const pd_sp* tk;            /* or each line's own narrowing (a float's outline), from line k0; NULL: w */
+    uint32_t sig;               /* tk's hash */
 } wrapshape;
 
 typedef struct {                /* a filled rectangle: rules, borders, cell backgrounds */
@@ -247,6 +251,8 @@ typedef struct {
     ptable* tb;
     int32_t ntb, captb;
     pd_sp wrap_rem, wrap_w;     /* building: height still beside a wrapping float */
+    int32_t wrap_fl;            /* and that float (its index in fl), when text follows its outline; -1 its box */
+    pd_sp wrap_total, wrap_ox;  /* its whole height beside the text, where it is across the column */
     pd_sp wrap_skip;            /* and before that, the height of text above it (a float lower down) */
     pd_sp gap_skip, gap_h;      /* a float across the column lower down: the text before it, then its room */
     int32_t wrap_side;
@@ -406,8 +412,10 @@ static pd_status build_into(pd_layout* L, pcache* c, pd_block_id id, pd_sp width
             pd_sp bw = i == 0 ? w - c->pp.indent_first : w;
             int beside = i < k && i >= c->ws_k0;
 
-            ind[i] = bi0 + (beside && c->ws_side == PD_WRAP_LEFT ? c->ws_w : 0);
-            wid[i] = beside ? bw - c->ws_w : bw;
+            pd_sp tw = c->ws_sig && i - c->ws_k0 < 64 ? c->ws_tk[i - c->ws_k0] : c->ws_w;
+
+            ind[i] = bi0 + (beside && c->ws_side == PD_WRAP_LEFT ? tw : 0);
+            wid[i] = beside ? bw - tw : bw;
             wid[i] = wid[i] < PD_PT(12) ? PD_PT(12) : wid[i];
         }
 
@@ -468,7 +476,7 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
     blk* b = pd_doc_blk(d, id);
     pcache* c;
     uint64_t sig;
-    wrapshape none = { 0, 0, 0, 0 };
+    wrapshape none = { 0, 0, 0, 0, NULL, 0 };
 
     if (!ws || ws->k <= 0) {
         ws = &none;
@@ -494,7 +502,7 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
     }
 
     for (c = L->cache[id]; c && !(c->loose == loose && c->ws_k == ws->k && c->ws_w == ws->w &&
-                                  c->ws_side == ws->side && c->ws_k0 == ws->k0); c = c->next) {
+                                  c->ws_side == ws->side && c->ws_k0 == ws->k0 && c->ws_sig == ws->sig); c = c->next) {
     }
 
     sig = field_signature(L, b);
@@ -522,6 +530,11 @@ static pcache* layout_para_ex(pd_layout* L, pd_block_id id, pd_sp width, int32_t
         c->ws_side = ws->side;
         c->ws_k = ws->k;
         c->ws_k0 = ws->k0;
+        c->ws_sig = ws->sig;
+
+        if (ws->sig && ws->tk) {
+            memcpy(c->ws_tk, ws->tk, sizeof(c->ws_tk));
+        }
 
         for (tail = &L->cache[id]; *tail; tail = &(*tail)->next) {
         }
@@ -1122,6 +1135,46 @@ static pd_sp float_taken(const pd_float_props* fp, pd_sp w, pd_sp colw, pd_sp* o
 
     *ox = x;
     return t < 0 ? 0 : t > colw ? colw : t;
+}
+
+/* How far across its box (w by h) a float's outline reaches between a and b down it: *lo to *hi; 0 if it is not
+   there */
+static int poly_span(const pd_float_props* fp, pd_sp w, pd_sp h, pd_sp a, pd_sp b, pd_sp* lo, pd_sp* hi) {
+    int32_t k, n = fp->npoly;
+    int any = 0;
+
+    for (k = 0; k < n; k++) {
+        double x0 = (double)fp->poly[2 * k] * w / 21600, y0 = (double)fp->poly[2 * k + 1] * h / 21600;
+        double x1 = (double)fp->poly[2 * ((k + 1) % n)] * w / 21600, y1 = (double)fp->poly[2 * ((k + 1) % n) + 1] * h /
+                    21600;
+        double ya = y0 < y1 ? y0 : y1, yb = y0 < y1 ? y1 : y0, xa, xb;
+
+        if (yb < a || ya > b) {
+            continue;
+        }
+
+        if (y1 != y0) {     /* the edge's ends within the band */
+            double ca = a > ya ? a : ya, cb = b < yb ? b : yb;
+
+            xa = x0 + (x1 - x0) * (ca - y0) / (y1 - y0);
+            xb = x0 + (x1 - x0) * (cb - y0) / (y1 - y0);
+        } else {
+            xa = x0;
+            xb = x1;
+        }
+
+        if (!any) {
+            *lo = *hi = (pd_sp)xa;
+            any = 1;
+        }
+
+        *lo = (pd_sp)(xa < *lo ? xa : *lo);
+        *lo = (pd_sp)(xb < *lo ? xb : *lo);
+        *hi = (pd_sp)(xa > *hi ? xa : *hi);
+        *hi = (pd_sp)(xb > *hi ? xb : *hi);
+    }
+
+    return any;
 }
 
 /* lay out the paragraphs of a block stack at a width; returns total height */
@@ -2243,8 +2296,12 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 wrapshape ws;
                 int32_t pass;
 
+                pd_sp tk[64];
+
                 ws.w = F->wrap_w;
                 ws.side = F->wrap_side;
+                ws.tk = NULL;
+                ws.sig = 0;
 
                 for (pass = 0; pass < 3; pass++) {
                     for (ws.k0 = 0; ws.k0 < pc->nlines && pc->top[ws.k0 + 1] <= skip; ws.k0++) {
@@ -2253,7 +2310,29 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                     for (ws.k = ws.k0; ws.k < pc->nlines && pc->top[ws.k] < skip + rem; ws.k++) {
                     }
 
-                    if ((ws.k == pc->ws_k && ws.k0 == pc->ws_k0) || ws.k <= ws.k0) {
+                    if (F->wrap_fl >= 0 && ws.k > ws.k0) {  /* round its outline: each line as far as it reaches */
+                        const pfloat* wf = &F->fl[F->wrap_fl];
+                        int32_t i2;
+
+                        ws.sig = 2166136261u;
+                        memset(tk, 0, sizeof(tk));
+
+                        for (i2 = ws.k0; i2 < ws.k && i2 - ws.k0 < 64; i2++) {
+                            pd_sp a = F->wrap_total - rem + pc->top[i2] - skip, lo, hi;
+
+                            tk[i2 - ws.k0] = poly_span(&wf->fp, wf->w, wf->h, a, a + pc->top[i2 + 1] - pc->top[i2],
+                                                       &lo, &hi) ? (ws.side == PD_WRAP_LEFT ? F->wrap_ox + hi +
+                                                       wf->fp.gap : F->colw - F->wrap_ox - lo + wf->fp.gap) : 0;
+                            tk[i2 - ws.k0] = tk[i2 - ws.k0] < 0 ? 0 : tk[i2 - ws.k0] > F->colw ? F->colw :
+                                             tk[i2 - ws.k0];
+                            ws.sig = (ws.sig ^ (uint32_t)tk[i2 - ws.k0]) * 16777619u;
+                        }
+
+                        ws.sig |= 1;
+                        ws.tk = tk;
+                    }
+
+                    if ((ws.k == pc->ws_k && ws.k0 == pc->ws_k0 && ws.sig == pc->ws_sig) || ws.k <= ws.k0) {
                         break;
                     }
 
@@ -2353,6 +2432,11 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
 
             f->item = F->n;
 
+            if (f->fp.wrap_mode && (f->fp.wrap == PD_WRAP_LEFT || f->fp.wrap == PD_WRAP_RIGHT) &&
+                    (f->fp.placement & PD_PLACE_OFFSET)) {  /* text on the wider side */
+                f->fp.wrap = F->colw - (f->fp.offset_x + f->w) >= f->fp.offset_x ? PD_WRAP_LEFT : PD_WRAP_RIGHT;
+            }
+
             if (f->fp.offset_from != PD_FROM_PARAGRAPH && f->fp.wrap == PD_WRAP_NONE) {
                 f->fp.offset_y = 0;     /* text above and below: where it is anchored */
             } else if (f->fp.offset_from != PD_FROM_PARAGRAPH) {
@@ -2380,6 +2464,9 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 F->wrap_skip = f->fp.offset_y > 0 ? f->fp.offset_y : 0;
                 F->wrap_w = float_taken(&f->fp, f->w, F->colw, &ox);
                 F->wrap_side = f->fp.wrap;
+                F->wrap_fl = f->fp.npoly >= 3 ? F->nfl - 1 : -1;
+                F->wrap_total = F->wrap_rem;
+                F->wrap_ox = ox;
             } else if (f->fp.offset_y > 0) {
                 /* lower down: the text before it runs on, then its room */
                 push(F, VI_FLOAT, 0, 0, NULL, 0, b->id);

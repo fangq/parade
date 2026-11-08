@@ -926,6 +926,22 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "OffsetFrom", p->offset_from);
             }
 
+            if (p->wrap_mode) {
+                put_int(w, "WrapSide", p->wrap_mode);
+            }
+
+            if (p->npoly) {
+                int64_t q[2 * PD_WRAP_POLY_MAX];
+                int k;
+
+                for (k = 0; k < 2 * p->npoly; k++) {
+                    q[k] = p->poly[k];
+                }
+
+                pj_key(w, "WrapPolygon");
+                pj_int_matrix(w, q, p->npoly, 2);
+            }
+
             pj_obj_end(w);
             break;
         }
@@ -2140,6 +2156,22 @@ static void load_float(loader* L, const pj_node* o, pd_float_props* p) {
     p->frame = (int32_t)int_or(pj_get(x, "Frame"), 0, 0, 3, L);
     p->frame_lines = (int32_t)int_or(pj_get(x, "FrameLines"), 0, 0, 10, L);
     p->wrap = pj_get(x, "Wrap") ? enum_of(pj_get(x, "Wrap"), NAMES(wrap_names)) : 0;
+    p->wrap_mode = (int32_t)int_or(pj_get(x, "WrapSide"), 0, 0, PD_WRAPSIDE_LARGEST, L);
+
+    {
+        const pj_node* q = pj_get(x, "WrapPolygon");
+        int32_t k;
+
+        if (q) {
+            REQUIRE(q->type == PJ_ARR && q->n <= PD_WRAP_POLY_MAX);
+            p->npoly = (int32_t)q->n;
+
+            for (k = 0; k < p->npoly; k++) {
+                p->poly[2 * k] = (int32_t)int_or(pj_at(pj_at(q, k), 0), 0, -1000000, 1000000, L);
+                p->poly[2 * k + 1] = (int32_t)int_or(pj_at(pj_at(q, k), 1), 0, -1000000, 1000000, L);
+            }
+        }
+    }
     REQUIRE(p->wrap >= 0);
     p->width = (pd_sp)int_or(pj_get(x, "Width"), 0, 0, SP_MAX, L);
     p->width_fraction = (int32_t)int_or(pj_get(x, "WidthFraction"), 1000, 0, 1000, L);

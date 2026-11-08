@@ -347,6 +347,8 @@ typedef struct {
     char mime[64];
 } dmedia;
 
+#define DX_PENDING 256         /* floats anchored in one paragraph, written */
+
 typedef struct {
     const pd_doc* d;
     pd_buf* o;                  /* the part being written */
@@ -377,7 +379,7 @@ typedef struct {
     int hyph_auto;              /* the document hyphenates: settings.xml autoHyphenation */
     const pd_float_props* frame;    /* the frame whose paragraphs are being written (their w:framePr) */
     int move_range;             /* the id of the move's range being written */
-    pd_block_id pending[8];     /* picture floats to anchor in the next paragraph */
+    pd_block_id pending[DX_PENDING];    /* picture floats to anchor in the next paragraph */
     int npending;
     pd_block_id tblp;           /* the float the table being written floats as (w:tblpPr), 0 none */
     uint32_t page_color;        /* a section's page colour: the document's w:background */
@@ -779,6 +781,38 @@ static void dx_vml_fallback(dxo* x, const void* data, size_t len, long long cx, 
                             const pd_float_props* fp);
 static int dx_ref_name(const pd_doc* d, pd_block_id para, char* out, size_t cap);
 
+/* A float's wrapping as Word's wrap element, into b: none (over or under), top and bottom, square on the side
+   it leaves or both, or tight round its outline */
+static const char* dx_wrap(char* b, size_t cap, const pd_float_props* fp, int off) {
+    const char* side = !off || fp->wrap_mode == PD_WRAPSIDE_BOTH ? "bothSides" : fp->wrap_mode == PD_WRAPSIDE_LARGEST ?
+                       "largest" : fp->wrap == PD_WRAP_LEFT ? "right" : "left";
+    size_t n;
+    int32_t k;
+
+    if (fp->wrap >= PD_WRAP_FRONT) {
+        return "<wp:wrapNone/>";
+    }
+
+    if (fp->wrap == PD_WRAP_NONE) {
+        return "<wp:wrapTopAndBottom/>";
+    }
+
+    if (fp->npoly < 3) {
+        snprintf(b, cap, "<wp:wrapSquare wrapText=\"%s\"/>", side);
+        return b;
+    }
+
+    n = (size_t)snprintf(b, cap, "<wp:wrapTight wrapText=\"%s\"><wp:wrapPolygon edited=\"1\">", side);
+
+    for (k = 0; k < fp->npoly && k < PD_WRAP_POLY_MAX && n + 64 < cap; k++) {
+        n += (size_t)snprintf(b + n, cap - n, "<wp:%s x=\"%d\" y=\"%d\"/>", k ? "lineTo" : "start",
+                              (int)fp->poly[2 * k], (int)fp->poly[2 * k + 1]);
+    }
+
+    snprintf(b + n, cap - n, "</wp:wrapPolygon></wp:wrapTight>");
+    return b;
+}
+
 static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     pd_buf* o = x->o;
     const char* name = "";
@@ -789,6 +823,7 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
                 strcmp(mime, "application/vnd.parade.drawing+json") == 0;
     pd_res_id pic = ob->resource;
     int m;
+    char wb[2048];
 
     int chart = 0, wpc = 0;
 
@@ -868,10 +903,7 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
         pb_printf(o, "</wp:positionH><wp:positionV relativeFrom=\"%s\"><wp:posOffset>%lld</wp:posOffset>"
                   "</wp:positionV><wp:extent cx=\"%lld\" cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/>%s",
                   fp->offset_from == PD_FROM_PAGE ? "page" : fp->offset_from == PD_FROM_MARGIN ? "margin" : "paragraph",
-                  EMU(fp->offset_y), cx, cy, fp->wrap >= PD_WRAP_FRONT ? "<wp:wrapNone/>" :
-                  fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : !off ?
-                  "<wp:wrapSquare wrapText=\"bothSides\"/>" : fp->wrap == PD_WRAP_LEFT ?
-                  "<wp:wrapSquare wrapText=\"right\"/>" : "<wp:wrapSquare wrapText=\"left\"/>");
+                  EMU(fp->offset_y), cx, cy, dx_wrap(wb, sizeof(wb), fp, off));
     }
 
     if (group) {    /* Word keeps a group in markup it alone reads, and says so: after the run's opening */
@@ -1115,7 +1147,7 @@ static void dx_story_content(dxo* x, pd_block_id story) {
     pd_char_props base = x->base;
     int in_link = x->in_link, in_note = x->in_note, nctl = x->nctl, nruby = x->nruby, page_break = x->page_break;
     int ncb = x->ncb, cbi = x->cbi, npending = x->npending, k;
-    pd_block_id pending[8];
+    pd_block_id pending[DX_PENDING];
     struct dxcb cb[64];
     pd_block_info bi;
 
@@ -1713,6 +1745,7 @@ static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp) {
     long long cx = EMU(w), cy = EMU(dx_block_height(x, fl, w)), gap = EMU(fp->gap);
     int off = (fp->placement & PD_PLACE_OFFSET) && fp->wrap != PD_WRAP_NONE;
     int32_t i;
+    char wb[2048];
 
     if (pd_doc_block_info(x->d, fl, &fi) != PD_OK) {
         return;
@@ -1738,11 +1771,7 @@ static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp) {
               "<wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\">"
               "<a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>",
               fp->offset_from == PD_FROM_PAGE ? "page" : fp->offset_from == PD_FROM_MARGIN ? "margin" : "paragraph",
-              EMU(fp->offset_y), cx, cy,
-              fp->wrap >= PD_WRAP_FRONT ? "<wp:wrapNone/>" :
-              fp->wrap == PD_WRAP_NONE ? "<wp:wrapTopAndBottom/>" : !off ? "<wp:wrapSquare wrapText=\"bothSides\"/>" :
-              fp->wrap == PD_WRAP_LEFT ? "<wp:wrapSquare wrapText=\"right\"/>" : "<wp:wrapSquare wrapText=\"left\"/>",
-              x->docpr, x->docpr, cx, cy);
+              EMU(fp->offset_y), cx, cy, dx_wrap(wb, sizeof(wb), fp, off), x->docpr, x->docpr, cx, cy);
 
     for (i = 0; i < fi.child_count; i++) {
         dx_block(x, pd_doc_child(x->d, fl, i));
@@ -1759,7 +1788,7 @@ static void dx_textbox(dxo* x, pd_block_id fl, const pd_float_props* fp);
 
 static void dx_anchors(dxo* x) {
     int i, n = x->npending;
-    pd_block_id pend[8];
+    pd_block_id pend[DX_PENDING];
 
     /* taken off the list first: a text box's own paragraphs anchor nothing of these */
     memcpy(pend, x->pending, sizeof(pend));
@@ -3104,7 +3133,7 @@ static void dx_block(dxo* x, pd_block_id id) {
                 break;
             }
 
-            if (x->npending < 8) {
+            if (x->npending < DX_PENDING) {
                 x->pending[x->npending++] = id;     /* anchored in the paragraph after it: a picture or a text box */
                 break;
             }
@@ -7357,8 +7386,15 @@ typedef struct {
         size_t tbn;
         char* own;              /* tbx made here (WordArt's text as a paragraph), freed once read */
         pd_rev_id rev;          /* inserted or deleted with its anchor */
-    } pend_fl[8];               /* floats anchored in a paragraph already under way: after it */
-    int npend_fl;
+        int wrap_mode;          /* PD_WRAPSIDE_* */
+        int npoly;              /* its wrap polygon (wrapTight, wrapThrough), points in 21600ths of its box */
+        int32_t poly[2 * PD_WRAP_POLY_MAX];
+    }* pend_fl;                 /* floats anchored in a paragraph already under way: after it */
+    int npend_fl, cappend_fl;
+    int wrap_mode;              /* the drawing's wrapText: PD_WRAPSIDE_* */
+    int posh_from;              /* its offset across from: 0 the column, 1 the page's left edge, 2 the right margin */
+    int npoly, in_poly;         /* its wp:wrapPolygon */
+    int32_t poly[2 * PD_WRAP_POLY_MAX];
     /* tables */
     dtab tabs[8];               /* each table being read, the innermost last */
     int ntab;
@@ -8426,6 +8462,27 @@ static pd_rev_id deleted_rev(const dxi* X, pd_rev_id rev) {
     return rev && pd_doc_revision_get(X->b->d, rev, &rv) == PD_OK && rv.kind == PD_REV_DELETE ? rev : 0;
 }
 
+/* a float more anchored in the paragraph under way, cleared, with what the drawing being read says of where it
+   goes across and how text wraps it: its index, -1 if there is no room */
+static int dw_pend_add(dw* w) {
+    int k;
+    pd_sp textw = w->sp.page_width - w->X->margin_left - w->sp.margin_right;
+
+    if (w->npend_fl >= 4096 || pd_grow((void**)&w->pend_fl, &w->cappend_fl, (int64_t)w->npend_fl + 1,
+                                       sizeof(w->pend_fl[0]))) {
+        return -1;
+    }
+
+    k = w->npend_fl++;
+    memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+    w->pend_fl[k].wrap_mode = w->wrap_mode;
+    w->pend_fl[k].npoly = w->npoly;
+    memcpy(w->pend_fl[k].poly, w->poly, sizeof(w->poly));
+    w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_from == 1 ? w->X->margin_left : 0) +
+                          (w->posh_from == 2 ? textw : 0);
+    return k;
+}
+
 static long long vml_length(const char* style, const char* prop);
 static void dw_floats(dw* w);
 
@@ -8498,12 +8555,12 @@ static void dw_vml_float(dw* w) {
     int k, absolute = vml_prop(st, "position", v, sizeof(v)) && !strcmp(v, "absolute");
     pd_sp colw = X->page_w - X->margin_left - X->margin_right;
 
-    if (cx <= 0 || cy <= 0 || w->npend_fl >= 8) {
+    if (cx <= 0 || cy <= 0 || (k = dw_pend_add(w)) < 0) {
         return;
     }
 
-    k = w->npend_fl++;
-    memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+    w->pend_fl[k].wrap_mode = 0;   /* its box, not a drawing's outline */
+    w->pend_fl[k].npoly = 0;
     w->pend_fl[k].w = (pd_sp)(cx * 65536 / 12700);
     w->pend_fl[k].h = (pd_sp)(cy * 65536 / 12700);
     w->pend_fl[k].rev = deleted_rev(X, w->rev);
@@ -8686,6 +8743,9 @@ static void dw_floats(dw* w) {
 
             fp.offset_y = w->pend_fl[k].off_y;     /* down the paragraph it is anchored in, or the page */
             fp.offset_from = w->pend_fl[k].off_from;
+            fp.wrap_mode = fp.wrap == PD_WRAP_LEFT || fp.wrap == PD_WRAP_RIGHT ? w->pend_fl[k].wrap_mode : 0;
+            fp.npoly = fp.wrap_mode || fp.wrap == PD_WRAP_LEFT || fp.wrap == PD_WRAP_RIGHT ? w->pend_fl[k].npoly : 0;
+            memcpy(fp.poly, w->pend_fl[k].poly, sizeof(fp.poly));
 
             pd_doc_set_float_props(b->d, fl, &fp);
         }
@@ -11463,10 +11523,9 @@ static void dw_image(dw* w) {
         dw_begin_para(w);
         dw_apply_run(w);    /* its run's format, not the one before it */
         bld_inline(X->b, &o);
-    } else if (w->npend_fl < 8) {
-        int k = w->npend_fl++;
+    } else if (dw_pend_add(w) >= 0) {
+        int k = w->npend_fl - 1;
 
-        memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
         w->pend_fl[k].res = o.resource;
         w->pend_fl[k].w = o.width;
         w->pend_fl[k].h = o.height;
@@ -11474,7 +11533,6 @@ static void dw_image(dw* w) {
         w->pend_fl[k].wrap = w->wrap;
         w->pend_fl[k].rev = deleted_rev(X, w->rev);
         w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
-        w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
         w->pend_fl[k].off_y = (pd_sp)(w->posv_off * 65536 / 12700);
         w->pend_fl[k].off_from = w->posv_para >= 2 ? w->posv_para - 1 : 0;   /* from the page, its margin */
 
@@ -13115,6 +13173,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->posh_align = -1;
                 w->posh_off = 0;
                 w->posh_page = w->posh_has_off = 0;
+                w->posh_from = 0;
+                w->wrap_mode = 0;
+                w->npoly = w->in_poly = 0;
                 w->in_posv = w->in_voffset = w->posv_para = 0;
                 w->posv_off = 0;
                 w->drawing_res = 0;
@@ -13174,11 +13235,28 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->wrap = -PD_WRAP_LEFT;
                 } else {
                     w->wrap = -9;       /* by its position, once that is read */
+                    w->wrap_mode = mu_attr(&m, "wrapText", v, sizeof(v)) && !strcmp(v, "largest") ?
+                                   PD_WRAPSIDE_LARGEST : PD_WRAPSIDE_BOTH;
+                }
+
+                w->in_poly = 0;
+            } else if (w->in_drawing && w->anchor && strcmp(t, "wrapPolygon") == 0) {
+                w->in_poly = m.type == MT_OPEN;
+                w->npoly = 0;
+            } else if (w->in_poly && (strcmp(t, "start") == 0 || strcmp(t, "lineTo") == 0)) {
+                if (w->npoly < PD_WRAP_POLY_MAX) {
+                    w->poly[2 * w->npoly] = attr_int(&m, "x", 0);
+                    w->poly[2 * w->npoly + 1] = attr_int(&m, "y", 0);
+                    w->npoly++;
                 }
             } else if (w->in_drawing && strcmp(t, "positionH") == 0) {
                 w->in_posh = m.type == MT_OPEN;
                 w->posh_page = mu_attr(&m, "relativeFrom", v, sizeof(v)) && (strcmp(v, "page") == 0 ||
-                               strcmp(v, "leftMargin") == 0);
+                               strcmp(v, "leftMargin") == 0 || strcmp(v, "insideMargin") == 0);
+                /* from the page's left edge (the left or inside margin's), the right margin (the outside's), else
+                   the column (a character's: its column) */
+                w->posh_from = w->posh_page ? 1 : mu_attr(&m, "relativeFrom", v, sizeof(v)) &&
+                               (strcmp(v, "rightMargin") == 0 || strcmp(v, "outsideMargin") == 0) ? 2 : 0;
             } else if (w->in_drawing && strcmp(t, "positionV") == 0) {
                 w->in_posv = m.type == MT_OPEN;
                 w->posv_para = !mu_attr(&m, "relativeFrom", v, sizeof(v)) ? 0 : !strcmp(v, "paragraph") ||
@@ -13554,6 +13632,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         } else if ((!strcmp(t, "ins") || !strcmp(t, "del") || !strcmp(t, "moveTo") || !strcmp(t, "moveFrom")) &&
                    !w->in_rpr) {
             w->rev = 0;
+        } else if (strcmp(t, "wrapPolygon") == 0) {
+            w->in_poly = 0;
         } else if (strcmp(t, "positionH") == 0) {
             w->in_posh = 0;
         } else if (strcmp(t, "positionV") == 0) {
@@ -13582,17 +13662,15 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                                            w->posh_off > 2286000 ? PD_WRAP_RIGHT : PD_WRAP_LEFT) : -w->wrap;
             }
 
-            if (w->in_drawing && w->tbx && w->anchor && w->cx > 0 && w->npend_fl < 8) {
-                int k = w->npend_fl++;
+            if (w->in_drawing && w->tbx && w->anchor && w->cx > 0 && dw_pend_add(w) >= 0) {
+                int k = w->npend_fl - 1;
 
-                memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
                 w->pend_fl[k].w = (pd_sp)(w->cx * 65536 / 12700);
                 w->pend_fl[k].h = (pd_sp)(w->cy * 65536 / 12700);
                 w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
                 w->pend_fl[k].wrap = w->wrap;
                 w->pend_fl[k].rev = deleted_rev(X, w->rev);
                 w->pend_fl[k].has_off = w->posh_has_off && w->posh_align < 0;
-                w->pend_fl[k].off_x = (pd_sp)(w->posh_off * 65536 / 12700) - (w->posh_page ? X->margin_left : 0);
                 w->pend_fl[k].off_y = (pd_sp)(w->posv_off * 65536 / 12700);
                 w->pend_fl[k].off_from = w->posv_para >= 2 ? w->posv_para - 1 : 0;   /* from the page, its margin */
 
@@ -13606,11 +13684,13 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     dw_floats(w);
                 }
             } else if (w->in_drawing && w->tbx && !w->anchor && w->cx > 0 && !w->blip[0] && !w->drawing_res &&
-                       w->npend_fl < 8) {
+                       (tk = dw_pend_add(w)) >= 0) {
                 /* a text box in the line: its own block where it is, as wide as it is */
-                int k = w->npend_fl++;
+                int k = tk;
 
-                memset(&w->pend_fl[k], 0, sizeof(w->pend_fl[0]));
+                w->pend_fl[k].wrap_mode = 0;
+                w->pend_fl[k].npoly = 0;
+                w->pend_fl[k].off_x = 0;
                 w->pend_fl[k].w = (pd_sp)(w->cx * 65536 / 12700);
                 w->pend_fl[k].h = (pd_sp)(w->cy * 65536 / 12700);
                 w->pend_fl[k].wrap = PD_WRAP_NONE;
@@ -13675,6 +13755,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         free(w->pend_fl[tk].own);
     }
 
+    free(w->pend_fl);
     free(w);
 }
 

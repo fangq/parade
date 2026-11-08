@@ -631,6 +631,8 @@ PD_API pd_status pd_doc_resource(const pd_doc* doc, pd_res_id res, const char** 
 /* Floats, sections, tables                                           */
 /* ------------------------------------------------------------------ */
 
+#define PD_WRAP_POLY_MAX 32     /**< points of a float's wrap outline */
+
 #define PD_PLACE_HERE   1u      /**< at the anchor if it fits */
 #define PD_PLACE_TOP    2u      /**< top of a page */
 #define PD_PLACE_BOTTOM 4u      /**< bottom of a page */
@@ -662,6 +664,10 @@ typedef struct {
     int32_t offset_from;        /**< what offset_y is from: PD_FROM_PARAGRAPH, PD_FROM_PAGE, PD_FROM_MARGIN */
     int32_t frame;              /**< PD_FRAME_*: a Word frame (framePr) its paragraphs are, written back as one */
     int32_t frame_lines;        /**< a drop cap: the lines of text it is beside */
+    int32_t wrap_mode;          /**< with wrap LEFT or RIGHT and an offset: PD_WRAPSIDE_*, the side the text takes */
+    int32_t npoly;              /**< text wraps to this outline of it rather than its box (Word's wrapTight and
+                                     wrapThrough): points used in poly, 0 = its box */
+    int32_t poly[2 * PD_WRAP_POLY_MAX];     /**< x, y pairs in 21600ths of its width and height, from its top left */
 } pd_float_props;
 
 /* a float that is a Word frame: paragraphs with a framePr rather than a text box */
@@ -669,6 +675,10 @@ typedef struct {
 #define PD_FRAME_BOX    1       /**< a frame placed as its float props say */
 #define PD_FRAME_DROP   2       /**< a drop cap: its letter frame_lines high, the text beside it */
 #define PD_FRAME_MARGIN 3       /**< a drop cap in the margin, left of the text */
+/* which side of a float text wraps on, beside wrap's (Word's wrapText) */
+#define PD_WRAPSIDE_WRAP    0   /**< the one wrap says */
+#define PD_WRAPSIDE_BOTH    1   /**< both: on the wider side where there is room for one only (bothSides) */
+#define PD_WRAPSIDE_LARGEST 2   /**< the wider of the two (largest) */
 
 #define PD_FROM_PARAGRAPH 0     /**< the top of the paragraph after it (its anchor) */
 #define PD_FROM_PAGE 1          /**< the top edge of the page its anchor is on */

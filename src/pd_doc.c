@@ -3893,6 +3893,8 @@ pd_status pd_doc_set_float_props(pd_doc* d, pd_block_id id, const pd_float_props
     blk* b = d ? pd_doc_blk(d, id) : NULL;
 
     BLOCK_OP("Float", b && b->kind == PD_BLOCK_FLOAT && fp && fp->wrap >= PD_WRAP_NONE && fp->wrap <= PD_WRAP_BEHIND &&
+             fp->wrap_mode >= PD_WRAPSIDE_WRAP && fp->wrap_mode <= PD_WRAPSIDE_LARGEST && fp->npoly >= 0 &&
+             fp->npoly <= PD_WRAP_POLY_MAX &&
              fp->width >= 0 && fp->width_fraction >= 0 && fp->width_fraction <= 1000 && (fp->placement & 31) &&
              fp->placement <= 63,
              (b->st.fp = *fp, b->st.fp.sequence[sizeof(b->st.fp.sequence) - 1] = '\0'));
