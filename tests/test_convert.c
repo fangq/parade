@@ -4,6 +4,7 @@
  * figure and a footnote; clipboard ranges and paste; malformed input.
  */
 
+#include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -5740,6 +5741,141 @@ static void test_docx_moves_formats(void) {
     pd_doc_free(d);
 }
 
+/* the structure of the equations (m:oMath) in XML, one after another: each m: element's name and its children in
+   brackets, properties (m:...Pr) left out but for a run's style and script, and the runs' text */
+static void omml_shape(const char* x, char* out, size_t cap) {
+    size_t o = 0;
+    const char* p = x;
+    int in_math = 0;
+
+    out[0] = '\0';
+
+    while ((p = strchr(p, '<')) != NULL && o + 64 < cap) {
+        char name[32];
+        size_t k = 0;
+        int close = p[1] == '/';
+        const char* q = p + 1 + close;
+
+        if (strncmp(q, "m:", 2)) {
+            p++;
+            continue;
+        }
+
+        for (q += 2; *q && (isalnum((unsigned char)*q)) && k + 1 < sizeof(name); q++) {
+            name[k++] = *q;
+        }
+
+        name[k] = '\0';
+
+        if (!strcmp(name, "oMath")) {
+            in_math = !close;
+            o += (size_t)snprintf(out + o, cap - o, close ? "]" : "[");
+            p = q;
+            continue;
+        }
+
+        if (!in_math) {
+            p = q;
+            continue;
+        }
+
+        if (!close && k > 2 && !strcmp(name + k - 2, "Pr")) {   /* properties: only a run's style and script */
+            char endtag[40];
+            const char* e;
+
+            snprintf(endtag, sizeof(endtag), "</m:%s>", name);
+            e = strstr(q, endtag);
+
+            if (!strcmp(name, "rPr") && e) {
+                const char* v = q;
+
+                while ((v = strstr(v, "m:val=\"")) != NULL && v < e) {
+                    v += 7;
+                    o += (size_t)snprintf(out + o, cap - o, "%.*s;", (int)(strchr(v, '"') - v), v);
+                }
+            }
+
+            p = e ? e + strlen(endtag) : q;
+            continue;
+        }
+
+        if (!close && !strcmp(name, "t")) {     /* the text */
+            const char* g = strchr(q, '>'), *e = g ? strstr(g, "</m:t>") : NULL;
+
+            if (g && e) {
+                o += (size_t)snprintf(out + o, cap - o, "'%.*s'", (int)(e - g - 1), g + 1);
+                p = e + 6;
+                continue;
+            }
+        }
+
+        if (!strcmp(name, "t")) {
+            p = q;
+            continue;
+        }
+
+        if (close) {
+            o += (size_t)snprintf(out + o, cap - o, ")");
+        } else {
+            const char* g = strchr(q, '>');
+
+            o += (size_t)snprintf(out + o, cap - o, "%s(%s", name, g && g[-1] == '/' ? ")" : "");
+        }
+
+        p = q;
+    }
+}
+
+/* Equations from Word come back the same after a trip through Parade's LaTeX: fractions, n-ary operators with
+   limits, matrices, delimiters with separators, accents, group characters, sub-and-superscripts, functions,
+   equation arrays, boxes round them, phantoms, limits over and under, and runs in bold, double-struck and
+   fraktur -- the m:oMath structure written out is the one read in. */
+static void test_docx_omml_roundtrip(void) {
+#define MR(t) "<m:r><m:t>" t "</m:t></m:r>"
+#define MRS(pr, t) "<m:r><m:rPr>" pr "</m:rPr><m:t>" t "</m:t></m:r>"
+#define EQ(x) "<w:p><m:oMath>" x "</m:oMath></w:p>"
+    static const char body[] =
+        EQ("<m:f><m:num>" MR("a") "</m:num><m:den>" MR("b") "</m:den></m:f>")
+        EQ("<m:nary><m:naryPr><m:chr m:val=\"\xE2\x88\x91\"/></m:naryPr><m:sub>" MR("i=1") "</m:sub><m:sup>" MR("n")
+           "</m:sup><m:e>" MR("i") "</m:e></m:nary>")
+        EQ("<m:m><m:mr><m:e>" MR("a") "</m:e><m:e>" MR("b") "</m:e></m:mr><m:mr><m:e>" MR("c") "</m:e><m:e>" MR("d")
+           "</m:e></m:mr></m:m>")
+        EQ("<m:d><m:dPr><m:begChr m:val=\"[\"/><m:endChr m:val=\"]\"/></m:dPr><m:e>" MR("x") "</m:e><m:e>" MR("y")
+           "</m:e></m:d>")
+        EQ("<m:acc><m:accPr><m:chr m:val=\"\xCC\x82\"/></m:accPr><m:e>" MR("x") "</m:e></m:acc>")
+        EQ("<m:groupChr><m:e>" MR("x+y") "</m:e></m:groupChr>")
+        EQ("<m:sSubSup><m:e>" MR("x") "</m:e><m:sub>" MR("i") "</m:sub><m:sup>" MR("2") "</m:sup></m:sSubSup>")
+        EQ("<m:func><m:fName>" MRS("<m:sty m:val=\"p\"/>", "sin") "</m:fName><m:e>" MR("x") "</m:e></m:func>")
+        EQ("<m:eqArr><m:e>" MR("a=b") "</m:e><m:e>" MR("c=d") "</m:e></m:eqArr>")
+        EQ("<m:borderBox><m:e>" MR("E") "</m:e></m:borderBox>")
+        EQ("<m:phant><m:phantPr><m:show m:val=\"0\"/></m:phantPr><m:e>" MR("x") "</m:e></m:phant>")
+        EQ("<m:limUpp><m:e>" MR("x") "</m:e><m:lim>" MR("n") "</m:lim></m:limUpp>")
+        EQ(MRS("<m:sty m:val=\"b\"/>", "v") MRS("<m:scr m:val=\"double-struck\"/><m:sty m:val=\"p\"/>", "R")
+           MRS("<m:scr m:val=\"fraktur\"/><m:sty m:val=\"p\"/>", "g"));
+    char xml[6000], want[3000], got[3000];
+    pd_doc* d;
+    buf_t b = { NULL, 0 };
+
+    snprintf(xml, sizeof(xml), "<w:document xmlns:w=\"w\" xmlns:m=\"m\"><w:body>%s</w:body></w:document>", body);
+    d = docx_doc("word/document.xml", xml, NULL);
+    CHECK(d != NULL);
+
+    if (d && pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK) {
+        char* out = docx_part(&b, "word/document.xml");
+
+        omml_shape(xml, want, sizeof(want));
+        omml_shape(out, got, sizeof(got));
+        CHECK_STR(got, want);
+        free(out);
+    }
+
+    free(b.p);
+    pd_doc_free(d);
+#undef MR
+#undef MRS
+#undef EQ
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -6431,6 +6567,7 @@ int main(void) {
     test_docx_nested_fields();
     test_comment_balloons();
     test_docx_moves_formats();
+    test_docx_omml_roundtrip();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

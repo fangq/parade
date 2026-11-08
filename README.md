@@ -167,7 +167,10 @@ poppler over the output.
   (`pd_doc_set_math_font`, e.g. Latin Modern Math): fractions, scripts,
   radicals, big operators with limits, `\left..\right` delimiters from
   size variants and glyph assemblies, accents, matrices, `\text` and
-  math alphabets. Imported from Markdown `$..$`/`$$..$$` and HTML
+  math alphabets, `\boxed`, `\phantom`, `\overset`/`\underset` and
+  braces. Word's OMML is read into it and written back from it with the
+  structure kept (functions, separators, equation arrays, boxes, phantoms,
+  group characters, run styles and scripts). Imported from Markdown `$..$`/`$$..$$` and HTML
   `span.math`; exported to LaTeX. Lengths saturate at 1024pt, so a
   malformed font cannot overflow the layout.
 - Margin kerning and font expansion as in pdfTeX/microtype

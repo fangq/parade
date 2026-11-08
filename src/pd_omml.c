@@ -191,7 +191,8 @@ typedef struct {
     int np;
     pd_buf seq;                 /* everything, in order: for elements that only group */
     char chr[16], beg[16], end[16], sep[16], pos[8], type[16], lim[16];
-    int has_chr, has_beg, has_end, has_sep, deg_hide, sty_p, nor;
+    int has_chr, has_beg, has_end, has_sep, deg_hide, sty_p, nor, hidden;
+    char sty[4], scr[16];       /* a run's style (p, b, i, bi) and script (script, fraktur, double-struck, ...) */
 } mel;
 
 static const pd_buf* part_of(const mel* e, const char* name, int nth) {
@@ -266,7 +267,12 @@ static void read_props(pd_markup* g, const char* name, mel* e) {
         } else if (!strcmp(t, "degHide")) {
             e->deg_hide = !v[0] || !strcmp(v, "1") || !strcmp(v, "on") || !strcmp(v, "true");
         } else if (!strcmp(t, "sty")) {
-            e->sty_p = !strcmp(v, "p") || !strcmp(v, "b");
+            e->sty_p = !strcmp(v, "p");
+            snprintf(e->sty, sizeof(e->sty), "%.3s", v);
+        } else if (!strcmp(t, "scr")) {
+            snprintf(e->scr, sizeof(e->scr), "%s", v);
+        } else if (!strcmp(t, "show")) {    /* a phantom not shown */
+            e->hidden = !strcmp(v, "0") || !strcmp(v, "off") || !strcmp(v, "false");
         } else if (!strcmp(t, "nor")) {
             e->nor = !v[0] || !strcmp(v, "1") || !strcmp(v, "on");
         }
@@ -316,7 +322,19 @@ static void read_run(pd_markup* g, pd_buf* out) {
             }
         }
 
-        text_tex(out, text.p, text.n, props.sty_p, props.nor);
+        /* an alphabet of its own: its script, else bold (italic) */
+        const char* al = props.nor ? NULL : !strcmp(props.scr, "script") ? "mathcal" : !strcmp(props.scr, "fraktur") ?
+                         "mathfrak" : !strcmp(props.scr, "double-struck") ? "mathbb" : !strcmp(props.scr, "sans-serif") ?
+                         "mathsf" : !strcmp(props.scr, "monospace") ? "mathtt" : !strcmp(props.sty, "b") ? "mathbf" :
+                         !strcmp(props.sty, "bi") ? "boldsymbol" : NULL;
+
+        if (al) {
+            pb_printf(out, "\\%s{", al);
+            text_tex(out, text.p, text.n, 0, 0);
+            pb_putc(out, '}');
+        } else {
+            text_tex(out, text.p, text.n, props.sty_p, props.nor);
+        }
     }
 
     pb_free(&text);
@@ -473,8 +491,22 @@ static int convert(pd_markup* g, const char* name, pd_buf* out, int depth) {
     } else if (!strcmp(name, "bar")) {
         pb_puts(out, !strcmp(e->pos, "top") ? "\\overline" : "\\underline");
         braced(out, e, "e");
-    } else if (!strcmp(name, "groupChr")) {
-        pb_puts(out, !strcmp(e->pos, "top") ? "\\overline" : "\\underline");
+    } else if (!strcmp(name, "groupChr")) {   /* a brace over or under (Word's default: under) */
+        size_t k = 0;
+        uint32_t c = e->has_chr && e->chr[0] ? utf8_next(e->chr, strlen(e->chr), &k) : 0x23DF;
+
+        pb_puts(out, c == 0x23DE || (c != 0x23DF && !strcmp(e->pos, "top")) ? "\\overbrace" : "\\underbrace");
+        braced(out, e, "e");
+    } else if (!strcmp(name, "borderBox")) {
+        pb_puts(out, "\\boxed");
+        braced(out, e, "e");
+    } else if (!strcmp(name, "phant")) {
+        if (e->hidden) {    /* room for it, nothing shown */
+            pb_puts(out, "\\phantom");
+        }
+
+        braced(out, e, "e");
+    } else if (!strcmp(name, "box")) {      /* only groups */
         braced(out, e, "e");
     } else if (!strcmp(name, "func")) {
         const pd_buf* fn = part_of(e, "fName", 0);
@@ -501,9 +533,9 @@ static int convert(pd_markup* g, const char* name, pd_buf* out, int depth) {
         pb_putc(out, ' ');
         braced(out, e, "e");
     } else if (!strcmp(name, "limLow") || !strcmp(name, "limUpp")) {
-        braced(out, e, "e");
-        pb_puts(out, name[3] == 'L' ? "_" : "^");
+        pb_puts(out, name[3] == 'L' ? "\\underset" : "\\overset");
         braced(out, e, "lim");
+        braced(out, e, "e");
     } else if (!strcmp(name, "mr")) {
         const pd_buf* b;
 
@@ -531,7 +563,7 @@ static int convert(pd_markup* g, const char* name, pd_buf* out, int depth) {
     } else if (!strcmp(name, "eqArr")) {
         const pd_buf* b;
 
-        pb_puts(out, "\\begin{matrix}");
+        pb_puts(out, "\\begin{aligned}");
 
         for (i = 0; (b = part_of(e, "e", i)) != NULL; i++) {
             if (i) {
@@ -541,7 +573,7 @@ static int convert(pd_markup* g, const char* name, pd_buf* out, int depth) {
             pb_put(out, b->p, b->n);
         }
 
-        pb_puts(out, "\\end{matrix}");
+        pb_puts(out, "\\end{aligned}");
     } else {    /* e, num, den, sub, sup, deg, fName, lim, box, borderBox, oMath, ...: their content */
         pb_put(out, e->seq.p, e->seq.n);
     }
@@ -587,19 +619,23 @@ typedef struct {
     size_t n, i;
     pd_buf* o;
     int depth;
+    const char* rpr;            /* the alphabet runs are in now (\mathbf ...): their m:rPr's inside, NULL none */
 } tp;
 
 static void tex_list(tp* p, int stop_brace);
 
-static void omml_text(pd_buf* o, const char* s, size_t n, int upright) {
+#define STY_P "<m:sty m:val=\"p\"/>"
+
+/* a math run of text; rpr the inside of its m:rPr (its style, its script), NULL none */
+static void omml_text(pd_buf* o, const char* s, size_t n, const char* rpr) {
     if (!n) {
         return;
     }
 
     pb_puts(o, "<m:r>");
 
-    if (upright) {
-        pb_puts(o, "<m:rPr><m:sty m:val=\"p\"/></m:rPr>");
+    if (rpr && rpr[0]) {
+        pb_printf(o, "<m:rPr>%s</m:rPr>", rpr);
     }
 
     pb_puts(o, "<m:t xml:space=\"preserve\">");
@@ -619,6 +655,23 @@ static void omml_text(pd_buf* o, const char* s, size_t n, int upright) {
     }
 
     pb_puts(o, "</m:t></m:r>");
+}
+
+/* a function LaTeX names (\sin, \log, ...), which OMML writes as m:func */
+static int func_name(const char* n) {
+    static const char* const known[] = { "sin", "cos", "tan", "cot", "sec", "csc", "sinh", "cosh", "tanh", "log",
+                                         "ln", "exp", "lim", "max", "min", "sup", "inf", "det", "arg", "deg", "dim",
+                                         "ker", "arcsin", "arccos", "arctan", "gcd", "Pr", NULL
+                                       };
+    int k;
+
+    for (k = 0; known[k]; k++) {
+        if (!strcmp(n, known[k])) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static void skip_ws(tp* p) {
@@ -690,7 +743,7 @@ static void tex_list(tp* p, int stop_brace) {
         return;
     }
 
-#define FLUSH() do { omml_text(o, p->s + lit, p->i - lit, 0); } while (0)
+#define FLUSH() do { omml_text(o, p->s + lit, p->i - lit, p->rpr); } while (0)
     while (p->i < p->n) {
         char c = p->s[p->i];
 
@@ -729,7 +782,7 @@ static void tex_list(tp* p, int stop_brace) {
                     k--;
                 }
 
-                omml_text(o, p->s + lit, k - lit, 0);
+                omml_text(o, p->s + lit, k - lit, p->rpr);
                 base_start = k;
             }
 
@@ -747,7 +800,7 @@ static void tex_list(tp* p, int stop_brace) {
             } else {
                 atom = o->n;
                 pb_printf(o, "<m:s%s><m:e>", c == '^' ? "Sup" : "Sub");
-                omml_text(o, p->s + base_start, p->i - base_start, 0);
+                omml_text(o, p->s + base_start, p->i - base_start, p->rpr);
             }
 
             {   /* the script, and the other one after it: then both, on one base */
@@ -923,9 +976,39 @@ static void tex_list(tp* p, int stop_brace) {
                 pb_puts(o, "<m:endChr m:val=\"");
                 pb_puts(o, e[0] == '>' ? "&gt;" : e);
                 pb_puts(o, "\"/></m:dPr><m:e>");
-                p->n = close;
-                tex_list(p, 0);
-                p->n = save;
+
+                {   /* its parts, \mid between them (Word's separator) */
+                    size_t q, part = p->i;
+                    int db = 0, dl = 0;
+
+                    for (q = p->i; q <= close; q++) {
+                        int at_end = q == close;
+
+                        if (!at_end && p->s[q] == '{') {
+                            db++;
+                        } else if (!at_end && p->s[q] == '}') {
+                            db--;
+                        } else if (!at_end && !strncmp(p->s + q, "\\left", 5)) {
+                            dl++;
+                        } else if (!at_end && !strncmp(p->s + q, "\\right", 6)) {
+                            dl--;
+                        }
+
+                        if (at_end || (db == 0 && dl == 0 && !strncmp(p->s + q, "\\mid", 4) &&
+                                       (q + 4 >= close || !isalpha((unsigned char)p->s[q + 4])))) {
+                            p->i = part;
+                            p->n = q;
+                            tex_list(p, 0);
+                            p->n = save;
+
+                            if (!at_end) {
+                                pb_puts(o, "</m:e><m:e>");
+                                part = q + 4;
+                            }
+                        }
+                    }
+                }
+
                 pb_puts(o, "</m:e></m:d>");
                 p->i = j < save ? j : save;
             } else if (!strcmp(name, "mathrm") || !strcmp(name, "operatorname") || !strcmp(name, "text") ||
@@ -986,7 +1069,7 @@ static void tex_list(tp* p, int stop_brace) {
                             }
                         }
 
-                        omml_text(o, u.p ? u.p : "", u.n, 1);
+                        omml_text(o, u.p ? u.p : "", u.n, STY_P);
                         pb_free(&u);
                     }
 
@@ -1075,6 +1158,7 @@ static void tex_list(tp* p, int stop_brace) {
             } else if (!strcmp(name, "begin")) {    /* a matrix: rows and cells */
                 char env[24] = "";
                 size_t j, start, end_at;
+                int eqarr;
 
                 skip_ws(p);
 
@@ -1106,7 +1190,9 @@ static void tex_list(tp* p, int stop_brace) {
                     }
 
                     end_at = hit ? (size_t)(hit - p->s) : p->n;
-                    pb_puts(o, "<m:m><m:mr><m:e>");
+                    eqarr = !strcmp(env, "aligned") || !strcmp(env, "align") || !strcmp(env, "align*") ||
+                            !strcmp(env, "eqnarray") || !strcmp(env, "gathered");
+                    pb_puts(o, eqarr ? "<m:eqArr><m:e>" : "<m:m><m:mr><m:e>");
 
                     {
                         size_t q = start, cell = start, save = p->n;
@@ -1132,11 +1218,11 @@ static void tex_list(tp* p, int stop_brace) {
                                     break;
                                 }
 
-                                if (p->s[q] == '&') {
-                                    pb_puts(o, "</m:e><m:e>");
+                                if (p->s[q] == '&') {   /* an equation array's alignment point: in its row */
+                                    pb_puts(o, eqarr ? "" : "</m:e><m:e>");
                                     cell = q + 1;
                                 } else {
-                                    pb_puts(o, "</m:e></m:mr><m:mr><m:e>");
+                                    pb_puts(o, eqarr ? "</m:e><m:e>" : "</m:e></m:mr><m:mr><m:e>");
                                     cell = q + 2;
                                     q++;
                                 }
@@ -1144,7 +1230,7 @@ static void tex_list(tp* p, int stop_brace) {
                         }
                     }
 
-                    pb_puts(o, "</m:e></m:mr></m:m>");
+                    pb_puts(o, eqarr ? "</m:e></m:eqArr>" : "</m:e></m:mr></m:m>");
                     p->i = hit ? end_at + strlen(want) : p->n;
                 }
             } else {    /* a symbol, a function name, spacing, or one not known: as text */
@@ -1160,19 +1246,67 @@ static void tex_list(tp* p, int stop_brace) {
 
                     memset(&tmp, 0, sizeof(tmp));
                     put_utf8(&tmp, sy->cp);
-                    omml_text(o, tmp.p, tmp.n, 0);
+                    omml_text(o, tmp.p, tmp.n, p->rpr);
                     pb_free(&tmp);
                 } else if (!strcmp(name, ",") || !strcmp(name, ";") || !strcmp(name, " ") || !strcmp(name, "quad") ||
                            !strcmp(name, "qquad") || !strcmp(name, "!")) {
-                    omml_text(o, " ", strcmp(name, "!") ? 1 : 0, 0);
+                    omml_text(o, " ", strcmp(name, "!") ? 1 : 0, p->rpr);
                 } else if (!strcmp(name, "{") || !strcmp(name, "}") || !strcmp(name, "%") || !strcmp(name, "&") ||
                            !strcmp(name, "_") || !strcmp(name, "#") || !strcmp(name, "$")) {
-                    omml_text(o, name, 1, 0);
+                    omml_text(o, name, 1, p->rpr);
                 } else if (!strcmp(name, "mathbf") || !strcmp(name, "mathit") || !strcmp(name, "boldsymbol") ||
-                           !strcmp(name, "mathcal") || !strcmp(name, "mathbb") || !strcmp(name, "mathsf")) {
-                    tex_arg(p);     /* the letters, without the alphabet */
-                } else if (name[0]) {   /* \sin, \log, ...: upright */
-                    omml_text(o, name, strlen(name), 1);
+                           !strcmp(name, "mathcal") || !strcmp(name, "mathbb") || !strcmp(name, "mathsf") ||
+                           !strcmp(name, "mathfrak") || !strcmp(name, "mathtt") || !strcmp(name, "mathscr")) {
+                    const char* keep = p->rpr;  /* the letters in runs of that style or script */
+
+                    p->rpr = !strcmp(name, "mathbf") ? "<m:sty m:val=\"b\"/>" : !strcmp(name, "boldsymbol") ?
+                             "<m:sty m:val=\"bi\"/>" : !strcmp(name, "mathit") ? "<m:sty m:val=\"i\"/>" :
+                             !strcmp(name, "mathbb") ? "<m:scr m:val=\"double-struck\"/><m:sty m:val=\"p\"/>" :
+                             !strcmp(name, "mathfrak") ? "<m:scr m:val=\"fraktur\"/><m:sty m:val=\"p\"/>" :
+                             !strcmp(name, "mathsf") ? "<m:scr m:val=\"sans-serif\"/><m:sty m:val=\"p\"/>" :
+                             !strcmp(name, "mathtt") ? "<m:scr m:val=\"monospace\"/><m:sty m:val=\"p\"/>" :
+                             "<m:scr m:val=\"script\"/><m:sty m:val=\"p\"/>";
+                    tex_arg(p);
+                    p->rpr = keep;
+                } else if (!strcmp(name, "boxed")) {
+                    pb_puts(o, "<m:borderBox><m:e>");
+                    tex_arg(p);
+                    pb_puts(o, "</m:e></m:borderBox>");
+                } else if (!strcmp(name, "phantom")) {
+                    pb_puts(o, "<m:phant><m:phantPr><m:show m:val=\"0\"/></m:phantPr><m:e>");
+                    tex_arg(p);
+                    pb_puts(o, "</m:e></m:phant>");
+                } else if (!strcmp(name, "overbrace") || !strcmp(name, "underbrace")) {
+                    pb_printf(o, "<m:groupChr><m:groupChrPr><m:chr m:val=\"%s\"/><m:pos m:val=\"%s\"/>"
+                              "<m:vertJc m:val=\"%s\"/></m:groupChrPr><m:e>", name[0] == 'o' ? "\xE2\x8F\x9E" :
+                              "\xE2\x8F\x9F", name[0] == 'o' ? "top" : "bot", name[0] == 'o' ? "bot" : "top");
+                    tex_arg(p);
+                    pb_puts(o, "</m:e></m:groupChr>");
+                } else if (!strcmp(name, "overset") || !strcmp(name, "underset")) {
+                    pd_buf lim, *keep = p->o;   /* the limit first in LaTeX, after the base in OMML */
+
+                    memset(&lim, 0, sizeof(lim));
+                    p->o = &lim;
+                    tex_arg(p);
+                    p->o = keep;
+                    pb_printf(o, "<m:lim%s><m:e>", name[0] == 'o' ? "Upp" : "Low");
+                    tex_arg(p);
+                    pb_puts(o, "</m:e><m:lim>");
+                    pb_put(o, lim.p, lim.n);
+                    pb_printf(o, "</m:lim></m:lim%s>", name[0] == 'o' ? "Upp" : "Low");
+                    pb_free(&lim);
+                } else if (name[0]) {   /* \sin, \log, ...: upright; with an argument in braces, a function */
+                    skip_ws(p);
+
+                    if (p->i < p->n && p->s[p->i] == '{' && func_name(name)) {
+                        pb_puts(o, "<m:func><m:fName>");
+                        omml_text(o, name, strlen(name), STY_P);
+                        pb_puts(o, "</m:fName><m:e>");
+                        tex_arg(p);
+                        pb_puts(o, "</m:e></m:func>");
+                    } else {
+                        omml_text(o, name, strlen(name), STY_P);
+                    }
                 }
             }
 

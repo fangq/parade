@@ -1160,6 +1160,33 @@ static mbox make_bar(mctx* M, mbox* base, int over, mstyle st) {
     return r;
 }
 
+/* \boxed: a rule round the base, a quarter em from it */
+static mbox make_boxed(mctx* M, mbox* base, mstyle st) {
+    pd_sp size = style_size(M, st.style), t = K(M, MC_OVERBAR_RULE, size), pad = size / 4;
+    pd_sp w = base->w + 2 * (pad + t), top = -(base->h + pad + t), bot = base->d + pad;
+    mbox r;
+
+    box_init(&r);
+    box_place(M, &r, base, pad + t, 0);
+    box_rule(M, &r, 0, top, w, t);
+    box_rule(M, &r, 0, bot, w, t);
+    box_rule(M, &r, 0, top, t, bot + t - top);
+    box_rule(M, &r, w - t, top, t, bot + t - top);
+    return r;
+}
+
+/* \overset, \underset: a smaller line over or under the base, centred on it */
+static mbox make_stack(mctx* M, mbox* base, mbox* lim, int over, mstyle st) {
+    pd_sp size = style_size(M, st.style), gap = K(M, MC_OVERBAR_GAP, size);
+    pd_sp w = base->w > lim->w ? base->w : lim->w;
+    mbox r;
+
+    box_init(&r);
+    box_place(M, &r, base, (w - base->w) / 2, 0);
+    box_place(M, &r, lim, (w - lim->w) / 2, over ? -(base->h + gap + lim->d) : base->d + gap + lim->h);
+    return r;
+}
+
 /* \begin{matrix} ... \end{matrix} and friends */
 static mbox make_matrix(mctx* M, mstyle st, const char* env) {
     pd_sp size = style_size(M, st.style), axis = K(M, MC_AXIS, size);
@@ -1644,6 +1671,34 @@ static mbox parse_list(mctx* M, mstyle st, int* ended) {
                 a.b = make_bar(M, &base, name[0] == 'o', st);
                 a.cls = ORD;
                 box_free(&base);
+            } else if (!strcmp(name, "boxed")) {
+                mbox base = parse_arg(M, st);
+
+                a.b = make_boxed(M, &base, st);
+                a.cls = ORD;
+                box_free(&base);
+            } else if (!strcmp(name, "phantom")) {  /* its room, nothing in it */
+                mbox base = parse_arg(M, st);
+
+                box_init(&a.b);
+                a.b.w = base.w;
+                a.b.h = base.h;
+                a.b.d = base.d;
+                a.cls = ORD;
+                box_free(&base);
+            } else if (!strcmp(name, "overbrace") || !strcmp(name, "underbrace")) {
+                mbox base = parse_arg(M, st);   /* drawn as a rule over or under it */
+
+                a.b = make_bar(M, &base, name[0] == 'o', st);
+                a.cls = ORD;
+                box_free(&base);
+            } else if (!strcmp(name, "overset") || !strcmp(name, "underset")) {
+                mbox lim = parse_arg(M, sup_style(st)), base = parse_arg(M, st);
+
+                a.b = make_stack(M, &base, &lim, name[0] == 'o', st);
+                a.cls = ORD;
+                box_free(&base);
+                box_free(&lim);
             } else if (!strcmp(name, "limits") || !strcmp(name, "nolimits")) {
                 if (na > 0 && atoms[na - 1].cls == OP) {
                     atoms[na - 1].limits = name[0] == 'l';

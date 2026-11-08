@@ -318,6 +318,13 @@ static void test_math(const pd_font* mf) {
     CHECK(del.height >= a.height && del.depth >= a.depth && del.width > a.width);   /* the parentheses enclose it */
     CHECK(math_box(mf, "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}", 0, &b, NULL) >= 6);
     CHECK(math_box(mf, "\\mathbb{R} \\alpha \\unknowncommand", 0, &a, NULL) > 3);
+    /* Word's constructs: a box round it (four rules), a phantom (its room, nothing drawn), limits over and under
+       (taller, deeper), a brace (a rule) */
+    CHECK(math_box(mf, "\\boxed{x}", 0, &a, &rules) == 5 && rules == 4 && a.width > x.width && a.height > x.height);
+    CHECK(math_box(mf, "\\phantom{x}", 0, &a, NULL) == 0 && a.width == x.width && a.height == x.height);
+    CHECK(math_box(mf, "\\overset{n}{x}", 0, &a, NULL) == 2 && a.height > x.height + PD_PT(2));
+    CHECK(math_box(mf, "\\underset{n}{x}", 0, &a, NULL) == 2 && a.depth > x.depth + PD_PT(2));
+    CHECK(math_box(mf, "\\overbrace{x}", 0, &a, &rules) == 2 && rules == 1);
 
     /* the same input, the same layout */
     {
