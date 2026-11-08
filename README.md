@@ -186,6 +186,7 @@ document API only.
 | LaTeX    | -   | yes | article that compiles with LuaLaTeX/pdfLaTeX: sections, lists, longtable, figures with `\caption`/`\label`/`\ref`, footnotes, equations |
 | RTF      | yes | yes | style sheet, list table, tables (merged cells), footnotes, hyperlink fields, PNG/JPEG |
 | DOCX     | yes | yes | styles (basedOn chains), numbering, tables, footnotes, hyperlinks (also field codes), images, sections, headers/footers, theme colours with tints and shades, the font table (alternate names, PANOSE, pitch: `pd_doc_font_class`), content controls (check boxes, drop-down lists, dates, text: `PD_INLINE_CONTROL`, `pd_doc_control_at`), charts (bar, column, line, area, pie, doughnut, scatter, drawn from their cached values by `src/pd_chart.c`; the chart part, its workbook and the theme kept and written back), East Asian and complex-script font slots (`family_ea`, `family_cs`, complex scripts' size, bold, italic), ruby (`PD_INLINE_RUBY`), the document grid (`line_pitch`, `snap_grid`); what Parade does not model kept as it came (extended and custom properties, custom XML data, the glossary, web settings) and settings.xml merged with what it writes (track changes, protection, compatibility mode, document variables stay); deterministic zip |
+| PPTX     | yes | yes | read: each slide a page that is a canvas (master and layout shapes, placeholders' text styles, theme, pictures, tables, SmartArt drawings). Written (Save As, not round-tripping the original package): each canvas page a slide of its shapes -- Word's wps/wpg/pic DrawingML kept with the canvas made `p:sp`/`p:grpSp`/`p:cxnSp` (connections renumbered)/`p:pic`, geometry, fills, lines, effects and styles as they are; text boxes' text from their stories (alignment, indents, spacing, bullets and numbering, size, bold, italic, underline, strike, colours with theme links, fonts with theme fonts, super/subscript, links, slide numbers); a text box holding only a table a PowerPoint table (spans, merges, fills, rules); the background; the document's theme. A section that is no canvas is a slide of one text box with its text. One master and one blank layout: what the master and layout drew is on each slide as shapes, placeholders become plain shapes; speaker notes, hidden slides, transitions and charts are not kept; deterministic zip |
 | text     | yes | yes | one paragraph per line |
 
 `tools/pd_conv in.x out.y` converts between any of them and to PDF via
@@ -414,6 +415,9 @@ pd_para_break(p, &prm, NULL);
     src/pd_pptx.c        PowerPoint read: each slide a page that is a canvas (placeholders from the layout
                          and master, theme colours and fonts, pictures, tables, SmartArt drawings), made a
                          .docx in memory and read as one; a .docx's SmartArt made groups of its shapes
+    src/pd_pptx_write.c  PowerPoint written: each canvas page a slide of its shapes (the DrawingML the
+                         canvas keeps, its text boxes' text from their stories), other sections a slide
+                         of one text box
     src/pd_dgm.c         SmartArt laid out from its definition when it has no drawing saved of it (data
                          model, layout nodes, constraints and rules; composite, lin, snake, hierRoot,
                          hierChild, cycle, pyra); PD_SMARTART=layout lays out even those that have one,

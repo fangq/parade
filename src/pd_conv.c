@@ -1589,6 +1589,10 @@ pd_status pd_doc_export(const pd_doc* d, pd_conv_format fmt, pd_writer fn, void*
             st = pd_docx_export_as(d, &out, fmt == PD_CONV_DOTX);
             break;
 
+        case PD_CONV_PPTX:
+            st = pd_pptx_export(d, &out);
+            break;
+
         case PD_CONV_JDATA:
             return pd_doc_save(d, PD_JDATA_TEXT, fn, user);
 

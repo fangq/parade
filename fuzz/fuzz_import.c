@@ -36,7 +36,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     }
 
     if (pd_doc_import(data, size, in, &d) == PD_OK) {
-        for (fmt = PD_CONV_TEXT; fmt <= PD_CONV_JDATA; fmt++) {
+        for (fmt = PD_CONV_TEXT; fmt <= PD_CONV_PPTX; fmt++) {
             pd_doc_export(d, (pd_conv_format)fmt, fuzz_discard, &bytes);
         }
 

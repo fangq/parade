@@ -186,6 +186,11 @@ unsigned char* pd_zip_get(const unsigned char* zip, size_t n, const char* name, 
    relationships its pictures need (Relationship elements, NULL none); NULL when it has none (both malloc'd) */
 char* pd_docx_smartart(const unsigned char* zip, size_t zn, const char* xml, size_t len, size_t* out_len,
                        char** rels, size_t* rels_len);
+/* the document's theme as an Office theme part (pd_docx.c): the one it came with, else one made */
+void pd_docx_theme_part(const pd_doc* d, pd_buf* o);
+/* PowerPoint written: each page with a canvas a slide of its shapes, other sections a slide of their text
+   (pd_pptx_write.c) */
+pd_status pd_pptx_export(const pd_doc* d, pd_buf* out);
 void* pd_zipw_new(pd_buf* o);
 int pd_zipw_add(void* z, const char* name, const void* data, size_t len);
 void pd_zipw_finish(void* z);

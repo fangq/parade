@@ -32,6 +32,10 @@
  *   DOCX      WordprocessingML: styles, numbering, tables, footnotes,
  *             hyperlinks, images, sections (size, margins, columns),
  *             headers/footers with page fields
+ *   PPTX      read: each slide a page that is a canvas; written: each canvas page a slide of the
+ *             canvas's shapes (from the DrawingML it keeps, text boxes' text from their stories, a
+ *             text box holding a table a table), a section that is no canvas a slide of one text box
+ *             with its text; one master, one blank layout, the document's theme
  *   TEXT      UTF-8, one paragraph per line
  *
  * Clipboard: pd_doc_export_range writes the selected part of a document
@@ -56,7 +60,7 @@ typedef enum {
     PD_CONV_RTF = 4,
     PD_CONV_DOCX = 5,
     PD_CONV_JDATA = 6,          /**< the native format (JData text), for clipboards */
-    PD_CONV_PPTX = 7,           /**< PowerPoint, import only: each slide a page that is a canvas (also .potx) */
+    PD_CONV_PPTX = 7,           /**< PowerPoint: each slide a page that is a canvas (read also from .potx) */
     PD_CONV_DOTX = 8            /**< a Word template (.dotx): read as DOCX (a new document from it), written as one */
 } pd_conv_format;
 
