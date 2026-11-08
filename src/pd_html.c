@@ -779,8 +779,12 @@ static void hx_table(hx* x, pd_block_id t) {
                 }
             }
 
-            if (cp.background || cp.valign) {
+            if (cp.background || cp.valign || cp.width) {
                 pb_puts(x->o, " style=\"");
+
+                if (cp.width) {
+                    pb_printf(x->o, "width:%.2fpt;", cp.width / 65536.0);
+                }
 
                 if (cp.background) {
                     pb_puts(x->o, "background-color:");

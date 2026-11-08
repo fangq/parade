@@ -727,6 +727,9 @@ typedef struct {
                                      0: border_width */
     uint32_t background_theme;  /**< pd_theme_color reference of background, 0 = none */
     uint32_t border_theme;      /**< pd_theme_color reference of border_color, 0 = none */
+    pd_sp width;                /**< its preferred width (Word's tcW), for a column the table does not size itself;
+                                     0 = automatic */
+    int32_t width_pct;          /**< or that in per-mille of the table's width (width 0) */
 } pd_cell_props;
 
 /** a table row's own properties (Word's w:trPr) */

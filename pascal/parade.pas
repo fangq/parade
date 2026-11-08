@@ -639,6 +639,8 @@ type
     border_color: UInt32;
     edge_width: array[0..3] of pd_sp;   { each edge's width (top, right, bottom, left); 0: border_width }
     background_theme, border_theme: UInt32;     { pd_theme_color references, 0 = none }
+    width: pd_sp;            { preferred width (Word's tcW), 0 = automatic }
+    width_pct: Int32;        { or per-mille of the table's width }
   end;
   Ppd_cell_props = ^pd_cell_props;
 

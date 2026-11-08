@@ -1482,7 +1482,7 @@ static void widen(pd_sp* mn, pd_sp* mx, int32_t c, int32_t span, pd_sp a, pd_sp 
 static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
     const pd_doc* d = L->doc;
     const pd_table_props* tp = &t->st.tp;
-    pd_sp* mn, *mx, *w, avail, fixed = 0;
+    pd_sp* mn, *mx, *w, *pref, avail, fixed = 0;
     int64_t smin = 0, smax = 0;
     int32_t r, k, c, j, pass, nauto = 0;
     pd_sp pad = tp->cell_padding;
@@ -1511,7 +1511,7 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
         return;
     }
 
-    if ((T->colx = (pd_sp*)calloc((size_t)T->ncols * 4 + 1, sizeof(pd_sp))) == NULL) {
+    if ((T->colx = (pd_sp*)calloc((size_t)T->ncols * 5 + 1, sizeof(pd_sp))) == NULL) {
         T->ncols = 0;   /* no memory: no table */
         return;
     }
@@ -1519,6 +1519,15 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
     mn = T->colx + T->ncols + 1;    /* scratch after the edges, given back with them */
     mx = mn + T->ncols;
     w = mx + T->ncols;
+    pref = w + T->ncols;
+
+    {   /* the width it is given: of the column, or its own; an indented table has less room */
+        pd_sp want = tp->width_pct > 0 ? (pd_sp)((int64_t)colw * tp->width_pct / 1000) : tp->width;
+        pd_sp room = colw - (tp->align == PD_ALIGN_LEFT && tp->indent > 0 ? tp->indent : 0);
+
+        avail = want > 0 && want < room ? want : room;
+        avail = avail > 0 ? avail : colw;
+    }
 
     /* single-column cells first, then spanning cells widen the columns they cover */
     for (pass = 0; pass < 2; pass++) {
@@ -1540,8 +1549,12 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
                 b += 2 * pad;
 
                 if (span == 1) {
+                    pd_sp want = cell->st.cell.width > 0 ? cell->st.cell.width :
+                                 (pd_sp)((int64_t)avail * cell->st.cell.width_pct / 1000);
+
                     mn[c] = a > mn[c] ? a : mn[c];
                     mx[c] = b > mx[c] ? b : mx[c];
+                    pref[c] = want > pref[c] ? want : pref[c];
                 } else {
                     widen(mn, mx, c, span, a, b);
                 }
@@ -1561,19 +1574,14 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
         }
     }
 
-    {   /* the width it is given: of the column, or its own; an indented table has less room */
-        pd_sp want = tp->width_pct > 0 ? (pd_sp)((int64_t)colw * tp->width_pct / 1000) : tp->width;
-        pd_sp room = colw - (tp->align == PD_ALIGN_LEFT && tp->indent > 0 ? tp->indent : 0);
-
-        avail = want > 0 && want < room ? want : room;
-        avail = avail > 0 ? avail : colw;
-    }
-
     for (c = 0; c < T->ncols; c++) {
         mx[c] = mx[c] < mn[c] ? mn[c] : mx[c];
 
         if (c < tp->ncols && tp->col_width[c] > 0) {
             w[c] = tp->col_width[c];
+            fixed += w[c];
+        } else if (pref[c] > 0) {   /* as wide as a cell of it would be, if its content fits */
+            w[c] = pref[c] > mn[c] ? pref[c] : mn[c];
             fixed += w[c];
         } else {
             w[c] = -1;

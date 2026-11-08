@@ -5883,6 +5883,46 @@ static void test_cant_split(void) {
     }
 }
 
+/* A cell's preferred width (tcW) sizes a column the table leaves automatic: 4000 twips (200pt) puts the next
+   cell 200pt to the right, also after .docx and native round trips */
+static void test_cell_width(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:w=\"4000\" w:type=\"dxa\"/></w:tcPr><w:p><w:r><w:t>WIDE"
+                             "</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr><w:p><w:r>"
+                             "<w:t>NARROW</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pg[2];
+            pd_sp x[2], y[2];
+
+            CHECK(text_drawn(d, L, "WIDE", &pg[0], &x[0], &y[0]) && text_drawn(d, L, "NARROW", &pg[1], &x[1], &y[1]));
+            CHECK(x[1] - x[0] > PD_PT(199) && x[1] - x[0] < PD_PT(201));
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -5910,6 +5950,7 @@ int main(void) {
     test_grid_before();
     test_exact_row();
     test_cant_split();
+    test_cell_width();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");
