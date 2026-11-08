@@ -1364,6 +1364,7 @@ typedef struct {
     const xdoc* dmc;            /* and its colours */
     pd_buf* o;
     pd_buf* charts;             /* the slide's charts: drawings of their own, over its canvas */
+    const xdoc* th;             /* the slide's theme when it is not the document's (another master's), else NULL */
     long long gx, gy;           /* while a group's shapes are put: where its children's (0, 0) is on the slide, */
     double gsx, gsy;            /* and how much bigger it draws them (0: not in a group) */
 } conv;
@@ -1614,6 +1615,38 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
     pb_puts(C->o, "</w:txbxContent></wps:txbx>");
 }
 
+/* a shape's style's reference (Q 1 its fill, 2 its line, 3 its effects) when the slide's theme is not the document's:
+   the theme's fill, line or effects it names, in the reference's colour -- what the .docx's theme (the first master's)
+   would give it is not what this master's does */
+static void put_style_ref(conv* C, const xdoc* d, int sp, int lsp, int msp, int q) {
+    static const char* const refs[4] = { "", "fillRef", "lnRef", "effectRef" };
+    static const char* const lists[4] = { "", "fillStyleLst", "lnStyleLst", "effectStyleLst" };
+    xref sty = shape_style(C, d, sp, lsp, msp);
+    int r = sty.n >= 0 ? xd_kid(sty.d, sty.n, refs[q]) : -1, lst, e;
+    long idx = r >= 0 ? (long)xd_int(sty.d, r, "idx", 0) : 0;
+
+    if (idx <= 0) {
+        return;
+    }
+
+    lst = xd_find(C->th, q == 1 && idx > 1000 ? "bgFillStyleLst" : lists[q]);
+    idx = q == 1 && idx > 1000 ? idx - 1000 : idx;
+
+    for (e = lst >= 0 ? C->th->v[lst].kid : -1; e >= 0 && idx > 1; e = C->th->v[e].next) {
+        idx--;
+    }
+
+    if (e >= 0 && q == 3) {
+        e = xd_kid(C->th, e, "effectLst");
+    }
+
+    if (e >= 0) {
+        C->P->ph = sty.d->v[r].kid >= 0 ? colour_of(C->P, sty.d, sty.d->v[r].kid) : -1;
+        xd_raw_mapped(C->P, C->o, C->th, e);
+        C->P->ph = -1;
+    }
+}
+
 /* one of a set of spPr children that stand for one another (the fills; the geometries) under N, -1 none */
 static int sppr_one(const xdoc* d, int n, const char* const* names, int nn) {
     int k, q;
@@ -1741,6 +1774,11 @@ static int put_sppr(conv* C, ppart* pt, int sp, int lsp, int msp, const char* el
             from = C->layout;
         } else if (e < 0 && mspr >= 0 && (e = sppr_one(&C->master->x, mspr, sets[q], nset[q])) >= 0) {
             from = C->master;
+        }
+
+        if (e < 0 && q > 0 && C->th) {  /* another master's theme: what the style refers to in it, made the shape's */
+            put_style_ref(C, d, sp, lsp, msp, q);
+            continue;
         }
 
         if (e < 0 && q == 0) {
@@ -2767,7 +2805,7 @@ static void put_background_fill(conv* C, const ppart* pt, int f) {
 }
 
 static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* path, int no, int last) {
-    ppart slide, layout, master;
+    ppart slide, layout, master, theme;
     int have_l = 0, have_m = 0, tree, show = 1;
     const char* lp, *mp;
     long bg;
@@ -2819,6 +2857,10 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
     C.pres_style = pres_style;
     C.o = &cv;
     C.charts = &charts;
+
+    if (P->theme_path[0] && strcmp(P->theme_path, P->doc_theme) && part_load(P, &theme, P->theme_path)) {
+        C.th = &theme.x;    /* another master's theme */
+    }
 
     /* the background: the slide's, else its layout's, else its master's; white. A picture or a gradient is a
        shape of its own over the whole slide (the canvas's own background its colour, where the picture is not) */
@@ -2910,6 +2952,10 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
     pb_puts(&P->doc, "</w:p>");
     pb_free(&cv);
     pb_free(&charts);
+
+    if (C.th) {
+        part_free(&theme);
+    }
 
     if (have_m) {
         part_free(&master);

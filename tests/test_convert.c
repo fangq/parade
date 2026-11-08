@@ -4505,6 +4505,38 @@ static void test_pptx_table_style(void) {
 #undef PFILL
 }
 
+/* a slide whose master's theme is not the document's (the first master's): its shapes' style references are to its
+   own theme's fills and lines */
+static void test_pptx_other_theme(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"S\"/><p:cNvSpPr/>"
+                         "<p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/>"
+                         "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr><p:style><a:lnRef idx=\"2\">"
+                         "<a:srgbClr val=\"00FF00\"/></a:lnRef><a:fillRef idx=\"2\"><a:srgbClr val=\"FF0000\"/></a:fillRef>"
+                         "<a:effectRef idx=\"0\"><a:srgbClr val=\"000000\"/></a:effectRef><a:fontRef idx=\"minor\">"
+                         "<a:srgbClr val=\"000000\"/></a:fontRef></p:style></p:sp>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>",
+                         "ppt/slideLayouts/slideLayout1.xml", "<p:sldLayout xmlns:p=\"p\"><p:cSld><p:spTree/></p:cSld>"
+                         "</p:sldLayout>",
+                         "ppt/slideLayouts/_rels/slideLayout1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../slideMasters/slideMaster2.xml\"/></Relationships>",
+                         "ppt/slideMasters/slideMaster2.xml", "<p:sldMaster xmlns:p=\"p\"><p:cSld><p:spTree/></p:cSld>"
+                         "</p:sldMaster>",
+                         "ppt/slideMasters/_rels/slideMaster2.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../theme/theme2.xml\"/></Relationships>",
+                         "ppt/theme/theme2.xml", "<a:theme xmlns:a=\"a\"><a:themeElements><a:fmtScheme><a:fillStyleLst>"
+                         "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:srgbClr val=\"0000FF\"/>"
+                         "</a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w=\"9525\"><a:solidFill><a:schemeClr "
+                         "val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"50800\"><a:solidFill><a:schemeClr val=\"phClr\"/>"
+                         "</a:solidFill></a:ln></a:lnStyleLst></a:fmtScheme></a:themeElements></a:theme>", NULL);
+    char* js = d ? slide_json(d, 0) : NULL;
+
+    /* its own blue, the line 4 points in the reference's green */
+    CHECK(js && strstr(js, "\"fill\":4278190335,\"line\":4278255360,\"lw\":262144"));
+    free(js);
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -6053,6 +6085,7 @@ int main(void) {
     test_pptx_run_props();
     test_pptx_math();
     test_pptx_table_style();
+    test_pptx_other_theme();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();
