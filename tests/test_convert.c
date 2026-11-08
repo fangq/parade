@@ -10685,6 +10685,31 @@ static void test_docx_art_borders(void) {
     pd_doc_free(d);
 }
 
+/* cells set apart by the rows (w:trPr's tblCellSpacing, as tables pasted from the web have it), the table saying
+   nothing: the table's spacing, and kept so through a .docx */
+static void test_docx_row_cell_spacing(void) {
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:body><w:tbl><w:tblPr><w:tblW w:w=\"4000\" w:type=\"dxa\"/></w:tblPr>"
+                         "<w:tblGrid><w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:trPr>"
+                         "<w:tblCellSpacing w:w=\"100\" w:type=\"dxa\"/></w:trPr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p>"
+                         "</w:tc><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:body></w:document>",
+                         NULL);
+    pd_table_props tp;
+
+    CHECK(d != NULL);
+
+    if (d) {
+        pd_block_id t = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0);
+
+        CHECK(pd_doc_table_props(d, t, &tp) == PD_OK && tp.cell_spacing == PD_PT(5));
+        d = docx_again(d);
+        t = d ? pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0) : 0;
+        CHECK(d && pd_doc_table_props(d, t, &tp) == PD_OK && tp.cell_spacing == PD_PT(5));
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -10805,6 +10830,7 @@ int main(void) {
     test_docx_linked_textboxes();
     test_docx_float_valign();
     test_docx_art_borders();
+    test_docx_row_cell_spacing();
     test_svg_out();
     test_drawing_png();
     test_docx_canvas_kept();

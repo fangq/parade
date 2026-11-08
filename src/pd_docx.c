@@ -13891,6 +13891,19 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->tabs[w->ntab - 1].look = look;
             } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "bidiVisual") == 0) {
                 w->tabs[w->ntab - 1].rtl = attr_on(&m);
+            } else if (w->in_trpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblCellSpacing") == 0 &&
+                       w->tabs[w->ntab - 1].spacing == 0 && X->b->ntables >= 1 && X->b->ntables <= 8 &&
+                       X->b->table[X->b->ntables - 1]) {
+                /* said by the rows, not the table (as tables pasted from the web have it): the table's */
+                pd_sp sp = !mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0 ? twips(attr_int(&m, "w:w", 0)) : 0;
+                pd_table_props tp;
+
+                if (sp > 0 && sp < PD_PT(1000) &&
+                        pd_doc_table_props(X->b->d, X->b->table[X->b->ntables - 1], &tp) == PD_OK) {
+                    w->tabs[w->ntab - 1].spacing = sp;
+                    tp.cell_spacing = sp;
+                    pd_doc_set_table_props(X->b->d, X->b->table[X->b->ntables - 1], &tp);
+                }
             } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblCellSpacing") == 0) {
                 if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
                     pd_sp sp = twips(attr_int(&m, "w:w", 0));
