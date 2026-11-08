@@ -516,6 +516,9 @@ type
     { the selected shape turned to Deg degrees (clockwise), flipped (Horizontal, else vertically): one step of undo }
     function RotateShape(Deg: Double): Boolean;
     function FlipShape(Horizontal: Boolean): Boolean;
+    { the selected shape moved by DX, DY, sized to W by H (the drawing's units; its box before it is turned, about
+      its centre) and turned to Deg degrees, at once (Word's Size and Position): one step of undo }
+    function SetShapePlacement(DX, DY, W, H, Deg: Double): Boolean;
     { the selected shape as Word places it: its box before it is turned, the turn, its preset and adjustments }
     function SelectedShapeGeom(out G: TParadeShapeGeom): Boolean;
     { a preset's adjustment (adj, adj1, ...: a corner's radius, an arrow's head) set, in Word's units: one step of undo }
@@ -11032,6 +11035,64 @@ begin
     Inc(R, 21600000);
   SetAttr(Xml, Els[Xf].A, 'rot', IntToStr(R));
   Result := ApplyKeptXml(Xml, 'Rotate', FShapeSid);
+end;
+
+function TParadeEdit.SetShapePlacement(DX, DY, W, H, Deg: Double): Boolean;
+var
+  Xml: string;
+  Els: TXmlEls;
+  G: TParadeShapeGeom;
+  E, Pr, Xf, Off, Ext: Integer;
+  OX, OY, CX, CY, NX, NY, R: Int64;
+  UX, UY: Double;
+
+  function Find: Boolean;
+  begin
+    Els := XmlElements(Xml);
+    E := SidElement(Els, FShapeSid);
+    Pr := PropsOf(Els, E);
+    Xf := -1; Off := -1; Ext := -1;
+    if (E >= 0) and (Pr >= 0) then
+      Xf := ChildNamed(Els, Pr, 'a:xfrm');
+    if Xf >= 0 then
+    begin
+      Off := ChildNamed(Els, Xf, 'a:off');
+      Ext := ChildNamed(Els, Xf, 'a:ext');
+    end;
+    Result := (Off >= 0) and (Ext >= 0);
+  end;
+
+begin
+  OnlyShape;
+  Result := False;
+  if FReadOnly or not FShapeOn or (FShapeSid < 0) or (W < 1) or (H < 1) or not SelectedShapeGeom(G) or
+     (G.W <= 0) or (G.H <= 0) or not KeptXml(Xml) or not Find then
+    Exit;
+  OX := StrToInt64Def(AttrOf(Xml, Els[Off].A, 'x'), 0);
+  OY := StrToInt64Def(AttrOf(Xml, Els[Off].A, 'y'), 0);
+  CX := StrToInt64Def(AttrOf(Xml, Els[Ext].A, 'cx'), 0);
+  CY := StrToInt64Def(AttrOf(Xml, Els[Ext].A, 'cy'), 0);
+  if (CX <= 0) or (CY <= 0) then
+    Exit;
+  UX := CX / G.W;     { its own units a drawing unit: a group's child space, or EMU }
+  UY := CY / G.H;
+  NX := Round(W * UX);
+  NY := Round(H * UY);
+  OX := OX + (CX - NX) div 2 + Round(DX * UX);    { about its centre, then moved }
+  OY := OY + (CY - NY) div 2 + Round(DY * UY);
+  SetAttr(Xml, Els[Ext].A, 'cx', IntToStr(Max(Int64(1), NX)));
+  if not Find then Exit;
+  SetAttr(Xml, Els[Ext].A, 'cy', IntToStr(Max(Int64(1), NY)));
+  if not Find then Exit;
+  SetAttr(Xml, Els[Off].A, 'x', IntToStr(OX));
+  if not Find then Exit;
+  SetAttr(Xml, Els[Off].A, 'y', IntToStr(OY));
+  if not Find then Exit;
+  R := Round(Deg * 60000) mod 21600000;
+  if R < 0 then
+    Inc(R, 21600000);
+  SetAttr(Xml, Els[Xf].A, 'rot', IntToStr(R));
+  Result := ApplyKeptXml(Xml, 'Size and position', FShapeSid);
 end;
 
 function TParadeEdit.FlipShape(Horizontal: Boolean): Boolean;
