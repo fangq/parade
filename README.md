@@ -168,6 +168,9 @@ turns into display-list paths, the same for the screen and for PDF.
   drawing as an SVG picture (the drawing itself kept in `data-parade`,
   which HTML import reads back), and `pd_conv in out.svg` writes a file
   a page (out.svg, out-2.svg, ...).
+- **Pictures of drawings** (`pd_drawing_render`, `pd_drawing_to_png`):
+  a drawing rasterized on its own, paths, glyphs and PNG/GIF pictures, for
+  RTF (which writes drawings as PNG pictures now) and the clipboard.
 - **Rasterizer**: `pd_draw_render` draws display-list paths into an RGBA
   image with Parade's integer coverage rasterizer, so a host gets the
   library's pixels rather than drawing styles itself.

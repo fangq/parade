@@ -3933,6 +3933,48 @@ static void test_svg_out(void) {
     pd_doc_free(d);
 }
 
+/* A drawing as a picture: rasterized on its own (a red box over its left half, a blue ellipse at the right), as a
+   PNG file, and in RTF -- which took only PNG and JPEG pictures -- as a PNG picture of it. */
+static void test_drawing_png(void) {
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"2540000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill><a:ln><a:noFill/>"
+                      "</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"635000\"/><a:ext cx=\"1270000\" cy=\"1270000\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"ellipse\"/><a:solidFill><a:srgbClr val=\"0000FF\"/></a:solidFill><a:ln>"
+                      "<a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>", &d, &L, &n);
+    pd_inline o;
+
+    if (it && pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK) {
+        uint8_t* px = (uint8_t*)calloc(200 * 200, 4);
+        buf_t b;
+
+        if (px) {   /* 200 pt square at a pixel a point */
+            CHECK(pd_drawing_render(d, o.resource, PD_PT(200), PD_PT(200), 1 << 16, px, 200, 200, 800) == PD_OK);
+            CHECK(px[(100 * 200 + 50) * 4] == 255 && px[(100 * 200 + 50) * 4 + 3] == 255);    /* red at the left */
+            CHECK(px[(100 * 200 + 150) * 4 + 2] == 255 && px[(100 * 200 + 150) * 4] == 0);    /* blue in the ellipse */
+            CHECK(px[(10 * 200 + 190) * 4 + 3] == 0);   /* clear at the top right, outside the ellipse */
+            free(px);
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_drawing_to_png(d, o.resource, PD_PT(200), PD_PT(200), 1 << 16, to_buf, &b) == PD_OK);
+        CHECK(b.p && b.n > 33 && !memcmp(b.p, "\x89PNG\r\n\x1a\n", 8) && !memcmp(b.p + 12, "IHDR\0\0\0\xc8\0\0\0\xc8", 12));
+        free(b.p);
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_RTF, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "{\\pict\\pngblip") && strstr(b.p, "89504e470d0a1a0a"));
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -6429,6 +6471,7 @@ int main(void) {
     test_docx_shape_effects();
     test_docx_text_in_shapes();
     test_svg_out();
+    test_drawing_png();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();

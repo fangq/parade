@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "parade_layout.h"
 #include "pd_conv.h"
 
 #define TWIPS(sp) ((int)((int64_t)(sp) * 20 / 65536))
@@ -169,6 +170,12 @@ static void rx_font_cmds(rx* x, const pd_char_props* c, const pd_char_props* b) 
     }
 }
 
+/* a PNG made for the file, gathered */
+static int rtf_png_sink(void* user, const void* data, size_t len) {
+    pb_put((pd_buf*)user, data, len);
+    return ((pd_buf*)user)->err;
+}
+
 static int rx_span(void* user, const pd_span* sp) {
     rx* x = (rx*)user;
     pd_buf* o = x->o;
@@ -203,6 +210,35 @@ static int rx_span(void* user, const pd_span* sp) {
                     }
 
                     pb_puts(o, "}");
+                } else if (pd_doc_resource(x->d, ob->resource, &mime, &data, &len) == PD_OK &&
+                           !strcmp(mime, "application/vnd.parade.drawing+json")) {
+                    /* a drawing: a PNG picture of it, drawn at 144 dpi */
+                    pd_sp iw, ih;
+                    pd_buf png;
+                    int w, h;
+
+                    pd_doc_image_display_size(x->d, ob, &iw, &ih);
+                    memset(&png, 0, sizeof(png));
+
+                    if (iw > 0 && ih > 0 && pd_drawing_to_png(x->d, ob->resource, iw, ih, 2 << 16, rtf_png_sink, &png) == PD_OK &&
+                            !png.err) {
+                        w = TWIPS(iw);
+                        h = TWIPS(ih);
+                        pb_printf(o, "{\\pict\\pngblip\\picw%d\\pich%d\\picwgoal%d\\pichgoal%d\n", w / 15 > 0 ? w / 15 : 1,
+                                  h / 15 > 0 ? h / 15 : 1, w, h);
+
+                        for (i = 0; i < png.n; i++) {
+                            pb_printf(o, "%02x", (unsigned char)png.p[i]);
+
+                            if (i % 64 == 63) {
+                                pb_putc(o, '\n');
+                            }
+                        }
+
+                        pb_puts(o, "}");
+                    }
+
+                    pb_free(&png);
                 }
 
                 break;

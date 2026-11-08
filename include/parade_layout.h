@@ -227,6 +227,21 @@ PD_API pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp
     (shadow, glow, reflection) */
 PD_API void pd_draw_bounds(const pd_draw* item, pd_sp* x0, pd_sp* y0, pd_sp* x1, pd_sp* y1);
 
+/**
+ * Draw a drawing resource, width by height on the page, into an RGBA image
+ * as pd_draw_render does (premultiplied, over what it holds; scale pixels
+ * a point in 16.16): its paths, its glyphs, its PNG and GIF pictures. For
+ * hosts that need a picture of it -- an RTF file, the clipboard. Its text
+ * boxes' stories, laid out with the page, are not in it; turned glyphs and
+ * turned pictures are drawn upright.
+ */
+PD_API pd_status pd_drawing_render(const pd_doc* doc, pd_res_id res, pd_sp width, pd_sp height, int32_t scale,
+                                   uint8_t* rgba, int32_t w, int32_t h, int32_t stride);
+
+/** the same as a PNG file (transparent where nothing is drawn), as large as width and height at scale */
+PD_API pd_status pd_drawing_to_png(const pd_doc* doc, pd_res_id res, pd_sp width, pd_sp height, int32_t scale,
+                                   pd_writer fn, void* user);
+
 /* ------------------------------------------------------------------ */
 /* SVG                                                                */
 /* ------------------------------------------------------------------ */

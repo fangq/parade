@@ -55,6 +55,10 @@ void pd_drawlist_free(pd_drawlist* l);
 /* a drawing as an SVG element (no XML declaration) into o, for HTML; 0 when it is no drawing */
 int pd_drawing_svg_buf(const pd_doc* doc, pd_res_id res, pd_sp w, pd_sp h, pd_buf* o);
 
+/* a PNG or GIF picture as RGB (and alpha, when it has one: NULL else), w by h; 0 on success (pd_pdf.c) */
+int pd_image_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
+                    unsigned char** alpha);
+
 /* RGBA pixels (premultiplied, as pd_draw_render makes them) as a PNG file in a new buffer; 0 on success */
 int pd_png_encode(const uint8_t* rgba, int32_t w, int32_t h, int32_t stride, unsigned char** out, size_t* n);
 

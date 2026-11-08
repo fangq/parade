@@ -1728,3 +1728,191 @@ uint32_t pd_gradient_color(const pd_gradient* g, int32_t t) {
 
     return o;
 }
+
+/* ------------------------------------------------------------------ */
+/* a drawing as a picture                                             */
+/* ------------------------------------------------------------------ */
+
+/* whether (x, y) is inside a polygon (pairs, PD_PATH_BREAK between rings), even-odd */
+static int rc_inside(const pd_sp* p, int32_t n, double x, double y) {
+    int32_t i, s = 0, in = 0;
+
+    for (i = 0; i <= n; i++) {
+        if (i == n || p[2 * i] == PD_PATH_BREAK) {
+            int32_t k;
+
+            for (k = s; k < i; k++) {
+                int32_t j = k + 1 < i ? k + 1 : s;
+                double ax = p[2 * k], ay = p[2 * k + 1], bx = p[2 * j], by = p[2 * j + 1];
+
+                if ((ay > y) != (by > y) && x < ax + (bx - ax) * (y - ay) / (by - ay)) {
+                    in = !in;
+                }
+            }
+
+            s = i + 1;
+        }
+    }
+
+    return in;
+}
+
+/* a picture item: its PNG or GIF scaled into its box (nearest pixel), shown in its frame and its shape */
+static void rc_picture(const pd_doc* doc, const pd_draw* a, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba,
+                       int32_t w, int32_t h, int32_t stride) {
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t len = 0;
+    unsigned char* rgb = NULL, *al = NULL;
+    int32_t iw, ih, px, py;
+    double k = scale / 4294967296.0;    /* pixels an sp */
+
+    if (pd_doc_resource(doc, a->resource, &mime, &data, &len) != PD_OK || !mime || a->w <= 0 || a->h <= 0 ||
+            pd_image_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &al) != 0) {
+        return;
+    }
+
+    for (py = 0; py < h; py++) {
+        double sy = y0 + (py + 0.5) / k;
+
+        if (sy < a->y || sy >= a->y + a->h || (a->clip_w > 0 && (sy < a->clip_y || sy >= a->clip_y + a->clip_h))) {
+            continue;
+        }
+
+        for (px = 0; px < w; px++) {
+            double sx = x0 + (px + 0.5) / k;
+            int32_t ix, iy, q, A;
+            uint8_t* d;
+
+            if (sx < a->x || sx >= a->x + a->w || (a->clip_w > 0 && (sx < a->clip_x || sx >= a->clip_x + a->clip_w)) ||
+                    (a->clip_points && a->clip_npoints >= 3 && !rc_inside(a->clip_points, a->clip_npoints, sx, sy))) {
+                continue;
+            }
+
+            ix = (int32_t)((sx - a->x) * iw / a->w);
+            iy = (int32_t)((sy - a->y) * ih / a->h);
+            ix = (a->flip & PD_FLIP_H) ? iw - 1 - ix : ix;
+            iy = (a->flip & PD_FLIP_V) ? ih - 1 - iy : iy;
+            A = al ? al[(size_t)iy * iw + ix] : 255;
+            d = rgba + (size_t)py * stride + (size_t)px * 4;
+
+            for (q = 0; q < 3; q++) {
+                d[q] = (uint8_t)(rgb[((size_t)iy * iw + ix) * 3 + q] * A / 255 + d[q] * (255 - A) / 255);
+            }
+
+            d[3] = (uint8_t)(A + d[3] * (255 - A) / 255);
+        }
+    }
+
+    free(rgb);
+    free(al);
+}
+
+/* a glyph item at its pen, upright */
+static void rc_glyph(const pd_draw* a, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba, int32_t w, int32_t h,
+                     int32_t stride) {
+    double k = scale / 4294967296.0, gx = (a->x - x0) * k, gy = (a->y - y0) * k;
+    int32_t ix = (int32_t)floor(gx), iy = (int32_t)floor(gy + 0.5), sub = (int32_t)((gx - ix) * ONE), x, y, need;
+    pd_glyph_image gi;
+    uint8_t* cov;
+    uint32_t c = a->color ? a->color : 0xFF000000u;
+    int32_t ca = (c >> 24) ? (int32_t)(c >> 24) : 255;
+
+    if (pd_font_glyph_render(a->font, a->glyph, (pd_sp)((int64_t)a->size * scale / 65536), sub, NULL, 0, &gi) != PD_OK ||
+            gi.width <= 0 || gi.height <= 0) {
+        return;
+    }
+
+    need = gi.width * gi.height;
+
+    if (!(cov = (uint8_t*)malloc((size_t)need))) {
+        return;
+    }
+
+    if (pd_font_glyph_render(a->font, a->glyph, (pd_sp)((int64_t)a->size * scale / 65536), sub, cov, need, &gi) == PD_OK) {
+        for (y = 0; y < gi.height; y++) {
+            int32_t py = iy - gi.top + y;
+
+            for (x = 0; x < gi.width && py >= 0 && py < h; x++) {
+                int32_t px = ix + gi.left + x, A = cov[y * gi.width + x] * ca / 255, q;
+                uint8_t* d = rgba + (size_t)py * stride + (size_t)px * 4;
+
+                if (px < 0 || px >= w || !A) {
+                    continue;
+                }
+
+                for (q = 0; q < 3; q++) {
+                    d[q] = (uint8_t)((int32_t)((c >> (16 - 8 * q)) & 255) * A / 255 + d[q] * (255 - A) / 255);
+                }
+
+                d[3] = (uint8_t)(A + d[3] * (255 - A) / 255);
+            }
+        }
+    }
+
+    free(cov);
+}
+
+pd_status pd_drawing_render(const pd_doc* doc, pd_res_id res, pd_sp width, pd_sp height, int32_t scale, uint8_t* rgba,
+                            int32_t w, int32_t h, int32_t stride) {
+    pd_drawlist l;
+    pd_status st;
+    int32_t i;
+
+    if (!doc || !rgba || w <= 0 || h <= 0 || stride < 4 * w || scale <= 0 || scale > (256 << 16)) {
+        return PD_ERR_ARG;
+    }
+
+    if ((st = pd_drawing_list(doc, res, width, height, &l)) != PD_OK) {
+        return st;
+    }
+
+    for (i = 0; i < l.n && st == PD_OK; i++) {  /* in the list's order, each as the page would show it */
+        const pd_draw* a = &l.d[i];
+
+        if (a->kind == PD_DRAW_PATH || a->kind == PD_DRAW_RULE) {
+            st = rc_item(a, PD_LAYER_ALL, 0, 0, scale, rgba, w, h, stride);
+        } else if (a->kind == PD_DRAW_GLYPH && a->font) {
+            rc_glyph(a, 0, 0, scale, rgba, w, h, stride);
+        } else if (a->kind == PD_DRAW_IMAGE) {
+            rc_picture(doc, a, 0, 0, scale, rgba, w, h, stride);
+        }
+    }
+
+    pd_drawlist_free(&l);
+    return st;
+}
+
+pd_status pd_drawing_to_png(const pd_doc* doc, pd_res_id res, pd_sp width, pd_sp height, int32_t scale, pd_writer fn,
+                            void* user) {
+    int32_t w, h;
+    uint8_t* px;
+    unsigned char* png = NULL;
+    size_t pn = 0;
+    pd_status st;
+
+    if (!doc || !fn || width <= 0 || height <= 0 || scale <= 0 || scale > (256 << 16)) {
+        return PD_ERR_ARG;
+    }
+
+    w = (int32_t)(((int64_t)width * scale + ((int64_t)1 << 32) - 1) >> 32);
+    h = (int32_t)(((int64_t)height * scale + ((int64_t)1 << 32) - 1) >> 32);
+
+    if (w <= 0 || h <= 0 || (int64_t)w * h > 64 * 1024 * 1024) {
+        return PD_ERR_RANGE;
+    }
+
+    if (!(px = (uint8_t*)calloc((size_t)w * h, 4))) {
+        return PD_ERR_NOMEM;
+    }
+
+    st = pd_drawing_render(doc, res, width, height, scale, px, w, h, w * 4);
+
+    if (st == PD_OK) {
+        st = pd_png_encode(px, w, h, w * 4, &png, &pn) ? PD_ERR_NOMEM : fn(user, png, pn) ? PD_ERR_IO : PD_OK;
+    }
+
+    free(png);
+    free(px);
+    return st;
+}
