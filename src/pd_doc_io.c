@@ -308,6 +308,10 @@ static void save_cp(pj_writer* w, const pd_char_props* c) {
         put_int(w, "LetterSpace", c->letter_space);
     }
 
+    if (m & PD_CP_HSCALE) {
+        put_int(w, "HScale", c->hscale);
+    }
+
     if (m & PD_CP_KERNING) {
         put_bool(w, "Kerning", c->kerning);
     }
@@ -1586,6 +1590,7 @@ static void load_cp(const pj_node* o, pd_char_props* c, loader* L) {
     }
 
     F("LetterSpace", PD_CP_LETTERSPACE, letter_space, SP_MIN, SP_MAX);
+    F("HScale", PD_CP_HSCALE, hscale, 0, 6000);
     F("Kerning", PD_CP_KERNING, kerning, 0, 1);
 
     if ((x = pj_get(o, "Lang"))) {

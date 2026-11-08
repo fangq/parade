@@ -13,6 +13,11 @@
 #include "pd_internal.h"
 #include "pd_unidata.h"
 
+/* a width in a style that widens or narrows its glyphs (pd_style.hscale) */
+static int32_t hscaled(const pd_style* st, int32_t w) {
+    return st->hscale > 0 && st->hscale != 1000 ? (int32_t)((int64_t)w * st->hscale / 1000) : w;
+}
+
 /* ------------------------------------------------------------------ */
 /* small utilities                                                    */
 /* ------------------------------------------------------------------ */
@@ -304,7 +309,8 @@ static int add_glyph(builder* b, uint32_t cp, uint32_t cluster, uint32_t cluster
     gl->glyph = g;
     gl->cluster = cluster;
     gl->xoff = gl->yoff = 0;
-    gl->advance = b->st->hidden ? 0 : pd_scale(pd_font_glyph_advance(f, g), b->st->size, b->upem) + b->st->letter_space;
+    gl->advance = b->st->hidden ? 0 : hscaled(b->st, pd_scale(pd_font_glyph_advance(f, g), b->st->size, b->upem)) +
+                  b->st->letter_space;
     box->width += gl->advance;
     box->glyph_count++;
     box->text_end = cluster_end;
@@ -344,8 +350,8 @@ static int add_shaped(builder* b, const pd_shaped* g, int32_t n, uint32_t text_s
 
         gl->glyph = g[k].glyph;
         gl->cluster = g[k].cluster;
-        gl->advance = pd_scale(g[k].advance, b->st->size, b->upem);
-        gl->xoff = pd_scale(g[k].xoff, b->st->size, b->upem);
+        gl->advance = hscaled(b->st, pd_scale(g[k].advance, b->st->size, b->upem));
+        gl->xoff = hscaled(b->st, pd_scale(g[k].xoff, b->st->size, b->upem));
         gl->yoff = pd_scale(g[k].yoff, b->st->size, b->upem);
 
         if (k + 1 == n || g[k + 1].cluster != g[k].cluster) {
@@ -375,7 +381,7 @@ static int is_special(uint32_t cp) {
 
 static int add_space(builder* b, uint32_t cluster, uint32_t cluster_end, int nobreak) {
     const pd_font* f = b->st->font;
-    int32_t w = pd_scale(pd_font_glyph_advance(f, pd_font_glyph_index(f, ' ')), b->st->size, b->upem) +
+    int32_t w = hscaled(b->st, pd_scale(pd_font_glyph_advance(f, pd_font_glyph_index(f, ' ')), b->st->size, b->upem)) +
                 b->st->letter_space;
     pd_item* it;
 
@@ -469,7 +475,7 @@ static int add_soft_hyphen(builder* b, uint32_t at, uint32_t at_end) {
     p->glyphs[p->n_glyphs].glyph = g;
     p->glyphs[p->n_glyphs].cluster = at;
     p->glyphs[p->n_glyphs].xoff = p->glyphs[p->n_glyphs].yoff = 0;
-    p->glyphs[p->n_glyphs].advance = pd_scale(pd_font_glyph_advance(f, g), b->st->size, b->upem);
+    p->glyphs[p->n_glyphs].advance = hscaled(b->st, pd_scale(pd_font_glyph_advance(f, g), b->st->size, b->upem));
     it->width = p->glyphs[p->n_glyphs].advance;
     p->n_glyphs++;
     return 0;
@@ -1277,7 +1283,9 @@ static int32_t walk_line_lv(const pd_para* p, int32_t li, pd_glyph* out, int32_t
                     ATOM(at[na].glyph = gl->glyph; at[na].cluster = gl->cluster; at[na].advance = (pd_sp)(pos - prev);
                          at[na].style = it->style; at[na].kind = PD_GLYPH; at[na].x = gl->xoff; at[na].y = gl->yoff;
                          at[na].user = it->style >= 0 ? p->styles[it->style].user : 0;
-                         at[na].scale = it->width > 0 ? (int32_t)(neww * 65536 / it->width) : 65536);
+                         at[na].scale = (int32_t)((it->width > 0 ? neww * 65536 / it->width : 65536) *
+                                                  (it->style >= 0 && p->styles[it->style].hscale > 0 ?
+                                                   p->styles[it->style].hscale : 1000) / 1000));
                     prev = pos;
                 }
             }

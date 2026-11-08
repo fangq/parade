@@ -205,6 +205,8 @@ typedef struct {
     int32_t text_case;      /**< 1: glyphs of the capitals (the text and its offsets unchanged) */
     pd_sp letter_space;     /**< added after every glyph */
     int32_t hidden;         /**< glyphs of no width, no break opportunities: text present but not shown */
+    int32_t hscale;         /**< glyphs widened (> 1000) or narrowed, per-mille of their width (0 = 1000); the glyphs
+                                 carry it in pd_glyph.scale */
 } pd_style;
 
 /** fill a style with defaults for the given font and size */

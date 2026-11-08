@@ -220,6 +220,7 @@ typedef enum {
 #define PD_CP_SIZE_CS     (1u << 20)
 #define PD_CP_WEIGHT_CS   (1u << 21)
 #define PD_CP_ITALIC_CS   (1u << 22)
+#define PD_CP_HSCALE      (1u << 23)
 
 typedef enum {
     PD_UNDERLINE_NONE = 0,
@@ -270,6 +271,8 @@ typedef struct {
     uint32_t color_theme;       /**< pd_theme_color reference (with PD_CP_COLOR), 0 = none */
     uint32_t background_theme;  /**< pd_theme_color reference (with PD_CP_BACKGROUND), 0 = none */
     int32_t font_theme;         /**< PD_FONT_THEME_* of each script's family: PD_FONT_THEME(text, ea, cs) */
+    int32_t hscale;             /**< characters widened (> 1000) or narrowed, per-mille of their width (Word's w:w);
+                                     0 = 1000 */
 } pd_char_props;
 
 /* a family taken from the theme: its heading (major) or body (minor) font */

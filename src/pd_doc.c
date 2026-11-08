@@ -141,6 +141,10 @@ void pd_doc_cp_normalize(pd_char_props* cp) {
         z.letter_space = cp->letter_space;
     }
 
+    if (m & PD_CP_HSCALE) {
+        z.hscale = cp->hscale;
+    }
+
     if (m & PD_CP_KERNING) {
         z.kerning = cp->kerning;
     }
@@ -301,6 +305,10 @@ static void cp_apply(pd_char_props* dst, const pd_char_props* src) {
 
     if (m & PD_CP_LETTERSPACE) {
         dst->letter_space = src->letter_space;
+    }
+
+    if (m & PD_CP_HSCALE) {
+        dst->hscale = src->hscale;
     }
 
     if (m & PD_CP_KERNING) {

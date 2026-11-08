@@ -7351,6 +7351,71 @@ static void test_docx_ref_text(void) {
     pd_doc_free(d);
 }
 
+/* Word's character scale (w:w): a run at 200% is twice as wide, its glyphs drawn scaled (PDF Tz), and the scale
+   is written back and kept in Parade's format. */
+static void test_docx_char_scale(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>MM</w:t></w:r><w:r><w:rPr><w:w w:val=\"200\"/></w:rPr>"
+                    "<w:t>NN</w:t></w:r></w:p></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 3 && d; pass++) {
+        pd_layout* L = NULL;
+
+        CHECK(chars_at(d, pd_doc_next_paragraph(d, 0), 2).hscale == 2000);
+
+        if (have_layout_font()) {
+            pd_sp ml, mh, nl, nh;
+            pd_draw* it;
+            int32_t n = 0, k, scaled = 0;
+
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+            if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+                CHECK(glyph_span(L, 'M', &ml, &mh) && glyph_span(L, 'N', &nl, &nh));
+                /* N is 0.81 of M in this face: two Ns at 200% are 1.6 times two Ms, unscaled 0.8 */
+                CHECK(nh - nl > (mh - ml) * 3 / 2);
+                pd_layout_page_items(L, 0, NULL, 0, &n);
+                it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+                pd_layout_page_items(L, 0, it, n, &n);
+
+                for (k = 0; k < n; k++) {
+                    scaled += it[k].kind == PD_DRAW_GLYPH && it[k].text == 'N' && it[k].scale == 2 * 65536;
+                }
+
+                free(it);
+                CHECK(scaled == 2);
+            }
+
+            pd_layout_free(L);
+        }
+
+        if (pass == 0) {
+            buf_t b = { NULL, 0 };
+            char* xml;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            xml = docx_part(&b, "word/document.xml");
+            CHECK(strstr(xml, "<w:w w:val=\"200\"/>") != NULL);
+            free(xml);
+            free(b.p);
+            d = docx_again(d);
+        } else if (pass == 1) {
+            buf_t b = { NULL, 0 };
+            pd_doc* j = NULL;
+
+            CHECK(pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b) == PD_OK && pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = j;
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 /* the structure of the equations (m:oMath) in XML, one after another: each m: element's name and its children in
    brackets, properties (m:...Pr) left out but for a run's style and script, and the runs' text */
 static void omml_shape(const char* x, char* out, size_t cap) {
@@ -9197,6 +9262,7 @@ int main(void) {
     test_docx_moves_formats();
     test_docx_omml_roundtrip();
     test_docx_ref_text();
+    test_docx_char_scale();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

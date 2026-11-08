@@ -605,6 +605,10 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_printf(o, "<w:spacing w:val=\"%d\"/>", TW(c->letter_space));
     }
 
+    if ((c->hscale > 0 ? c->hscale : 1000) != (b->hscale > 0 ? b->hscale : 1000)) {
+        pb_printf(o, "<w:w w:val=\"%d\"/>", (int)((c->hscale > 0 ? c->hscale : 1000) + 5) / 10);
+    }
+
     if (!c->kerning != !b->kerning) {
         pb_printf(o, "<w:kern w:val=\"%d\"/>", c->kerning ? 2 : 0);
     }
@@ -3627,6 +3631,10 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
         pb_printf(o, "<w:spacing w:val=\"%d\"/>", TW(c->letter_space));
     }
 
+    if ((m & PD_CP_HSCALE) && c->hscale > 0) {
+        pb_printf(o, "<w:w w:val=\"%d\"/>", (int)(c->hscale + 5) / 10);
+    }
+
     if (m & PD_CP_KERNING) {
         pb_printf(o, "<w:kern w:val=\"%d\"/>", c->kerning ? 2 : 0);
     }
@@ -6158,6 +6166,11 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "spacing") == 0) {         /* between letters, in twips */
         cp->mask |= PD_CP_LETTERSPACE;
         cp->letter_space = twips(attr_int(m, "w:val", 0));
+    } else if (strcmp(t, "w") == 0) {               /* widened or narrowed, in per cent */
+        int pc = attr_int(m, "w:val", 100);
+
+        cp->mask |= PD_CP_HSCALE;
+        cp->hscale = pc < 1 ? 1000 : pc > 600 ? 6000 : pc * 10;
     } else if (strcmp(t, "position") == 0) {        /* raised or lowered, in half-points */
         cp->mask |= PD_CP_POSITION;
         cp->position = (pd_sp)((int64_t)attr_int(m, "w:val", 0) * 65536 / 2);
@@ -6460,6 +6473,7 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sc->mask & PD_CP_CAPS) dc->caps = sc->caps;
     if (sc->mask & PD_CP_HIDDEN) dc->hidden = sc->hidden;
     if (sc->mask & PD_CP_LETTERSPACE) dc->letter_space = sc->letter_space;
+    if (sc->mask & PD_CP_HSCALE) dc->hscale = sc->hscale;
     if (sc->mask & PD_CP_POSITION) dc->position = sc->position;
     if (sc->mask & PD_CP_KERNING) dc->kerning = sc->kerning;
     if (sc->mask & PD_CP_LANG) memcpy(dc->lang, sc->lang, sizeof(dc->lang));
@@ -7436,6 +7450,7 @@ static void dw_apply_run(dw* w) {
     DW_DIFF(PD_CP_CAPS, caps)
     DW_DIFF(PD_CP_HIDDEN, hidden)
     DW_DIFF(PD_CP_LETTERSPACE, letter_space)
+    DW_DIFF(PD_CP_HSCALE, hscale)
     DW_DIFF(PD_CP_POSITION, position)
     DW_DIFF(PD_CP_KERNING, kerning)
     DW_DIFF(PD_CP_SIZE_CS, size_cs)
@@ -7982,6 +7997,7 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid, const
         SAME_C(PD_CP_CAPS, caps)
         SAME_C(PD_CP_HIDDEN, hidden)
         SAME_C(PD_CP_LETTERSPACE, letter_space)
+        SAME_C(PD_CP_HSCALE, hscale)
         SAME_C(PD_CP_POSITION, position)
         SAME_C(PD_CP_KERNING, kerning)
         SAME_C(PD_CP_SIZE_CS, size_cs)
