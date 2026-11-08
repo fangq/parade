@@ -278,6 +278,40 @@ static double pv_param(double wr, double hr, double ang) {
     return atan2(wr * sin(ang), hr * cos(ang));
 }
 
+/* ECMA's arcTo from (cx, cy): the ellipse of radii wr, hr whose stAng point is there, swept by swAng (both
+   60000ths of a degree, clockwise as y runs down), as 1 to 4 cubics (6 numbers each) in P; how many */
+int pd_preset_arc(double cx, double cy, double wr, double hr, double st_ang, double sw_ang, double* p) {
+    double st = PV_RAD(st_ang), sw = PV_RAD(sw_ang);
+    double t0 = pv_param(wr, hr, st), ox = cx - wr * cos(t0), oy = cy - hr * sin(t0);
+    int k, segs = (int)ceil(fabs(sw) / (3.14159265358979323846 / 2) - 1e-9);
+
+    segs = segs < 1 ? 1 : segs > 4 ? 4 : segs;
+
+    for (k = 0; k < segs; k++) {
+        double a0 = st + sw * k / segs, a1 = st + sw * (k + 1) / segs;
+        double u0 = pv_param(wr, hr, a0), u1 = pv_param(wr, hr, a1), kk;
+        double* q = p + 6 * k;
+
+        while (sw > 0 && u1 < u0) {
+            u1 += 2 * 3.14159265358979323846;
+        }
+
+        while (sw < 0 && u1 > u0) {
+            u1 -= 2 * 3.14159265358979323846;
+        }
+
+        kk = 4.0 / 3 * tan((u1 - u0) / 4);
+        q[0] = ox + wr * cos(u0) - kk * wr * sin(u0);
+        q[1] = oy + hr * sin(u0) + kk * hr * cos(u0);
+        q[4] = ox + wr * cos(u1);
+        q[5] = oy + hr * sin(u1);
+        q[2] = q[4] + kk * wr * sin(u1);
+        q[3] = q[5] - kk * hr * cos(u1);
+    }
+
+    return segs;
+}
+
 static void pv_paths(const pv_env* E, const char* d, pv_out* O) {
     char s[256], f[16];
     double pw = 0, ph = 0, sx = 1, sy = 1, cx = 0, cy = 0, x0 = 0, y0 = 0;
@@ -338,33 +372,16 @@ static void pv_paths(const pv_env* E, const char* d, pv_out* O) {
             cy = p[5];
         } else if (s[0] == 'A' && n >= 4) {
             /* an arc from where the path is: as curves of at most a quarter turn each */
-            double wr = pv_arg(E, a[0]) * sx, hr = pv_arg(E, a[1]) * sy, st = PV_RAD(pv_arg(E, a[2])),
-                   sw = PV_RAD(pv_arg(E, a[3]));
-            double t0 = pv_param(wr, hr, st), ox = cx - wr * cos(t0), oy = cy - hr * sin(t0);
-            int k, segs = (int)ceil(fabs(sw) / (3.14159265358979323846 / 2) - 1e-9);
-
-            if (segs < 1) {
-                segs = 1;
-            }
+            double p[24];
+            int k, segs = pd_preset_arc(cx, cy, pv_arg(E, a[0]) * sx, pv_arg(E, a[1]) * sy, pv_arg(E, a[2]),
+                                        pv_arg(E, a[3]), p);
 
             for (k = 0; k < segs; k++) {
-                double a0 = st + sw * k / segs, a1 = st + sw * (k + 1) / segs;
-                double u0 = pv_param(wr, hr, a0), u1 = pv_param(wr, hr, a1), kk, p[6];
-
-                while (sw > 0 && u1 < u0) u1 += 2 * 3.14159265358979323846;
-                while (sw < 0 && u1 > u0) u1 -= 2 * 3.14159265358979323846;
-                kk = 4.0 / 3 * tan((u1 - u0) / 4);
-                p[0] = ox + wr * cos(u0) - kk * wr * sin(u0);
-                p[1] = oy + hr * sin(u0) + kk * hr * cos(u0);
-                p[4] = ox + wr * cos(u1);
-                p[5] = oy + hr * sin(u1);
-                p[2] = p[4] + kk * wr * sin(u1);
-                p[3] = p[5] - kk * hr * cos(u1);
-                pv_put(O, 'c', p, 6);
+                pv_put(O, 'c', p + 6 * k, 6);
             }
 
-            cx = ox + wr * cos(pv_param(wr, hr, st + sw));
-            cy = oy + hr * sin(pv_param(wr, hr, st + sw));
+            cx = p[6 * segs - 2];
+            cy = p[6 * segs - 1];
         } else if (s[0] == 'z') {
             double p[2] = { x0, y0 };
 

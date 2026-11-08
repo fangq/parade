@@ -2991,6 +2991,108 @@ static void test_docx_canvas_kept(void) {
     pd_doc_free(d);
 }
 
+/* the drawing JSON's item holding NEEDLE among its points: from its opening brace to its closing one */
+static int item_with(const char* js, const char* needle, char* out, size_t cap) {
+    const char* p = strstr(js, needle), *a, *b;
+
+    if (!p) {
+        return 0;
+    }
+
+    for (a = p; a > js && strncmp(a, "{\"path\"", 7); a--) {
+    }
+
+    b = strchr(p, '}');
+
+    if (!b || (size_t)(b - a) + 1 >= cap) {
+        return 0;
+    }
+
+    memcpy(out, a, (size_t)(b - a) + 1);
+    out[b - a + 1] = '\0';
+    return 1;
+}
+
+/* whether a drawing JSON item's "path" passes within 4 sp of (x, y) */
+static int item_has_pt(const char* item, long x, long y) {
+    const char* p = strstr(item, "\"path\":[");
+    char* e;
+
+    for (p = p ? p + 8 : NULL; p && *p && *p != ']'; ) {
+        long px = strtol(p, &e, 10), py;
+
+        if (*e != ',') {
+            return 0;
+        }
+
+        py = strtol(e + 1, &e, 10);
+
+        if (labs(px - x) <= 4 && labs(py - y) <= 4) {
+            return 1;
+        }
+
+        p = *e == ',' ? e + 1 : e;
+    }
+
+    return 0;
+}
+
+/* A freeform of three paths: a half disc drawn with arcTo from the left end of its diameter over the top, a line
+   in a path of its own size (2 by 2) that is not filled, and a filled square that is not outlined. */
+static void test_docx_custgeom_paths(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wpg=\"wpg\" xmlns:wps=\"wps\"><w:body>"
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"1270000\" cy=\"1270000\"/><a:graphic><a:graphicData><wpg:wgp>"
+        "<wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/><a:chOff x=\"0\" y=\"0\"/>"
+        "<a:chExt cx=\"1270000\" cy=\"1270000\"/></a:xfrm></wpg:grpSpPr>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm><a:custGeom>"
+        "<a:pathLst><a:path w=\"1000\" h=\"1000\"><a:moveTo><a:pt x=\"0\" y=\"500\"/></a:moveTo><a:arcTo wR=\"500\" "
+        "hR=\"500\" stAng=\"10800000\" swAng=\"10800000\"/><a:close/></a:path>"
+        "<a:path w=\"2\" h=\"2\" fill=\"none\"><a:moveTo><a:pt x=\"0\" y=\"2\"/></a:moveTo><a:lnTo><a:pt x=\"2\" y=\"2\"/>"
+        "</a:lnTo></a:path>"
+        "<a:path w=\"4\" h=\"4\" stroke=\"0\"><a:moveTo><a:pt x=\"1\" y=\"3\"/></a:moveTo><a:lnTo><a:pt x=\"3\" y=\"3\"/>"
+        "</a:lnTo><a:lnTo><a:pt x=\"3\" y=\"4\"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom>"
+        "<a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill><a:ln w=\"12700\"><a:solidFill><a:srgbClr val=\"0000FF\"/>"
+        "</a:solidFill></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+        "</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>",
+        NULL);
+    pd_inline o;
+    char* js;
+    char item[4096], want[64];
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+    js = drawing_json(d, o.resource);
+    CHECK(js != NULL);
+
+    if (js) {
+        /* the arc passes through the top of the circle, half way across (50 pt, 0), and ends at the right (100 pt,
+           50 pt); filled green, outlined blue */
+        snprintf(want, sizeof(want), "[0,%d,", (int)PD_PT(50));
+        CHECK(item_with(js, want, item, sizeof(item)));
+        CHECK(strstr(item, "\"fill\":4278255360") != NULL && strstr(item, "\"line\":4278190335") != NULL);
+        CHECK(item_has_pt(item, PD_PT(50), 0) && item_has_pt(item, PD_PT(100), PD_PT(50)));
+        CHECK(!item_has_pt(item, PD_PT(50), PD_PT(100)) && strstr(item, "\"closed\":1") != NULL);
+        /* the line along the bottom: its own 2-by-2 space stretched over the box, outlined and not filled */
+        snprintf(want, sizeof(want), "[0,%d,%d,%d]", (int)PD_PT(100), (int)PD_PT(100), (int)PD_PT(100));
+        CHECK(item_with(js, want, item, sizeof(item)));
+        CHECK(strstr(item, "\"fill\":0,") != NULL && strstr(item, "\"line\":4278190335") != NULL);
+        /* the square in its 4-by-4 space: filled, not outlined */
+        snprintf(want, sizeof(want), "[%d,%d,%d,%d", (int)PD_PT(25), (int)PD_PT(75), (int)PD_PT(75), (int)PD_PT(75));
+        CHECK(item_with(js, want, item, sizeof(item)));
+        CHECK(strstr(item, "\"fill\":4278255360") != NULL && strstr(item, "\"line\":0,") != NULL);
+        free(js);
+    }
+
+    pd_doc_free(d);
+}
+
 /* A canvas as Word draws Fig. 3-style diagrams: its background and frame; a shape filled from its group (grpFill);
    a freeform whose points are guides; a box extruded and seen through an isometric camera (a prism: several faces);
    a curved connector (a curve, not a chord) with a medium arrowhead (three line widths long); a 60% pattern
@@ -5624,6 +5726,7 @@ int main(void) {
     test_docx_deleted_float();
     test_docx_group_turned_shapes();
     test_docx_canvas_3d();
+    test_docx_custgeom_paths();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();
