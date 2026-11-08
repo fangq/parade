@@ -738,7 +738,13 @@ typedef struct {
     pd_sp height;               /**< with height_exact: the row's height (else its cells' min_height say) */
     int32_t height_exact;       /**< 1: exactly height tall, what its cells hold beyond that cut off (Word's
                                      hRule="exact"); such a row is never broken */
+    int32_t split;              /**< PD_ROWSPLIT_*: whether it may be broken across columns and pages */
 } pd_row_props;
+
+/* where a table row may break */
+#define PD_ROWSPLIT_TALL  0     /**< only when it is taller than a column */
+#define PD_ROWSPLIT_NEVER 1     /**< never (Word's cantSplit): what passes a column's foot is cut off */
+#define PD_ROWSPLIT_ANY   2     /**< after any line where the column ends (Word's rows by default) */
 
 /* ------------------------------------------------------------------ */
 /* Table styles                                                       */

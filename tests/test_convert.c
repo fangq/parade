@@ -5817,6 +5817,72 @@ static void test_exact_row(void) {
     pd_doc_free(d);
 }
 
+/* A table row near a page's foot: Word breaks it there (its first line on one page, its last on the next) unless
+   it is cantSplit, when it goes whole to the next page; cantSplit kept through .docx and the native format */
+static void test_cant_split(void) {
+    int cant;
+
+    for (cant = 0; cant < 2; cant++) {
+        char* body = (char*)malloc(16384), *p;
+        pd_doc* d;
+        int i, pass;
+
+        if (!body) {
+            return;
+        }
+
+        p = body + sprintf(body, "<w:document xmlns:w=\"w\"><w:body>");
+
+        for (i = 0; i < 40; i++) {
+            p += sprintf(p, "<w:p><w:r><w:t>filler %d</w:t></w:r></w:p>", i);
+        }
+
+        p += sprintf(p, "<w:tbl><w:tblGrid><w:gridCol w:w=\"3000\"/><w:gridCol w:w=\"3000\"/></w:tblGrid><w:tr>%s<w:tc>",
+                     cant ? "<w:trPr><w:cantSplit/></w:trPr>" : "");
+
+        for (i = 1; i <= 20; i++) {
+            p += sprintf(p, "<w:p><w:r><w:t>R%d</w:t></w:r></w:p>", i);
+        }
+
+        sprintf(p, "</w:tc><w:tc><w:p><w:r><w:t>side</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"
+                "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" "
+                "w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/></w:sectPr>"
+                "</w:body></w:document>");
+        d = docx_doc("word/document.xml", body, NULL);
+        free(body);
+        CHECK(d != NULL);
+
+        for (pass = 0; d && pass < 3; pass++) {
+            pd_layout* L = laid_out(d);
+            pd_doc* back = NULL;
+            buf_t b;
+
+            if (L) {
+                int32_t pg[3];
+                pd_sp x, y;
+
+                CHECK(text_drawn(d, L, "R1", &pg[0], &x, &y) && text_drawn(d, L, "R20", &pg[1], &x, &y) &&
+                      text_drawn(d, L, "filler 0", &pg[2], &x, &y));
+                CHECK(cant ? pg[0] == 1 && pg[1] == 1 : pg[0] == 0 && pg[1] == 1);
+                pd_layout_free(L);
+            }
+
+            if (pass == 2) {
+                break;
+            }
+
+            memset(&b, 0, sizeof(b));
+            CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = back;
+        }
+
+        pd_doc_free(d);
+    }
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -5843,6 +5909,7 @@ int main(void) {
     test_wide_table();
     test_grid_before();
     test_exact_row();
+    test_cant_split();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

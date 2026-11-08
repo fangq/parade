@@ -94,8 +94,11 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   64, Word's limit being 63), automatic column widths from the cells'
   narrowest and widest content (CSS-style; fixed widths and column spans
   honoured), cell
-  padding, borders, backgrounds and vertical alignment. Rows are
-  unbreakable boxes; columns break between rows and header rows repeat at
+  padding, borders, backgrounds and vertical alignment. Rows break across
+  columns only when taller than one, or (`PD_ROWSPLIT_ANY`, Word's rows)
+  after any line where the column ends, or never (Word's cantSplit); rows
+  may be exactly as tall as they say, their cells cut off, and leave grid
+  columns empty before and after their cells; header rows repeat at
   the top of every continuation.
 - Floats with `wrap` left/right sit at their anchor and the following
   paragraphs are re-broken with a narrower `\parshape` for the float's

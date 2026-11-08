@@ -242,6 +242,9 @@ const
   PD_PAGES_OPTIMAL = 1;
   PD_TABLE_MAX_COLS = 64;
   PD_TABLE_MAX_GRID = 4096;
+  PD_ROWSPLIT_TALL = 0;
+  PD_ROWSPLIT_NEVER = 1;
+  PD_ROWSPLIT_ANY = 2;
 
   PD_MAX_TABS = 16;
   PD_TAB_LEFT = 0;
@@ -645,6 +648,7 @@ type
     width_before, width_after: pd_sp;   { their widths, at least (0 = unsaid) }
     height: pd_sp;                      { with height_exact: the row's height }
     height_exact: Int32;                { 1: exactly that tall, its cells' content cut off there }
+    split: Int32;                       { PD_ROWSPLIT_* }
   end;
 
   { what a table style says of a part's cells (PD_TPART_*), and of their text }

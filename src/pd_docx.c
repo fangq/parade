@@ -2712,7 +2712,7 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 minh = rp.height;
             }
 
-            if (minh > 0 || r < tp.header_rows || rp.grid_before || rp.grid_after) {
+            if (minh > 0 || r < tp.header_rows || rp.grid_before || rp.grid_after || rp.split == PD_ROWSPLIT_NEVER) {
                 pb_puts(o, "<w:trPr>");
 
                 if (rp.grid_before) {
@@ -2729,6 +2729,10 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
                 if (rp.grid_after && rp.width_after) {
                     pb_printf(o, "<w:wAfter w:w=\"%d\" w:type=\"dxa\"/>", TW(rp.width_after));
+                }
+
+                if (rp.split == PD_ROWSPLIT_NEVER) {
+                    pb_puts(o, "<w:cantSplit/>");
                 }
 
                 if (minh > 0) {
@@ -6235,7 +6239,7 @@ static void dw_row_begin(dw* w) {
     w->pend_row = 0;
 
     if (b->ntables >= 1 && b->ntables <= 8 && b->table[b->ntables - 1] && (w->row_pr.grid_before ||
-            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after || w->row_pr.height_exact)) {
+            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after || w->row_pr.height_exact || w->row_pr.split)) {
         pd_doc_set_row_props(b->d, b->row[b->ntables - 1], &w->row_pr);
     }
 }
@@ -10663,6 +10667,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->pend_row = 1;
                 w->row_header = 0;
                 memset(&w->row_pr, 0, sizeof(w->row_pr));
+                w->row_pr.split = PD_ROWSPLIT_ANY;  /* Word breaks a row where the page ends, unless told not to */
 
                 if (w->ntab >= 1 && w->ntab <= 8) {
                     w->tabs[w->ntab - 1].row++;
@@ -10671,6 +10676,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
             } else if (strcmp(t, "trPr") == 0) {
                 w->in_trpr = m.type == MT_OPEN;
+            } else if (w->in_trpr && strcmp(t, "cantSplit") == 0) {
+                w->row_pr.split = attr_on(&m) ? PD_ROWSPLIT_NEVER : PD_ROWSPLIT_ANY;
             } else if (w->in_trpr && (strcmp(t, "gridBefore") == 0 || strcmp(t, "gridAfter") == 0)) {
                 int g = attr_int(&m, "w:val", 0);
 

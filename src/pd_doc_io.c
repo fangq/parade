@@ -733,7 +733,7 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
         case PD_BLOCK_ROW: {
             const pd_row_props* p = &s->row;
 
-            if (p->grid_before || p->grid_after || p->width_before || p->width_after || p->height_exact) {
+            if (p->grid_before || p->grid_after || p->width_before || p->width_after || p->height_exact || p->split) {
                 pj_key(w, "Row");
                 pj_obj_begin(w);
 
@@ -750,6 +750,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 if (p->height_exact) {
                     put_int(w, "Height", p->height);
                     put_bool(w, "HeightExact", p->height_exact);
+                }
+
+                if (p->split) {
+                    put_int(w, "Split", p->split);
                 }
 
                 pj_obj_end(w);
@@ -1856,6 +1860,7 @@ static void load_row(loader* L, const pj_node* o, pd_row_props* p) {
     p->width_after = (pd_sp)int_or(pj_get(x, "WidthAfter"), 0, 0, SP_MAX, L);
     p->height = (pd_sp)int_or(pj_get(x, "Height"), 0, 0, SP_MAX, L);
     p->height_exact = (int32_t)int_or(pj_get(x, "HeightExact"), 0, 0, 1, L);
+    p->split = (int32_t)int_or(pj_get(x, "Split"), PD_ROWSPLIT_TALL, PD_ROWSPLIT_TALL, PD_ROWSPLIT_ANY, L);
 }
 
 static void load_cell(loader* L, const pj_node* o, pd_cell_props* p) {

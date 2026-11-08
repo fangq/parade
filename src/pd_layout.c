@@ -17,8 +17,9 @@
  *    section end.
  * 5. Footnote bodies referenced by a line ride with it: the column keeps
  *    room for them at its bottom, below a short rule.
- * 6. Tables become one unbreakable box per row (column widths from the
- *    cell contents, CSS-style); header rows repeat after every break.
+ * 6. Tables become one box per row (column widths from the cell contents,
+ *    CSS-style), in slices cut between lines where the row may break;
+ *    header rows repeat after every break.
  * 7. A float with wrap sits at its anchor and the following paragraphs
  *    are re-broken with a narrower \parshape beside it.
  * 8. Continuous sections start below the previous one on the same page;
@@ -1355,6 +1356,19 @@ static int row_alone(const pd_doc* d, const ptable* T, const blk* t, int32_t r) 
     return 1;
 }
 
+/* some cell of a row has its content in the middle or at the bottom (which slices of it would not keep) */
+static int row_valigned(const pd_doc* d, const blk* row) {
+    int32_t k;
+
+    for (k = 0; k < row->nkids; k++) {
+        if (d->tab[row->kids[k]]->st.cell.valign) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* Where a row of height rowh may be cut: the ends of its tallest cell's lines (from the row's top) that no line of
    another cell runs across, increasing; *n of them. malloc'ed. */
 static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd_sp padv, pd_sp rowh, int32_t* n) {
@@ -1400,32 +1414,42 @@ static pd_sp* row_cuts(filler* F, const ptable* T, const blk* row, pd_sp pad, pd
         }
     }
 
-    for (i = 0; i < nl; i++) {      /* a cut at each of its lines' ends, unless another cell's line is across it */
+    for (i = 0; i < nl; i++) {      /* a cut at each of its lines' ends, */
         pd_sp at = padv + lb[i];
-        int ok = at > 0 && at < rowh;
 
-        for (k = 0, c = row_c0(row); ok && k < row->nkids && c < T->ncols; k++) {
-            const blk* cell = d->tab[row->kids[k]];
-            int32_t span = cell_span(T, cell, c);
-            pd_sp inner = T->colx[c + span] - T->colx[c] - 2 * pad;
-
-            inner = inner < PD_PT(1) ? PD_PT(1) : inner;
-            c += span;
-
-            if (k == best) {
-                continue;
-            }
-
-            stack_lines(F->L, cell->id, inner, ot, ob, &no, CAP);
-
-            for (j = 0; ok && j < no; j++) {
-                ok = !(padv + ot[j] < at && at < padv + ob[j]);
-            }
-        }
-
-        if (ok && *n < CAP) {
+        if (at > 0 && at < rowh && *n < CAP) {
             cuts[(*n)++] = at;
         }
+    }
+
+    for (k = 0, c = row_c0(row); *n > 0 && k < row->nkids && c < T->ncols; k++) {   /* unless another cell's line is
+                                                                                     across it */
+        const blk* cell = d->tab[row->kids[k]];
+        int32_t span = cell_span(T, cell, c), keep = 0;
+        pd_sp inner = T->colx[c + span] - T->colx[c] - 2 * pad;
+
+        inner = inner < PD_PT(1) ? PD_PT(1) : inner;
+        c += span;
+
+        if (k == best) {
+            continue;
+        }
+
+        stack_lines(F->L, cell->id, inner, ot, ob, &no, CAP);
+
+        for (i = 0; i < *n; i++) {
+            int ok = 1;
+
+            for (j = 0; ok && j < no; j++) {
+                ok = !(padv + ot[j] < cuts[i] && cuts[i] < padv + ob[j]);
+            }
+
+            if (ok) {
+                cuts[keep++] = cuts[i];
+            }
+        }
+
+        *n = keep;
     }
 
     free(lt);
@@ -1697,9 +1721,16 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
             push(F, VI_PEN, 0, merged || r <= F->tb[ti].header_rows ? INF_PEN : 0, NULL, 0, 0);
         }
 
-        if (rowh > F->colh && F->colh > 0 && !merged && r >= F->tb[ti].header_rows && !row->st.row.height_exact &&
-                row_alone(d, &T, t, r)) {
-            /* taller than a column: in slices that break across columns and pages, cut where no cell has a line */
+        if (row->st.row.split == PD_ROWSPLIT_NEVER && rowh > F->colh && F->colh > 0) {
+            rowh = F->colh;     /* never broken: what passes the column's foot is cut off */
+            F->tb[ti].rowh[r] = rowh;
+        }
+
+        if (((rowh > F->colh && F->colh > 0) || (row->st.row.split == PD_ROWSPLIT_ANY && !row_valigned(d, row))) &&
+                !merged && r >= F->tb[ti].header_rows && !row->st.row.height_exact &&
+                row->st.row.split != PD_ROWSPLIT_NEVER && row_alone(d, &T, t, r)) {
+            /* taller than a column, or one that breaks where the column ends: in slices that break across columns
+               and pages, cut where no cell has a line */
             int32_t ncut = 0, j2;
             pd_sp* cuts = row_cuts(F, &T, row, pad, padv, rowh, &ncut), at = 0;
 
@@ -1724,7 +1755,7 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
                 }
 
                 F->it[F->n - 1].tbl = ti;
-                F->it[F->n - 1].part = at == 0 ? 1 : to >= rowh ? 3 : 2;
+                F->it[F->n - 1].part = at == 0 && to >= rowh ? 0 : at == 0 ? 1 : to >= rowh ? 3 : 2;
                 F->it[F->n - 1].from = at;
                 at = to;
             }
@@ -2315,7 +2346,7 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
                       rowh[r] - 2 * padv - ch : 0;
                 off = off > 0 ? off : 0;
 
-                if (row->st.row.height_exact) {     /* what does not fit is cut off */
+                if (row->st.row.height_exact && ch > rowh[r] - 2 * padv) {     /* what does not fit is cut off */
                     place_stack_clip(L, cell->id, inner, page, cx + pad, ry + padv + off, 0, rowh[r] - 2 * padv - off,
                                      1, region);
                 } else {
@@ -2415,7 +2446,8 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
                 off = ch - 2 * padv - h;
             }
 
-            if (row->st.row.height_exact) {     /* what does not fit is cut off */
+            if ((row->st.row.height_exact || row->st.row.split == PD_ROWSPLIT_NEVER) && h > ch - 2 * padv) {
+                /* what does not fit is cut off */
                 place_stack_clip(F->L, cell->id, inner, F->page, cx + pad, y + padv + (off > 0 ? off : 0), 0,
                                  ch - 2 * padv - (off > 0 ? off : 0), 1, 0);
             } else {
