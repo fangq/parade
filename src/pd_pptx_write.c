@@ -1958,7 +1958,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     pd_buf b, ct, prels;
     void* z;
     int s, nslides, err = 0, i;
-    char name[200], layout[256];
+    char name[200], layout[256], prev_layout[256] = "";   /* the slide before's layout */
 
     if (!P) {
         return PD_ERR_NOMEM;
@@ -2091,9 +2091,13 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
                 pb_printf(&slide, "<p:sld %s>", NS);
             }
 
-            if (!layout[0]) {   /* a slide made since: on the first's */
+            if (!layout[0] && prev_layout[0]) {    /* a slide made since: on the layout of the one before it */
+                snprintf(layout, sizeof(layout), "%s", prev_layout);
+            } else if (!layout[0]) {    /* (made before them all: the first's) */
                 kept_first_layout(P, layout, sizeof(layout));
             }
+
+            snprintf(prev_layout, sizeof(prev_layout), "%s", layout);
         } else {
             pb_printf(&slide, "<p:sld %s>", NS);
         }

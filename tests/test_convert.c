@@ -6144,6 +6144,20 @@ static void test_pptx_write_kept_masters(void) {
         CHECK(back && slide_of(back, 1, &sa) && !strcmp(sa.text, "Two|/"));
     }
 
+    {   /* a slide added after the second (as the editor's New Slide does): on the second's layout, not the first's */
+        pd_block_id ns = 0;
+        buf_t b3 = { 0 };
+        char* r3;
+        size_t n3;
+
+        CHECK(pd_doc_insert_block(d, pd_doc_root(d), 2, PD_BLOCK_SECTION, &ns) == PD_OK);
+        CHECK(pd_doc_export(d, PD_CONV_PPTX, to_buf, &b3) == PD_OK);
+        r3 = b3.p ? (char*)pd_zip_get((const unsigned char*)b3.p, b3.n, "ppt/slides/_rels/slide3.xml.rels", &n3) : NULL;
+        CHECK(r3 && strstr(r3, "Target=\"../slideLayouts/slideLayout2.xml\""));
+        free(r3);
+        free(b3.p);
+    }
+
     free(s1);
     free(s2);
     free(r2);
