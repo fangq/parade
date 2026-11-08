@@ -111,6 +111,7 @@ typedef struct {                /* a line (or a whole paragraph region) on a pag
     int32_t region;
     int32_t rot;                /* a turned text box's line: how far (60000ths of a degree, clockwise), */
     pd_sp rx, ry;               /* about where; drawn turned, found by a click turned back */
+    int upright;                /* vertical text: East Asian characters not turned, set in the middle of the line */
 } pline;
 
 typedef struct {
@@ -125,6 +126,9 @@ typedef struct {
     int32_t nowned, capowned;
     pd_block_id heading[7];     /* last heading of each level at the end of the page */
     pd_sp text_x, text_w;       /* text area, for headers and footers */
+    pd_sp body_x;               /* where its columns start across; for vertical text (a tbRl section) in the page
+                                   turned a quarter left, its lines turned back as they are placed */
+    int vert;                   /* 1: a tbRl section's page: its body laid out across, then turned upright */
     const pd_section_props* sp;
     prule* rules;
     int32_t nrules, caprules;
@@ -616,6 +620,12 @@ static ppage* new_page(pd_layout* L, const blk* sec, int32_t number, int32_t sec
     even = (sp->mirror_margins > 0 || (sp->mirror_margins == 0 && sp->facing_pages)) && number % 2 == 0;
     p->text_x = even ? sp->margin_right : sp->margin_left + sp->gutter;
     p->text_w = sp->page_width - sp->margin_left - sp->margin_right - sp->gutter;
+    p->body_x = p->text_x;
+
+    if (sp->text_flow == PD_CELLTEXT_TBRL) {    /* the page turned a quarter left: its top margin on the left */
+        p->vert = 1;
+        p->body_x = sp->margin_top;
+    }
 
     if (L->npages > 1) {
         memcpy(p->heading, L->pages[L->npages - 2].heading, sizeof(p->heading));
@@ -915,6 +925,16 @@ static int add_line(pd_layout* L, int32_t page, pcache* pc, int32_t line, pd_sp 
         l->rot = L->turn_rot;
         l->rx = L->turn_rx;
         l->ry = L->turn_ry;
+    }
+
+    l->upright = 0;
+
+    if (!l->rot && p->vert && (region == 0 || region == 3 || region == 4)) {
+        /* vertical text: (x, y) across the turned page is (width - y, x) on it -- a quarter right about (w/2, w/2)
+           -- the lines running down, the first at the right; East Asian characters stand upright */
+        l->rot = 5400000;
+        l->rx = l->ry = p->w / 2;
+        l->upright = 1;
     }
 
     if (region == 0 || region == 3 || region == 4) {
@@ -2658,10 +2678,10 @@ static pd_sp col_x(const filler* F, int32_t page, int32_t col) {
 
     if (F->uneq) {  /* each its own width */
         return F->sp && F->sp->direction == PD_DIR_RTL ? F->L->pages[page].text_x + F->L->pages[page].text_w -
-               F->cx[F->ncols - 1 - col] - F->cw[F->ncols - 1 - col] : F->L->pages[page].text_x + F->cx[col];
+               F->cx[F->ncols - 1 - col] - F->cw[F->ncols - 1 - col] : F->L->pages[page].body_x + F->cx[col];
     }
 
-    return F->L->pages[page].text_x + col * (F->colw + F->gap);
+    return F->L->pages[page].body_x + col * (F->colw + F->gap);
 }
 
 /* height above the columns taken by the previous section on a shared page */
@@ -4472,6 +4492,13 @@ static pd_status paginate(pd_layout* L) {
         body_area(L, F.sp, &F.top, &F.colh);
         F.colw = (F.sp->page_width - F.sp->margin_left - F.sp->margin_right - F.sp->gutter - (F.ncols - 1) * F.gap) /
                  F.ncols;
+
+        if (F.sp->text_flow == PD_CELLTEXT_TBRL) {  /* vertical text: laid out on the page turned a quarter left,
+                                                       its right margin the top, its height the lines' length */
+            F.top = F.sp->margin_right;
+            F.colh = F.sp->page_width - F.sp->margin_left - F.sp->margin_right;
+            F.colw = (F.sp->page_height - F.sp->margin_top - F.sp->margin_bottom - (F.ncols - 1) * F.gap) / F.ncols;
+        }
         F.number = F.sp->first_page_number > 0 && !F.sp->continuous ? F.sp->first_page_number : number;
         F.floor_page = -1;
 
@@ -7231,6 +7258,13 @@ static void turn_pt(int32_t rot, pd_sp rx, pd_sp ry, pd_sp* x, pd_sp* y) {
     *y = ry + (pd_sp)lround(dx * sin(th) + dy * cos(th));
 }
 
+/* a character vertical text keeps upright: East Asian scripts, full-width forms */
+static int upright_char(uint32_t c) {
+    return (c >= 0x1100 && c <= 0x11FF) || (c >= 0x2E80 && c <= 0xA4CF) || (c >= 0xAC00 && c <= 0xD7AF) ||
+           (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFE30 && c <= 0xFE4F) || (c >= 0xFF00 && c <= 0xFF60) ||
+           (c >= 0x20000 && c <= 0x3FFFD);
+}
+
 /* the items a turned text box's line was drawn with, from N0: turned about its middle (glyphs turned at their
    pens, pictures about theirs; rules made paths) */
 static void turn_items(dlist_t* D, int32_t n0, const pline* l) {
@@ -7242,6 +7276,12 @@ static void turn_items(dlist_t* D, int32_t n0, const pline* l) {
         if (a.kind == PD_DRAW_GLYPH) {
             turn_pt(l->rot, l->rx, l->ry, &a.x, &a.y);
             a.rotation = l->rot;
+
+            if (l->upright && upright_char(a.text)) {   /* standing in its square, the line's middle under it */
+                a.rotation = 0;
+                a.x -= a.size * 12 / 100;
+                a.y += a.size * 88 / 100;
+            }
         } else if (a.kind == PD_DRAW_IMAGE || a.kind == PD_DRAW_BOX || a.kind == PD_DRAW_LINK) {
             pd_sp cx = a.x + a.w / 2, cy = a.y + a.h / 2, ox = cx, oy = cy;
 

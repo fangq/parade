@@ -9447,6 +9447,70 @@ static void test_border_export(void) {
     pd_doc_free(d);
 }
 
+/* A section of vertical text (w:textDirection tbRl): its lines run down the page, the first at the right (near
+   the right margin), the next to its left; Latin letters turned a quarter right, East Asian characters
+   upright; also after .docx and native round trips */
+static void test_vertical_section(void) {
+    char body[8192], *p;
+    pd_doc* d;
+    int pass, i;
+
+    p = body + sprintf(body, "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>Vertical");
+
+    for (i = 0; i < 40; i++) {
+        p += sprintf(p, " words");
+    }
+
+    sprintf(p, "</w:t></w:r></w:p><w:p><w:r><w:t>\xE4\xB8\xAD\xE6\x96\x87</w:t></w:r></w:p><w:sectPr>"
+            "<w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" "
+            "w:left=\"1440\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/><w:textDirection w:val=\"tbRl\"/>"
+            "</w:sectPr></w:body></w:document>");
+    d = docx_doc("word/document.xml", body, NULL);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            pd_draw v[2], c[2];
+            int32_t n, k;
+            pd_sp maxx = 0, minx = PD_PT(1000);
+            pd_block_id para = find_para(d, "Vertical");
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind == PD_DRAW_GLYPH && it[k].block == para) {
+                    maxx = it[k].x > maxx ? it[k].x : maxx;
+                    minx = it[k].x < minx ? it[k].x : minx;
+                }
+            }
+
+            free(it);
+            CHECK(two_glyphs(d, L, "Vertical", v) && v[0].rotation == 5400000 && v[1].x == v[0].x &&
+                  v[1].y > v[0].y && v[0].y > PD_PT(72) - 1 && v[0].y < PD_PT(80));
+            CHECK(maxx > PD_PT(612 - 72 - 20) && maxx <= PD_PT(612 - 72) && minx < maxx - PD_PT(10));  /* lines leftward */
+            CHECK(two_glyphs(d, L, "\xE4\xB8\xAD", c) && c[0].rotation == 0 && c[1].rotation == 0 &&
+                  c[1].y > c[0].y && c[0].x < v[0].x);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -9488,6 +9552,7 @@ int main(void) {
     test_unequal_columns();
     test_next_column_section();
     test_border_export();
+    test_vertical_section();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

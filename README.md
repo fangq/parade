@@ -121,6 +121,11 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   between columns, columns of their own widths (paragraphs re-broken at
   the width of the column each line lands in), and start on an odd or even page (a blank page put in
   before them when needed).
+- A section of vertical text (Word's tbRl) has its lines run down the
+  page, the first at the right, East Asian characters upright and others
+  turned: its body is laid out across the page turned a quarter left and
+  turned back as placed (its tables' rules, headers and footers are not
+  turned).
 - Continuous sections start below the previous one on the same page;
   a multi-column section ending there gets balanced columns.
 - `PD_PAGES_OPTIMAL` sections choose all column breaks at once (shortest

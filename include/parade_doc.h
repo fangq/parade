@@ -731,7 +731,9 @@ typedef struct {
                                      PD_BREAK_COLUMN (the next column of the page the section before ended on,
                                      when it has one; else a new page) */
     uint32_t page_color;        /**< its pages' background, 0 = none (Word's w:background, document-wide) */
-    int32_t text_flow;          /**< PD_CELLTEXT_*: Word's section w:textDirection (kept; laid out across) */
+    int32_t text_flow;          /**< PD_CELLTEXT_*: Word's section w:textDirection; PD_CELLTEXT_TBRL: vertical
+                                     text, its lines running down the page from the right (btLr kept, laid out
+                                     across) */
 } pd_section_props;
 
 /* where notes are numbered from the start again */
