@@ -49,6 +49,7 @@ typedef struct {
     pd_block_id st[256];        /* its text boxes' stories in the order of their w:txbxContent */
     int nst, next_st;
     char link[16];              /* the hyperlink the text is in: its relationship id, "" none */
+    int kept;                   /* the masters and layouts the presentation came with are written (else one blank) */
     pd_numbers nb;              /* the numbers fields and notes show */
     struct {
         pd_res_id chart, data;  /* the chart's part, its workbook (0 none) */
@@ -453,9 +454,8 @@ static void put_para(pw* P, pd_block_id p) {
 
     pb_puts(o, "<a:p><a:pPr");
 
-    if (marl > 0) {
-        pb_printf(o, " marL=\"%lld\"", marl > 51206400 ? 51206400 : marl);
-    }
+    /* the indents always said: a placeholder's text would take its master's */
+    pb_printf(o, " marL=\"%lld\"", marl > 51206400 ? 51206400 : marl < 0 ? 0 : marl);
 
     if (pp.indent_right > 0) {
         pb_printf(o, " marR=\"%lld\"", EMU(pp.indent_right));
@@ -465,9 +465,7 @@ static void put_para(pw* P, pd_block_id p) {
         pb_printf(o, " lvl=\"%d\"", (int)(level > 8 ? 8 : level));
     }
 
-    if (ind) {
-        pb_printf(o, " indent=\"%lld\"", ind < -51206400 ? -51206400 : ind > 51206400 ? 51206400 : ind);
-    }
+    pb_printf(o, " indent=\"%lld\"", ind < -51206400 ? -51206400 : ind > 51206400 ? 51206400 : ind);
 
     pb_printf(o, " algn=\"%s\"", pp.align == PD_ALIGN_CENTER ? "ctr" : pp.align == PD_ALIGN_RIGHT ? "r" :
               pp.align == PD_ALIGN_JUSTIFY ? "just" : "l");
@@ -979,6 +977,51 @@ static void put_wml_text(pw* P, int tc) {
     }
 }
 
+/* the mark the reader leaves on a slide's shape (PD_PPTX_EXT in pd_pptx.c): its pd:sp element, -1 none */
+static int shape_mark(const xdoc* d, int cnv) {
+    int e = cnv >= 0 ? xd_path(d, cnv, "extLst/ext/sp") : -1;
+    char v[64];
+
+    return e >= 0 && xd_attr(d, e, "xmlns:pd", v, sizeof(v)) && !strcmp(v, "urn:parade:pptx") ? e : -1;
+}
+
+/* a shape's p:nvPr: the placeholder it is, when it was one -- in a presentation of its own masters any, else those
+   PowerPoint finds by their type alone (a title, a subtitle, a body, the date, footer and slide number) */
+static void put_nvpr(pw* P, int cnv) {
+    static const char* const lone[] = { "title", "ctrTitle", "subTitle", "body", "dt", "ftr", "sldNum" };
+    int e = shape_mark(P->x, cnv), k, ok = 0;
+    char type[32] = "", idx[24] = "";
+
+    if (e >= 0 && xd_attr(P->x, e, "ph", type, sizeof(type))) {
+        xd_attr(P->x, e, "idx", idx, sizeof(idx));
+
+        for (k = 0; k < 7; k++) {
+            ok |= !strcmp(type, lone[k]);
+        }
+
+        if (ok || (P->kept && idx[0])) {
+            pb_puts(P->o, "<p:nvPr><p:ph");
+
+            if (type[0]) {
+                pb_puts(P->o, " type=\"");
+                escs(P->o, type);
+                pb_putc(P->o, '"');
+            }
+
+            if (idx[0]) {
+                pb_puts(P->o, " idx=\"");
+                escs(P->o, idx);
+                pb_putc(P->o, '"');
+            }
+
+            pb_puts(P->o, "/></p:nvPr>");
+            return;
+        }
+    }
+
+    pb_puts(P->o, "<p:nvPr/>");
+}
+
 static void put_shape(pw* P, int n);
 
 static void put_kids(pw* P, int n) {
@@ -1077,7 +1120,8 @@ static void put_shape(pw* P, int n) {
         put_cnvpr(P, cnv, "Shape");
         pb_puts(o, csp >= 0 && xd_attr(d, csp, "txBox", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true")) ?
                 "<p:cNvSpPr txBox=\"1\"/>" : "<p:cNvSpPr/>");
-        pb_puts(o, "<p:nvPr/></p:nvSpPr>");
+        put_nvpr(P, cnv);
+        pb_puts(o, "</p:nvSpPr>");
 
         if (spr >= 0) {
             put_copy(P, spr, "p:spPr");
@@ -1119,7 +1163,9 @@ static void put_shape(pw* P, int n) {
 
         pb_puts(o, "<p:pic><p:nvPicPr>");
         put_cnvpr(P, cnv, "Picture");
-        pb_puts(o, "<p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>");
+        pb_puts(o, "<p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr>");
+        put_nvpr(P, cnv);
+        pb_puts(o, "</p:nvPicPr>");
         put_copy(P, bf, "p:blipFill");
 
         if (spr >= 0) {

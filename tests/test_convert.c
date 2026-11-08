@@ -5149,6 +5149,10 @@ static int slide_of(const pd_doc* d, int k, slide_sum* s) {
     s->h = sp.page_height;
     p = strstr(js, "\"items\":[");
 
+    if (strstr(js, "\"xml\":")) {     /* the items alone, not the braces in the XML kept */
+        *strstr(js, "\"xml\":") = '\0';
+    }
+
     while (p && (p = strchr(p + 1, '{')) != NULL && s->nitems < 256) {
         const char* e = strchr(p, '}');
         long long x = 0, y = 0, w = 0, h = 0;
@@ -5264,6 +5268,9 @@ static void test_pptx_write_roundtrip(void) {
 
             CHECK(s1 && strstr(s1, "<p:cxnSp>") && strstr(s1, "<a:stCxn id=\"5\" idx=\"3\"/><a:endCxn id=\"6\" idx=\"2\"/>"));
             CHECK(s1 && strstr(s1, "<p:cNvPr id=\"5\" name=\"Box\"/>") && strstr(s1, "<p:cNvPr id=\"6\" name=\"Oval\"/>"));
+            /* the title placeholder a placeholder again; the shapes not one plain */
+            CHECK(s1 && strstr(s1, "name=\"Title 1\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"title\"/></p:nvPr>") &&
+                  strstr(s1, "name=\"Box\"/><p:cNvSpPr/><p:nvPr/>"));
             CHECK(s1 && strstr(s1, "<a:buChar char=\"\xE2\x80\xA2\"/></a:pPr><a:r>") && strstr(s1, "<a:t>First point</a:t>"));
             free(s1);
             s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide2.xml", &n);
@@ -5275,6 +5282,33 @@ static void test_pptx_write_roundtrip(void) {
             s2 = (char*)pd_zip_get((const unsigned char*)b.p, b.n, "ppt/presentation.xml", &n);
             CHECK(s2 && strstr(s2, "<p:sldSz cx=\"9144000\" cy=\"5143500\"/>"));
             free(s2);
+        }
+
+        if (f == 0) {   /* the placeholders marked in the slides' drawings; written as a .docx, read the same */
+            buf_t x;
+            pd_doc* dd = NULL;
+            pd_inline o;
+            char* js = NULL, *docxml;
+            size_t n = 0;
+
+            memset(&x, 0, sizeof(x));
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &x) == PD_OK && x.p);
+            docxml = x.p ? (char*)pd_zip_get((const unsigned char*)x.p, x.n, "word/document.xml", &n) : NULL;
+            CHECK(docxml && strstr(docxml, "xmlns:pd=\"urn:parade:pptx\"") &&
+                  strstr(docxml, "<pd:sp xmlns:pd=\"urn:parade:pptx\" from=\"slide\" ph=\"title\"/>") &&
+                  strstr(docxml, "from=\"master\"/>"));
+            CHECK(x.p && pd_doc_import(x.p, x.n, PD_CONV_DOCX, &dd) == PD_OK && dd && slides_same(d, dd));
+
+            if (back && pd_doc_inline_at(back, at(pd_doc_child(back, pd_doc_child(back, pd_doc_child(back,
+                                         pd_doc_root(back), 0), 0), 0), 0), &o) == PD_OK) {
+                js = drawing_json(back, o.resource);
+            }
+
+            CHECK(js && strstr(js, "from=\\\"slide\\\" ph=\\\"title\\\""));
+            free(js);
+            free(docxml);
+            free(x.p);
+            pd_doc_free(dd);
         }
 
         free(b.p);

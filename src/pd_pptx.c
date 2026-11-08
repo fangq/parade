@@ -1367,7 +1367,47 @@ typedef struct {
     const xdoc* th;             /* the slide's theme when it is not the document's (another master's), else NULL */
     long long gx, gy;           /* while a group's shapes are put: where its children's (0, 0) is on the slide, */
     double gsx, gsy;            /* and how much bigger it draws them (0: not in a group) */
+    int depth;                  /* groups the shape being put is in */
+    int isph;                   /* it is a placeholder: its type and index as the part says them ("" none) */
+    char ph_type[32], ph_idx[24];
 } conv;
+
+/* What a writer needs to put a slide's shape back where it came from, which a Word canvas has no place for: the
+   part it is from (the slide, its layout, its master) and the placeholder it is, as an extension of its non-visual
+   properties (Word passes over an extension it does not know; the .docx writer writes it back as it is). */
+#define PD_PPTX_EXT "<a:extLst><a:ext uri=\"{5E1E1C10-9A4B-4C35-9F2D-50415241444F}\"><pd:sp xmlns:pd=\"urn:parade:pptx\""
+
+static void put_marker(conv* C, int from, int bg) {
+    static const char* const part[3] = { "slide", "layout", "master" };
+
+    pb_printf(C->o, PD_PPTX_EXT " from=\"%s\"", part[from > 2 ? 2 : from < 0 ? 0 : from]);
+
+    if (bg) {
+        pb_puts(C->o, " bg=\"1\"");
+    } else if (C->isph) {
+        pb_puts(C->o, " ph=\"");
+        put_esc(C->o, C->ph_type);
+        pb_putc(C->o, '"');
+
+        if (C->ph_idx[0]) {
+            pb_puts(C->o, " idx=\"");
+            put_esc(C->o, C->ph_idx);
+            pb_putc(C->o, '"');
+        }
+    }
+
+    pb_puts(C->o, "/></a:ext></a:extLst>");
+}
+
+/* the part the shapes being put are from: 0 the slide, 1 its layout, 2 its master */
+static int from_of(const conv* C) {
+    return C->id_base >= 2000000 ? 2 : C->id_base >= 1000000 ? 1 : 0;
+}
+
+/* a top-level shape that is not the slide's own, or is a placeholder, says so */
+static int marked(const conv* C) {
+    return C->depth == 0 && (from_of(C) || C->isph);
+}
 
 /* a SmartArt drawing shape's text in the data model (its drawing a copy PowerPoint may not have redrawn): the
    point its presentation point (the shape's modelId) presents */
@@ -1819,7 +1859,14 @@ static void put_nvpr(conv* C, const xdoc* d, int sp, const char* nv, const char*
     xd_attr(d, c, "name", name, sizeof(name));
     pb_printf(C->o, "<%s id=\"%lld\" name=\"", el, xd_int(d, c, "id", 0) + C->id_base);
     put_esc(C->o, name);
-    pb_puts(C->o, "\"/>");
+
+    if (marked(C)) {
+        pb_puts(C->o, "\">");
+        put_marker(C, from_of(C), 0);
+        pb_printf(C->o, "</%s>", el);
+    } else {
+        pb_puts(C->o, "\"/>");
+    }
 }
 
 /* a cell's edge: its width (EMU) and colour; set 1 a line, -1 none, 0 not said */
@@ -2562,8 +2609,25 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
     long long idx;
     int isph = 0, lsp = -1, msp = -1, kind = 0;
 
+    C->isph = 0;
+    C->ph_type[0] = C->ph_idx[0] = '\0';
+
     if (!strcmp(el, "sp") || !strcmp(el, "pic") || !strcmp(el, "graphicFrame")) {
         isph = ph_of(d, n, type, sizeof(type), &idx);
+
+        if (isph) {     /* as the part says it, for a writer */
+            int nv;
+
+            C->isph = 1;
+            snprintf(C->ph_type, sizeof(C->ph_type), "%s", type);
+
+            for (nv = d->v[n].kid; nv >= 0; nv = d->v[nv].next) {
+                if (xd_path(d, nv, "nvPr/ph") >= 0) {
+                    xd_attr(d, xd_path(d, nv, "nvPr/ph"), "idx", C->ph_idx, sizeof(C->ph_idx));
+                    break;
+                }
+            }
+        }
 
         if (isph && skip_ph) {
             return;     /* a layout's or a master's placeholder: the slide's own, if it has it */
@@ -2665,7 +2729,16 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
     } else if (!strcmp(el, "grpSp")) {
         int gp = xd_kid(d, n, "grpSpPr");
 
-        pb_puts(C->o, "<wpg:grpSp><wpg:cNvGrpSpPr/>");
+        pb_puts(C->o, "<wpg:grpSp>");
+
+        if (marked(C)) {
+            pb_printf(C->o, "<wpg:cNvPr id=\"%lld\" name=\"Group\">", xd_int(d, xd_path(d, n, "nvGrpSpPr/cNvPr"), "id", 0) +
+                      C->id_base);
+            put_marker(C, from_of(C), 0);
+            pb_puts(C->o, "</wpg:cNvPr>");
+        }
+
+        pb_puts(C->o, "<wpg:cNvGrpSpPr/>");
 
         long long gx = C->gx, gy = C->gy;
         double gsx = C->gsx, gsy = C->gsy;
@@ -2691,7 +2764,9 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
             C->gsy = gsy > 0 ? gsy * sy : sy;
         }
 
+        C->depth++;
         put_tree(C, pt, n, skip_ph);
+        C->depth--;
         pb_puts(C->o, "</wpg:grpSp>");
         C->gx = gx;
         C->gy = gy;
@@ -2781,7 +2856,7 @@ static int background_fill(const ppart* pt) {
 }
 
 /* a picture or a gradient over the whole slide, under everything on it */
-static void put_background_fill(conv* C, const ppart* pt, int f) {
+static void put_background_fill(conv* C, const ppart* pt, int f, int from) {
     const xdoc* d = &pt->x;
 
     if (f < 0) {
@@ -2789,17 +2864,19 @@ static void put_background_fill(conv* C, const ppart* pt, int f) {
     }
 
     if (!strcmp(d->v[f].name, "blipFill")) {
-        pb_printf(C->o, "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"Background\"/><pic:cNvPicPr/></pic:nvPicPr>"
-                  "<pic:blipFill>", 3900000 + C->slide_no);
+        pb_printf(C->o, "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"Background\">", 3900000 + C->slide_no);
+        put_marker(C, from, 1);
+        pb_puts(C->o, "</pic:cNvPr><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill>");
         put_with_media(C->o, C, pt, d->s + d->v[f].ia, d->v[f].ib - d->v[f].ia);
         pb_printf(C->o, "</pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
                   "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>", C->P->sw, C->P->sh);
         return;
     }
 
-    pb_printf(C->o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Background\"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x=\"0\" "
-              "y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>",
-              3900000 + C->slide_no, C->P->sw, C->P->sh);
+    pb_printf(C->o, "<wps:wsp><wps:cNvPr id=\"%d\" name=\"Background\">", 3900000 + C->slide_no);
+    put_marker(C, from, 1);
+    pb_printf(C->o, "</wps:cNvPr><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
+              "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>", C->P->sw, C->P->sh);
     put_mapped(C->P, C->o, d->s + d->v[f].ia, d->v[f].ib - d->v[f].ia);
     pb_puts(C->o, "<a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>");
 }
@@ -2884,7 +2961,7 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
                   (unsigned long)(bg >= 0 ? bg : 0xFFFFFF));
 
         if (from && background_fill(from) >= 0) {
-            put_background_fill(&C, from, background_fill(from));
+            put_background_fill(&C, from, background_fill(from), from == &slide ? 0 : from == &master ? 2 : 1);
         } else if (from) {   /* the theme's background style (bgRef 1002, 1003...), its placeholder colour the ref's */
             int br = xd_path(&from->x, xd_find(&from->x, "bg"), "bgRef");
             long idx = br >= 0 ? xd_int(&from->x, br, "idx", 0) : 0;
@@ -2898,7 +2975,7 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
 
                 if (e >= 0 && (!strcmp(th.x.v[e].name, "gradFill") || !strcmp(th.x.v[e].name, "blipFill"))) {
                     P->ph = bg >= 0 ? bg : 0xFFFFFF;
-                    put_background_fill(&C, &th, e);
+                    put_background_fill(&C, &th, e, from == &slide ? 0 : from == &master ? 2 : 1);
                     P->ph = -1;
                 }
 
