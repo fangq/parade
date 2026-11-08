@@ -3795,6 +3795,78 @@ static void test_docx_shape_effects(void) {
     pd_doc_free(d);
 }
 
+/* Text in shapes: a box in two columns 10 pt apart holding six one-line paragraphs too tall for one column; a box
+   shrunk to half (normAutofit fontScale); WordArt waving its word (each glyph a path through the warp); and East
+   Asian vertical text, the CJK character standing upright among Latin letters turned with the line. */
+static void test_docx_text_in_shapes(void) {
+    const char* box = "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"%d\" y=\"%d\"/><a:ext cx=\"%d\" cy=\"%d\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>"
+                      "%s</w:txbxContent></wps:txbx><wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" %s>%s"
+                      "</wps:bodyPr></wps:wsp>";
+    const char* para = "<w:p><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:t>%s</w:t></w:r></w:p>";
+    char shapes[16384], six[2048], one[256];
+    size_t sl = 0, xl = 0;
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, right = 0, left = 0, halves = 0, wavy = 0, waved = 0, up = 0, turned = 0;
+    pd_draw* it;
+    const char* words[6] = { "Qa", "Qb", "Qc", "Qd", "Qe", "Qf" };
+
+    for (k = 0; k < 6; k++) {
+        xl += (size_t)snprintf(six + xl, sizeof(six) - xl, para, words[k]);
+    }
+
+    /* 100 pt wide (two 45 pt columns), 40 pt high: three 10 pt lines a column */
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, box, 0, 0, 1270000, 508000, six, "numCol=\"2\" spcCol=\"127000\"", "");
+    snprintf(one, sizeof(one), para, "Zz");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, box, 0, 1270000, 1270000, 508000, one, "",
+                           "<a:normAutofit fontScale=\"50000\"/>");
+    snprintf(one, sizeof(one), para, "Wavy");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, box, 1270000, 0, 1270000, 508000, one, "wrap=\"none\"",
+                           "<a:prstTxWarp prst=\"textWave1\"><a:avLst/></a:prstTxWarp>");
+    snprintf(one, sizeof(one), para, "Y\xE4\xB8\xADY");
+    snprintf(shapes + sl, sizeof(shapes) - sl, box, 1270000, 1270000, 508000, 1270000, one, "vert=\"eaVert\"", "");
+    it = group_items(shapes, &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    {   /* the box's left edge: the leftmost Q */
+        pd_sp x0 = INT32_MAX;
+
+        for (k = 0; k < n; k++) {
+            if (it[k].kind == PD_DRAW_GLYPH && it[k].text == 'Q') {
+                x0 = it[k].x < x0 ? it[k].x : x0;
+            }
+        }
+
+        for (k = 0; k < n; k++) {
+            if (it[k].kind == PD_DRAW_GLYPH && it[k].text == 'Q') {
+                right += it[k].x >= x0 + PD_PT(55);
+                left += it[k].x < x0 + PD_PT(45);
+            }
+
+            halves += it[k].kind == PD_DRAW_GLYPH && (it[k].text == 'Z' || it[k].text == 'z') && it[k].size == PD_PT(5);
+            wavy += it[k].kind == PD_DRAW_GLYPH && (it[k].text == 'W' || it[k].text == 'v');
+            waved += it[k].kind == PD_DRAW_PATH && it[k].region == 5 && (it[k].text == 'W' || it[k].text == 'v');
+            up += it[k].kind == PD_DRAW_GLYPH && it[k].text == 0x4E2D && it[k].rotation == 0;
+            turned += it[k].kind == PD_DRAW_GLYPH && it[k].text == 'Y' && it[k].rotation == 5400000;
+        }
+    }
+
+    CHECK(left == 3 && right == 3);     /* three lines down the first column, three in the second */
+    CHECK(halves == 2);                 /* 10 pt text at half */
+    CHECK(wavy == 0 && waved == 2);     /* the warped word's glyphs paths, none left as glyphs */
+    CHECK(up == 1 && turned == 2);
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -6289,6 +6361,7 @@ int main(void) {
     test_docx_pattern_fill();
     test_docx_picture_fill();
     test_docx_shape_effects();
+    test_docx_text_in_shapes();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();

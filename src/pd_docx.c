@@ -8107,6 +8107,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     double cam_lat = 0, cam_lon = 0, cam_rev = 0;
     long long lw = 9525, ins[4] = { 91440, 45720, 91440, 45720 };
     int tx_rot = 0, tx_upright = 0, tx_vert = 0;   /* its text's bodyPr: turned further, kept upright, vertical, */
+    int tx_ncol = 1, tx_ea = 0, tx_fit = -1;        /* columns, CJK upright, shrunk to fit (fontScale; 0 to work out) */
+    long long tx_spc = 0;                           /* (the gap between columns, EMU) */
+    char tx_warp[32] = "";                          /* WordArt's warp (prstTxWarp) */
     int tx_actr = 0;                                /* its lines' block centred across */
     pd_char_props base, pbase, rcp;     /* the text boxes' Normal, the paragraph's style's, the run's own */
     pd_buf text;
@@ -8381,6 +8384,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
             fill = line = sfill = sline = 0;
             tx_rot = tx_upright = tx_vert = tx_actr = 0;
+            tx_ncol = 1;
+            tx_ea = 0;
+            tx_fit = -1;
+            tx_spc = 0;
+            tx_warp[0] = '\0';
             lw = 9525;
             ins[0] = ins[2] = 91440;
             ins[1] = ins[3] = 45720;
@@ -9014,6 +9022,22 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
                         if (tx_actr) {
                             pb_puts(&o, ",\"actr\":1");
+                        }
+
+                        if (tx_ncol > 1) {  /* in columns, this far apart */
+                            pb_printf(&o, ",\"cols\":[%d,%d]", tx_ncol, (int)emu_sp((double)tx_spc));
+                        }
+
+                        if (tx_ea && tx_vert) {     /* East Asian vertical: CJK characters stand upright */
+                            pb_puts(&o, ",\"ea\":1");
+                        }
+
+                        if (tx_fit >= 0) {  /* shrunk to fit: by its fontScale, or as far as it must */
+                            pb_printf(&o, ",\"fit\":%d", tx_fit);
+                        }
+
+                        if (tx_warp[0] && strcmp(tx_warp, "textNoShape") && strcmp(tx_warp, "textPlain")) {
+                            pb_printf(&o, ",\"warp\":\"%s\"", tx_warp);
                         }
 
                         pb_putc(&o, '}');
@@ -9659,6 +9683,15 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             tx_upright = mu_attr(&g, "upright", v, sizeof(v)) && (!strcmp(v, "1") || !strcmp(v, "true"));
             tx_vert = !mu_attr(&g, "vert", v, sizeof(v)) || !strcmp(v, "horz") ? 0 : !strcmp(v, "vert270") ?
                       16200000 : 5400000;   /* (vertical text: the box turned a quarter, its text across it) */
+            tx_ea = mu_attr(&g, "vert", v, sizeof(v)) && (!strcmp(v, "eaVert") || !strcmp(v, "wordArtVert") ||
+                    !strcmp(v, "mongolianVert") || !strcmp(v, "wordArtVertRtl"));
+            tx_ncol = mu_attr(&g, "numCol", v, sizeof(v)) ? atoi(v) : 1;
+            tx_ncol = tx_ncol < 1 ? 1 : tx_ncol > 16 ? 16 : tx_ncol;
+            tx_spc = mu_attr(&g, "spcCol", v, sizeof(v)) ? atoll(v) : 0;
+        } else if (!strcmp(t, "prstTxWarp") && open && !in_txbx) {
+            mu_attr(&g, "prst", tx_warp, sizeof(tx_warp));
+        } else if (!strcmp(t, "normAutofit") && open && !in_txbx) {
+            tx_fit = mu_attr(&g, "fontScale", v, sizeof(v)) ? atoi(v) : 0;
         } else if (in_txbx) {
             if (!strcmp(t, "p") && tb_depth == 1 && tb_grid == 2 && g.type == MT_OPEN && !tb_head) {   /* a cell without tcPr */
                 pb_printf(&text, "%s{\"span\":%d,\"bg\":%u,\"paras\":[", tb_cell0 ? "" : ",", tb_span,

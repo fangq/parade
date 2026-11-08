@@ -94,6 +94,12 @@ typedef struct {                /* a line (or a whole paragraph region) on a pag
     int32_t region;
     int32_t rot;                /* a turned text box's line: how far (60000ths of a degree, clockwise), */
     pd_sp rx, ry;               /* about where; drawn turned, found by a click turned back */
+    int32_t fscale;             /* a text box's text shrunk to fit: 65536 = as it is, about (sx, sy) */
+    pd_sp sx, sy;
+    int16_t warp;               /* WordArt's warp (WARP_*), the text's extent stretched over the box's */
+    int16_t ea;                 /* East Asian vertical: CJK characters upright in the turned line */
+    pd_sp wx0, wy0, wx1, wy1;   /* (the text's extent) */
+    pd_sp bx0, by0, bx1, by1;   /* (the box) */
 } pline;
 
 typedef struct {
@@ -212,7 +218,64 @@ struct pd_layout {
     int32_t dtext_depth;        /* text boxes of drawings being placed, one inside another */
     int32_t dtext_rot;          /* the one being placed: how far it is turned (60000ths of a degree, clockwise), */
     pd_sp dtext_rx, dtext_ry;   /* about its middle */
+    int32_t dtext_scale;        /* shrunk to fit, 65536 = not, about (dtext_sx, dtext_sy) */
+    pd_sp dtext_sx, dtext_sy;
+    int32_t dtext_ea;           /* East Asian vertical */
 };
+
+/* WordArt's warps (prstTxWarp) drawn as envelopes: the text's extent stretched between a top and a bottom curve
+   across the box (textCircle and the other warps that set text along a path: not warped) */
+static const char* const warp_names[] = {
+    "", "textInflate", "textDeflate", "textWave1", "textWave2", "textDoubleWave1", "textSlantUp", "textSlantDown",
+    "textTriangle", "textTriangleInverted", "textChevron", "textChevronInverted", "textCanUp", "textCanDown",
+    "textArchUp", "textArchDown", "textFadeRight", "textFadeLeft", "textCascadeUp", "textCascadeDown",
+    "textInflateTop", "textInflateBottom", "textDeflateTop", "textDeflateBottom", "textArchUpPour", "textArchDownPour"
+};
+
+static int warp_kind(const char* s, size_t n) {
+    int k;
+
+    for (k = 1; k < (int)(sizeof(warp_names) / sizeof(warp_names[0])); k++) {
+        if (strlen(warp_names[k]) == n && !memcmp(warp_names[k], s, n)) {
+            return k;
+        }
+    }
+
+    return 0;
+}
+
+/* a warp's top and bottom curves at u (0 left .. 1 right) as fractions of the box's height down from its top */
+static void warp_curves(int k, double u, double* t, double* b) {
+    double c = 4 * (u - 0.5) * (u - 0.5), v = fabs(2 * u - 1), w = sin(2 * 3.14159265358979 * u);
+
+    *t = 0;
+    *b = 1;
+
+    switch (k) {
+        case 1: *t = 0.18 * c; *b = 1 - 0.18 * c; break;                    /* inflate */
+        case 2: *t = 0.18 * (1 - c); *b = 1 - 0.18 * (1 - c); break;        /* deflate */
+        case 3: *t = 0.1 * (1 - w); *b = 0.8 + 0.1 * (1 - w); break;       /* waves */
+        case 4: *t = 0.1 * (1 + w); *b = 0.8 + 0.1 * (1 + w); break;
+        case 5: w = sin(4 * 3.14159265358979 * u); *t = 0.1 * (1 - w); *b = 0.8 + 0.1 * (1 - w); break;
+        case 6: case 18: *t = 0.3 * (1 - u); *b = 1 - 0.3 * u; break;      /* slant (and cascade) up, down */
+        case 7: case 19: *t = 0.3 * u; *b = 1 - 0.3 * (1 - u); break;
+        case 8: *t = 0.8 * v; break;                                        /* triangle */
+        case 9: *b = 1 - 0.8 * v; break;
+        case 10: *t = 0.3 * v; *b = 0.7 + 0.3 * v; break;                  /* chevron */
+        case 11: *t = 0.3 * (1 - v); *b = 0.7 + 0.3 * (1 - v); break;
+        case 12: *t = 0.2 * (1 - c); *b = 0.8 + 0.2 * (1 - c); break;      /* can up: both curves smile */
+        case 13: *t = 0.2 * c; *b = 0.8 + 0.2 * c; break;                  /* can down: both frown */
+        case 14: case 24: *t = 0.4 * c; *b = 0.6 + 0.4 * c; break;         /* arch up: a frown, the ends down */
+        case 15: case 25: *t = 0.4 * (1 - c); *b = 0.6 + 0.4 * (1 - c); break;
+        case 16: *t = 0.3 * u; *b = 1 - 0.3 * u; break;                    /* fade (narrowing) right, left */
+        case 17: *t = 0.3 * (1 - u); *b = 1 - 0.3 * (1 - u); break;
+        case 20: *t = 0.3 * c; break;                                       /* inflate, deflate one side */
+        case 21: *b = 1 - 0.3 * c; break;
+        case 22: *t = 0.3 * (1 - c); break;
+        case 23: *b = 1 - 0.3 * (1 - c); break;
+        default: break;
+    }
+}
 
 /* filler state for one section */
 typedef struct {
@@ -625,6 +688,11 @@ static int add_line(pd_layout* L, int32_t page, pcache* pc, int32_t line, pd_sp 
     l->rot = region == 5 && L->dtext_depth > 0 ? L->dtext_rot : 0;
     l->rx = L->dtext_rx;
     l->ry = L->dtext_ry;
+    l->fscale = region == 5 && L->dtext_depth > 0 && L->dtext_scale ? L->dtext_scale : 65536;
+    l->sx = L->dtext_sx;
+    l->sy = L->dtext_sy;
+    l->warp = 0;
+    l->ea = (int16_t)(region == 5 && L->dtext_depth > 0 ? L->dtext_ea : 0);
 
     if (region == 0 || region == 3 || region == 4) {
         blk* b = pd_doc_blk(L->doc, pc->block);
@@ -712,12 +780,32 @@ static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int
             pd_sp width = bw - il - ir, top = by + it_, h;
             pd_status st;
 
+            const pj_node* cl = pj_get(it, "cols"), *wp = pj_get(it, "warp");
+            int32_t ncol = (int32_t)pj_int_or(pj_at(cl, 0), 1), fit = (int32_t)pj_int_or(pj_get(it, "fit"), -1);
+            pd_sp spc = (pd_sp)(pj_int_or(pj_at(cl, 1), 0) * sx), inner = bh - it_ - ib, colw;
+            int warp = wp && wp->type == PJ_STR ? warp_kind(wp->s, wp->len) : 0;
+            double s = 1;
+
             if (!story || !pd_doc_blk(L->doc, story) || width <= 0) {
                 continue;
             }
 
+            ncol = ncol < 1 ? 1 : ncol > 16 ? 16 : ncol;
+            colw = ncol > 1 && width - (ncol - 1) * spc > PD_PT(4) ? (width - (ncol - 1) * spc) / ncol : width;
+            ncol = colw == width ? 1 : ncol;
+
+            if (fit > 0 && !warp) {     /* shrunk by the scale it gives */
+                s = fit > 100000 ? 1 : fit < 10000 ? 0.1 : fit / 100000.0;
+            } else if (fit == 0 && !warp && inner > 0) {    /* shrunk until it fits, a tenth at a time */
+                while (s > 0.25 && stack_height(L, story, (pd_sp)(colw / s), &st) * s > (double)inner * ncol) {
+                    s -= 0.1;
+                }
+            }
+
+            colw = (pd_sp)(colw / s);   /* laid out wider, then drawn smaller */
+
             if (an && an->type == PJ_STR && an->len >= 1 && (an->s[0] == 'c' || an->s[0] == 'b')) {
-                h = stack_height(L, story, width, &st);
+                h = (pd_sp)(stack_height(L, story, colw, &st) * s / ncol);
                 top = an->s[0] == 'c' ? by + (bh - h) / 2 : by + bh - ib - h;
             }
 
@@ -730,9 +818,64 @@ static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int
                 L->dtext_ry = by + bh / 2;
                 int32_t n0 = L->pages[page].n, j;
 
+                L->dtext_scale = (int32_t)(s * 65536);
+                L->dtext_sx = bx + il;
+                L->dtext_sy = top;
+                L->dtext_ea = (int32_t)pj_int_or(pj_get(it, "ea"), 0);
                 L->dtext_depth++;
-                place_stack(L, story, width, page, bx + il, top, 5);
+                place_stack(L, story, colw, page, bx + il, top, 5);
                 L->dtext_depth--;
+                L->dtext_scale = 65536;
+                L->dtext_ea = 0;
+
+                if (ncol > 1 && inner > 0) {    /* in columns: a column's lines down to the box's height, then on */
+                    pd_sp lim = (pd_sp)(inner / s), shift = 0, gap = (pd_sp)((colw * s + spc) / s);
+                    int32_t col = 0;
+
+                    for (j = n0; j < L->pages[page].n; j++) {
+                        pline* pl = &L->pages[page].lines[j];
+
+                        if (pl->bottom - shift - top > lim && pl->top - shift > top && col + 1 < ncol) {
+                            col++;
+                            shift = pl->top - top;
+                        }
+
+                        pl->ox += col * gap;
+                        pl->oy -= shift;
+                        pl->top -= shift;
+                        pl->bottom -= shift;
+                    }
+                }
+
+                if (warp && L->pages[page].n > n0) {    /* WordArt: the text's extent stretched over the box */
+                    pd_sp lo = INT32_MAX, hi = INT32_MIN, t0 = INT32_MAX, t1 = INT32_MIN;
+
+                    for (j = n0; j < L->pages[page].n; j++) {
+                        pline* pl = &L->pages[page].lines[j];
+                        pd_line ln;
+
+                        if (pd_para_get_line(pl->pc->para, pl->line, &ln) == PD_OK && ln.width > 0) {
+                            lo = pl->ox + ln.x < lo ? pl->ox + ln.x : lo;
+                            hi = pl->ox + ln.x + ln.width > hi ? pl->ox + ln.x + ln.width : hi;
+                            t0 = pl->oy + ln.baseline - ln.ascent < t0 ? pl->oy + ln.baseline - ln.ascent : t0;
+                            t1 = pl->oy + ln.baseline + ln.descent > t1 ? pl->oy + ln.baseline + ln.descent : t1;
+                        }
+                    }
+
+                    for (j = n0; lo < hi && t0 < t1 && j < L->pages[page].n; j++) {
+                        pline* pl = &L->pages[page].lines[j];
+
+                        pl->warp = (int16_t)warp;
+                        pl->wx0 = lo;
+                        pl->wx1 = hi;
+                        pl->wy0 = t0;
+                        pl->wy1 = t1;
+                        pl->bx0 = bx + il;
+                        pl->by0 = by + it_;
+                        pl->bx1 = bx + bw - ir;
+                        pl->by1 = by + bh - ib;
+                    }
+                }
 
                 if (pj_int_or(pj_get(it, "actr"), 0) && L->pages[page].n > n0) {     /* the lines' block centred */
                     pd_sp lo = INT32_MAX, hi = INT32_MIN, dx;
@@ -6049,12 +6192,172 @@ static void emit_rules(dlist_t* D, const ppage* pg, int32_t from, int32_t to, in
     }
 }
 
+/* whether a code point is CJK (stood upright in East Asian vertical text) */
+static int is_cjk(uint32_t c) {
+    return (c >= 0x2E80 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF) || (c >= 0xF900 && c <= 0xFAFF) ||
+           (c >= 0xFF00 && c <= 0xFFEF) || (c >= 0x20000 && c <= 0x3FFFF);
+}
+
 /* a point turned ROT (60000ths of a degree, clockwise on the page) about (rx, ry) */
 static void turn_pt(int32_t rot, pd_sp rx, pd_sp ry, pd_sp* x, pd_sp* y) {
     double th = rot / 60000.0 * 3.14159265358979323846 / 180, dx = *x - rx, dy = *y - ry;
 
     *x = rx + (pd_sp)lround(dx * cos(th) - dy * sin(th));
     *y = ry + (pd_sp)lround(dx * sin(th) + dy * cos(th));
+}
+
+/* a glyph's outline gathered as page points through a line's warp */
+typedef struct {
+    const pline* l;
+    double x, y, k, kx;         /* the pen; page units a font unit (26.6) down and across */
+    pd_sp* xy;
+    int32_t n, cap, start;
+    int32_t cx, cy;             /* where the outline is, font units */
+    int err;
+} wglyph;
+
+static void wg_put(wglyph* g, int32_t fx, int32_t fy) {
+    const pline* l = g->l;
+    double px = g->x + fx * g->kx, py = g->y - fy * g->k, t, b, u, v;
+
+    if (pd_grow((void**)&g->xy, &g->cap, (int64_t)g->n * 2 + 4, sizeof(pd_sp))) {
+        g->err = 1;
+        return;
+    }
+
+    u = (px - l->wx0) / (double)(l->wx1 - l->wx0);  /* where in the text's extent, then the same in the envelope */
+    v = (py - l->wy0) / (double)(l->wy1 - l->wy0);
+    warp_curves(l->warp, u < 0 ? 0 : u > 1 ? 1 : u, &t, &b);
+    g->xy[2 * g->n] = (pd_sp)lround(l->bx0 + u * (l->bx1 - l->bx0));
+    g->xy[2 * g->n + 1] = (pd_sp)lround(l->by0 + (t + v * (b - t)) * (l->by1 - l->by0));
+    g->n++;
+    g->cx = fx;
+    g->cy = fy;
+}
+
+static void wg_move(void* u, int32_t x, int32_t y) {
+    wglyph* g = (wglyph*)u;
+
+    if (g->n > g->start && !pd_grow((void**)&g->xy, &g->cap, (int64_t)g->n * 2 + 4, sizeof(pd_sp))) {
+        g->xy[2 * g->n] = g->xy[2 * g->n + 1] = PD_PATH_BREAK;
+        g->n++;
+    }
+
+    g->start = g->n;
+    wg_put(g, x, y);
+}
+
+static void wg_line(void* u, int32_t x, int32_t y) {
+    wg_put((wglyph*)u, x, y);
+}
+
+static void wg_quad(void* u, int32_t ax, int32_t ay, int32_t x, int32_t y) {
+    wglyph* g = (wglyph*)u;
+    int32_t x0 = g->cx, y0 = g->cy, k;
+
+    for (k = 1; k <= 6; k++) {  /* (a warp bends straight lines: curves as short chords) */
+        double t = k / 6.0, s = 1 - t;
+
+        wg_put(g, (int32_t)(s * s * x0 + 2 * s * t * ax + t * t * x), (int32_t)(s * s * y0 + 2 * s * t * ay + t * t * y));
+    }
+}
+
+static void wg_cubic(void* u, int32_t ax, int32_t ay, int32_t bx, int32_t by, int32_t x, int32_t y) {
+    wglyph* g = (wglyph*)u;
+    int32_t x0 = g->cx, y0 = g->cy, k;
+
+    for (k = 1; k <= 8; k++) {
+        double t = k / 8.0, s = 1 - t;
+
+        wg_put(g, (int32_t)(s * s * s * x0 + 3 * s * s * t * ax + 3 * s * t * t * bx + t * t * t * x),
+               (int32_t)(s * s * s * y0 + 3 * s * s * t * ay + 3 * s * t * t * by + t * t * t * y));
+    }
+}
+
+/* the items a shrunk or warped text box's line was drawn with, from N0: shrunk about the box's corner; warped,
+   each glyph made a path of its outline through the envelope (drawn as paths: no text to pick out of a PDF) */
+static void shape_items(dlist_t* D, int32_t n0, const pline* l) {
+    int32_t i, k, n = D->n, out;
+
+    if (l->fscale != 65536) {
+        double s = l->fscale / 65536.0;
+
+        for (i = n0; i < n; i++) {
+            pd_draw* a = &D->d[i];
+
+            a->x = l->sx + (pd_sp)((a->x - l->sx) * s);
+            a->y = l->sy + (pd_sp)((a->y - l->sy) * s);
+            a->w = (pd_sp)(a->w * s);
+            a->h = a->kind == PD_DRAW_GLYPH ? a->h : (pd_sp)(a->h * s);
+            a->size = (pd_sp)(a->size * s);
+
+            if (a->kind == PD_DRAW_IMAGE) {
+                a->clip_x = l->sx + (pd_sp)((a->clip_x - l->sx) * s);
+                a->clip_y = l->sy + (pd_sp)((a->clip_y - l->sy) * s);
+                a->clip_w = (pd_sp)(a->clip_w * s);
+                a->clip_h = (pd_sp)(a->clip_h * s);
+            } else if (a->kind == PD_DRAW_PATH) {
+                pd_sp* p = D->pts + (intptr_t)a->points;
+
+                for (k = 0; k < a->npoints; k++) {
+                    if (p[2 * k] != PD_PATH_BREAK) {
+                        p[2 * k] = l->sx + (pd_sp)((p[2 * k] - l->sx) * s);
+                        p[2 * k + 1] = l->sy + (pd_sp)((p[2 * k + 1] - l->sy) * s);
+                    }
+                }
+
+                a->line_width = (pd_sp)(a->line_width * s);
+            }
+        }
+    }
+
+    if (!l->warp || l->wx1 <= l->wx0 || l->wy1 <= l->wy0) {
+        return;
+    }
+
+    for (i = n0; i < n; i++) {  /* each glyph a path, the glyph itself dropped */
+        pd_draw a = D->d[i];
+        wglyph g;
+        pd_outline_sink sk;
+
+        if (a.kind != PD_DRAW_GLYPH || !a.font) {
+            continue;
+        }
+
+        memset(&g, 0, sizeof(g));
+        memset(&sk, 0, sizeof(sk));
+        g.l = l;
+        g.x = a.x;
+        g.y = a.y;
+        g.k = (double)a.size / ((double)a.font->m.units_per_em * 64);
+        g.kx = g.k * (a.scale ? a.scale : 65536) / 65536.0;
+        sk.move_to = wg_move;
+        sk.line_to = wg_line;
+        sk.quad_to = wg_quad;
+        sk.cubic_to = wg_cubic;
+
+        if (pd_font_glyph_outline(a.font, a.glyph, &sk, &g) == PD_OK && !g.err && g.n >= 3) {
+            int32_t m = D->n;
+
+            emit_path(D, g.xy, g.n, 1, a.color ? a.color : 0xFF000000u, 0, 0, a.block, a.region);
+
+            if (D->n > m) {
+                D->d[D->n - 1].offset = a.offset;
+                D->d[D->n - 1].text = a.text;
+            }
+        }
+
+        free(g.xy);
+        D->d[i].kind = -1;  /* dropped below */
+    }
+
+    for (i = out = n0; i < D->n; i++) {
+        if (D->d[i].kind != -1) {
+            D->d[out++] = D->d[i];
+        }
+    }
+
+    D->n = out;
 }
 
 /* the items a turned text box's line was drawn with, from N0: turned about its middle (glyphs turned at their
@@ -6066,6 +6369,17 @@ static void turn_items(dlist_t* D, int32_t n0, const pline* l) {
         pd_draw a = D->d[i];
 
         if (a.kind == PD_DRAW_GLYPH) {
+            if (l->ea && is_cjk(a.text)) {  /* East Asian vertical: the character upright, centred in its cell */
+                pd_sp cx = a.x + a.w / 2, cy = a.y - a.size * 38 / 100;
+
+                a.x = cx + a.size * 38 / 100;
+                a.y = cy + a.w / 2;
+                turn_pt(l->rot, l->rx, l->ry, &a.x, &a.y);
+                a.rotation = (l->rot + 21600000 - 5400000) % 21600000;
+                D->d[i] = a;
+                continue;
+            }
+
             turn_pt(l->rot, l->rx, l->ry, &a.x, &a.y);
             a.rotation = l->rot;
         } else if (a.kind == PD_DRAW_IMAGE || a.kind == PD_DRAW_BOX || a.kind == PD_DRAW_LINK) {
@@ -6166,6 +6480,10 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
                 int32_t n0 = D.n;
 
                 emit_line(L, &D, pg, &pg->lines[i]);
+
+                if (pg->lines[i].fscale != 65536 || pg->lines[i].warp) {
+                    shape_items(&D, n0, &pg->lines[i]);
+                }
 
                 if (pg->lines[i].rot) {
                     turn_items(&D, n0, &pg->lines[i]);

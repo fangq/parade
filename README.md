@@ -155,6 +155,12 @@ turns into display-list paths, the same for the screen and for PDF.
   passes, near a Gaussian); PDF places them as pictures with soft masks
   under or over the vector shape. `pd_draw_bounds` gives what an item
   covers with them.
+- **Text in shapes**: text boxes in columns (numCol, spcCol), shrunk to
+  fit (normAutofit: its fontScale, or a tenth at a time until it fits),
+  East Asian vertical text with CJK characters upright, and WordArt warps
+  drawn as envelopes (inflate, deflate, waves, slants, triangles,
+  chevrons, cans, arches, fades: the text's extent stretched between the
+  warp's top and bottom curves, each glyph a path of its outline).
 - **Rasterizer**: `pd_draw_render` draws display-list paths into an RGBA
   image with Parade's integer coverage rasterizer, so a host gets the
   library's pixels rather than drawing styles itself.
