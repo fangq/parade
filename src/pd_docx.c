@@ -322,12 +322,13 @@ static const char* W_NS =
     "xmlns:v=\"urn:schemas-microsoft-com:vml\" "
     "xmlns:o=\"urn:schemas-microsoft-com:office:office\" "
     "xmlns:w10=\"urn:schemas-microsoft-com:office:word\" "
-    "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"";
+    "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" "
+    "xmlns:pd=\"urn:parade:pptx\"";
 
 /* the prefixes declared above, which a drawing's own XML, kept as it came, may use */
 static int dx_prefix_declared(const char* p, size_t n) {
     static const char* const known[] = { "w", "r", "wp", "a", "pic", "mc", "wpg", "wps", "w14", "wpc", "wp14", "w15",
-                                         "a14", "a15", "a16", "v", "o", "w10", "m", "xml"
+                                         "a14", "a15", "a16", "v", "o", "w10", "m", "xml", "pd"
                                        };
     size_t i;
 
