@@ -6103,6 +6103,66 @@ static void test_cell_spacing(void) {
     pd_doc_free(d);
 }
 
+/* A floating table (w:tblpPr) 350pt from the page's left and 100pt from its top: drawn there, with the text
+   beside it on its left and none running under it; also after .docx and native round trips */
+static void test_floating_table(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblPr><w:tblpPr w:leftFromText=\"180\" w:rightFromText=\"180\" "
+                             "w:vertAnchor=\"page\" w:horzAnchor=\"page\" w:tblpX=\"7000\" w:tblpY=\"2000\"/>"
+                             "<w:tblW w:w=\"2500\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"2500\"/>"
+                             "</w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>FLOATING</w:t></w:r></w:p><w:p><w:r><w:t>two"
+                             "</w:t></w:r></w:p><w:p><w:r><w:t>three</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+                             "<w:p><w:r><w:t>Body text beside the table and on below it, Body text beside the table and "
+                             "on below it, Body text beside the table and on below it, Body text beside the table and on "
+                             "below it, Body text beside the table and on below it, Body text beside the table and on "
+                             "below it, Body text beside the table and on below it.</w:t></w:r></w:p>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t pg, n, k, beside = 0, under = 0;
+            pd_sp x, y;
+            pd_block_id body = find_para(d, "Body text");
+            pd_draw* it = page_draws(L, 0, &n);
+
+            CHECK(text_drawn(d, L, "FLOATING", &pg, &x, &y) && pg == 0);
+            CHECK(x > PD_PT(350) && x < PD_PT(360) && y > PD_PT(100) && y < PD_PT(120));
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind == PD_DRAW_GLYPH && it[k].block == body && it[k].y > PD_PT(102) &&
+                        it[k].y < PD_PT(140)) {
+                    beside += it[k].x < PD_PT(330);
+                    under += it[k].x >= PD_PT(330);
+                }
+            }
+
+            CHECK(beside > 10 && under == 0);
+            free(it);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -6134,6 +6194,7 @@ int main(void) {
     test_cell_text_dir();
     test_cell_diagonals();
     test_cell_spacing();
+    test_floating_table();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

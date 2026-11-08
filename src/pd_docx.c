@@ -376,6 +376,7 @@ typedef struct {
     int hyph_auto;              /* the document hyphenates: settings.xml autoHyphenation */
     pd_block_id pending[8];     /* picture floats to anchor in the next paragraph */
     int npending;
+    pd_block_id tblp;           /* the float the table being written floats as (w:tblpPr), 0 none */
     int page_break;             /* a page break opens the next paragraph */
     pd_block_id reft[1024];     /* paragraphs referred to that have no bookmark: given _RefPd<id> */
     int nreft;
@@ -2566,12 +2567,16 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
     pd_block_info ti, ri;
     pd_table_props tp;
     pd_row_props rp;
+    pd_float_props fp;
+    pd_block_id fl;
     int32_t r, c, k, ncols = 0, col;
     pd_buf* o = x->o;
     int colw, fixed = 0;
 
     pd_doc_block_info(x->d, t, &ti);
     pd_doc_table_props(x->d, t, &tp);
+    fl = x->tblp;
+    x->tblp = 0;
 
     for (r = 0; r < ti.child_count; r++) {
         int32_t w = 0;
@@ -2609,6 +2614,24 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
         pb_printf(o, "<w:tbl><w:tblPr><w:tblStyle w:val=\"%s\"/>", sid);
     } else {
         pb_puts(o, "<w:tbl><w:tblPr><w:tblStyle w:val=\"TableGrid\"/>");
+    }
+
+    if (fl && pd_doc_float_props(x->d, fl, &fp) == PD_OK) {    /* floating, beside the text */
+        int gap = TW(fp.gap);
+
+        pb_printf(o, "<w:tblpPr w:leftFromText=\"%d\" w:rightFromText=\"%d\" w:vertAnchor=\"%s\" "
+                  "w:horzAnchor=\"%s\"", fp.wrap == PD_WRAP_LEFT ? 0 : gap, fp.wrap == PD_WRAP_RIGHT ? 0 : gap,
+                  fp.offset_from == PD_FROM_PAGE ? "page" : fp.offset_from == PD_FROM_MARGIN ? "margin" : "text",
+                  (fp.placement & PD_PLACE_OFFSET) ? "text" : "margin");
+
+        if (fp.placement & PD_PLACE_OFFSET) {
+            pb_printf(o, " w:tblpX=\"%d\"", TW(fp.offset_x));
+        } else {
+            pb_printf(o, " w:tblpXSpec=\"%s\"", fp.wrap == PD_WRAP_RIGHT ? "right" : fp.wrap == PD_WRAP_LEFT ? "left" :
+                      "center");
+        }
+
+        pb_printf(o, " w:tblpY=\"%d\"/>", TW(fp.offset_y));
     }
 
     if (tp.width_pct > 0) {
@@ -2888,8 +2911,17 @@ static void dx_block(dxo* x, pd_block_id id) {
 
         case PD_BLOCK_FLOAT: {
             pd_inline ob;
+            pd_block_info ki;
 
             (void)ob;
+
+            if (bi.child_count == 1 && pd_doc_block_info(x->d, pd_doc_child(x->d, id, 0), &ki) == PD_OK &&
+                    ki.kind == PD_BLOCK_TABLE) {     /* a table alone: a floating table */
+                dx_flush_anchors(x);
+                x->tblp = id;
+                dx_table(x, ki.id, dx_text_width(x));
+                break;
+            }
 
             if (x->npending < 8) {
                 x->pending[x->npending++] = id;     /* anchored in the paragraph after it: a picture or a text box */
@@ -6058,6 +6090,8 @@ typedef struct {               /* a table being read */
     int has_ind;
     int rtl;                    /* w:bidiVisual: its columns from the right */
     pd_sp spacing;              /* w:tblCellSpacing */
+    pd_block_id fl;             /* w:tblpPr: the float it is in, its props (width set at its end), else 0 */
+    pd_float_props fp;
     pd_style_id sid;            /* its style as one of the document's: the cells and their text take it there */
     pd_sp row_h;                /* w:trHeight of the row under way */
     int cspan;                  /* the grid columns the cell under way takes */
@@ -6260,6 +6294,66 @@ static void dw_cell_style(dw* w, dtab* T) {
     }
 
     T->cell.given = 1;
+}
+
+/* A table's w:tblpPr, looked for ahead of the reader (it comes in w:tblPr, after the table has begun): where Word
+   floats it, as a float's props (its width left for the table's end); 0 if it does not float */
+static int dw_tblp(dw* w, const pd_markup* at, pd_float_props* fp) {
+    pd_markup q = *at;
+    char v[32];
+    int depth = 0;
+
+    while (mu_next(&q) != MT_END) {
+        const char* t = mu_local(q.name);
+
+        if (q.type == MT_CLOSE && --depth < 0) {
+            return 0;
+        }
+
+        if (q.type == MT_OPEN) {
+            depth++;
+        }
+
+        if (!strcmp(t, "tr") || !strcmp(t, "tblGrid") || (q.type == MT_CLOSE && !strcmp(t, "tblPr"))) {
+            return 0;
+        }
+
+        if ((q.type == MT_OPEN || q.type == MT_EMPTY) && depth <= 2 && !strcmp(t, "tblpPr")) {
+            pd_sp x = twips(attr_int(&q, "w:tblpX", 0)), y = twips(attr_int(&q, "w:tblpY", 0));
+            pd_sp lgap = twips(attr_int(&q, "w:leftFromText", 0)), rgap = twips(attr_int(&q, "w:rightFromText", 0));
+            pd_sp textw = w->sp.page_width - w->X->margin_left - w->sp.margin_right;
+            char spec[16] = "";
+
+            fp->placement = PD_PLACE_HERE | PD_PLACE_FORCE;
+            mu_attr(&q, "w:tblpXSpec", spec, sizeof(spec));
+
+            if (mu_attr(&q, "w:horzAnchor", v, sizeof(v)) && !strcmp(v, "page")) {
+                x -= w->X->margin_left;     /* from the page's edge: the column's is the margin's */
+            }
+
+            if (!strcmp(spec, "right") || !strcmp(spec, "outside")) {
+                fp->wrap = PD_WRAP_RIGHT;
+            } else if (!strcmp(spec, "center")) {
+                fp->wrap = PD_WRAP_NONE;
+            } else if (spec[0]) {
+                fp->wrap = PD_WRAP_LEFT;
+            } else {    /* at an offset: beside the text on the side it is nearer */
+                fp->wrap = x > textw / 3 ? PD_WRAP_RIGHT : PD_WRAP_LEFT;
+                fp->placement |= PD_PLACE_OFFSET;
+                fp->offset_x = x;
+            }
+
+            fp->gap = fp->wrap == PD_WRAP_RIGHT ? lgap : rgap;
+            fp->gap = fp->gap > 0 ? fp->gap : 0;
+            fp->offset_y = y;
+            fp->offset_from = !mu_attr(&q, "w:vertAnchor", v, sizeof(v)) || !strcmp(v, "margin") ? PD_FROM_MARGIN :
+                              !strcmp(v, "page") ? PD_FROM_PAGE : PD_FROM_PARAGRAPH;
+            strcpy(fp->sequence, "Table");
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 /* the row whose first cell is coming, with what its w:trPr said */
@@ -6564,6 +6658,18 @@ static void dw_table_props(dw* w) {
         if (tp.width_pct > 0) {
             tp.width = 0;
         }
+    }
+
+    if (w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].fl) {  /* floating: its float as wide as it */
+        dtab* T = &w->tabs[w->ntab - 1];
+        pd_sp tw = 0;
+
+        for (k = 0; k < w->ngrid; k++) {
+            tw += w->grid[k];
+        }
+
+        T->fp.width = T->width_pct > 0 ? 0 : w->t_width > tw ? w->t_width : tw;
+        T->fp.width_fraction = T->width_pct > 0 ? (int32_t)T->width_pct : 1000;
     }
 
     if (w->ngrid > 0 && !w->t_autofit) {    /* Word lays a table out on its grid */
@@ -10630,10 +10736,30 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
 
                 dw_begin_cell(w);
-                bld_table_begin(X->b);
+
+                {   /* floating (w:tblpPr): in a float of its own, where one may be */
+                    pd_float_props fp;
+                    pd_block_info ci;
+                    pd_block_id fl = 0;
+
+                    memset(&fp, 0, sizeof(fp));
+                    fp.width_fraction = 1000;
+
+                    if (w->ntab < 8 && pd_doc_block_info(X->b->d, bld_container(X->b), &ci) == PD_OK &&
+                            (ci.kind == PD_BLOCK_SECTION || ci.kind == PD_BLOCK_STORY) && dw_tblp(w, &m, &fp)) {
+                        fl = bld_float_begin(X->b);
+                    }
+
+                    bld_table_begin(X->b);
+
+                    if (w->ntab < 8) {
+                        memset(&w->tabs[w->ntab], 0, sizeof(w->tabs[0]));
+                        w->tabs[w->ntab].fl = fl;
+                        w->tabs[w->ntab].fp = fp;
+                    }
+                }
 
                 if (w->ntab < 8) {
-                    memset(&w->tabs[w->ntab], 0, sizeof(w->tabs[0]));
                     w->tabs[w->ntab].look = 0x04A0;     /* Word's when it says nothing: header row, first column */
                     w->tabs[w->ntab].row = -1;
 
@@ -10961,6 +11087,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             }
         } else if (strcmp(t, "tbl") == 0) {
             bld_table_end(X->b);
+
+            if (w->ntab >= 1 && w->ntab <= 8 && w->tabs[w->ntab - 1].fl) {  /* floating: as wide as the table */
+                pd_doc_set_float_props(X->b->d, w->tabs[w->ntab - 1].fl, &w->tabs[w->ntab - 1].fp);
+                bld_float_end(X->b);
+            }
+
             w->ntab -= w->ntab > 0;
         }
     }

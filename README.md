@@ -100,6 +100,8 @@ designed to be called from Lazarus/Free Pascal, C, C++ or Python.
   may be exactly as tall as they say, their cells cut off, and leave grid
   columns empty before and after their cells; header rows repeat at
   the top of every continuation.
+- A table can float (a float holding just the table: Word's floating
+  tables, `w:tblpPr`), placed and wrapped like a picture.
 - Floats with `wrap` left/right sit at their anchor and the following
   paragraphs are re-broken with a narrower `\parshape` for the float's
   height (kept together with it).

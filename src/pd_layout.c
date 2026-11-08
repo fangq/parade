@@ -1421,7 +1421,11 @@ static void place_turned(pd_layout* L, const blk* cell, int32_t page, pd_sp x, p
     pd_sp v = cell_vlen(L, cell, padv), across = cell_across(L, cell, padv), room = w - 2 * pad - across, cx, cy;
     int32_t rot0 = L->turn_rot;
     pd_sp rx0 = L->turn_rx, ry0 = L->turn_ry;
-    int up = cell->st.cell.text_dir == PD_CELLTEXT_BTLR;
+    int up = cell->st.cell.text_dir == PD_CELLTEXT_BTLR, cut = room < 0;
+
+    if (cut) {  /* more lines than the cell is wide: those past its far side cut off */
+        across = w - 2 * pad > 0 ? w - 2 * pad : 0;
+    }
 
     room = room > 0 ? room : 0;
     room = cell->st.cell.valign == 1 ? room / 2 : cell->st.cell.valign == 2 ? room : 0;
@@ -1430,7 +1434,12 @@ static void place_turned(pd_layout* L, const blk* cell, int32_t page, pd_sp x, p
     L->turn_rot = up ? 16200000 : 5400000;
     L->turn_rx = cx;
     L->turn_ry = cy;
-    place_stack(L, cell->id, v, page, cx - v / 2, cy - across / 2, region);
+    if (cut) {
+        place_stack_clip(L, cell->id, v, page, cx - v / 2, cy - across / 2, 0, across, 1, region);
+    } else {
+        place_stack(L, cell->id, v, page, cx - v / 2, cy - across / 2, region);
+    }
+
     L->turn_rot = rot0;
     L->turn_rx = rx0;
     L->turn_ry = ry0;
@@ -2065,8 +2074,8 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
 
             f->item = F->n;
 
-            if (f->fp.offset_from != PD_FROM_PARAGRAPH && f->fp.wrap < PD_WRAP_FRONT) {
-                f->fp.offset_y = 0;     /* text round it: where it is anchored (the page's top is not known here) */
+            if (f->fp.offset_from != PD_FROM_PARAGRAPH && f->fp.wrap == PD_WRAP_NONE) {
+                f->fp.offset_y = 0;     /* text above and below: where it is anchored */
             } else if (f->fp.offset_from != PD_FROM_PARAGRAPH) {
                 /* from the page's top (or its margin): that far below where it was anchored the last time, a
                    second pass when that is not known yet */
