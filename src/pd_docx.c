@@ -374,6 +374,7 @@ typedef struct {
     int hf_footer[8];
     int nhf;
     int hyph_auto;              /* the document hyphenates: settings.xml autoHyphenation */
+    const pd_float_props* frame;    /* the frame whose paragraphs are being written (their w:framePr) */
     pd_block_id pending[8];     /* picture floats to anchor in the next paragraph */
     int npending;
     int page_break;             /* a page break opens the next paragraph */
@@ -2483,7 +2484,40 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
         pb_printf(o, "<w:pStyle w:val=\"%s\"/>", sid);
     }
 
-    dx_ppr_head(o, &dp, dp.mask);
+    dx_ppr_head(o, &dp, dp.mask & ~(PD_PP_WIDOWS | PD_PP_ORPHANS));
+
+    if (x->frame) {     /* a frame's (a drop cap's) paragraph */
+        const pd_float_props* f = x->frame;
+
+        pb_puts(o, "<w:framePr");
+
+        if (f->frame == PD_FRAME_DROP || f->frame == PD_FRAME_MARGIN) {
+            pb_printf(o, " w:dropCap=\"%s\" w:lines=\"%d\"", f->frame == PD_FRAME_DROP ? "drop" : "margin",
+                      (int)(f->frame_lines > 0 ? f->frame_lines : 1));
+        } else {
+            pb_printf(o, " w:w=\"%d\"", TW(f->width));
+
+            if (f->placement & PD_PLACE_OFFSET) {
+                pb_printf(o, " w:x=\"%d\"", TW(f->offset_x));
+            } else if (f->wrap == PD_WRAP_RIGHT) {
+                pb_puts(o, " w:xAlign=\"right\"");
+            }
+
+            if (f->offset_y || f->offset_from != PD_FROM_PARAGRAPH) {
+                pb_printf(o, " w:y=\"%d\" w:vAnchor=\"%s\"", TW(f->offset_y), f->offset_from == PD_FROM_PAGE ? "page" :
+                          f->offset_from == PD_FROM_MARGIN ? "margin" : "text");
+            }
+        }
+
+        if (f->gap > 0) {
+            pb_printf(o, " w:hSpace=\"%d\"", TW(f->gap));
+        }
+
+        pb_printf(o, " w:wrap=\"%s\" w:hAnchor=\"text\"%s/>", f->wrap == PD_WRAP_NONE ? "notBeside" : "around",
+                  f->frame == PD_FRAME_BOX ? "" : " w:vAnchor=\"text\"");
+    }
+
+    dx_ppr_head(o, &dp, dp.mask & (PD_PP_WIDOWS | PD_PP_ORPHANS));
 
     if (num) {
         pd_list_level lv[9];
@@ -2864,8 +2898,20 @@ static void dx_block(dxo* x, pd_block_id id) {
 
         case PD_BLOCK_FLOAT: {
             pd_inline ob;
+            pd_float_props fp;
 
             (void)ob;
+
+            if (pd_doc_float_props(x->d, id, &fp) == PD_OK && fp.frame && !x->frame) {
+                x->frame = &fp;     /* a Word frame: its paragraphs with their framePr, in the flow */
+
+                for (i = 0; i < bi.child_count; i++) {
+                    dx_block(x, pd_doc_child(x->d, id, i));
+                }
+
+                x->frame = NULL;
+                break;
+            }
 
             if (x->npending < 8) {
                 x->pending[x->npending++] = id;     /* anchored in the paragraph after it: a picture or a text box */
@@ -6139,6 +6185,11 @@ typedef struct {
     /* paragraph */
     int in_p, started, in_ppr, in_rpr, in_tcpr, in_trpr, in_sect;
     int in_notepr;              /* in a sectPr's footnotePr (1) or endnotePr (2) */
+    struct {
+        int on, drop, lines, wrap, has_x, has_y, xalign, hpage, vfrom;
+        long w, h, x, y, hspace;
+    } frm;                      /* the paragraph's w:framePr: a frame, a drop cap */
+    pd_block_id frame_fl;       /* the float the paragraph is read into, for its frame */
     char pstyle[64];
     int num_id, ilvl, outline, sect_here;
     char hf_ref[6][64];         /* the section's header/footer r:ids: default, first, even; footers after */
@@ -6779,6 +6830,10 @@ static void dw_begin_para(dw* w) {
 
     dw_begin_cell(w);
 
+    if (w->frm.on && !w->frame_fl && !w->note && w->X->depth == 0 && w->ntab == 0) {
+        w->frame_fl = bld_float_begin(b);   /* a frame: the paragraph is a float's, placed by dw_frame_end */
+    }
+
     for (hop = 0; st && hop < 10; hop++, st = find_style(w->X, st->based_on)) {
         if (hop == 0 || (!known_name(name) && known_name(st->name))) {
             name = st->name;    /* the style's own name, or a known one it is based on */
@@ -7136,6 +7191,65 @@ static pd_rev_id deleted_rev(const dxi* X, pd_rev_id rev) {
     pd_revision rv;
 
     return rev && pd_doc_revision_get(X->b->d, rev, &rv) == PD_OK && rv.kind == PD_REV_DELETE ? rev : 0;
+}
+
+/* A frame's paragraph read: the float it is in placed as its framePr says -- a drop cap beside the lines of
+   text it spans (in the margin left of them for "margin"), a frame where its x and y put it, the text round it
+   unless it says not -- and as wide as it says, else as its text (each character taken as 0.6 em, a drop cap's
+   capital as 0.8). */
+static void dw_frame_end(dw* w) {
+    pd_bld* b = w->X->b;
+    pd_float_props fp;
+    pd_block_id fl = w->frame_fl;
+
+    bld_float_end(b);
+    w->frame_fl = 0;
+
+    if (fl && pd_doc_float_props(b->d, fl, &fp) == PD_OK) {
+        pd_block_id p = pd_doc_child(b->d, fl, 0);
+        const char* t = NULL;
+        uint32_t n = 0, i, chars = 0;
+        pd_sp size = PD_PT(11), width;
+        pd_run r[1];
+        int32_t nr = 0;
+
+        if (p && pd_doc_para_text(b->d, p, &t, &n) == PD_OK) {
+            pd_char_props cp;
+
+            for (i = 0; i < n; i++) {
+                chars += ((unsigned char)t[i] & 0xC0) != 0x80;
+            }
+
+            if (pd_doc_para_runs(b->d, p, r, 1, &nr) == PD_OK && nr > 0 &&
+                    pd_doc_format_resolve(b->d, p, r[0].format, &cp) == PD_OK && cp.size > 0) {
+                size = cp.size;
+            }
+        }
+
+        width = w->frm.w > 0 ? twips((int)w->frm.w) : (pd_sp)((int64_t)size * (w->frm.drop ? 8 : 6) / 10 *
+                (chars ? chars : 1));
+        fp.frame = w->frm.drop ? w->frm.drop : PD_FRAME_BOX;
+        fp.frame_lines = w->frm.drop ? (w->frm.lines < 1 ? 1 : w->frm.lines > 10 ? 10 : w->frm.lines) : 0;
+        fp.width = width;
+        fp.gap = twips((int)w->frm.hspace);
+        fp.placement = PD_PLACE_HERE | PD_PLACE_FORCE;
+        fp.wrap = w->frm.wrap == PD_WRAP_NONE ? PD_WRAP_NONE : w->frm.xalign == 2 ? PD_WRAP_RIGHT : PD_WRAP_LEFT;
+
+        if (w->frm.drop == PD_FRAME_MARGIN) {  /* in the margin: the text keeps its width */
+            fp.placement |= PD_PLACE_OFFSET;
+            fp.offset_x = -width - fp.gap;
+        } else if (!w->frm.drop && w->frm.has_x && fp.wrap != PD_WRAP_NONE) {
+            fp.placement |= PD_PLACE_OFFSET;
+            fp.offset_x = twips((int)w->frm.x) - (w->frm.hpage ? w->X->margin_left : 0);
+        }
+
+        if (!w->frm.drop && w->frm.has_y) {
+            fp.offset_y = twips((int)w->frm.y);
+            fp.offset_from = w->frm.vfrom;
+        }
+
+        pd_doc_set_float_props(b->d, fl, &fp);
+    }
 }
 
 static void dw_floats(dw* w) {
@@ -10362,6 +10476,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->num_id = 0;
                 w->ilvl = 0;
                 memset(&w->ppr, 0, sizeof(w->ppr));
+                memset(&w->frm, 0, sizeof(w->frm));
                 memset(&w->mcp, 0, sizeof(w->mcp));
                 w->mstyle[0] = '\0';
                 w->in_mrpr = 0;
@@ -10466,6 +10581,26 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     w->ilvl = w->ilvl < 0 ? 0 : w->ilvl > 8 ? 8 : w->ilvl;
                 } else if (strcmp(t, "outlineLvl") == 0) {
                     w->outline = attr_int(&m, "w:val", -1);
+                } else if (strcmp(t, "framePr") == 0) {     /* a frame: its paragraph read into a float */
+                    memset(&w->frm, 0, sizeof(w->frm));
+                    w->frm.on = 1;
+                    w->frm.drop = mu_attr(&m, "w:dropCap", v, sizeof(v)) ? (!strcmp(v, "drop") ? PD_FRAME_DROP :
+                                  !strcmp(v, "margin") ? PD_FRAME_MARGIN : 0) : 0;
+                    w->frm.lines = attr_int(&m, "w:lines", 1);
+                    w->frm.w = attr_int(&m, "w:w", 0);
+                    w->frm.h = attr_int(&m, "w:h", 0);
+                    w->frm.hspace = attr_int(&m, "w:hSpace", 0);
+                    w->frm.has_x = mu_attr(&m, "w:x", v, sizeof(v));
+                    w->frm.x = atol(w->frm.has_x ? v : "0");
+                    w->frm.has_y = mu_attr(&m, "w:y", v, sizeof(v));
+                    w->frm.y = atol(w->frm.has_y ? v : "0");
+                    w->frm.xalign = mu_attr(&m, "w:xAlign", v, sizeof(v)) ? (!strcmp(v, "right") || !strcmp(v, "outside") ?
+                                    2 : !strcmp(v, "center") ? 1 : 0) : 0;
+                    w->frm.hpage = mu_attr(&m, "w:hAnchor", v, sizeof(v)) && !strcmp(v, "page");
+                    w->frm.vfrom = mu_attr(&m, "w:vAnchor", v, sizeof(v)) ? (!strcmp(v, "page") ? PD_FROM_PAGE :
+                                   !strcmp(v, "margin") ? PD_FROM_MARGIN : PD_FROM_PARAGRAPH) : PD_FROM_MARGIN;
+                    w->frm.wrap = mu_attr(&m, "w:wrap", v, sizeof(v)) && (!strcmp(v, "notBeside") || !strcmp(v, "none")) ?
+                                  PD_WRAP_NONE : -1;
                 } else {
                     ppr_elem(w->X, &m, t, &w->ppr);
                 }
@@ -10854,6 +10989,10 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             }
 
             bld_end_para(X->b);
+
+            if (w->frame_fl) {
+                dw_frame_end(w);
+            }
 
             if (w->npend_fl) {
                 dw_floats(w);

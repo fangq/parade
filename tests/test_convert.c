@@ -5273,6 +5273,156 @@ static void test_docx_bar_tab(void) {
     pd_doc_free(d);
 }
 
+/* the leftmost x of the glyphs on each baseline of page 0, region 0, top to bottom, into xs (at most n); how many */
+static int line_starts(pd_doc* d, pd_sp* xs, pd_sp* ys, int n) {
+    pd_layout* L = NULL;
+    int32_t cnt = 0, k, j, c = 0;
+    pd_draw* it;
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &cnt) == PD_OK && (it = (pd_draw*)malloc(((size_t)cnt + 1) *
+                    sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, cnt, &cnt);
+
+        for (k = 0; k < cnt; k++) {
+            if (it[k].kind != PD_DRAW_GLYPH || it[k].region != 0) {
+                continue;
+            }
+
+            for (j = 0; j < c && ys[j] != it[k].y; j++) {
+            }
+
+            if (j == c && c < n) {
+                ys[c] = it[k].y;
+                xs[c++] = it[k].x;
+            } else if (j < c && it[k].x < xs[j]) {
+                xs[j] = it[k].x;
+            }
+        }
+
+        free(it);
+    }
+
+    pd_layout_free(L);
+
+    for (k = 1; k < c; k++) {   /* top to bottom */
+        for (j = k; j > 0 && ys[j - 1] > ys[j]; j--) {
+            pd_sp t = ys[j];
+
+            ys[j] = ys[j - 1];
+            ys[j - 1] = t;
+            t = xs[j];
+            xs[j] = xs[j - 1];
+            xs[j - 1] = t;
+        }
+    }
+
+    return c;
+}
+
+/* A drop cap (framePr dropCap="drop" lines="3") is a float of its letter beside the first three lines of the
+   paragraph after it, which wrap round it, and is written back as a frame; a frame with a width and wrapping
+   around is a float of that width at the left with the text beside it. */
+static void test_docx_drop_cap(void) {
+    static const char lorem[] = "<w:p><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:t>he quick brown fox jumps over the lazy dog and keeps on running far "
+                                "away across the wide green fields until the sun goes down behind the hills and the "
+                                "night comes on, and then it runs again all through the dark and quiet night, past "
+                                "farms and rivers and sleeping towns, never stopping once to rest its tired legs, and on "
+                                "and on it goes over the hills and far away, until the morning light comes up again "
+                                "over the edge of the world and the birds begin to sing in the trees.</w:t>"
+                                "</w:r></w:p>";
+    char xml[2400];
+    pd_doc* d, *back = NULL;
+    buf_t b;
+    int pass;
+
+    snprintf(xml, sizeof(xml), "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:framePr w:dropCap=\"drop\" "
+             "w:lines=\"3\" w:wrap=\"around\" w:vAnchor=\"text\" w:hAnchor=\"text\"/><w:spacing w:line=\"680\" "
+             "w:lineRule=\"exact\"/></w:pPr><w:r><w:rPr><w:position w:val=\"-8\"/><w:sz w:val=\"90\"/></w:rPr>"
+             "<w:t>T</w:t></w:r></w:p>%s</w:body></w:document>", lorem);
+    d = docx_doc("word/document.xml", xml, NULL);
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+
+    {
+        char* dx = docx_part(&b, "word/document.xml");
+
+        CHECK(strstr(dx, "<w:framePr w:dropCap=\"drop\" w:lines=\"3\"") != NULL);
+        free(dx);
+    }
+
+    free(b.p);
+
+    for (pass = 0; pass < 2; pass++) {
+        pd_doc* x = pass ? back : d;
+        pd_block_id sec, fl;
+        pd_block_info bi;
+        pd_float_props fp;
+        pd_sp xs[16], ys[16];
+        int n;
+
+        if (!x) {
+            continue;
+        }
+
+        sec = pd_doc_child(x, pd_doc_root(x), 0);
+        fl = pd_doc_child(x, sec, 0);
+        CHECK(pd_doc_block_info(x, fl, &bi) == PD_OK && bi.kind == PD_BLOCK_FLOAT);
+        CHECK(pd_doc_float_props(x, fl, &fp) == PD_OK && fp.frame == PD_FRAME_DROP && fp.frame_lines == 3 &&
+              fp.wrap == PD_WRAP_LEFT);
+
+        if (!have_layout_font()) {
+            continue;
+        }
+
+        /* the cap at the margin, the first three lines of text right of it, the fourth back at the margin */
+        n = line_starts(x, xs, ys, 16);
+        CHECK(n >= 5 && xs[0] > PD_PT(72 + 20) && xs[1] == xs[0] && xs[2] == xs[0] && xs[3] == PD_PT(72));
+        {
+            pd_layout* L = NULL;
+            pd_sp lo, hi;
+
+            if (pd_layout_new(x, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+                CHECK(glyph_span(L, 'T', &lo, &hi) && lo == PD_PT(72) && hi <= xs[0]);
+            }
+
+            pd_layout_free(L);
+        }
+    }
+
+    pd_doc_free(back);
+    pd_doc_free(d);
+
+    /* a frame 2in wide at the margin, the text round it */
+    snprintf(xml, sizeof(xml), "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:framePr w:w=\"2880\" "
+             "w:hSpace=\"180\" w:wrap=\"around\" w:hAnchor=\"margin\" w:x=\"0\"/></w:pPr><w:r><w:t>Boxed</w:t></w:r>"
+             "</w:p>%s</w:body></w:document>", lorem);
+    d = docx_doc("word/document.xml", xml, NULL);
+    CHECK(d != NULL);
+
+    if (d && have_layout_font()) {
+        pd_float_props fp;
+        pd_sp xs[16], ys[16];
+        int n;
+
+        CHECK(pd_doc_float_props(d, pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), &fp) == PD_OK &&
+              fp.frame == PD_FRAME_BOX && fp.width == PD_PT(144));
+        n = line_starts(d, xs, ys, 16);
+        CHECK(n >= 1 && xs[0] == PD_PT(72 + 144 + 9));
+    }
+
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -5959,6 +6109,7 @@ int main(void) {
     test_docx_text_small();
     test_docx_line_rules();
     test_docx_bar_tab();
+    test_docx_drop_cap();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

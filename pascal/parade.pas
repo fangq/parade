@@ -309,6 +309,11 @@ const
   PD_LINENUM_SECTION = 1;
   PD_LINENUM_CONTINUOUS = 2;
 
+  PD_FRAME_NONE = 0;
+  PD_FRAME_BOX = 1;
+  PD_FRAME_DROP = 2;
+  PD_FRAME_MARGIN = 3;
+
   PD_LINE_MULTIPLE = 0;
   PD_LINE_AT_LEAST = 1;
   PD_LINE_EXACT = 2;
@@ -594,6 +599,8 @@ type
     offset_x: pd_sp;
     offset_y: pd_sp;
     offset_from: Int32;     { PD_FROM_* }
+    frame: Int32;           { PD_FRAME_*: a Word frame it is }
+    frame_lines: Int32;     { a drop cap: the lines of text beside it }
   end;
   Ppd_float_props = ^pd_float_props;
 

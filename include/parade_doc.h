@@ -630,7 +630,15 @@ typedef struct {
                                      paragraph it is anchored in; the text beside it from there. Negative: above
                                      it. With offset_from, from the page's top or its top margin instead */
     int32_t offset_from;        /**< what offset_y is from: PD_FROM_PARAGRAPH, PD_FROM_PAGE, PD_FROM_MARGIN */
+    int32_t frame;              /**< PD_FRAME_*: a Word frame (framePr) its paragraphs are, written back as one */
+    int32_t frame_lines;        /**< a drop cap: the lines of text it is beside */
 } pd_float_props;
+
+/* a float that is a Word frame: paragraphs with a framePr rather than a text box */
+#define PD_FRAME_NONE   0
+#define PD_FRAME_BOX    1       /**< a frame placed as its float props say */
+#define PD_FRAME_DROP   2       /**< a drop cap: its letter frame_lines high, the text beside it */
+#define PD_FRAME_MARGIN 3       /**< a drop cap in the margin, left of the text */
 
 #define PD_FROM_PARAGRAPH 0     /**< the top of the paragraph after it (its anchor) */
 #define PD_FROM_PAGE 1          /**< the top edge of the page its anchor is on */
