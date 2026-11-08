@@ -4292,6 +4292,56 @@ static void test_pptx_ole(void) {
     pd_doc_free(d);
 }
 
+/* a chart on a slide: drawn where its frame is, its part and its workbook kept; one in a group where the group
+   draws it */
+static void test_pptx_chart(void) {
+#define PCHART(id, x, y, cx, cy, rid) "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"" id "\" name=\"Chart\"/>" \
+    "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"" x "\" y=\"" y "\"/><a:ext cx=\"" cx \
+    "\" cy=\"" cy "\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">" \
+    "<c:chart xmlns:c=\"c\" r:id=\"" rid "\"/></a:graphicData></a:graphic></p:graphicFrame>"
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PCHART("4", "1270000", "635000", "3810000", "2540000", "rIdC")
+                         "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"5\" name=\"G\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"
+                         "<p:grpSpPr><a:xfrm><a:off x=\"5080000\" y=\"3810000\"/><a:ext cx=\"2540000\" cy=\"1270000\"/>"
+                         "<a:chOff x=\"100\" y=\"100\"/><a:chExt cx=\"1270000\" cy=\"635000\"/></a:xfrm></p:grpSpPr>"
+                         PCHART("6", "100", "100", "1270000", "635000", "rIdC") "</p:grpSp>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdC\" "
+                         "Target=\"../charts/chart3.xml\"/></Relationships>",
+                         "ppt/charts/chart3.xml", "<c:chartSpace xmlns:c=\"c\" xmlns:a=\"a\" xmlns:r=\"r\"><c:chart><c:plotArea>"
+                         "<c:barChart><c:barDir val=\"col\"/><c:ser><c:idx val=\"0\"/><c:val><c:numRef><c:numCache><c:ptCount "
+                         "val=\"3\"/><c:pt idx=\"0\"><c:v>3</c:v></c:pt><c:pt idx=\"1\"><c:v>5</c:v></c:pt><c:pt idx=\"2\">"
+                         "<c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart>"
+                         "<c:externalData r:id=\"rId1\"/></c:chartSpace>",
+                         "ppt/charts/_rels/chart3.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../embeddings/Book1.xlsx\"/></Relationships>",
+                         "ppt/embeddings/Book1.xlsx", "PK-not-really", NULL);
+    pd_block_id sec = d ? pd_doc_child(d, pd_doc_root(d), 0) : 0;
+    int k;
+
+    CHECK(d != NULL);
+
+    for (k = 0; d && k < 2; k++) {  /* the first at (100, 50) points, 300 by 200; the second at (400, 300), 200 by 100 */
+        pd_block_id fl = pd_doc_child(d, sec, 1 + k);
+        pd_float_props fp;
+        pd_inline o;
+        char* js = NULL;
+
+        memset(&o, 0, sizeof(o));
+        CHECK(pd_doc_float_props(d, fl, &fp) == PD_OK && fp.offset_x == PD_PT(k ? 400 : 100) &&
+              fp.offset_y == PD_PT(k ? 300 : 50) && fp.offset_from == PD_FROM_PAGE);
+
+        if (pd_doc_inline_at(d, at(pd_doc_child(d, fl, 0), 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE) {
+            js = drawing_json(d, o.resource);
+        }
+
+        CHECK(o.width == PD_PT(k ? 200 : 300) && o.height == PD_PT(k ? 100 : 200));
+        CHECK(js && strstr(js, "\"chart\":") && strstr(js, "\"data\":") && count_of(js, "\"shape\":\"rect\"") >= 3);
+        free(js);
+    }
+
+    pd_doc_free(d);
+#undef PCHART
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5835,6 +5885,7 @@ int main(void) {
     test_pptx_autonum();
     test_pptx_picture_bullet();
     test_pptx_ole();
+    test_pptx_chart();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

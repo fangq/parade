@@ -54,6 +54,8 @@ typedef struct {
     const xdoc* tstyles;        /* ppt/tableStyles.xml, NULL if none */
     int cells;                  /* tables' cell fills made shapes: their ids */
     int docx;                   /* a .docx's SmartArt: pictures named by the package's own paths (in rels) */
+    int ncharts;
+    char charts[64][128];       /* the charts put in it so far: their parts' paths in the package */
 } pptx;
 
 /* a path relative to a part's folder ("../media/a.png" from "ppt/slides/slide1.xml") */
@@ -1280,6 +1282,9 @@ typedef struct {
     const xdoc* dm;             /* a SmartArt's data model, while its drawing is put, */
     const xdoc* dmc;            /* and its colours */
     pd_buf* o;
+    pd_buf* charts;             /* the slide's charts: drawings of their own, over its canvas */
+    long long gx, gy;           /* while a group's shapes are put: where its children's (0, 0) is on the slide, */
+    double gsx, gsy;            /* and how much bigger it draws them (0: not in a group) */
 } conv;
 
 /* a SmartArt drawing shape's text in the data model (its drawing a copy PowerPoint may not have redrawn): the
@@ -2130,6 +2135,92 @@ static void put_ole(conv* C, ppart* pt, int gf, int gd) {
     pb_puts(C->o, "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>");
 }
 
+/* a chart's part in the .docx: its number there (the part, its relationships and the parts they name -- its
+   workbook, its colours and style -- copied in the first time, from ppt/ to word/ so the relationships hold); 0 none */
+static int chart_no(pptx* P, const char* path) {
+    unsigned char* data;
+    size_t len = 0;
+    char dst[300], rpath[300], rdst[300];
+    const char* slash = strrchr(path, '/');
+    ppart cp;
+    int k;
+
+    for (k = 0; k < P->ncharts; k++) {
+        if (!strcmp(P->charts[k], path)) {
+            return k + 1;
+        }
+    }
+
+    if (!P->zw || P->ncharts >= 64 || (data = pd_zip_get(P->zip, P->zn, path, &len)) == NULL) {
+        return 0;
+    }
+
+    snprintf(dst, sizeof(dst), "word/charts/pchart%d.xml", P->ncharts + 1);
+    pd_zipw_add(P->zw, dst, data, len);
+    free(data);
+    snprintf(rpath, sizeof(rpath), "%.*s_rels/%s.rels", slash ? (int)(slash - path + 1) : 0, path, slash ? slash + 1 : path);
+
+    if ((data = pd_zip_get(P->zip, P->zn, rpath, &len)) != NULL) {
+        snprintf(rdst, sizeof(rdst), "word/charts/_rels/pchart%d.xml.rels", P->ncharts + 1);
+        pd_zipw_add(P->zw, rdst, data, len);
+        free(data);
+        memset(&cp, 0, sizeof(cp));
+        snprintf(cp.path, sizeof(cp.path), "%s", path);
+        part_rels(P, &cp);
+
+        for (k = 0; k < cp.nrels; k++) {    /* (an external one names no part here: nothing read) */
+            unsigned char* b;
+
+            if (!strncmp(cp.rels[k].target, "ppt/", 4) &&
+                    (b = pd_zip_get(P->zip, P->zn, cp.rels[k].target, &len)) != NULL) {
+                snprintf(rdst, sizeof(rdst), "word/%s", cp.rels[k].target + 4);
+                pd_zipw_add(P->zw, rdst, b, len);
+                free(b);
+            }
+        }
+
+        free(cp.rels);
+    }
+
+    snprintf(P->charts[P->ncharts], sizeof(P->charts[0]), "%.127s", path);
+    pb_printf(&P->rels, "<Relationship Id=\"rIdPc%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+              "relationships/chart\" Target=\"charts/pchart%d.xml\"/>", P->ncharts + 1, P->ncharts + 1);
+    return ++P->ncharts;
+}
+
+/* a chart (a frame's c:chart): a drawing of its own where the frame is on the slide, in front of the slide's canvas
+   (a Word canvas holds no chart) */
+static void put_chart(conv* C, ppart* pt, int gf, int ch) {
+    const xdoc* d = &pt->x;
+    int xf = xd_kid(d, gf, "xfrm"), off = xd_kid(d, xf, "off"), ext = xd_kid(d, xf, "ext"), no, id;
+    long long x = xd_int(d, off, "x", 0), y = xd_int(d, off, "y", 0), cx = xd_int(d, ext, "cx", 0);
+    long long cy = xd_int(d, ext, "cy", 0);
+    char rid[64];
+    const char* path;
+
+    if (!C->charts || off < 0 || ext < 0 || !xd_attr(d, ch, "r:id", rid, sizeof(rid)) || !(path = rel_of(pt, rid)) ||
+            !(no = chart_no(C->P, path))) {
+        return;
+    }
+
+    if (C->gsx > 0) {   /* in a group: where the group draws it */
+        x = C->gx + (long long)(x * C->gsx);
+        y = C->gy + (long long)(y * C->gsy);
+        cx = (long long)(cx * C->gsx);
+        cy = (long long)(cy * C->gsy);
+    }
+
+    id = 3600000 + ++C->P->docpr;
+    pb_printf(C->charts, "<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" simplePos=\"0\" "
+              "relativeHeight=\"%d\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\"><wp:simplePos "
+              "x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"page\"><wp:posOffset>%lld</wp:posOffset></wp:positionH>"
+              "<wp:positionV relativeFrom=\"page\"><wp:posOffset>%lld</wp:posOffset></wp:positionV><wp:extent cx=\"%lld\" "
+              "cy=\"%lld\"/><wp:effectExtent l=\"0\" t=\"0\" r=\"0\" b=\"0\"/><wp:wrapNone/><wp:docPr id=\"%d\" "
+              "name=\"Chart\"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/"
+              "drawingml/2006/chart\"><c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" "
+              "r:id=\"rIdPc%d\"/></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>", id, x, y, cx, cy, id, no);
+}
+
 static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
     const xdoc* d = &pt->x;
     const char* el = d->v[n].name;
@@ -2241,14 +2332,36 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
 
         pb_puts(C->o, "<wpg:grpSp><wpg:cNvGrpSpPr/>");
 
+        long long gx = C->gx, gy = C->gy;
+        double gsx = C->gsx, gsy = C->gsy;
+        int xf = xd_kid(d, gp, "xfrm");
+
         if (gp >= 0) {
             put_renamed(C->P, C->o, d, gp, "wpg:grpSpPr");
         } else {
             pb_puts(C->o, "<wpg:grpSpPr/>");
         }
 
+        if (xf >= 0) {  /* where its children are on the slide (for a chart among them, drawn apart) */
+            int off = xd_kid(d, xf, "off"), ext = xd_kid(d, xf, "ext"), co = xd_kid(d, xf, "chOff");
+            int ce = xd_kid(d, xf, "chExt");
+            double sx = xd_int(d, ce, "cx", 0) > 0 ? (double)xd_int(d, ext, "cx", 0) / (double)xd_int(d, ce, "cx", 0) : 1;
+            double sy = xd_int(d, ce, "cy", 0) > 0 ? (double)xd_int(d, ext, "cy", 0) / (double)xd_int(d, ce, "cy", 0) : 1;
+            double ox = (double)xd_int(d, off, "x", 0) - xd_int(d, co, "x", 0) * sx;
+            double oy = (double)xd_int(d, off, "y", 0) - xd_int(d, co, "y", 0) * sy;
+
+            C->gx = gsx > 0 ? gx + (long long)(ox * gsx) : (long long)ox;
+            C->gy = gsy > 0 ? gy + (long long)(oy * gsy) : (long long)oy;
+            C->gsx = gsx > 0 ? gsx * sx : sx;
+            C->gsy = gsy > 0 ? gsy * sy : sy;
+        }
+
         put_tree(C, pt, n, skip_ph);
         pb_puts(C->o, "</wpg:grpSp>");
+        C->gx = gx;
+        C->gy = gy;
+        C->gsx = gsx;
+        C->gsy = gsy;
     } else if (!strcmp(el, "graphicFrame")) {
         int gd = xd_path(d, n, "graphic/graphicData"), tbl = gd >= 0 ? xd_kid(d, gd, "tbl") : -1;
 
@@ -2256,6 +2369,8 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
             put_table(C, pt, n, tbl);
         } else if (gd >= 0 && xd_kid(d, gd, "relIds") >= 0) {
             put_smartart(C, pt, n);
+        } else if (gd >= 0 && xd_kid(d, gd, "chart") >= 0) {
+            put_chart(C, pt, n, xd_kid(d, gd, "chart"));
         } else if (gd >= 0) {
             put_ole(C, pt, n, gd);
         }
@@ -2350,10 +2465,11 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
     const char* lp, *mp;
     long bg;
     conv C;
-    pd_buf cv;
+    pd_buf cv, charts;
     char v[16];
 
     memset(&cv, 0, sizeof(cv));
+    memset(&charts, 0, sizeof(charts));
 
     if (!part_load(P, &slide, path)) {
         return;
@@ -2395,6 +2511,7 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
     C.pres = pres;
     C.pres_style = pres_style;
     C.o = &cv;
+    C.charts = &charts;
 
     /* the background: the slide's, else its layout's, else its master's; white. A picture or a gradient is a
        shape of its own over the whole slide (the canvas's own background its colour, where the picture is not) */
@@ -2481,8 +2598,11 @@ static void put_slide(pptx* P, const xdoc* pres, int pres_style, const char* pat
               "<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\">"
               "<wpc:wpc>", P->docpr, P->sw, P->sh, P->docpr, P->docpr);
     pb_put(&P->doc, cv.p, cv.n);
-    pb_puts(&P->doc, "</wpc:wpc></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>");
+    pb_puts(&P->doc, "</wpc:wpc></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>");
+    pb_put(&P->doc, charts.p, charts.n);
+    pb_puts(&P->doc, "</w:p>");
     pb_free(&cv);
+    pb_free(&charts);
 
     if (have_m) {
         part_free(&master);
