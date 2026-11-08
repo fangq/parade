@@ -174,6 +174,22 @@ turns into display-list paths, the same for the screen and for PDF.
   passes, near a Gaussian); PDF places them as pictures with soft masks
   under or over the vector shape. `pd_draw_bounds` gives what an item
   covers with them.
+- **Text in shapes**: text boxes in columns (numCol, spcCol), shrunk to
+  fit (normAutofit: its fontScale, or a tenth at a time until it fits),
+  East Asian vertical text with CJK characters upright, and WordArt warps
+  drawn as envelopes (inflate, deflate, waves, slants, triangles,
+  chevrons, cans, arches, fades: the text's extent stretched between the
+  warp's top and bottom curves, each glyph a path of its outline).
+- **SVG** (`pd_layout_write_svg`, `pd_drawing_to_svg`): a page or one
+  drawing from the same display list -- paths with curves and dashes,
+  gradients and patterns as SVG's, glyphs as paths from the fonts'
+  outlines, pictures as data: URIs, effects as PNG pictures. HTML shows a
+  drawing as an SVG picture (the drawing itself kept in `data-parade`,
+  which HTML import reads back), and `pd_conv in out.svg` writes a file
+  a page (out.svg, out-2.svg, ...).
+- **Pictures of drawings** (`pd_drawing_render`, `pd_drawing_to_png`):
+  a drawing rasterized on its own, paths, glyphs and PNG/GIF pictures, for
+  RTF (which writes drawings as PNG pictures now) and the clipboard.
 - **Rasterizer**: `pd_draw_render` draws display-list paths into an RGBA
   image with Parade's integer coverage rasterizer, so a host gets the
   library's pixels rather than drawing styles itself.
@@ -454,6 +470,7 @@ pd_para_break(p, &prm, NULL);
     include/parade_layout.h public C API: pages, display lists, carets
     src/pd_font.c        font metrics reader
     src/pd_raster.c      glyph outlines (glyf) and the integer rasterizer, for glyphs and drawings' paths
+    src/pd_svg.c         SVG output of a page's or a drawing's display list
     src/pd_cff.c         CFF Type 2 charstrings
     src/pd_para.c        content building, simple shaper, output, hit testing
     src/pd_break.c       total-fit / first-fit line breaking

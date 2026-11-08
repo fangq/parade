@@ -1024,6 +1024,16 @@ static void pdf_gradient(pdfw* w, sbuf* c, preslist* R, const pd_draw* a, const 
     }
 }
 
+static int png_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
+                      unsigned char** alpha);
+static int gif_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
+                      unsigned char** alpha);
+
+int pd_image_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
+                    unsigned char** alpha) {
+    return png_decode(p, n, w, h, rgb, alpha) == 0 || gif_decode(p, n, w, h, rgb, alpha) == 0 ? 0 : 1;
+}
+
 /* rows of a PNG (each a filter byte, then stride bytes) unfiltered in place */
 static void png_unfilter(unsigned char* raw, uint32_t rows, uint32_t stride, uint32_t bpp) {
     uint32_t y, x;

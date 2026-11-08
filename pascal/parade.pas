@@ -1093,6 +1093,13 @@ function pd_layout_caret_step(layout: Ppd_layout; pos: pd_pos; dir: Int32; out r
 
 procedure pd_pdf_options_init(out options: pd_pdf_options); cdecl; PDEXT;
 function pd_layout_write_pdf(layout: Ppd_layout; options: Ppd_pdf_options; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+function pd_layout_write_svg(layout: Ppd_layout; page: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+function pd_drawing_to_svg(doc: Ppd_doc; res: pd_res_id; width, height: pd_sp; fn: pd_writer;
+  user: Pointer): pd_status; cdecl; PDEXT;
+function pd_drawing_render(doc: Ppd_doc; res: pd_res_id; width, height: pd_sp; scale: Int32; rgba: PByte;
+  w, h, stride: Int32): pd_status; cdecl; PDEXT;
+function pd_drawing_to_png(doc: Ppd_doc; res: pd_res_id; width, height: pd_sp; scale: Int32; fn: pd_writer;
+  user: Pointer): pd_status; cdecl; PDEXT;
 
 { ---- parade_convert.h ---- }
 const

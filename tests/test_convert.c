@@ -3896,6 +3896,186 @@ static void test_docx_shape_effects(void) {
     pd_doc_free(d);
 }
 
+/* Text in shapes: a box in two columns 10 pt apart holding six one-line paragraphs too tall for one column; a box
+   shrunk to half (normAutofit fontScale); WordArt waving its word (each glyph a path through the warp); and East
+   Asian vertical text, the CJK character standing upright among Latin letters turned with the line. */
+static void test_docx_text_in_shapes(void) {
+    const char* box = "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"%d\" y=\"%d\"/><a:ext cx=\"%d\" cy=\"%d\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>"
+                      "%s</w:txbxContent></wps:txbx><wps:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" %s>%s"
+                      "</wps:bodyPr></wps:wsp>";
+    const char* para = "<w:p><w:r><w:rPr><w:sz w:val=\"20\"/></w:rPr><w:t>%s</w:t></w:r></w:p>";
+    char shapes[16384], six[2048], one[256];
+    size_t sl = 0, xl = 0;
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0, k, right = 0, left = 0, halves = 0, wavy = 0, waved = 0, up = 0, turned = 0;
+    pd_draw* it;
+    const char* words[6] = { "Qa", "Qb", "Qc", "Qd", "Qe", "Qf" };
+
+    for (k = 0; k < 6; k++) {
+        xl += (size_t)snprintf(six + xl, sizeof(six) - xl, para, words[k]);
+    }
+
+    /* 100 pt wide (two 45 pt columns), 40 pt high: three 10 pt lines a column */
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, box, 0, 0, 1270000, 508000, six, "numCol=\"2\" spcCol=\"127000\"", "");
+    snprintf(one, sizeof(one), para, "Zz");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, box, 0, 1270000, 1270000, 508000, one, "",
+                           "<a:normAutofit fontScale=\"50000\"/>");
+    snprintf(one, sizeof(one), para, "Wavy");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, box, 1270000, 0, 1270000, 508000, one, "wrap=\"none\"",
+                           "<a:prstTxWarp prst=\"textWave1\"><a:avLst/></a:prstTxWarp>");
+    snprintf(one, sizeof(one), para, "Y\xE4\xB8\xADY");
+    snprintf(shapes + sl, sizeof(shapes) - sl, box, 1270000, 1270000, 508000, 1270000, one, "vert=\"eaVert\"", "");
+    it = group_items(shapes, &d, &L, &n);
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    {   /* the box's left edge: the leftmost Q */
+        pd_sp x0 = INT32_MAX;
+
+        for (k = 0; k < n; k++) {
+            if (it[k].kind == PD_DRAW_GLYPH && it[k].text == 'Q') {
+                x0 = it[k].x < x0 ? it[k].x : x0;
+            }
+        }
+
+        for (k = 0; k < n; k++) {
+            if (it[k].kind == PD_DRAW_GLYPH && it[k].text == 'Q') {
+                right += it[k].x >= x0 + PD_PT(55);
+                left += it[k].x < x0 + PD_PT(45);
+            }
+
+            halves += it[k].kind == PD_DRAW_GLYPH && (it[k].text == 'Z' || it[k].text == 'z') && it[k].size == PD_PT(5);
+            wavy += it[k].kind == PD_DRAW_GLYPH && (it[k].text == 'W' || it[k].text == 'v');
+            waved += it[k].kind == PD_DRAW_PATH && it[k].region == 5 && (it[k].text == 'W' || it[k].text == 'v');
+            up += it[k].kind == PD_DRAW_GLYPH && it[k].text == 0x4E2D && it[k].rotation == 0;
+            turned += it[k].kind == PD_DRAW_GLYPH && it[k].text == 'Y' && it[k].rotation == 5400000;
+        }
+    }
+
+    CHECK(left == 3 && right == 3);     /* three lines down the first column, three in the second */
+    CHECK(halves == 2);                 /* 10 pt text at half */
+    CHECK(wavy == 0 && waved == 2);     /* the warped word's glyphs paths, none left as glyphs */
+    CHECK(up == 1 && turned == 2);
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* SVG: a page with a dashed curve, a three-stop gradient and a pattern as SVG's own -- a dash array, a cubic, a
+   linear gradient with its stops, a pattern -- and the drawing alone the same; HTML shows the drawing as an SVG
+   picture and reads the drawing itself back. */
+static void test_svg_out(void) {
+    pd_doc* d = NULL, *back = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"ellipse\"/><a:noFill/><a:ln w=\"25400\"><a:solidFill><a:srgbClr val=\"FF0000\"/>"
+                      "</a:solidFill><a:prstDash val=\"dash\"/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"FF0000\"/></a:gs>"
+                      "<a:gs pos=\"50000\"><a:srgbClr val=\"00FF00\"/></a:gs><a:gs pos=\"100000\"><a:srgbClr val=\"0000FF\"/>"
+                      "</a:gs></a:gsLst><a:lin ang=\"0\" scaled=\"0\"/></a:gradFill></wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"1270000\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:pattFill prst=\"smCheck\"><a:fgClr><a:srgbClr val=\"000000\"/></a:fgClr>"
+                      "<a:bgClr><a:srgbClr val=\"FFFFFF\"/></a:bgClr></a:pattFill></wps:spPr><wps:bodyPr/></wps:wsp>",
+                      &d, &L, &n);
+    buf_t b;
+    pd_inline o;
+
+    if (!it) {
+        pd_layout_free(L);
+        pd_doc_free(d);
+        return;
+    }
+
+    memset(&b, 0, sizeof(b));
+    CHECK(pd_layout_write_svg(L, 0, to_buf, &b) == PD_OK);
+    CHECK(b.p && strstr(b.p, "<svg xmlns=\"http://www.w3.org/2000/svg\"") && strstr(b.p, "viewBox=\"0 0 "));
+    CHECK(b.p && strstr(b.p, "stroke-dasharray=\"8 6\"") && strstr(b.p, "stroke=\"#ff0000\""));
+    CHECK(b.p && strstr(b.p, "C") && strstr(b.p, "<linearGradient") && strstr(b.p, "<stop offset=\"0.5000\" stop-color=\"#00ff00\"/>"));
+    CHECK(b.p && strstr(b.p, "<pattern id=") && strstr(b.p, "fill=\"url(#p"));
+    free(b.p);
+
+    if (pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK) {
+        memset(&b, 0, sizeof(b));   /* the drawing alone, 200 pt square */
+        CHECK(pd_drawing_to_svg(d, o.resource, PD_PT(200), PD_PT(200), to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "viewBox=\"0 0 200 200\"") && strstr(b.p, "stroke-dasharray=\"8 6\"") &&
+              strstr(b.p, "<linearGradient"));
+        free(b.p);
+    }
+
+    memset(&b, 0, sizeof(b));   /* HTML: an SVG picture, the drawing kept beside it and read back */
+    CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK);
+    CHECK(b.p && strstr(b.p, "<img src=\"data:image/svg+xml;base64,") &&
+          strstr(b.p, "data-parade=\"data:application/vnd.parade.drawing+json;base64,"));
+
+    if (b.p && pd_doc_import(b.p, b.n, PD_CONV_HTML, &back) == PD_OK) {
+        const char* mime = NULL;
+        const void* data;
+        size_t len;
+        int found = pd_doc_resource(back, 1, &mime, &data, &len) == PD_OK &&
+                    !strcmp(mime, "application/vnd.parade.drawing+json");
+
+        CHECK(found);
+        pd_doc_free(back);
+    }
+
+    free(b.p);
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* A drawing as a picture: rasterized on its own (a red box over its left half, a blue ellipse at the right), as a
+   PNG file, and in RTF -- which took only PNG and JPEG pictures -- as a PNG picture of it. */
+static void test_drawing_png(void) {
+    pd_doc* d = NULL;
+    pd_layout* L = NULL;
+    int32_t n = 0;
+    pd_draw* it = group_items(
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"2540000\"/></a:xfrm>"
+                      "<a:prstGeom prst=\"rect\"/><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill><a:ln><a:noFill/>"
+                      "</a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"
+                      "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"1270000\" y=\"635000\"/><a:ext cx=\"1270000\" cy=\"1270000\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"ellipse\"/><a:solidFill><a:srgbClr val=\"0000FF\"/></a:solidFill><a:ln>"
+                      "<a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>", &d, &L, &n);
+    pd_inline o;
+
+    if (it && pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK) {
+        uint8_t* px = (uint8_t*)calloc(200 * 200, 4);
+        buf_t b;
+
+        if (px) {   /* 200 pt square at a pixel a point */
+            CHECK(pd_drawing_render(d, o.resource, PD_PT(200), PD_PT(200), 1 << 16, px, 200, 200, 800) == PD_OK);
+            CHECK(px[(100 * 200 + 50) * 4] == 255 && px[(100 * 200 + 50) * 4 + 3] == 255);    /* red at the left */
+            CHECK(px[(100 * 200 + 150) * 4 + 2] == 255 && px[(100 * 200 + 150) * 4] == 0);    /* blue in the ellipse */
+            CHECK(px[(10 * 200 + 190) * 4 + 3] == 0);   /* clear at the top right, outside the ellipse */
+            free(px);
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_drawing_to_png(d, o.resource, PD_PT(200), PD_PT(200), 1 << 16, to_buf, &b) == PD_OK);
+        CHECK(b.p && b.n > 33 && !memcmp(b.p, "\x89PNG\r\n\x1a\n", 8) && !memcmp(b.p + 12, "IHDR\0\0\0\xc8\0\0\0\xc8", 12));
+        free(b.p);
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_RTF, to_buf, &b) == PD_OK);
+        CHECK(b.p && strstr(b.p, "{\\pict\\pngblip") && strstr(b.p, "89504e470d0a1a0a"));
+        free(b.p);
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static pd_font* rtl_font;
 
 static const pd_font* rtl_resolver(void* user, const char* family, int32_t weight, int32_t italic) {
@@ -6102,6 +6282,84 @@ static void emr(buf_t* b, uint32_t type, const uint32_t* w, int n) {
     for (i = 0; i < n; i++) {
         le32(b, w[i]);
     }
+}
+
+/* Metafile shapes the player skipped and pens and brushes it flattened: a pie (a quarter of a circle, the top right,
+   from the radial on the right anticlockwise to the one at the top), a horizontal red-to-blue GRADIENTFILL, a box
+   in a dashed pen and a cross-hatched brush, and an open arc. */
+static void test_emf_shapes(void) {
+    buf_t e = { NULL, 0 };
+    uint32_t hdr[20];
+    pd_doc* d;
+    pd_res_id r, src;
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t len = 0;
+    char* js, want[96];
+    double W = 25 / 25.4 * 72 * 65536;
+
+    memset(hdr, 0, sizeof(hdr));
+    hdr[2] = 99; hdr[3] = 99;
+    hdr[6] = 2500; hdr[7] = 2500;
+    hdr[8] = 0x464D4520u;
+    hdr[9] = 0x10000; hdr[12] = 4;
+    hdr[16] = 100; hdr[17] = 100;
+    hdr[18] = 25; hdr[19] = 25;
+    emr(&e, 1, hdr, 20);
+    {
+        uint32_t brush[4] = { 1, 0, 0x0000FF00, 0 }, sel[1] = { 1 }, pie[8] = { 10, 10, 50, 50, 50, 30, 30, 10 };
+
+        emr(&e, 39, brush, 4);
+        emr(&e, 37, sel, 1);
+        emr(&e, 47, pie, 8);
+    }
+    {   /* two vertices, one rectangle, horizontal: red at the left, blue at the right */
+        uint32_t g[7 + 8 + 2] = { 0, 0, 0, 0, 2, 1, 0, 60, 10, 0xFF00u, 0, 90, 30, 0, 0xFF00u, 0, 1 };
+
+        emr(&e, 118, g, 17);
+    }
+    {
+        uint32_t pen[5] = { 2, 1, 1, 0, 0x00000000 }, hatch[4] = { 3, 2, 0x00000000, 4 }, s2[1] = { 2 }, s3[1] = { 3 };
+        uint32_t box[4] = { 60, 60, 90, 90 }, arcw[8] = { 10, 60, 50, 90, 50, 75, 10, 75 };
+
+        emr(&e, 38, pen, 5);    /* a dashed pen, one unit */
+        emr(&e, 39, hatch, 4);  /* a cross-hatched brush, black */
+        emr(&e, 37, s2, 1);
+        emr(&e, 37, s3, 1);
+        emr(&e, 43, box, 4);
+        emr(&e, 45, arcw, 8);
+    }
+    emr(&e, 14, hdr, 3);
+
+    pd_doc_new(&d);
+    CHECK(pd_doc_add_resource(d, "image/x-emf", e.p, e.n, &src) == PD_OK);
+    r = pd_metafile_drawing(d, (const unsigned char*)e.p, e.n, src);
+    CHECK(r != 0 && pd_doc_resource(d, r, &mime, &data, &len) == PD_OK);
+    js = (char*)malloc(len + 1);
+
+    if (js && r) {
+        char item[8192];
+
+        memcpy(js, data, len);
+        js[len] = '\0';
+        /* the pie: green, from its centre, through the right and the top, not the bottom */
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(W * 0.5), (int)(W * 0.3));
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"fill\":4278255360") && strstr(item, "\"closed\":1"));
+        CHECK(item_has_pt(item, (long)(W * 0.3), (long)(W * 0.3)) && item_has_pt(item, (long)(W * 0.3), (long)(W * 0.1)));
+        CHECK(!item_has_pt(item, (long)(W * 0.3), (long)(W * 0.5)) && !item_has_pt(item, (long)(W * 0.1), (long)(W * 0.3)));
+        /* the gradient */
+        CHECK(strstr(js, "\"gk\":1,\"f2\":4278190335,\"ga\":0,\"gs\":[0,4294901760,100000,4278190335]") != NULL);
+        /* the box: dashed, cross-hatched */
+        CHECK(strstr(js, "\"dash\":[300000,100000]") != NULL && strstr(js, "\"patt\":[255,128,128,128,128,128,128,128]") != NULL);
+        /* the arc: open, over the top of its ellipse (anticlockwise from the right to the left) */
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(W * 0.5), (int)(W * 0.75));
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"closed\":0") &&
+              item_has_pt(item, (long)(W * 0.3), (long)(W * 0.6)) && !item_has_pt(item, (long)(W * 0.3), (long)(W * 0.9)));
+    }
+
+    free(js);
+    free(e.p);
+    pd_doc_free(d);
 }
 
 /* A small EMF made here: a red-filled rectangle, a polygon with a hole
@@ -9415,6 +9673,7 @@ int main(void) {
     test_docx_drawings();
     printf("EMF pictures\n");
     test_emf();
+    test_emf_shapes();
     printf("docx equations\n");
     test_docx_omml();
     printf("docx fields and references\n");
@@ -9438,6 +9697,9 @@ int main(void) {
     test_docx_pattern_fill();
     test_docx_picture_fill();
     test_docx_shape_effects();
+    test_docx_text_in_shapes();
+    test_svg_out();
+    test_drawing_png();
     test_docx_canvas_kept();
     test_drawing_story_copy();
     test_docx_tracked_objects();
