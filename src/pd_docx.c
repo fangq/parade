@@ -5724,6 +5724,8 @@ typedef struct {
     struct {                    /* bookmarks read: where they are */
         char name[32];
         pd_block_id para;
+        int wid;                /* its w:id, which its bookmarkEnd names */
+        pd_marker_id m0, m1;    /* where its text starts and ends (REF fields show it) */
     } bm[4096];
     int nbm;
     struct {                    /* fields that point at a bookmark, put right once all are read */
@@ -11969,6 +11971,150 @@ static void dw_fld_end(dw* w) {
     }
 }
 
+static pd_pos at_pos(pd_block_id b, uint32_t off) {
+    pd_pos q;
+
+    q.block = b;
+    q.offset = off;
+    return q;
+}
+
+/* A REF field shows its bookmark's text, not the text Word last put there: the result of each kept REF (the text
+   between its start and its end, inside the link \h makes) is the bookmarked text of that paragraph, its
+   objects left out, in the result's own format. A bookmark not found, empty, or holding a value only layout
+   knows (a field, a note's number) leaves Word's. */
+static void dx_ref_results(dxi* X, pd_doc* d) {
+    pd_block_id p;
+    int k;
+
+    for (p = pd_doc_next_paragraph(d, 0); p; p = pd_doc_next_paragraph(d, p)) {
+        const char* t;
+        uint32_t n, i;
+
+        if (pd_doc_para_text(d, p, &t, &n) != PD_OK) {
+            continue;
+        }
+
+        for (i = 0; i + 3 <= n; i++) {
+            pd_inline o, e;
+            char name[64], want[512];
+            uint32_t a, z, j, wn = 0;
+            const char* s;
+            pd_pos m0, m1;
+            pd_range r;
+
+            if (memcmp(t + i, "\xEF\xBF\xBC", 3) || pd_doc_inline_at(d, at_pos(p, i), &o) != PD_OK ||
+                    o.kind != PD_INLINE_FIELD || o.field != PD_FIELD_KEPT || o.source_len <= 4) {
+                continue;
+            }
+
+            snprintf(want, sizeof(want), "%.*s", o.source_len, o.source);
+            s = want + strspn(want, " ");
+
+            if (strncmp(s, "REF ", 4) || strstr(want, FLD_IN)) {
+                continue;
+            }
+
+            field_arg(want, name, sizeof(name));
+
+            for (k = 0; k < X->nbm && strcmp(X->bm[k].name, name); k++) {
+            }
+
+            if (k == X->nbm || !X->bm[k].m0 || pd_doc_marker_get(d, X->bm[k].m0, &m0) != PD_OK) {
+                continue;
+            }
+
+            /* the result: after the start (and a link opening it), up to the end (and the link closing it) */
+            a = i + 3;
+
+            if (a + 3 <= n && !memcmp(t + a, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at_pos(p, a), &e) == PD_OK &&
+                    e.kind == PD_INLINE_LINK) {
+                a += 3;
+            }
+
+            for (z = a; z + 3 <= n; z++) {
+                if (!memcmp(t + z, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at_pos(p, z), &e) == PD_OK &&
+                        ((e.kind == PD_INLINE_FIELD && e.field == PD_FIELD_KEPT) || e.kind == PD_INLINE_LINK)) {
+                    break;
+                }
+            }
+
+            if (z + 3 > n) {
+                continue;
+            }
+
+            {
+                /* the bookmarked text: to its end, or its paragraph's end */
+                const char* bt;
+                uint32_t bn, end;
+
+                if (pd_doc_para_text(d, m0.block, &bt, &bn) != PD_OK) {
+                    continue;
+                }
+
+                end = X->bm[k].m1 && pd_doc_marker_get(d, X->bm[k].m1, &m1) == PD_OK && m1.block == m0.block ? m1.offset :
+                      bn;
+
+                for (j = m0.offset; j < end && j < bn && wn + 1 < sizeof(want); j++) {
+                    pd_inline bo;
+
+                    if (j + 3 <= bn && !memcmp(bt + j, "\xEF\xBF\xBC", 3)) {
+                        if (pd_doc_inline_at(d, at_pos(m0.block, j), &bo) == PD_OK && (bo.kind == PD_INLINE_FIELD ||
+                                bo.kind == PD_INLINE_EQUATION || bo.kind == PD_INLINE_FOOTNOTE)) {
+                            wn = 0;     /* a value only layout knows (a caption's number): Word's text stays */
+                            break;
+                        }
+
+                        j += 2;
+                    } else {
+                        want[wn++] = bt[j];
+                    }
+                }
+
+                want[wn] = '\0';
+            }
+
+            if (!wn || (z - a == wn && !memcmp(t + a, want, wn))) {
+                continue;
+            }
+
+            r.start = at_pos(p, a);
+            r.end = at_pos(p, z);
+
+            if (z > a) {    /* the new text in the old's format */
+                pd_format_id f = 0;
+                int32_t nr = 0, q;
+                pd_run* all;
+
+                pd_doc_para_runs(d, p, NULL, 0, &nr);
+                all = (pd_run*)malloc(((size_t)nr + 1) * sizeof(pd_run));
+
+                if (all && pd_doc_para_runs(d, p, all, nr, &nr) == PD_OK) {
+                    for (q = 0; q < nr; q++) {
+                        if (all[q].start <= a && a < all[q].end) {
+                            f = all[q].format;
+                        }
+                    }
+                }
+
+                free(all);
+
+                if (pd_doc_delete(d, r, NULL) == PD_OK) {
+                    pd_doc_insert_text(d, r.start, want, wn, f, NULL);
+                }
+            } else {
+                pd_doc_insert_text(d, r.start, want, wn, PD_FORMAT_INHERIT, NULL);
+            }
+
+            if (pd_doc_para_text(d, p, &t, &n) != PD_OK) {
+                break;
+            }
+
+            i = a + wn - 1;
+        }
+    }
+}
+
 /* the story of a header or footer part, read once however many sections use it */
 /* The fonts a document carries (fontTable.xml's embedRegular and the
    rest): each de-obfuscated -- its first 32 bytes XORed with the key its
@@ -13096,7 +13242,19 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
                 if (X->nbm < 4096) {
                     snprintf(X->bm[X->nbm].name, sizeof(X->bm[0].name), "%.31s", v);
+                    X->bm[X->nbm].wid = attr_int(&m, "w:id", -1);
+                    X->bm[X->nbm].m0 = X->bm[X->nbm].m1 = 0;
+                    pd_doc_marker_new(X->b->d, bld_pos(X->b), PD_GRAVITY_LEFT, &X->bm[X->nbm].m0);
                     X->bm[X->nbm++].para = X->b->para;
+                }
+            } else if (strcmp(t, "bookmarkEnd") == 0 && w->in_p && w->started) {
+                int id = attr_int(&m, "w:id", -1), k;
+
+                for (k = X->nbm - 1; k >= 0 && X->bm[k].wid != id; k--) {
+                }
+
+                if (k >= 0 && !X->bm[k].m1) {
+                    pd_doc_marker_new(X->b->d, bld_pos(X->b), PD_GRAVITY_LEFT, &X->bm[k].m1);
                 }
             } else if (strcmp(t, "noBreakHyphen") == 0) {
                 dw_text(w, "\xE2\x80\x91", 3);
@@ -14116,6 +14274,7 @@ pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all
             }
         }
 
+        dx_ref_results(&X, d);
         pd_doc_clear_undo(d);
     }
 

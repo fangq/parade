@@ -7309,6 +7309,48 @@ static void test_docx_moves_formats(void) {
     pd_doc_free(d);
 }
 
+/* A REF field shows the bookmarked text, not Word's stale result, with its \h link; a bookmark holding a
+   caption's number keeps Word's (test_docx_fields). */
+static void test_docx_ref_text(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:bookmarkStart w:id=\"3\" w:name=\"intro\"/><w:r><w:t>Hello world</w:t></w:r>"
+                    "<w:bookmarkEnd w:id=\"3\"/><w:r><w:t xml:space=\"preserve\"> more</w:t></w:r></w:p>"
+                    "<w:p><w:r><w:t xml:space=\"preserve\">See </w:t></w:r>" FLD(" REF intro \\h ", "stale text")
+                    "<w:r><w:t>.</w:t></w:r></w:p></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id p;
+        const char* t;
+        uint32_t n, k;
+        int links = 0;
+        pd_inline o;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            break;
+        }
+
+        p = pd_doc_next_paragraph(d, pd_doc_next_paragraph(d, 0));
+        pd_doc_para_text(d, p, &t, &n);
+        CHECK(has_bytes(t, n, "Hello world") && !has_bytes(t, n, "stale"));
+
+        for (k = 0; k + 3 <= n; k++) {
+            if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at(p, k), &o) == PD_OK) {
+                links += o.kind == PD_INLINE_LINK && o.source_len == 6 && !memcmp(o.source, "#intro", 6);
+            }
+        }
+
+        CHECK(links == 1);
+    }
+
+    pd_doc_free(d);
+}
+
 /* the structure of the equations (m:oMath) in XML, one after another: each m: element's name and its children in
    brackets, properties (m:...Pr) left out but for a run's style and script, and the runs' text */
 static void omml_shape(const char* x, char* out, size_t cap) {
@@ -9154,6 +9196,7 @@ int main(void) {
     test_comment_balloons();
     test_docx_moves_formats();
     test_docx_omml_roundtrip();
+    test_docx_ref_text();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");
