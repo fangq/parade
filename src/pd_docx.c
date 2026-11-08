@@ -608,6 +608,10 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_printf(o, "<w:spacing w:val=\"%d\"/>", TW(c->letter_space));
     }
 
+    if ((c->hscale > 0 ? c->hscale : 1000) != (b->hscale > 0 ? b->hscale : 1000)) {
+        pb_printf(o, "<w:w w:val=\"%d\"/>", (int)((c->hscale > 0 ? c->hscale : 1000) + 5) / 10);
+    }
+
     if (!c->kerning != !b->kerning) {
         pb_printf(o, "<w:kern w:val=\"%d\"/>", c->kerning ? 2 : 0);
     }
@@ -825,8 +829,14 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     pd_res_id pic = ob->resource;
     int m;
     char wb[2048];
+    char crop[96] = "";
 
     int chart = 0, wpc = 0;
+
+    if (ob->crop[0] || ob->crop[1] || ob->crop[2] || ob->crop[3]) {    /* cut off at its sides */
+        snprintf(crop, sizeof(crop), "<a:srcRect l=\"%d\" t=\"%d\" r=\"%d\" b=\"%d\"/>", (int)ob->crop[0],
+                 (int)ob->crop[1], (int)ob->crop[2], (int)ob->crop[3]);
+    }
 
     if (group) {    /* a metafile played into a drawing: the metafile itself goes back; a chart: the chart */
         pj_doc* jd = pj_parse(data, len, 0, NULL);
@@ -953,10 +963,10 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
 
     pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
               "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr>"
-              "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
+              "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/>%s<a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
               "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
               "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData>"
-              "</a:graphic>%s</w:drawing></w:r>", fp ? "<wp:cNvGraphicFramePr/>" : "", x->docpr, name, m + 1, cx, cy,
+              "</a:graphic>%s</w:drawing></w:r>", fp ? "<wp:cNvGraphicFramePr/>" : "", x->docpr, name, m + 1, crop, cx, cy,
               fp ? "</wp:anchor>" : "</wp:inline>");
 }
 
@@ -1886,6 +1896,26 @@ static void dx_comment_bounds(dxo* x, pd_block_id p) {
 
 /* one run of text, inside w:ins or w:del when it is a tracked change */
 /* the w:ins or w:del a tracked change's runs go in, opened: its kind (PD_REV_*), 0 when it is none */
+/* a change said where it applies, as an empty w:ins or w:del (a paragraph mark's, a row's) or, given el, the
+   opening of that element (w:pPrChange), each with its author and date */
+static void dx_rev_mark(dxo* x, pd_rev_id rev, const char* el) {
+    pd_revision rv;
+
+    if (!rev || pd_doc_revision_get(x->d, rev, &rv) != PD_OK) {
+        return;
+    }
+
+    pb_printf(x->o, "<w:%s w:id=\"%d\" w:author=\"", el ? el : rv.kind == PD_REV_DELETE ? "del" : "ins", ++x->nrev);
+    xesc(x->o, rv.author, strlen(rv.author));
+
+    if (rv.date[0]) {
+        pb_puts(x->o, "\" w:date=\"");
+        xesc(x->o, rv.date, strlen(rv.date));
+    }
+
+    pb_puts(x->o, el ? "\">" : "\"/>");
+}
+
 /* a tracked insertion or deletion opened round runs: its kind, 8 more for a move (moveFrom, moveTo, in a range
    of the move's name), 0 none (a formatting change is in the run's rPr) */
 static int dx_rev_open(dxo* x, pd_rev_id rev) {
@@ -2683,8 +2713,34 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
         dx_ppr_tail(o, &dp, dp.mask, x->hyph_auto, &sp);
     }
 
+    {
+        /* its mark inserted or deleted */
+        pd_para_attrs pat;
+
+        if (pd_doc_para_attrs(x->d, p, &pat) == PD_OK && pat.mark_rev) {
+            pb_puts(o, "<w:rPr>");
+            dx_rev_mark(x, pat.mark_rev, NULL);
+            pb_puts(o, "</w:rPr>");
+        }
+    }
+
     if (extra_ppr) {
         pb_puts(o, extra_ppr);
+    }
+
+    {
+        /* its properties changed: what they were */
+        pd_para_attrs pat;
+        pd_revision rv;
+
+        if (pd_doc_para_attrs(x->d, p, &pat) == PD_OK && pat.format_rev &&
+                pd_doc_revision_get(x->d, pat.format_rev, &rv) == PD_OK && rv.kind == PD_REV_FORMAT) {
+            dx_rev_mark(x, pat.format_rev, "pPrChange");
+            pb_puts(o, "<w:pPr>");
+            dx_ppr_head(o, &rv.old_para, rv.old_para.mask);
+            dx_ppr_tail(o, &rv.old_para, rv.old_para.mask, x->hyph_auto, NULL);
+            pb_puts(o, "</w:pPr></w:pPrChange>");
+        }
     }
 
     pb_puts(o, "</w:pPr>");
@@ -2940,7 +2996,8 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
                 minh = rp.height;
             }
 
-            if (minh > 0 || r < tp.header_rows || rp.grid_before || rp.grid_after || rp.split == PD_ROWSPLIT_NEVER) {
+            if (minh > 0 || r < tp.header_rows || rp.grid_before || rp.grid_after || rp.split == PD_ROWSPLIT_NEVER ||
+                    rp.revision) {
                 pb_puts(o, "<w:trPr>");
 
                 if (rp.grid_before) {
@@ -2969,6 +3026,10 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
                 if (r < tp.header_rows) {
                     pb_puts(o, "<w:tblHeader/>");
+                }
+
+                if (rp.revision) {  /* the row inserted or deleted */
+                    dx_rev_mark(x, rp.revision, NULL);
                 }
 
                 pb_puts(o, "</w:trPr>");
@@ -3655,6 +3716,10 @@ static void dx_rpr_set(pd_buf* o, const pd_char_props* c) {
 
     if (m & PD_CP_LETTERSPACE) {
         pb_printf(o, "<w:spacing w:val=\"%d\"/>", TW(c->letter_space));
+    }
+
+    if ((m & PD_CP_HSCALE) && c->hscale > 0) {
+        pb_printf(o, "<w:w w:val=\"%d\"/>", (int)(c->hscale + 5) / 10);
     }
 
     if (m & PD_CP_KERNING) {
@@ -5754,6 +5819,8 @@ typedef struct {
     struct {                    /* bookmarks read: where they are */
         char name[32];
         pd_block_id para;
+        int wid;                /* its w:id, which its bookmarkEnd names */
+        pd_marker_id m0, m1;    /* where its text starts and ends (REF fields show it) */
     } bm[4096];
     int nbm;
     struct {                    /* fields that point at a bookmark, put right once all are read */
@@ -6186,6 +6253,11 @@ static void rpr_elem(const dxi* X, const pd_markup* m, const char* t, pd_char_pr
     } else if (strcmp(t, "spacing") == 0) {         /* between letters, in twips */
         cp->mask |= PD_CP_LETTERSPACE;
         cp->letter_space = twips(attr_int(m, "w:val", 0));
+    } else if (strcmp(t, "w") == 0) {               /* widened or narrowed, in per cent */
+        int pc = attr_int(m, "w:val", 100);
+
+        cp->mask |= PD_CP_HSCALE;
+        cp->hscale = pc < 1 ? 1000 : pc > 600 ? 6000 : pc * 10;
     } else if (strcmp(t, "position") == 0) {        /* raised or lowered, in half-points */
         cp->mask |= PD_CP_POSITION;
         cp->position = (pd_sp)((int64_t)attr_int(m, "w:val", 0) * 65536 / 2);
@@ -6488,6 +6560,7 @@ static void pr_over(dprops* d, const dprops* s) {
     if (sc->mask & PD_CP_CAPS) dc->caps = sc->caps;
     if (sc->mask & PD_CP_HIDDEN) dc->hidden = sc->hidden;
     if (sc->mask & PD_CP_LETTERSPACE) dc->letter_space = sc->letter_space;
+    if (sc->mask & PD_CP_HSCALE) dc->hscale = sc->hscale;
     if (sc->mask & PD_CP_POSITION) dc->position = sc->position;
     if (sc->mask & PD_CP_KERNING) dc->kerning = sc->kerning;
     if (sc->mask & PD_CP_LANG) memcpy(dc->lang, sc->lang, sizeof(dc->lang));
@@ -7357,11 +7430,16 @@ typedef struct {
     pd_char_props old_cp;
     char chg_author[64], chg_date[32];
     pd_rev_id fmt_rev;          /* the run's formatting change */
+    int in_pprchg;              /* in a paragraph's w:pPrChange: its old w:pPr */
+    dprops old_pr;
+    pd_rev_id mark_rev, para_fmt_rev, row_rev;  /* the paragraph mark's change, the paragraph's formatting's, the
+                                                   row's insertion or deletion */
     char move_name[32][40];     /* the moves' names (moveFromRangeStart, moveToRangeStart), numbered from 1 */
     int nmove, move_cur;
     int link_depth[16], nlinks;
     /* drawings */
     char blip[64];
+    int32_t crop[4];            /* the picture's a:srcRect: l, t, r, b in 100000ths */
     long long cx, cy;
     int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
     int posh_page, posh_has_off;    /* its offset is from the page's edge; it has one */
@@ -7386,6 +7464,7 @@ typedef struct {
         const char* tbx;        /* a text box: its w:txbxContent, read into the float */
         size_t tbn;
         char* own;              /* tbx made here (WordArt's text as a paragraph), freed once read */
+        int32_t crop[4];        /* a picture's crop */
         pd_rev_id rev;          /* inserted or deleted with its anchor */
         int wrap_mode;          /* PD_WRAPSIDE_* */
         int npoly;              /* its wrap polygon (wrapTight, wrapThrough), points in 21600ths of its box */
@@ -7471,6 +7550,7 @@ static void dw_apply_run(dw* w) {
     DW_DIFF(PD_CP_CAPS, caps)
     DW_DIFF(PD_CP_HIDDEN, hidden)
     DW_DIFF(PD_CP_LETTERSPACE, letter_space)
+    DW_DIFF(PD_CP_HSCALE, hscale)
     DW_DIFF(PD_CP_POSITION, position)
     DW_DIFF(PD_CP_KERNING, kerning)
     DW_DIFF(PD_CP_SIZE_CS, size_cs)
@@ -7620,8 +7700,11 @@ static void dw_row_begin(dw* w) {
     bld_row_begin(b, w->row_header);
     w->pend_row = 0;
 
+    w->row_pr.revision = w->row_rev;
+
     if (b->ntables >= 1 && b->ntables <= 8 && b->table[b->ntables - 1] && (w->row_pr.grid_before ||
-            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after || w->row_pr.height_exact || w->row_pr.split)) {
+            w->row_pr.grid_after || w->row_pr.width_before || w->row_pr.width_after || w->row_pr.height_exact || w->row_pr.split ||
+            w->row_pr.revision)) {
         pd_doc_set_row_props(b->d, b->row[b->ntables - 1], &w->row_pr);
     }
 }
@@ -8017,6 +8100,7 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid, const
         SAME_C(PD_CP_CAPS, caps)
         SAME_C(PD_CP_HIDDEN, hidden)
         SAME_C(PD_CP_LETTERSPACE, letter_space)
+        SAME_C(PD_CP_HSCALE, hscale)
         SAME_C(PD_CP_POSITION, position)
         SAME_C(PD_CP_KERNING, kerning)
         SAME_C(PD_CP_SIZE_CS, size_cs)
@@ -8771,6 +8855,7 @@ static void dw_floats(dw* w) {
         memset(&o, 0, sizeof(o));
         o.kind = PD_INLINE_IMAGE;
         o.resource = w->pend_fl[k].res;
+        memcpy(o.crop, w->pend_fl[k].crop, sizeof(o.crop));
         o.width = w->pend_fl[k].w;
         o.height = w->pend_fl[k].h;
         bld_begin_para(b);
@@ -11553,6 +11638,10 @@ static void dw_image(dw* w) {
         return;
     }
 
+    if (!w->drawing_res) {
+        memcpy(o.crop, w->crop, sizeof(o.crop));
+    }
+
     if (!w->anchor) {
         dw_begin_para(w);
         dw_apply_run(w);    /* its run's format, not the one before it */
@@ -11561,6 +11650,7 @@ static void dw_image(dw* w) {
         int k = w->npend_fl - 1;
 
         w->pend_fl[k].res = o.resource;
+        memcpy(w->pend_fl[k].crop, o.crop, sizeof(o.crop));
         w->pend_fl[k].w = o.width;
         w->pend_fl[k].h = o.height;
         w->pend_fl[k].gap = (pd_sp)(w->dist * 65536 / 12700);
@@ -12058,6 +12148,150 @@ static void dw_fld_end(dw* w) {
 
     if (w->fs[k].kept) {
         dw_kept_end(w);
+    }
+}
+
+static pd_pos at_pos(pd_block_id b, uint32_t off) {
+    pd_pos q;
+
+    q.block = b;
+    q.offset = off;
+    return q;
+}
+
+/* A REF field shows its bookmark's text, not the text Word last put there: the result of each kept REF (the text
+   between its start and its end, inside the link \h makes) is the bookmarked text of that paragraph, its
+   objects left out, in the result's own format. A bookmark not found, empty, or holding a value only layout
+   knows (a field, a note's number) leaves Word's. */
+static void dx_ref_results(dxi* X, pd_doc* d) {
+    pd_block_id p;
+    int k;
+
+    for (p = pd_doc_next_paragraph(d, 0); p; p = pd_doc_next_paragraph(d, p)) {
+        const char* t;
+        uint32_t n, i;
+
+        if (pd_doc_para_text(d, p, &t, &n) != PD_OK) {
+            continue;
+        }
+
+        for (i = 0; i + 3 <= n; i++) {
+            pd_inline o, e;
+            char name[64], want[512];
+            uint32_t a, z, j, wn = 0;
+            const char* s;
+            pd_pos m0, m1;
+            pd_range r;
+
+            if (memcmp(t + i, "\xEF\xBF\xBC", 3) || pd_doc_inline_at(d, at_pos(p, i), &o) != PD_OK ||
+                    o.kind != PD_INLINE_FIELD || o.field != PD_FIELD_KEPT || o.source_len <= 4) {
+                continue;
+            }
+
+            snprintf(want, sizeof(want), "%.*s", o.source_len, o.source);
+            s = want + strspn(want, " ");
+
+            if (strncmp(s, "REF ", 4) || strstr(want, FLD_IN)) {
+                continue;
+            }
+
+            field_arg(want, name, sizeof(name));
+
+            for (k = 0; k < X->nbm && strcmp(X->bm[k].name, name); k++) {
+            }
+
+            if (k == X->nbm || !X->bm[k].m0 || pd_doc_marker_get(d, X->bm[k].m0, &m0) != PD_OK) {
+                continue;
+            }
+
+            /* the result: after the start (and a link opening it), up to the end (and the link closing it) */
+            a = i + 3;
+
+            if (a + 3 <= n && !memcmp(t + a, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at_pos(p, a), &e) == PD_OK &&
+                    e.kind == PD_INLINE_LINK) {
+                a += 3;
+            }
+
+            for (z = a; z + 3 <= n; z++) {
+                if (!memcmp(t + z, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at_pos(p, z), &e) == PD_OK &&
+                        ((e.kind == PD_INLINE_FIELD && e.field == PD_FIELD_KEPT) || e.kind == PD_INLINE_LINK)) {
+                    break;
+                }
+            }
+
+            if (z + 3 > n) {
+                continue;
+            }
+
+            {
+                /* the bookmarked text: to its end, or its paragraph's end */
+                const char* bt;
+                uint32_t bn, end;
+
+                if (pd_doc_para_text(d, m0.block, &bt, &bn) != PD_OK) {
+                    continue;
+                }
+
+                end = X->bm[k].m1 && pd_doc_marker_get(d, X->bm[k].m1, &m1) == PD_OK && m1.block == m0.block ? m1.offset :
+                      bn;
+
+                for (j = m0.offset; j < end && j < bn && wn + 1 < sizeof(want); j++) {
+                    pd_inline bo;
+
+                    if (j + 3 <= bn && !memcmp(bt + j, "\xEF\xBF\xBC", 3)) {
+                        if (pd_doc_inline_at(d, at_pos(m0.block, j), &bo) == PD_OK && (bo.kind == PD_INLINE_FIELD ||
+                                bo.kind == PD_INLINE_EQUATION || bo.kind == PD_INLINE_FOOTNOTE)) {
+                            wn = 0;     /* a value only layout knows (a caption's number): Word's text stays */
+                            break;
+                        }
+
+                        j += 2;
+                    } else {
+                        want[wn++] = bt[j];
+                    }
+                }
+
+                want[wn] = '\0';
+            }
+
+            if (!wn || (z - a == wn && !memcmp(t + a, want, wn))) {
+                continue;
+            }
+
+            r.start = at_pos(p, a);
+            r.end = at_pos(p, z);
+
+            if (z > a) {    /* the new text in the old's format */
+                pd_format_id f = 0;
+                int32_t nr = 0, q;
+                pd_run* all;
+
+                pd_doc_para_runs(d, p, NULL, 0, &nr);
+                all = (pd_run*)malloc(((size_t)nr + 1) * sizeof(pd_run));
+
+                if (all && pd_doc_para_runs(d, p, all, nr, &nr) == PD_OK) {
+                    for (q = 0; q < nr; q++) {
+                        if (all[q].start <= a && a < all[q].end) {
+                            f = all[q].format;
+                        }
+                    }
+                }
+
+                free(all);
+
+                if (pd_doc_delete(d, r, NULL) == PD_OK) {
+                    pd_doc_insert_text(d, r.start, want, wn, f, NULL);
+                }
+            } else {
+                pd_doc_insert_text(d, r.start, want, wn, PD_FORMAT_INHERIT, NULL);
+            }
+
+            if (pd_doc_para_text(d, p, &t, &n) != PD_OK) {
+                break;
+            }
+
+            i = a + wn - 1;
+        }
     }
 }
 
@@ -12899,6 +13133,58 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
+        if (open && strcmp(t, "pPrChange") == 0 && w->in_ppr && !w->in_mrpr && !w->in_pprchg) {
+            /* the paragraph's properties changed: what it had, in the w:pPr inside */
+            w->in_pprchg = m.type == MT_OPEN;
+            memset(&w->old_pr, 0, sizeof(w->old_pr));
+            w->chg_author[0] = w->chg_date[0] = '\0';
+            mu_attr(&m, "w:author", w->chg_author, sizeof(w->chg_author));
+            mu_attr(&m, "w:date", w->chg_date, sizeof(w->chg_date));
+            continue;
+        }
+
+        if (w->in_pprchg) {
+            if (m.type == MT_CLOSE && strcmp(t, "pPrChange") == 0) {
+                pd_revision rv;
+
+                memset(&rv, 0, sizeof(rv));
+                rv.kind = PD_REV_FORMAT;
+                memcpy(rv.author, w->chg_author, sizeof(rv.author));
+                memcpy(rv.date, w->chg_date, sizeof(rv.date));
+                rv.old_para = w->old_pr.pp;
+                rv.old_para.mask &= ~PD_PP_NEXT_STYLE;
+                w->in_pprchg = 0;
+
+                if (pd_doc_revision_add(X->b->d, &rv, &w->para_fmt_rev) != PD_OK) {
+                    w->para_fmt_rev = 0;
+                }
+            } else if (open && strcmp(t, "pPr") != 0) {
+                ppr_elem(X, &m, t, &w->old_pr);
+            }
+
+            continue;
+        }
+
+        if (open && (w->in_mrpr || w->in_trpr) && (!strcmp(t, "ins") || !strcmp(t, "del") || !strcmp(t, "moveTo") ||
+                !strcmp(t, "moveFrom"))) {
+            pd_revision rv;     /* the paragraph mark, or the row, inserted or deleted */
+
+            memset(&rv, 0, sizeof(rv));
+            rv.kind = t[0] == 'd' || !strcmp(t, "moveFrom") ? PD_REV_DELETE : PD_REV_INSERT;
+            mu_attr(&m, "w:author", rv.author, sizeof(rv.author));
+            mu_attr(&m, "w:date", rv.date, sizeof(rv.date));
+
+            if (pd_doc_revision_add(X->b->d, &rv, w->in_mrpr ? &w->mark_rev : &w->row_rev) != PD_OK) {
+                *(w->in_mrpr ? &w->mark_rev : &w->row_rev) = 0;
+            }
+
+            if (m.type == MT_OPEN) {
+                w->skip = 1;
+            }
+
+            continue;
+        }
+
         if (open && (!strcmp(t, "moveFromRangeStart") || !strcmp(t, "moveToRangeStart"))) {
             int k;      /* a move's two ends share its name: their revisions its number */
 
@@ -12975,6 +13261,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->ilvl = 0;
                 memset(&w->ppr, 0, sizeof(w->ppr));
                 memset(&w->frm, 0, sizeof(w->frm));
+                w->mark_rev = w->para_fmt_rev = 0;
                 memset(&w->mcp, 0, sizeof(w->mcp));
                 w->mstyle[0] = '\0';
                 w->in_mrpr = 0;
@@ -13188,7 +13475,19 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
                 if (X->nbm < 4096) {
                     snprintf(X->bm[X->nbm].name, sizeof(X->bm[0].name), "%.31s", v);
+                    X->bm[X->nbm].wid = attr_int(&m, "w:id", -1);
+                    X->bm[X->nbm].m0 = X->bm[X->nbm].m1 = 0;
+                    pd_doc_marker_new(X->b->d, bld_pos(X->b), PD_GRAVITY_LEFT, &X->bm[X->nbm].m0);
                     X->bm[X->nbm++].para = X->b->para;
+                }
+            } else if (strcmp(t, "bookmarkEnd") == 0 && w->in_p && w->started) {
+                int id = attr_int(&m, "w:id", -1), k;
+
+                for (k = X->nbm - 1; k >= 0 && X->bm[k].wid != id; k--) {
+                }
+
+                if (k >= 0 && !X->bm[k].m1) {
+                    pd_doc_marker_new(X->b->d, bld_pos(X->b), PD_GRAVITY_LEFT, &X->bm[k].m1);
                 }
             } else if (strcmp(t, "noBreakHyphen") == 0) {
                 dw_text(w, "\xE2\x80\x91", 3);
@@ -13216,6 +13515,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->tbx = NULL;
                 w->tbn = 0;
                 w->dist = 0;
+                memset(w->crop, 0, sizeof(w->crop));
             } else if ((strcmp(t, "object") == 0 || strcmp(t, "pict") == 0) && m.type == MT_OPEN && !w->in_drawing) {
                 /* VML: an OLE object's preview picture (an equation, a chart), or an old-style picture */
                 w->in_vml = 1;
@@ -13312,6 +13612,15 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 }
             } else if (w->in_drawing && strcmp(t, "blip") == 0) {
                 mu_attr(&m, "r:embed", w->blip, sizeof(w->blip));
+            } else if (w->in_drawing && strcmp(t, "srcRect") == 0) {   /* the picture cropped */
+                static const char* const side[4] = { "l", "t", "r", "b" };
+                int k;
+
+                for (k = 0; k < 4; k++) {
+                    int v4 = attr_int(&m, side[k], 0);
+
+                    w->crop[k] = v4 < -100000 ? -100000 : v4 > 99999 ? 99999 : v4;
+                }
             } else if (strcmp(t, "hyperlink") == 0) {
                 int ext = 0;
                 const char* url = mu_attr(&m, "r:id", v, sizeof(v)) ? rel_target(X, v, &ext) : NULL;
@@ -13501,6 +13810,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->row_header = 0;
                 memset(&w->row_pr, 0, sizeof(w->row_pr));
                 w->row_pr.split = PD_ROWSPLIT_ANY;  /* Word breaks a row where the page ends, unless told not to */
+                w->row_rev = 0;
 
                 if (w->ntab >= 1 && w->ntab <= 8) {
                     w->tabs[w->ntab - 1].row++;
@@ -13599,6 +13909,16 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
         /* closing tags */
         if (strcmp(t, "p") == 0 && w->in_p) {
             dw_begin_para(w);   /* an empty paragraph is still one */
+
+            if ((w->mark_rev || w->para_fmt_rev) && X->b->para) {  /* its mark's and its properties' changes */
+                pd_para_attrs at;
+
+                if (pd_doc_para_attrs(X->b->d, X->b->para, &at) == PD_OK) {
+                    at.mark_rev = w->mark_rev;
+                    at.format_rev = w->para_fmt_rev;
+                    pd_doc_set_para_attrs(X->b->d, X->b->para, &at);
+                }
+            }
 
             if (w->mcp.mask || w->mstyle[0]) {  /* sized by its mark */
                 pd_char_props keep = w->rcp;
@@ -14231,6 +14551,7 @@ pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all
             }
         }
 
+        dx_ref_results(&X, d);
         pd_doc_clear_undo(d);
     }
 

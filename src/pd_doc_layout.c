@@ -30,7 +30,7 @@ pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
         return PD_ERR_FORMAT;
     }
 
-    pd_doc_markup_props(d, cp);
+    pd_doc_markup_props(d, para, cp);
 
     f = resolve_font(d, cp);
 
@@ -46,6 +46,7 @@ pd_status pd_doc_run_style(const pd_doc* d, pd_block_id para, pd_format_id fmt, 
     st->text_case = cp->caps || cp->small_caps ? 1 : 0;
     st->letter_space = cp->letter_space;
     st->hidden = cp->hidden;
+    st->hscale = cp->hscale > 0 ? cp->hscale : 0;
     return PD_OK;
 }
 
@@ -359,6 +360,7 @@ static int script_style(const pd_doc* d, const pd_char_props* cp, const pd_style
     out->text_case = ps->text_case;
     out->letter_space = ps->letter_space;
     out->hidden = ps->hidden;
+    out->hscale = ps->hscale;
     out->hyph = ps->hyph;
     return 1;
 }

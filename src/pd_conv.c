@@ -1259,6 +1259,18 @@ static void copy_attrs(copier* C, pd_block_id sp, pd_block_id dp) {
 
         if (pd_doc_para_attrs(C->s, sp, &at) == PD_OK && (at.quote_depth || at.task || at.loose || at.lang[0] ||
                 at.cont || at.div_class[0])) {
+            pd_revision rv;     /* its changes as the revisions of the document pasted into */
+
+            if (!at.mark_rev || pd_doc_revision_get(C->s, at.mark_rev, &rv) != PD_OK ||
+                    pd_doc_revision_add(C->d, &rv, &at.mark_rev) != PD_OK) {
+                at.mark_rev = 0;
+            }
+
+            if (!at.format_rev || pd_doc_revision_get(C->s, at.format_rev, &rv) != PD_OK ||
+                    pd_doc_revision_add(C->d, &rv, &at.format_rev) != PD_OK) {
+                at.format_rev = 0;
+            }
+
             pd_doc_set_para_attrs(C->d, dp, &at);
         }
     }

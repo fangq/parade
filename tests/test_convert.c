@@ -7724,6 +7724,299 @@ static void test_docx_moves_formats(void) {
     pd_doc_free(d);
 }
 
+/* A REF field shows the bookmarked text, not Word's stale result, with its \h link; a bookmark holding a
+   caption's number keeps Word's (test_docx_fields). */
+static void test_docx_ref_text(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:bookmarkStart w:id=\"3\" w:name=\"intro\"/><w:r><w:t>Hello world</w:t></w:r>"
+                    "<w:bookmarkEnd w:id=\"3\"/><w:r><w:t xml:space=\"preserve\"> more</w:t></w:r></w:p>"
+                    "<w:p><w:r><w:t xml:space=\"preserve\">See </w:t></w:r>" FLD(" REF intro \\h ", "stale text")
+                    "<w:r><w:t>.</w:t></w:r></w:p></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        pd_block_id p;
+        const char* t;
+        uint32_t n, k;
+        int links = 0;
+        pd_inline o;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            break;
+        }
+
+        p = pd_doc_next_paragraph(d, pd_doc_next_paragraph(d, 0));
+        pd_doc_para_text(d, p, &t, &n);
+        CHECK(has_bytes(t, n, "Hello world") && !has_bytes(t, n, "stale"));
+
+        for (k = 0; k + 3 <= n; k++) {
+            if (!memcmp(t + k, "\xEF\xBF\xBC", 3) && pd_doc_inline_at(d, at(p, k), &o) == PD_OK) {
+                links += o.kind == PD_INLINE_LINK && o.source_len == 6 && !memcmp(o.source, "#intro", 6);
+            }
+        }
+
+        CHECK(links == 1);
+    }
+
+    pd_doc_free(d);
+}
+
+/* Word's character scale (w:w): a run at 200% is twice as wide, its glyphs drawn scaled (PDF Tz), and the scale
+   is written back and kept in Parade's format. */
+static void test_docx_char_scale(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>MM</w:t></w:r><w:r><w:rPr><w:w w:val=\"200\"/></w:rPr>"
+                    "<w:t>NN</w:t></w:r></w:p></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 3 && d; pass++) {
+        pd_layout* L = NULL;
+
+        CHECK(chars_at(d, pd_doc_next_paragraph(d, 0), 2).hscale == 2000);
+
+        if (have_layout_font()) {
+            pd_sp ml, mh, nl, nh;
+            pd_draw* it;
+            int32_t n = 0, k, scaled = 0;
+
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+            if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+                CHECK(glyph_span(L, 'M', &ml, &mh) && glyph_span(L, 'N', &nl, &nh));
+                /* N is 0.81 of M in this face: two Ns at 200% are 1.6 times two Ms, unscaled 0.8 */
+                CHECK(nh - nl > (mh - ml) * 3 / 2);
+                pd_layout_page_items(L, 0, NULL, 0, &n);
+                it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+                pd_layout_page_items(L, 0, it, n, &n);
+
+                for (k = 0; k < n; k++) {
+                    scaled += it[k].kind == PD_DRAW_GLYPH && it[k].text == 'N' && it[k].scale == 2 * 65536;
+                }
+
+                free(it);
+                CHECK(scaled == 2);
+            }
+
+            pd_layout_free(L);
+        }
+
+        if (pass == 0) {
+            buf_t b = { NULL, 0 };
+            char* xml;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            xml = docx_part(&b, "word/document.xml");
+            CHECK(strstr(xml, "<w:w w:val=\"200\"/>") != NULL);
+            free(xml);
+            free(b.p);
+            d = docx_again(d);
+        } else if (pass == 1) {
+            buf_t b = { NULL, 0 };
+            pd_doc* j = NULL;
+
+            CHECK(pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b) == PD_OK && pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = j;
+        }
+    }
+
+    pd_doc_free(d);
+}
+
+/* A plain picture cropped (a:srcRect, in the line or floating) is drawn cropped -- the whole picture larger,
+   clipped to its box -- and the crop is written back and kept in Parade's format. */
+static void test_docx_picture_crop(void) {
+    pd_doc* d = docx_doc(
+                    "word/_rels/document.xml.rels",
+                    "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+                    "</Relationships>",
+                    "word/media/image1.png", "tests/data/rgba.png",
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body><w:p>"
+                    "<w:r><w:drawing><wp:inline><wp:extent cx=\"1270000\" cy=\"635000\"/><a:graphic><a:graphicData><pic:pic>"
+                    "<pic:blipFill><a:blip r:embed=\"rId5\"/><a:srcRect l=\"25000\" t=\"10000\" r=\"25000\" b=\"10000\"/>"
+                    "<a:stretch><a:fillRect/></a:stretch></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline>"
+                    "</w:drawing></w:r></w:p></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 3 && d; pass++) {
+        pd_block_id p = pd_doc_next_paragraph(d, 0);
+        pd_inline o;
+
+        CHECK(pd_doc_inline_at(d, at(p, 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE && o.crop[0] == 25000 &&
+              o.crop[1] == 10000 && o.crop[2] == 25000 && o.crop[3] == 10000);
+
+        if (have_layout_font()) {   /* 100 x 50pt shown, of a picture drawn 200 x 62.5pt */
+            pd_layout* L = NULL;
+            pd_draw* it;
+            int32_t n = 0, k, found = 0;
+
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+            if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+                pd_layout_page_items(L, 0, NULL, 0, &n);
+                it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+                pd_layout_page_items(L, 0, it, n, &n);
+
+                for (k = 0; k < n; k++) {
+                    if (it[k].kind == PD_DRAW_IMAGE) {
+                        found = 1;
+                        CHECK(it[k].clip_w == PD_PT(100) && it[k].clip_h == PD_PT(50));
+                        CHECK(it[k].w == PD_PT(200) && it[k].h == PD_PT(62.5));
+                        CHECK(it[k].x == it[k].clip_x - PD_PT(50) && it[k].y == it[k].clip_y - PD_PT(6.25));
+                    }
+                }
+
+                free(it);
+            }
+
+            CHECK(found);
+            pd_layout_free(L);
+        }
+
+        if (pass == 0) {
+            buf_t b = { NULL, 0 };
+            char* xml;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            xml = docx_part(&b, "word/document.xml");
+            CHECK(strstr(xml, "<a:srcRect l=\"25000\" t=\"10000\" r=\"25000\" b=\"10000\"/>") != NULL);
+            free(xml);
+            free(b.p);
+            d = docx_again(d);
+        } else if (pass == 1) {
+            buf_t b = { NULL, 0 };
+            pd_doc* j = NULL;
+
+            CHECK(pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b) == PD_OK && pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = j;
+        }
+    }
+
+    pd_doc_free(d);
+}
+
+/* Changes of whole blocks: a paragraph's properties (pPrChange), its mark deleted (w:del in the mark's rPr) and a
+   table row deleted (w:del in trPr) are revisions of the paragraph and the row: listed for the margin, the row's
+   text shown as deleted text, written back, kept in Parade's format; rejected, the paragraph gets its old
+   properties and the row stays; accepted, the paragraph joins the next and the row goes. */
+static void test_docx_block_revisions(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:pPr><w:jc w:val=\"center\"/><w:rPr><w:del w:id=\"1\" w:author=\"Ed\"/></w:rPr>"
+                    "<w:pPrChange w:id=\"2\" w:author=\"Ed\"><w:pPr><w:jc w:val=\"right\"/></w:pPr></w:pPrChange></w:pPr>"
+                    "<w:r><w:t>One</w:t></w:r></w:p>"
+                    "<w:p><w:r><w:t>Two</w:t></w:r></w:p>"
+                    "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Kept</w:t></w:r></w:p></w:tc></w:tr>"
+                    "<w:tr><w:trPr><w:del w:id=\"3\" w:author=\"Ed\"/></w:trPr><w:tc><w:p><w:r><w:t>Zed</w:t></w:r></w:p></w:tc></w:tr>"
+                    "</w:tbl><w:p/></w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 3 && d; pass++) {
+        pd_block_id sec = pd_doc_child(d, pd_doc_root(d), 0), p1 = pd_doc_child(d, sec, 0), tbl = pd_doc_child(d, sec, 2);
+        pd_block_id row2 = pd_doc_child(d, tbl, 1);
+        pd_para_attrs pa;
+        pd_row_props rp;
+        pd_revision rv;
+        pd_block_info bi;
+
+        CHECK(pd_doc_para_attrs(d, p1, &pa) == PD_OK && pd_doc_revision_get(d, pa.mark_rev, &rv) == PD_OK &&
+              rv.kind == PD_REV_DELETE && !strcmp(rv.author, "Ed"));
+        CHECK(pd_doc_revision_get(d, pa.format_rev, &rv) == PD_OK && rv.kind == PD_REV_FORMAT &&
+              (rv.old_para.mask & PD_PP_ALIGN) && rv.old_para.align == PD_ALIGN_RIGHT);
+        CHECK(pd_doc_block_info(d, tbl, &bi) == PD_OK && bi.kind == PD_BLOCK_TABLE && bi.child_count == 2);
+        CHECK(pd_doc_row_props(d, row2, &rp) == PD_OK && pd_doc_revision_get(d, rp.revision, &rv) == PD_OK &&
+              rv.kind == PD_REV_DELETE);
+
+        if (have_layout_font()) {   /* listed for the margin; the row's text in the author's colour */
+            pd_layout* L = NULL;
+            pd_markup_item mk[16];
+            pd_draw* it;
+            int32_t n = 0, k, fmt = 0, dels = 0, zed = 0;
+
+            pd_doc_set_markup(d, PD_MARKUP_INLINE);
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+            if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+                    pd_layout_page_markup(L, 0, mk, 16, &n) == PD_OK) {
+                for (k = 0; k < n; k++) {
+                    fmt += mk[k].kind == PD_MARK_FORMAT && mk[k].range.start.block == p1;
+                    dels += mk[k].kind == PD_MARK_DELETION;
+                }
+
+                pd_layout_page_items(L, 0, NULL, 0, &n);
+                it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+                pd_layout_page_items(L, 0, it, n, &n);
+
+                for (k = 0; k < n; k++) {
+                    zed += it[k].kind == PD_DRAW_GLYPH && it[k].text == 'Z' && it[k].color == pd_doc_author_color(d, "Ed");
+                }
+
+                free(it);
+            }
+
+            CHECK(fmt == 1 && dels == 2 && zed == 1);
+            pd_layout_free(L);
+            pd_doc_set_markup(d, PD_MARKUP_BALLOONS);
+        }
+
+        if (pass == 0) {
+            buf_t b = { NULL, 0 };
+            char* xml;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            xml = docx_part(&b, "word/document.xml");
+            CHECK(strstr(xml, "<w:rPr><w:del ") && strstr(xml, "<w:pPrChange ") && strstr(xml, "<w:jc w:val=\"right\"/>"));
+            CHECK(strstr(xml, "<w:trPr><w:del ") != NULL);
+            free(xml);
+            free(b.p);
+            d = docx_again(d);
+        } else if (pass == 1) {
+            buf_t b = { NULL, 0 };
+            pd_doc* j = NULL;
+
+            CHECK(pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b) == PD_OK && pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = j;
+        } else {
+            pd_range r;
+            pd_para_props pp;
+            const char* t;
+            uint32_t tn;
+
+            r.start = at(p1, 0);
+            r.end = at(pd_doc_child(d, sec, 3), 0);
+            CHECK(pd_doc_revision_resolve(d, r, 0) == PD_OK);    /* rejected */
+            CHECK(pd_doc_para_resolve(d, p1, &pp) == PD_OK && pp.align == PD_ALIGN_RIGHT);
+            CHECK(pd_doc_para_attrs(d, p1, &pa) == PD_OK && !pa.mark_rev && !pa.format_rev);
+            CHECK(pd_doc_block_info(d, tbl, &bi) == PD_OK && bi.child_count == 2);
+            CHECK(pd_doc_row_props(d, row2, &rp) == PD_OK && !rp.revision);
+            CHECK(pd_doc_undo(d) == PD_OK);
+            CHECK(pd_doc_revision_resolve(d, r, 1) == PD_OK);    /* accepted */
+            pd_doc_para_text(d, p1, &t, &tn);
+            CHECK(tn == 6 && !memcmp(t, "OneTwo", 6));
+            CHECK(pd_doc_para_resolve(d, p1, &pp) == PD_OK && pp.align == PD_ALIGN_CENTER);
+            CHECK(pd_doc_block_info(d, tbl, &bi) == PD_OK && bi.child_count == 1);
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 /* the structure of the equations (m:oMath) in XML, one after another: each m: element's name and its children in
    brackets, properties (m:...Pr) left out but for a run's style and script, and the runs' text */
 static void omml_shape(const char* x, char* out, size_t cap) {
@@ -9722,6 +10015,10 @@ int main(void) {
     test_comment_balloons();
     test_docx_moves_formats();
     test_docx_omml_roundtrip();
+    test_docx_ref_text();
+    test_docx_char_scale();
+    test_docx_picture_crop();
+    test_docx_block_revisions();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

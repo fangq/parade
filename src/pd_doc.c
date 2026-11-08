@@ -141,6 +141,10 @@ void pd_doc_cp_normalize(pd_char_props* cp) {
         z.letter_space = cp->letter_space;
     }
 
+    if (m & PD_CP_HSCALE) {
+        z.hscale = cp->hscale;
+    }
+
     if (m & PD_CP_KERNING) {
         z.kerning = cp->kerning;
     }
@@ -301,6 +305,10 @@ static void cp_apply(pd_char_props* dst, const pd_char_props* src) {
 
     if (m & PD_CP_LETTERSPACE) {
         dst->letter_space = src->letter_space;
+    }
+
+    if (m & PD_CP_HSCALE) {
+        dst->hscale = src->hscale;
     }
 
     if (m & PD_CP_KERNING) {
@@ -4003,7 +4011,8 @@ pd_status pd_doc_set_row_props(pd_doc* d, pd_block_id id, const pd_row_props* rp
     BLOCK_OP("Row", b && b->kind == PD_BLOCK_ROW && rp && rp->grid_before >= 0 &&
              rp->grid_before < PD_TABLE_MAX_GRID && rp->grid_after >= 0 && rp->grid_after < PD_TABLE_MAX_GRID &&
              rp->width_before >= 0 && rp->width_after >= 0 && rp->height >= 0 && rp->height_exact >= 0 &&
-             rp->height_exact <= 1 && rp->split >= PD_ROWSPLIT_TALL && rp->split <= PD_ROWSPLIT_ANY, b->st.row = *rp);
+             rp->height_exact <= 1 && rp->split >= PD_ROWSPLIT_TALL && rp->split <= PD_ROWSPLIT_ANY &&
+             (int32_t)rp->revision <= d->nrevs, b->st.row = *rp);
 }
 
 pd_status pd_doc_set_break(pd_doc* d, pd_block_id id, pd_break_kind kind) {
@@ -4482,6 +4491,7 @@ pd_status pd_doc_set_para_attrs(pd_doc* d, pd_block_id para, const pd_para_attrs
 
     BLOCK_OP("Paragraph attributes", b && at && a.quote_depth >= 0 && a.quote_depth <= 9 && a.task >= 0 &&
              a.task <= 2 && (a.loose == 0 || a.loose == 1) && (a.cont == 0 || a.cont == 1) &&
+             (int32_t)a.mark_rev <= d->nrevs && (int32_t)a.format_rev <= d->nrevs &&
              pd_doc_utf8_valid(a.lang, strlen(a.lang), 0) && pd_doc_utf8_valid(a.div_class, strlen(a.div_class), 0),
              b->st.at = a);
 }
@@ -4901,6 +4911,8 @@ pd_status pd_doc_revision_add(pd_doc* d, const pd_revision* rev, pd_rev_id* out)
         cp_apply(&r.old, &rev->old);
         r.old.mask &= ~PD_CP_REVISION;
         r.old.revision = 0;
+        r.old_para.mask = rev->old_para.mask;
+        pp_apply(&r.old_para, &rev->old_para);
     }
 
     memcpy(r.author, rev->author, sizeof(r.author) - 1);
@@ -4915,7 +4927,8 @@ pd_status pd_doc_revision_add(pd_doc* d, const pd_revision* rev, pd_rev_id* out)
 
     for (i = 0; i < d->nrevs; i++) {
         if (d->revs[i].kind == r.kind && !strcmp(d->revs[i].author, r.author) && !strcmp(d->revs[i].date, r.date) &&
-                d->revs[i].move == r.move && !memcmp(&d->revs[i].old, &r.old, sizeof(r.old))) {
+                d->revs[i].move == r.move && !memcmp(&d->revs[i].old, &r.old, sizeof(r.old)) &&
+                !memcmp(&d->revs[i].old_para, &r.old_para, sizeof(r.old_para))) {
             *out = (pd_rev_id)(i + 1);
             return PD_OK;
         }
@@ -5040,9 +5053,19 @@ int32_t pd_doc_markup(const pd_doc* d) {
     return d ? d->markup : 0;
 }
 
-void pd_doc_markup_props(const pd_doc* d, pd_char_props* cp) {
+void pd_doc_markup_props(const pd_doc* d, pd_block_id para, pd_char_props* cp) {
     const pd_revision* r = cp->revision ? rev_of(d, cp->revision) : NULL;
     int ins;
+
+    if (!r || r->kind == PD_REV_FORMAT) {  /* in a row inserted or deleted: as its text were */
+        const blk* b = para && para <= d->captab ? d->tab[para] : NULL;
+        const blk* c = b && b->parent ? d->tab[b->parent] : NULL;
+        const blk* w = c && c->kind == PD_BLOCK_CELL && c->parent ? d->tab[c->parent] : NULL;
+
+        if (w && w->kind == PD_BLOCK_ROW && w->st.row.revision) {
+            r = rev_of(d, w->st.row.revision);
+        }
+    }
 
     if (!r) {
         return;
@@ -5244,14 +5267,104 @@ static pd_status track_delete(pd_doc* d, pd_range r, pd_pos* after) {
     return for_revisions(d, r, "Delete", act_track, NULL, del, 0);
 }
 
+/* The changes of whole blocks in a range: a paragraph's formatting (rejected: its old properties back), its
+   mark (an insertion rejected or a deletion accepted joins it with the next paragraph), the row it is in (a
+   deletion accepted or an insertion rejected removes the row). Done last first, so ids stay good. */
+static pd_status resolve_blocks(pd_doc* d, pd_range r, int accept) {
+    pd_block_id* ps = NULL, cur;
+    int32_t n = 0, cap = 0, i;
+    pd_status st = PD_OK;
+
+    for (cur = r.start.block; cur; cur = cur == r.end.block ? 0 : step_para(d, cur, 1)) {
+        if (grow((void**)&ps, &cap, (int64_t)n + 1, sizeof(pd_block_id))) {
+            free(ps);
+            return PD_ERR_NOMEM;
+        }
+
+        ps[n++] = cur;
+    }
+
+    for (i = n - 1; i >= 0 && st == PD_OK; i--) {
+        blk* b = para_of(d, ps[i]);
+        blk* row;
+        pd_para_attrs at;
+        const pd_revision* rv;
+
+        if (!b) {
+            continue;
+        }
+
+        at = b->st.at;
+
+        if (at.format_rev && (rv = rev_of(d, at.format_rev)) != NULL && !accept) {
+            st = pd_doc_set_para_props(d, b->id, &rv->old_para);
+        }
+
+        if (at.mark_rev && (rv = rev_of(d, at.mark_rev)) != NULL && st == PD_OK) {
+            pd_block_id next = step_para(d, b->id, 1);
+            blk* nb = next ? para_of(d, next) : NULL;
+
+            at.format_rev = 0;
+            at.mark_rev = 0;
+            st = pd_doc_set_para_attrs(d, b->id, &at);
+
+            if (st == PD_OK && (rv->kind == PD_REV_DELETE) == (accept != 0) && nb && nb->parent == b->parent) {
+                pd_range j;     /* the mark goes: this paragraph and the next are one */
+
+                j.start.block = b->id;
+                j.start.offset = b->st.len;
+                j.end.block = next;
+                j.end.offset = 0;
+                st = pd_doc_delete(d, j, NULL);
+            }
+        } else if (at.format_rev && st == PD_OK) {
+            at.format_rev = 0;
+            st = pd_doc_set_para_attrs(d, b->id, &at);
+        }
+
+        /* the row it is in, from its first paragraph */
+        b = para_of(d, ps[i]);
+        row = b && b->parent ? d->tab[b->parent] : NULL;
+        row = row && row->kind == PD_BLOCK_CELL && row->parent ? d->tab[row->parent] : NULL;
+
+        if (st == PD_OK && row && row->kind == PD_BLOCK_ROW && row->st.row.revision &&
+                (rv = rev_of(d, row->st.row.revision)) != NULL) {
+            if ((rv->kind == PD_REV_DELETE) == (accept != 0) && pd_doc_remove_block(d, row->id) == PD_OK) {
+                /* gone (a table's only row stays, its change taken off) */
+            } else {
+                pd_row_props rp = row->st.row;
+
+                rp.revision = 0;
+                st = pd_doc_set_row_props(d, row->id, &rp);
+            }
+        }
+    }
+
+    free(ps);
+    return st;
+}
+
 pd_status pd_doc_revision_resolve(pd_doc* d, pd_range r, int32_t accept) {
     int a = accept != 0;
+    char track[64];
+    pd_status st;
 
     if (!d || !range_ok(d, r)) {
         return PD_ERR_ARG;
     }
 
-    return for_revisions(d, r, a ? "Accept changes" : "Reject changes", act_resolve, &a, 0, 1);
+    pd_doc_begin_group(d, a ? "Accept changes" : "Reject changes");
+    memcpy(track, d->track, sizeof(track));
+    d->track[0] = '\0';    /* joining paragraphs and taking rows away are not themselves tracked */
+    st = for_revisions(d, r, a ? "Accept changes" : "Reject changes", act_resolve, &a, 0, 1);
+
+    if (st == PD_OK && range_ok(d, r)) {
+        st = resolve_blocks(d, r, a);
+    }
+
+    memcpy(d->track, track, sizeof(track));
+    pd_doc_end_group(d);
+    return st;
 }
 
 pd_status pd_doc_revision_find(const pd_doc* d, pd_pos from, int32_t dir, pd_range* out, pd_rev_id* rev) {

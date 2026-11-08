@@ -298,11 +298,12 @@ int  pd_jd_get_block(pd_doc* d, const void* pj_node, int32_t kind, bstate* st);
 /* pd_doc_comment_add outside the undo history (loading) */
 pd_status pd_doc_comment_add_raw(pd_doc* d, const pd_comment* in, pd_comment_id* out);
 /* a resolved run's look under the document's markup mode: author colours, deletions hidden or struck */
-void pd_doc_markup_props(const pd_doc* d, pd_char_props* cp);
+/* how text of a paragraph shows in the markup mode: its revision's look, or that of the row it is in */
+void pd_doc_markup_props(const pd_doc* d, pd_block_id para, pd_char_props* cp);
 /* the style of the document's Normal text */
 pd_status pd_doc_default_style(const pd_doc* d, pd_style* st);
 
-#define PD_CP_ALL ((1u << 23) - 1)
+#define PD_CP_ALL ((1u << 24) - 1)
 #define PD_PP_ALL ((1u << 21) - 1)
 
 /* a picture's MIME type and pixel size from its first bytes (PNG, JPEG, GIF), NULL if none of those */

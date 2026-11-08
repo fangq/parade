@@ -2388,7 +2388,7 @@ static int all_hidden(const pd_doc* d, pd_block_id id, int depth) {
                 return 0;
             }
 
-            pd_doc_markup_props(d, &cp);
+            pd_doc_markup_props(d, b->id, &cp);
 
             if (!cp.hidden) {
                 return 0;
@@ -5158,7 +5158,7 @@ static pd_sp rule_reach(const pd_doc* d, const blk* b, const pd_glyph* g, int32_
             }
 
             if (pd_doc_format_resolve(d, b->id, f, &cp) == PD_OK) {
-                pd_doc_markup_props(d, &cp);
+                pd_doc_markup_props(d, b->id, &cp);
             }
 
             if (cp.hidden || !(which ? cp.strike : cp.underline)) {
@@ -6816,7 +6816,7 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
         if (g[i].style >= 0 && g[i].style != cached_style) {
             pd_para_get_style(l->pc->para, g[i].style, &ps);
             pd_doc_format_resolve(d, b->id, (pd_format_id)ps.user, &cp);
-            pd_doc_markup_props(d, &cp);
+            pd_doc_markup_props(d, b->id, &cp);
             cached_style = g[i].style;
         }
 
@@ -6844,8 +6844,24 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
                 pd_doc_image_size(d, &q->obj, &iw, &ih);
 
                 if (!emit_drawing(L, D, q->obj.resource, a.x, a.y, iw, ih, b->id, g[i].cluster, l->region)) {
+                    double cl = q->obj.crop[0] / 100000.0, ct = q->obj.crop[1] / 100000.0;
+                    double cr = q->obj.crop[2] / 100000.0, cb = q->obj.crop[3] / 100000.0;
+
                     a.kind = PD_DRAW_IMAGE;
                     a.resource = q->obj.resource;
+
+                    if ((cl || ct || cr || cb) && cl + cr < 0.999 && ct + cb < 0.999) {
+                        /* cropped: the whole picture, larger, shown only in its box */
+                        a.clip_x = a.x;
+                        a.clip_y = a.y;
+                        a.clip_w = a.w;
+                        a.clip_h = a.h;
+                        a.w = (pd_sp)(a.clip_w / (1 - cl - cr));
+                        a.h = (pd_sp)(a.clip_h / (1 - ct - cb));
+                        a.x -= (pd_sp)(cl * a.w);
+                        a.y -= (pd_sp)(ct * a.h);
+                    }
+
                     emit(D, &a);
                 }
             } else if (q->obj.kind == PD_INLINE_EQUATION && d->math_font && q->obj.source && q->obj.source_len > 0) {
@@ -7492,7 +7508,8 @@ static void emit_comments(const pd_layout* L, dlist_t* D, int32_t page) {
 
             memset(&rv, 0, sizeof(rv));
             pd_doc_revision_get(d, mk[i].id, &rv);
-            tn = (size_t)snprintf(t, sizeof(t), "%s%sFormatted", rv.author, rv.author[0] ? ": " : "");
+            tn = (size_t)snprintf(t, sizeof(t), "%s%sFormatted%s", rv.author, rv.author[0] ? ": " : "",
+                                  rv.old_para.mask ? ": paragraph" : "");
         } else {    /* the deleted text, objects left out */
             const blk* b = pd_doc_blk(d, mk[i].range.start.block);
             pd_revision rv;
@@ -7507,6 +7524,11 @@ static void emit_comments(const pd_layout* L, dlist_t* D, int32_t page) {
                 } else {
                     t[tn++] = b->st.text[o];
                 }
+            }
+
+            if (mk[i].range.start.offset == mk[i].range.end.offset && tn + 3 < sizeof(t)) {
+                memcpy(t + tn, "\xC2\xB6", 2);    /* a paragraph mark */
+                tn += 2;
             }
 
             t[tn] = '\0';
@@ -7905,6 +7927,33 @@ pd_status pd_layout_page_markup(const pd_layout* L, int32_t page, pd_markup_item
         for (cur = pi.first.block; cur && !M.err && !past; cur = cur == pi.last.block ? 0 : pd_doc_next_paragraph(d, cur)) {
             const blk* b = pd_doc_blk(d, cur);
             int32_t k = 0;
+
+            if (b) {    /* the paragraph's own changes, and its row's (from the row's first paragraph) */
+                const blk* c = b->parent ? pd_doc_blk(d, b->parent) : NULL;
+                const blk* w = c && c->kind == PD_BLOCK_CELL && c->parent ? pd_doc_blk(d, c->parent) : NULL;
+                pd_rev_id rr[3];
+                int q;
+
+                rr[0] = b->st.at.format_rev;
+                rr[1] = b->st.at.mark_rev;
+                rr[2] = w && w->kind == PD_BLOCK_ROW && w->nkids > 0 && c->id == w->kids[0] && c->nkids > 0 &&
+                        c->kids[0] == cur ? w->st.row.revision : 0;
+
+                for (q = 0; q < 3 && !past; q++) {
+                    pd_revision rv;
+                    pd_range r;
+
+                    if (!rr[q] || pd_doc_revision_get(d, rr[q], &rv) != PD_OK) {
+                        continue;
+                    }
+
+                    r.start.block = r.end.block = cur;
+                    r.start.offset = q == 1 ? b->st.len : 0;
+                    r.end.offset = b->st.len;
+                    past = mark_add(L, &M, page, rv.kind == PD_REV_DELETE ? PD_MARK_DELETION : rv.kind == PD_REV_FORMAT ?
+                                    PD_MARK_FORMAT : PD_MARK_INSERTION, rr[q], r, rv.author) > page;
+                }
+            }
 
             while (b && k < b->st.nruns) {
                 pd_style_id cs;

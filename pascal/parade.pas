@@ -144,6 +144,7 @@ const
   PD_CP_SIZE_CS = 1 shl 20;
   PD_CP_WEIGHT_CS = 1 shl 21;
   PD_CP_ITALIC_CS = 1 shl 22;
+  PD_CP_HSCALE = 1 shl 23;
   PD_REV_INSERT = 1;
   PD_REV_DELETE = 2;
   PD_REV_FORMAT = 3;
@@ -431,6 +432,7 @@ type
     text_case: Int32;
     letter_space: pd_sp;
     hidden: Int32;
+    hscale: Int32;            { glyphs widened or narrowed, per-mille; 0 = 1000 }
   end;
   Ppd_style = ^pd_style;
 
@@ -523,6 +525,7 @@ type
     color_theme: UInt32;      { pd_theme_color reference (with PD_CP_COLOR), 0 = none }
     background_theme: UInt32; { pd_theme_color reference (with PD_CP_BACKGROUND), 0 = none }
     font_theme: Int32;        { PD_FONT_THEME_* of the text's, East Asian, complex scripts' family (2 bits each) }
+    hscale: Int32;            { characters widened or narrowed, per-mille (Word's w:w); 0 = 1000 }
   end;
   Ppd_char_props = ^pd_char_props;
 
@@ -535,14 +538,6 @@ type
   end;
   Ppd_theme = ^pd_theme;
 
-  pd_revision = record
-    kind: Int32;
-    author: array[0..63] of AnsiChar;
-    date: array[0..31] of AnsiChar;
-    move: Int32;              { a moved text's number, its deletion and insertion; 0 not a move }
-    old: pd_char_props;       { PD_REV_FORMAT: the direct formatting it had }
-  end;
-  Ppd_revision = ^pd_revision;
 
   pd_comment = record
     author: array[0..63] of AnsiChar;
@@ -595,6 +590,16 @@ type
   end;
   Ppd_para_props = ^pd_para_props;
 
+  pd_revision = record
+    kind: Int32;
+    author: array[0..63] of AnsiChar;
+    date: array[0..31] of AnsiChar;
+    move: Int32;              { a moved text's number, its deletion and insertion; 0 not a move }
+    old: pd_char_props;       { PD_REV_FORMAT: the direct formatting it had }
+    old_para: pd_para_props;  { a paragraph's PD_REV_FORMAT: the properties it had }
+  end;
+  Ppd_revision = ^pd_revision;
+
   pd_list_level = record
     format, start: Int32;
     text: array[0..31] of AnsiChar;
@@ -627,6 +632,7 @@ type
     title_len: Int32;
     alt: PAnsiChar;           { images }
     alt_len: Int32;
+    crop: array[0..3] of Int32;   { images: cut off left, top, right, bottom, 100000ths }
   end;
   Ppd_inline = ^pd_inline;
 
@@ -635,6 +641,8 @@ type
     lang: array[0..31] of AnsiChar;
     cont: Int32;              { a later block of the list item above }
     div_class: array[0..31] of AnsiChar;   { a named block it is in: ::: name, <div class> }
+    mark_rev: pd_rev_id;      { its paragraph mark inserted or deleted }
+    format_rev: pd_rev_id;    { its properties changed: a PD_REV_FORMAT with old_para }
   end;
   Ppd_para_attrs = ^pd_para_attrs;
 
@@ -742,6 +750,7 @@ type
     height: pd_sp;                      { with height_exact: the row's height }
     height_exact: Int32;                { 1: exactly that tall, its cells' content cut off there }
     split: Int32;                       { PD_ROWSPLIT_* }
+    revision: pd_rev_id;                { the row inserted or deleted }
   end;
 
   { what a table style says of a part's cells (PD_TPART_*), and of their text }

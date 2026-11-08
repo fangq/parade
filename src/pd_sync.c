@@ -590,6 +590,7 @@ static void fmt_attrs(pd_sync* s, pd_format_id f, attrs* a, int* has_link) {
     AI(PD_CP_STRIKE, "s", strike)
     AI(PD_CP_SHIFT, "sh", shift)
     AI(PD_CP_LETTERSPACE, "ls", letter_space)
+    AI(PD_CP_HSCALE, "hs", hscale)
     AI(PD_CP_KERNING, "k", kerning)
     AI(PD_CP_SMALLCAPS, "sc", small_caps)
     AI(PD_CP_CAPS, "caps", caps)
@@ -710,6 +711,7 @@ static pd_format_id sig_fmt(pd_sync* s, int32_t sig) {
     AG(PD_CP_STRIKE, "s", strike, int32_t)
     AG(PD_CP_SHIFT, "sh", shift, int32_t)
     AG(PD_CP_LETTERSPACE, "ls", letter_space, pd_sp)
+    AG(PD_CP_HSCALE, "hs", hscale, int32_t)
     AG(PD_CP_KERNING, "k", kerning, int32_t)
     AG(PD_CP_SMALLCAPS, "sc", small_caps, int32_t)
     AG(PD_CP_CAPS, "caps", caps, int32_t)
@@ -947,6 +949,19 @@ static char* obj_json(pd_sync* s, const pd_inline* o, YTransaction* t) {
         pj_cstr(&w, k);
     }
 
+    if (o->crop[0] || o->crop[1] || o->crop[2] || o->crop[3]) {
+        int c;
+
+        pj_key(&w, "Crop");
+        pj_arr_begin(&w);
+
+        for (c = 0; c < 4; c++) {
+            pj_int(&w, o->crop[c]);
+        }
+
+        pj_arr_end(&w);
+    }
+
     if (o->name[0]) {
         pj_key(&w, "Name");
         pj_cstr(&w, o->name);
@@ -1002,6 +1017,13 @@ static int obj_parse(pd_sync* s, const YTransaction* t, const pj_node* r, pd_inl
 
     if ((x = pj_get(r, "Res")) != NULL && x->type == PJ_STR) {
         o->resource = res_local(s, t, x->s);
+    }
+
+    if ((x = pj_get(r, "Crop")) != NULL) {
+        for (k = 0; k < 4; k++) {
+            o->crop[k] = (int32_t)pj_int_or(pj_at(x, k), 0);
+            o->crop[k] = o->crop[k] < -100000 ? -100000 : o->crop[k] > 100000 ? 100000 : o->crop[k];
+        }
     }
 
     if ((x = pj_get(r, "Name")) != NULL && x->type == PJ_STR) {
@@ -1537,7 +1559,12 @@ static void props_apply(pd_sync* s, const YTransaction* t, blk* b, const char* j
             }
         }
 
-        if ((b = pd_doc_blk(d, id)) != NULL && memcmp(&at, &b->st.at, sizeof(at)) != 0) {
+        if ((b = pd_doc_blk(d, id)) != NULL) {     /* its tracked changes are not shared: this replica's stay */
+            at.mark_rev = b->st.at.mark_rev;
+            at.format_rev = b->st.at.format_rev;
+        }
+
+        if (b && memcmp(&at, &b->st.at, sizeof(at)) != 0) {
             pd_doc_set_para_attrs(d, id, &at);
         }
     } else if ((x = pj_get(r, "B")) != NULL) {
