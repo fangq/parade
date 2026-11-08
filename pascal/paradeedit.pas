@@ -2138,6 +2138,8 @@ begin
   { a layout of its own: the document as it lays out when opened, not the line breaks editing left }
   ParadeCheck(pd_layout_new(FDoc, Fresh), 'layout');
   try
+    if pd_doc_comment_count(FDoc) > 0 then   { as Word prints a document with comments: balloons beside the page }
+      pd_layout_set_comments(Fresh, PD_LAYOUT_COMMENTS_MARGIN);
     ParadeCheck(pd_layout_update(Fresh, nil), 'layout');
     Fs := TFileStream.Create(FileName, fmCreate);
     try
