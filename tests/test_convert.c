@@ -13,8 +13,12 @@
 #include "parade_layout.h"
 #include "../src/pd_conv.h"
 
+void pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap);  /* pd_doc_internal.h */
+
 static int failures = 0, checks = 0;
 
+#define CHECK_STR(got, want) do { checks++; if (strcmp((got), (want)) != 0) { failures++; \
+        fprintf(stderr, "%s:%d: got \"%s\", want \"%s\"\n", __FILE__, __LINE__, (got), (want)); } } while (0)
 #define CHECK(cond) do { checks++; if (!(cond)) { failures++; \
             fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); } } while (0)
 
@@ -5473,6 +5477,84 @@ static void test_md_more(void) {
     }
 }
 
+/* lists past the 64th abstractNum keep their numbering (a list using #70 was bullets), Word's other number
+   formats are counted in them (01, 1st, ten-one in CJK, Twenty-one), and they come back from Parade's .docx */
+static void test_docx_num_formats(void) {
+    static const char* fm[4] = { "decimalZero", "ordinal", "chineseCounting", "cardinalText" };
+    static const int st[4] = { 9, 1, 11, 21 };
+    char* num = (char*)malloc(80000), *doc = (char*)malloc(4000), buf[32];
+    size_t o = 0, q = 0;
+    int i, k, pass;
+    pd_doc* d, *t = NULL;
+    buf_t b = { 0 };
+
+    o += (size_t)sprintf(num + o, "<w:numbering xmlns:w=\"w\">");
+
+    for (i = 0; i < 74; i++) {  /* abstractNum 70..73 have the formats; the rest are bullets */
+        const char* f = i >= 70 ? fm[i - 70] : "bullet";
+
+        o += (size_t)sprintf(num + o, "<w:abstractNum w:abstractNumId=\"%d\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"%d\"/>"
+                             "<w:numFmt w:val=\"%s\"/><w:lvlText w:val=\"%s\"/></w:lvl></w:abstractNum>", i,
+                             i >= 70 ? st[i - 70] : 1, f, i >= 70 ? "%1)" : "o");
+    }
+
+    for (i = 0; i < 74; i++) {
+        o += (size_t)sprintf(num + o, "<w:num w:numId=\"%d\"><w:abstractNumId w:val=\"%d\"/></w:num>", i + 1, i);
+    }
+
+    sprintf(num + o, "</w:numbering>");
+    q += (size_t)sprintf(doc + q, "<w:document xmlns:w=\"w\"><w:body>");
+
+    for (i = 0; i < 4; i++) {
+        for (k = 0; k < 2; k++) {
+            q += (size_t)sprintf(doc + q, "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"%d\"/></w:numPr>"
+                                 "</w:pPr><w:r><w:t>x</w:t></w:r></w:p>", 71 + i);
+        }
+    }
+
+    sprintf(doc + q, "</w:body></w:document>");
+    d = docx_doc("word/numbering.xml", num, "word/document.xml", doc, NULL);
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 2; pass++) {
+        pd_doc* e = pass == 0 ? d : t;
+        static const char* want[8] = { "09)", "10)", "1st)", "2nd)", "\xE5\x8D\x81\xE4\xB8\x80)",
+                                       "\xE5\x8D\x81\xE4\xBA\x8C)", "Twenty-one)", "Twenty-two)"
+                                     };
+
+        if (!e) {
+            CHECK(0);
+            break;
+        }
+
+        for (i = 0; i < 8; i++) {
+            label_of(e, pd_doc_child(e, pd_doc_child(e, pd_doc_root(e), 0), i), buf);
+            CHECK_STR(buf, want[i]);
+        }
+
+        if (pass == 0) {    /* and once more through Parade's own .docx */
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &t) == PD_OK);
+        }
+    }
+
+    pd_doc_format_number(100, PD_NUM_CJK_COUNTING, buf, sizeof(buf));
+    CHECK_STR(buf, "\xE4\xB8\x80\xE7\x99\xBE");     /* one hundred */
+    pd_doc_format_number(105, PD_NUM_CJK_COUNTING, buf, sizeof(buf));
+    CHECK_STR(buf, "\xE4\xB8\x80\xE7\x99\xBE\xE9\x9B\xB6\xE4\xBA\x94");     /* one hundred zero five */
+    pd_doc_format_number(3, PD_NUM_CIRCLED, buf, sizeof(buf));
+    CHECK_STR(buf, "\xE2\x91\xA2");
+    pd_doc_format_number(12, PD_NUM_ORDINAL, buf, sizeof(buf));
+    CHECK_STR(buf, "12th");
+    pd_doc_format_number(30, PD_NUM_ORDINAL_TEXT, buf, sizeof(buf));
+    CHECK_STR(buf, "Thirtieth");
+    pd_doc_free(t);
+    pd_doc_free(d);
+    free(b.p);
+    free(num);
+    free(doc);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -5490,6 +5572,7 @@ int main(void) {
     test_docx_styles();
     printf("docx lists\n");
     test_docx_lists();
+    test_docx_num_formats();
     printf("docx headers and footers\n");
     test_docx_headers();
     printf("docx tables\n");

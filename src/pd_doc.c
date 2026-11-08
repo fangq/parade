@@ -1584,7 +1584,7 @@ pd_status pd_doc_list_define(pd_doc* d, int32_t n, const pd_list_level* lv, pd_l
     l->n = n;
 
     for (i = 0; i < n; i++) {
-        if (lv[i].format < PD_NUM_BULLET || lv[i].format > PD_NUM_NONE) {
+        if (lv[i].format < PD_NUM_BULLET || lv[i].format > PD_NUM_LAST) {
             return PD_ERR_ARG;
         }
 
@@ -1598,6 +1598,29 @@ pd_status pd_doc_list_define(pd_doc* d, int32_t n, const pd_list_level* lv, pd_l
     return PD_OK;
 }
 
+/* a character of the BMP at buf, terminated; its bytes, 0 when it does not fit */
+static size_t utf8_put(char* buf, size_t cap, uint32_t c) {
+    size_t n = c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
+
+    if (cap < n + 1) {
+        return 0;
+    }
+
+    if (n == 1) {
+        buf[0] = (char)c;
+    } else if (n == 2) {
+        buf[0] = (char)(0xC0 | (c >> 6));
+        buf[1] = (char)(0x80 | (c & 0x3F));
+    } else {
+        buf[0] = (char)(0xE0 | (c >> 12));
+        buf[1] = (char)(0x80 | ((c >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (c & 0x3F));
+    }
+
+    buf[n] = '\0';
+    return n;
+}
+
 void pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap) {
     static const char* rn[13] = { "m", "cm", "d", "cd", "c", "xc", "l", "xl", "x", "ix", "v", "iv", "i" };
     static const int32_t rv[13] = { 1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1 };
@@ -1606,8 +1629,108 @@ void pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap) {
 
     buf[0] = '\0';
 
+    if (cap < 1) {
+        return;
+    }
+
     if (fmt == PD_NUM_DECIMAL || v <= 0) {
         snprintf(buf, cap, "%d", (int)v);
+    } else if (fmt == PD_NUM_DECIMAL_ZERO) {
+        snprintf(buf, cap, "%02d", (int)v);
+    } else if (fmt == PD_NUM_ORDINAL) {
+        int t = (int)(v % 100), u = (int)(v % 10);
+
+        snprintf(buf, cap, "%d%s", (int)v, t >= 11 && t <= 13 ? "th" : u == 1 ? "st" : u == 2 ? "nd" :
+                 u == 3 ? "rd" : "th");
+    } else if (fmt == PD_NUM_CIRCLED && v <= 20) {
+        utf8_put(buf, cap, 0x2460 + (uint32_t)(v - 1));
+    } else if (fmt == PD_NUM_FULLWIDTH) {
+        char tmp[16];
+        const char* s;
+
+        snprintf(tmp, sizeof(tmp), "%d", (int)v);
+
+        for (s = tmp; *s && o + 4 <= cap; s++) {
+            o += utf8_put(buf + o, cap - o, 0xFF10 + (uint32_t)(*s - '0'));
+        }
+    } else if (fmt == PD_NUM_CJK_COUNTING && v < 100000) {
+        static const uint32_t dg[10] = { 0x96F6, 0x4E00, 0x4E8C, 0x4E09, 0x56DB, 0x4E94, 0x516D, 0x4E03, 0x516B,
+                                         0x4E5D
+                                       };
+        static const uint32_t un[5] = { 0, 0x5341, 0x767E, 0x5343, 0x4E07 };    /* ten, hundred, thousand, 10^4 */
+        int d[5], n, zero = 0;
+
+        for (n = 0; n < 5; n++) {
+            d[n] = (int)(v % 10);
+            v /= 10;
+        }
+
+        for (n = 4; n > 0 && d[n] == 0; n--) {
+        }
+
+        for (k = n; k >= 0; k--) {
+            if (d[k] == 0) {
+                zero = 1;
+                continue;
+            }
+
+            if (zero && o > 0) {
+                o += utf8_put(buf + o, cap - o, dg[0]);
+            }
+
+            zero = 0;
+
+            if (!(d[k] == 1 && k == 1 && n == 1)) {   /* ten, not one ten */
+                o += utf8_put(buf + o, cap - o, dg[d[k]]);
+            }
+
+            if (k > 0) {
+                o += utf8_put(buf + o, cap - o, un[k]);
+            }
+        }
+    } else if (fmt == PD_NUM_CJK_TRADITIONAL && v <= 10) {
+        static const uint32_t st[10] = { 0x7532, 0x4E59, 0x4E19, 0x4E01, 0x620A, 0x5DF1, 0x5E9A, 0x8F9B, 0x58EC,
+                                         0x7678
+                                       };
+
+        utf8_put(buf, cap, st[v - 1]);
+    } else if ((fmt == PD_NUM_CARDINAL_TEXT || fmt == PD_NUM_ORDINAL_TEXT) && v < 100) {
+        static const char* ones[20] = { "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight",
+                                        "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen",
+                                        "Sixteen", "Seventeen", "Eighteen", "Nineteen"
+                                      };
+        static const char* oth[20] = { "Zeroth", "First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh",
+                                       "Eighth", "Ninth", "Tenth", "Eleventh", "Twelfth", "Thirteenth",
+                                       "Fourteenth", "Fifteenth", "Sixteenth", "Seventeenth", "Eighteenth",
+                                       "Nineteenth"
+                                     };
+        static const char* tens[10] = { "", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty",
+                                        "Ninety"
+                                      };
+        static const char* tth[10] = { "", "", "Twentieth", "Thirtieth", "Fortieth", "Fiftieth", "Sixtieth",
+                                       "Seventieth", "Eightieth", "Ninetieth"
+                                     };
+        int ord = fmt == PD_NUM_ORDINAL_TEXT;
+
+        if (v < 20) {
+            snprintf(buf, cap, "%s", ord ? oth[v] : ones[v]);
+        } else if (v % 10 == 0) {
+            snprintf(buf, cap, "%s", ord ? tth[v / 10] : tens[v / 10]);
+        } else {    /* Word: Twenty-one, Twenty-first */
+            char lo[16];
+            size_t i;
+
+            snprintf(lo, sizeof(lo), "%s", ord ? oth[v % 10] : ones[v % 10]);
+
+            for (i = 0; lo[i]; i++) {
+                lo[i] = (char)(lo[i] >= 'A' && lo[i] <= 'Z' ? lo[i] + 32 : lo[i]);
+            }
+
+            snprintf(buf, cap, "%s-%s", tens[v / 10], lo);
+        }
+    } else if (fmt == PD_NUM_CIRCLED || fmt == PD_NUM_CJK_COUNTING || fmt == PD_NUM_CJK_TRADITIONAL ||
+               fmt == PD_NUM_CARDINAL_TEXT || fmt == PD_NUM_ORDINAL_TEXT) {
+        snprintf(buf, cap, "%d", (int)v);   /* past what the format has */
     } else if (fmt == PD_NUM_LOWER_ALPHA || fmt == PD_NUM_UPPER_ALPHA) {
         char tmp[16];
         int n = 0;

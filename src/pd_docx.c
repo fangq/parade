@@ -46,6 +46,9 @@ static int ext_is(const char* ext, const char* want) {
 /* zip                                                                */
 /* ------------------------------------------------------------------ */
 
+static const char* num_fmt_name(int32_t f);
+static int32_t num_fmt_of(const char* v);
+
 typedef struct {
     char name[128];
     uint32_t crc, csize, usize, offset;
@@ -364,9 +367,9 @@ typedef struct {
     int nlinks, nnotes, nendnotes;
     dmedia media[256];
     int nmedia, docpr;
-    pd_list_id listmap[64];     /* Parade list -> numId order */
+    pd_list_id listmap[2048];   /* Parade list -> numId order */
     int nlistmap;
-    int listkind[64];
+    int listkind[2048];
     pd_block_id hf[8];          /* header/footer stories written as parts */
     int hf_footer[8];
     int nhf;
@@ -2355,7 +2358,7 @@ static int dx_num_id(dxo* x, pd_block_id p, int32_t* level) {
         }
     }
 
-    if (x->nlistmap >= 64) {
+    if (x->nlistmap >= 2048) {
         return 0;
     }
 
@@ -2937,14 +2940,13 @@ static void dx_sectpr(dxo* x, const pd_section_props* sp, pd_buf* o) {
     }
 
     if (sp->first_page_number > 0 || sp->page_number_format != PD_NUM_DECIMAL) {
-        static const char* fmts[] = { "decimal", "decimal", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman",
-                                      "decimal"
-                                    };
+
 
         pb_puts(o, "<w:pgNumType");
 
-        if (sp->page_number_format != PD_NUM_DECIMAL && sp->page_number_format >= 0 && sp->page_number_format <= 6) {
-            pb_printf(o, " w:fmt=\"%s\"", fmts[sp->page_number_format]);
+        if (sp->page_number_format != PD_NUM_DECIMAL && sp->page_number_format > PD_NUM_BULLET &&
+                sp->page_number_format <= PD_NUM_LAST && sp->page_number_format != PD_NUM_NONE) {
+            pb_printf(o, " w:fmt=\"%s\"", num_fmt_name(sp->page_number_format));
         }
 
         if (sp->first_page_number > 0) {
@@ -3770,12 +3772,10 @@ static void dx_styles(dxo* x, pd_buf* o) {
     pb_puts(o, "</w:styles>");
 }
 
+
 /* one abstract numbering per list, from its own levels; one instance of it
    per list, so each counts on its own */
 static void dx_numbering(dxo* x, pd_buf* o) {
-    static const char* fmts[] = { "bullet", "decimal", "lowerLetter", "upperLetter", "lowerRoman", "upperRoman",
-                                  "none"
-                                };
     pd_list_level lv[9];
     int32_t nlv;
     int i, k;
@@ -3794,7 +3794,7 @@ static void dx_numbering(dxo* x, pd_buf* o) {
 
         for (k = 0; k < 9; k++) {
             pd_list_level L = lv[k < nlv ? k : nlv > 0 ? nlv - 1 : 0];
-            int f = L.format >= PD_NUM_BULLET && L.format <= PD_NUM_NONE ? L.format : PD_NUM_DECIMAL;
+            int f = L.format >= PD_NUM_BULLET && L.format <= PD_NUM_LAST ? L.format : PD_NUM_DECIMAL;
 
             if (k >= nlv) {     /* levels the list lacks: like its deepest, further in */
                 L.indent += PD_PT(18) * (k - (nlv > 0 ? nlv - 1 : 0));
@@ -3805,7 +3805,7 @@ static void dx_numbering(dxo* x, pd_buf* o) {
             }
 
             pb_printf(o, "<w:lvl w:ilvl=\"%d\"><w:start w:val=\"%d\"/><w:numFmt w:val=\"%s\"/>", k,
-                      (int)(L.start >= 0 ? L.start : 1), fmts[f]);
+                      (int)(L.start >= 0 ? L.start : 1), num_fmt_name(f));
 
             if (L.restart_after) {
                 pb_printf(o, "<w:lvlRestart w:val=\"%d\"/>", L.restart_after < 0 ? 0 : (int)L.restart_after);
@@ -4538,10 +4538,10 @@ typedef struct {
     int nstyles;
     dtstyle* tstyles;
     int ntstyles;
-    dnum nums[256];
-    int nnums;
-    dabs abss[64];
-    int nabs;
+    dnum* nums;                 /* numbering.xml's w:num, grown as read */
+    int nnums, cnums;
+    dabs* abss;                 /* and its w:abstractNum */
+    int nabs, cabs;
     char* notes_xml;            /* footnotes.xml */
     size_t notes_len;
     dnote* notes;
@@ -5702,6 +5702,69 @@ static void bullet_text(const char* v, char* out, size_t cap) {
     }
 }
 
+/* Word's w:numFmt as Parade's: the formats with a counterpart; others count in decimal */
+static int32_t num_fmt_of(const char* v) {
+    static const struct {
+        const char* w;
+        int32_t f;
+    } map[] = {
+        { "bullet", PD_NUM_BULLET }, { "none", PD_NUM_NONE }, { "lowerLetter", PD_NUM_LOWER_ALPHA },
+        { "upperLetter", PD_NUM_UPPER_ALPHA }, { "lowerRoman", PD_NUM_LOWER_ROMAN },
+        { "upperRoman", PD_NUM_UPPER_ROMAN }, { "decimalZero", PD_NUM_DECIMAL_ZERO }, { "ordinal", PD_NUM_ORDINAL },
+        { "decimalEnclosedCircle", PD_NUM_CIRCLED }, { "decimalEnclosedCircleChinese", PD_NUM_CIRCLED },
+        { "decimalFullWidth", PD_NUM_FULLWIDTH }, { "decimalFullWidth2", PD_NUM_FULLWIDTH },
+        { "chineseCounting", PD_NUM_CJK_COUNTING }, { "chineseCountingThousand", PD_NUM_CJK_COUNTING },
+        { "japaneseCounting", PD_NUM_CJK_COUNTING }, { "taiwaneseCounting", PD_NUM_CJK_COUNTING },
+        { "taiwaneseCountingThousand", PD_NUM_CJK_COUNTING }, { "ideographTraditional", PD_NUM_CJK_TRADITIONAL },
+        { "cardinalText", PD_NUM_CARDINAL_TEXT }, { "ordinalText", PD_NUM_ORDINAL_TEXT }
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (strcmp(v, map[i].w) == 0) {
+            return map[i].f;
+        }
+    }
+
+    return PD_NUM_DECIMAL;
+}
+
+/* Parade's number format as Word's w:numFmt */
+static const char* num_fmt_name(int32_t f) {
+    static const char* fmts[PD_NUM_LAST + 1] = { "bullet", "decimal", "lowerLetter", "upperLetter", "lowerRoman",
+                                                 "upperRoman", "none", "decimalZero", "ordinal",
+                                                 "decimalEnclosedCircle", "decimalFullWidth", "chineseCounting",
+                                                 "ideographTraditional", "cardinalText", "ordinalText"
+                                               };
+
+    return f >= 0 && f <= PD_NUM_LAST ? fmts[f] : "decimal";
+}
+
+/* room for want items of size sz in *p, which holds *cap; 0 when memory runs out */
+static int grow(void** p, int* cap, int want, size_t sz) {
+    void* q;
+    int nc;
+
+    if (want <= *cap) {
+        return 1;
+    }
+
+    if (want > (1 << 20)) {
+        return 0;
+    }
+
+    nc = *cap < 16 ? 16 : *cap * 2;
+    nc = nc < want ? want : nc;
+
+    if ((q = realloc(*p, (size_t)nc * sz)) == NULL) {
+        return 0;
+    }
+
+    *p = q;
+    *cap = nc;
+    return 1;
+}
+
 static void read_numbering(dxi* X, const char* xml, size_t n) {
     pd_markup m;
     int cur_abs = -1, cur_lvl = -1, cur_num = -1, ovr_lvl = -1, i, in_rpr = 0;
@@ -5734,7 +5797,7 @@ static void read_numbering(dxi* X, const char* xml, size_t n) {
             continue;
         }
 
-        if (strcmp(t, "abstractNum") == 0 && X->nabs < 64) {
+        if (strcmp(t, "abstractNum") == 0 && grow((void**)&X->abss, &X->cabs, X->nabs + 1, sizeof(dabs))) {
             cur_abs = X->nabs++;
             memset(&X->abss[cur_abs], 0, sizeof(dabs));
             X->abss[cur_abs].id = attr_int(&m, "w:abstractNumId", -1);
@@ -5782,10 +5845,7 @@ static void read_numbering(dxi* X, const char* xml, size_t n) {
         } else if (L && strcmp(t, "numFmt") == 0) {
             mu_attr(&m, "w:val", v, sizeof(v));
             X->abss[cur_abs].kind[cur_lvl] = strcmp(v, "bullet") == 0 || strcmp(v, "none") == 0 ? 1 : 2;
-            L->format = strcmp(v, "bullet") == 0 ? PD_NUM_BULLET : strcmp(v, "none") == 0 ? PD_NUM_NONE :
-                        strcmp(v, "lowerLetter") == 0 ? PD_NUM_LOWER_ALPHA : strcmp(v, "upperLetter") == 0 ?
-                        PD_NUM_UPPER_ALPHA : strcmp(v, "lowerRoman") == 0 ? PD_NUM_LOWER_ROMAN :
-                        strcmp(v, "upperRoman") == 0 ? PD_NUM_UPPER_ROMAN : PD_NUM_DECIMAL;
+            L->format = num_fmt_of(v);
         } else if (L && strcmp(t, "lvlText") == 0) {
             if (mu_attr(&m, "w:val", v, sizeof(v)) || m.type == MT_EMPTY) {
                 if (L->format == PD_NUM_BULLET) {
@@ -5805,7 +5865,7 @@ static void read_numbering(dxi* X, const char* xml, size_t n) {
             } else if (mu_attr(&m, "w:firstLine", v, sizeof(v))) {
                 L->hanging = 0;
             }
-        } else if (strcmp(t, "num") == 0 && X->nnums < 256) {
+        } else if (strcmp(t, "num") == 0 && grow((void**)&X->nums, &X->cnums, X->nnums + 1, sizeof(dnum))) {
             cur_num = X->nnums++;
             memset(&X->nums[cur_num], 0, sizeof(dnum));
             X->nums[cur_num].num_id = attr_int(&m, "w:numId", -1);
@@ -10225,10 +10285,9 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                     }
 
                     if (mu_attr(&m, "w:fmt", v, sizeof(v))) {
-                        w->sp.page_number_format = strcmp(v, "lowerRoman") == 0 ? PD_NUM_LOWER_ROMAN :
-                                                   strcmp(v, "upperRoman") == 0 ? PD_NUM_UPPER_ROMAN :
-                                                   strcmp(v, "lowerLetter") == 0 ? PD_NUM_LOWER_ALPHA :
-                                                   strcmp(v, "upperLetter") == 0 ? PD_NUM_UPPER_ALPHA : PD_NUM_DECIMAL;
+                        int32_t f = num_fmt_of(v);
+
+                        w->sp.page_number_format = f == PD_NUM_BULLET || f == PD_NUM_NONE ? PD_NUM_DECIMAL : f;
                     }
                 } else if (strcmp(t, "cols") == 0) {
                     int nc = attr_int(&m, "w:num", 1);
@@ -11080,6 +11139,8 @@ pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all
         free(X.rels);
         free(X.styles);
         free(X.tstyles);
+        free(X.nums);
+        free(X.abss);
         free(X.notes_xml);
         free(X.notes);
         free(X.en_xml);
@@ -11211,6 +11272,8 @@ pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all
     free(X.rels);
     free(X.styles);
     free(X.tstyles);
+    free(X.nums);
+    free(X.abss);
     free(X.notes_xml);
     free(X.notes);
     free(X.en_xml);

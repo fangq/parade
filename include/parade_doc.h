@@ -447,7 +447,16 @@ typedef enum {
     PD_NUM_UPPER_ALPHA = 3,
     PD_NUM_LOWER_ROMAN = 4,
     PD_NUM_UPPER_ROMAN = 5,
-    PD_NUM_NONE = 6
+    PD_NUM_NONE = 6,
+    PD_NUM_DECIMAL_ZERO = 7,    /**< 01, 02, ... 10 */
+    PD_NUM_ORDINAL = 8,         /**< 1st, 2nd, 3rd */
+    PD_NUM_CIRCLED = 9,         /**< (1) in a circle, U+2460.., decimal past 20 */
+    PD_NUM_FULLWIDTH = 10,      /**< fullwidth digits */
+    PD_NUM_CJK_COUNTING = 11,   /**< ideographic counting: one, two, ... ten, eleven */
+    PD_NUM_CJK_TRADITIONAL = 12, /**< the ten heavenly stems, decimal past ten */
+    PD_NUM_CARDINAL_TEXT = 13,  /**< One, Two, Three (English) */
+    PD_NUM_ORDINAL_TEXT = 14,   /**< First, Second, Third (English) */
+    PD_NUM_LAST = 14
 } pd_num_format;
 
 typedef struct {

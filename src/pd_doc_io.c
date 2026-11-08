@@ -41,7 +41,9 @@ static const char* const field_names[] = { "page", "pages", "sectionpage", "refn
                                            "heading", "date"
                                          };
 static const char* const num_names[] = { "bullet", "decimal", "loweralpha", "upperalpha", "lowerroman",
-                                         "upperroman", "none"
+                                         "upperroman", "none", "decimalzero", "ordinal", "circled",
+                                         "fullwidth", "cjkcounting", "cjktraditional", "cardinaltext",
+                                         "ordinaltext"
                                        };
 static const char* const wrap_names[] = { "none", "left", "right", "front", "behind" };
 static const char* const break_names[] = { "page", "column", "oddpage", "evenpage", "rule" };
