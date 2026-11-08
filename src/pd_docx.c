@@ -12881,6 +12881,7 @@ pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xm
     }
 
     bld_end_para(&b);
+    pb_free(&b.pend);
     free(clean);
     free(map);
     free(X);
