@@ -11,9 +11,11 @@
  * Inside the rasterizer positions are in 1/256 pixel ("subpixels").
  */
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "pd_internal.h"
+#include "parade_layout.h"
 
 #define ONE 256                 /* subpixels per pixel */
 /* bound for accumulated glyf deltas: real outlines stay within int16, so 26.6 values fit int32 */
@@ -740,5 +742,485 @@ pd_status pd_font_glyph_render(const pd_font* f, uint32_t g, pd_sp px_per_em, in
     free(c.cover);
     free(c.area);
     free(p.s);
+    return PD_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* display-list paths: filled and stroked into an RGBA image           */
+/* ------------------------------------------------------------------ */
+
+/* Geometry (a stroke's outline, its dashes) is worked out in doubles in
+   subpixels; what reaches the pixels goes through the integer cells above,
+   each piece of a stroke wound the same way so overlapping pieces add up
+   under the non-zero rule instead of cancelling. */
+
+#define RC_LIMIT (1 << 26)      /* subpixel coordinates kept within this, so no row loop runs away */
+
+static int32_t rc_clamp(double v) {
+    return v > RC_LIMIT ? RC_LIMIT : v < -RC_LIMIT ? -RC_LIMIT : (int32_t)lround(v);
+}
+
+/* a closed polygon, wound positively (reversed if not) */
+static void rc_poly(canvas* c, const double* xy, int32_t n) {
+    double a = 0;
+    int32_t i;
+
+    if (n < 3) {
+        return;
+    }
+
+    for (i = 0; i < n; i++) {
+        int32_t j = (i + 1) % n;
+
+        a += xy[2 * i] * xy[2 * j + 1] - xy[2 * j] * xy[2 * i + 1];
+    }
+
+    for (i = 0; i < n; i++) {
+        int32_t p = a >= 0 ? i : n - 1 - i, q = a >= 0 ? (i + 1) % n : (2 * n - 2 - i) % n;
+
+        line_add(c, rc_clamp(xy[2 * p]), rc_clamp(xy[2 * p + 1]), rc_clamp(xy[2 * q]), rc_clamp(xy[2 * q + 1]));
+    }
+}
+
+static void rc_disc(canvas* c, double x, double y, double r) {
+    double xy[2 * 64];
+    int32_t k, n = 8 + (int32_t)(r / 48);
+
+    n = n > 64 ? 64 : n;
+
+    for (k = 0; k < n; k++) {
+        double t = k * 6.283185307179586 / n;
+
+        xy[2 * k] = x + r * cos(t);
+        xy[2 * k + 1] = y + r * sin(t);
+    }
+
+    rc_poly(c, xy, n);
+}
+
+static void rc_quad(canvas* c, double ax, double ay, double bx, double by, double cx, double cy, double dx, double dy) {
+    double xy[8] = { ax, ay, bx, by, cx, cy, dx, dy };
+
+    rc_poly(c, xy, 4);
+}
+
+/* a polyline's stroke (half width hw): a band along each segment, the corners joined and the ends capped as
+   the style says */
+static void rc_stroke_line(canvas* c, const double* xy, int32_t n, int closed, double hw, int cap, int join) {
+    int32_t i, nseg;
+
+    while (closed && n > 1 && xy[2 * n - 2] == xy[0] && xy[2 * n - 1] == xy[1]) {
+        n--;    /* the closing point given twice */
+    }
+
+    if (n == 1 || (n == 2 && xy[0] == xy[2] && xy[1] == xy[3])) {   /* a dot */
+        if (cap == PD_CAP_ROUND) {
+            rc_disc(c, xy[0], xy[1], hw);
+        } else if (cap == PD_CAP_SQUARE) {
+            rc_quad(c, xy[0] - hw, xy[1] - hw, xy[0] + hw, xy[1] - hw, xy[0] + hw, xy[1] + hw, xy[0] - hw, xy[1] + hw);
+        }
+
+        return;
+    }
+
+    nseg = closed ? n : n - 1;
+
+    for (i = 0; i < nseg; i++) {
+        const double* a = &xy[2 * i], *b = &xy[2 * ((i + 1) % n)];
+        double dx = b[0] - a[0], dy = b[1] - a[1], len = sqrt(dx * dx + dy * dy), nx, ny, ex = 0, ey = 0, sx = 0, sy = 0;
+
+        if (len <= 0) {
+            continue;
+        }
+
+        nx = -dy / len * hw;
+        ny = dx / len * hw;
+
+        if (!closed && cap == PD_CAP_SQUARE) {  /* the ends run on half the width */
+            if (i == 0) {
+                sx = -dx / len * hw;
+                sy = -dy / len * hw;
+            }
+
+            if (i == nseg - 1) {
+                ex = dx / len * hw;
+                ey = dy / len * hw;
+            }
+        }
+
+        rc_quad(c, a[0] + sx + nx, a[1] + sy + ny, b[0] + ex + nx, b[1] + ey + ny, b[0] + ex - nx, b[1] + ey - ny,
+                a[0] + sx - nx, a[1] + sy - ny);
+    }
+
+    for (i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {   /* the corners */
+        const double* v = &xy[2 * i], *p = &xy[2 * ((i + n - 1) % n)], *q = &xy[2 * ((i + 1) % n)];
+        double d0x = v[0] - p[0], d0y = v[1] - p[1], d1x = q[0] - v[0], d1y = q[1] - v[1];
+        double l0 = sqrt(d0x * d0x + d0y * d0y), l1 = sqrt(d1x * d1x + d1y * d1y), n0x, n0y, n1x, n1y, s, cs;
+
+        if (l0 <= 0 || l1 <= 0) {
+            continue;
+        }
+
+        d0x /= l0;
+        d0y /= l0;
+        d1x /= l1;
+        d1y /= l1;
+
+        if (join == PD_JOIN_ROUND) {
+            rc_disc(c, v[0], v[1], hw);
+            continue;
+        }
+
+        n0x = -d0y;
+        n0y = d0x;
+        n1x = -d1y;
+        n1y = d1x;
+        s = n0x * d1x + n0y * d1y < 0 ? hw : -hw;    /* the outer side of the turn */
+        cs = d0x * d1x + d0y * d1y;     /* cos of the turn */
+
+        if (cs > 0.9999) {
+            continue;   /* straight on */
+        }
+
+        if (join == PD_JOIN_MITER && 1 + cs >= 1.0 / 32) {     /* the point no further than 8 widths out */
+            double mx = n0x + n1x, my = n0y + n1y, k = 2 / (mx * mx + my * my);
+
+            rc_quad(c, v[0], v[1], v[0] + s * n0x, v[1] + s * n0y, v[0] + s * mx * k, v[1] + s * my * k,
+                    v[0] + s * n1x, v[1] + s * n1y);
+        } else {
+            double xy3[6] = { v[0], v[1], v[0] + s * n0x, v[1] + s * n0y, v[0] + s * n1x, v[1] + s * n1y };
+
+            rc_poly(c, xy3, 3);
+        }
+    }
+
+    if (!closed && cap == PD_CAP_ROUND) {
+        rc_disc(c, xy[0], xy[1], hw);
+        rc_disc(c, xy[2 * n - 2], xy[2 * n - 1], hw);
+    }
+}
+
+/* a ring's dashes: each stretch of it that is on stroked as an open line, the pattern starting again with the
+   ring */
+static void rc_dashed(canvas* c, const double* xy, int32_t n, int closed, double hw, const double* dash, int nd,
+                      int cap, int join) {
+    double* run = (double*)malloc(((size_t)n + 2) * 2 * sizeof(double)), left = dash[0];
+    int32_t i, nr = 0, di = 0, on = 1, nseg = closed ? n : n - 1;
+
+    if (!run) {
+        return;
+    }
+
+    run[0] = xy[0];
+    run[1] = xy[1];
+    nr = 1;
+
+    for (i = 0; i < nseg; i++) {
+        const double* a = &xy[2 * i], *b = &xy[2 * ((i + 1) % n)];
+        double dx = b[0] - a[0], dy = b[1] - a[1], len = sqrt(dx * dx + dy * dy), t = 0;
+
+        while (len - t > left) {    /* the pattern changes within this segment */
+            double px, py;
+
+            t += left;
+            px = a[0] + dx * t / len;
+            py = a[1] + dy * t / len;
+
+            if (on) {
+                run[2 * nr] = px;
+                run[2 * nr + 1] = py;
+                rc_stroke_line(c, run, nr + 1, 0, hw, cap, join);
+            }
+
+            run[0] = px;    /* a gap ends or a dash ends: either way the next run starts here */
+            run[1] = py;
+            nr = 1;
+            on = !on;
+            di = (di + 1) % nd;
+            left = dash[di];
+        }
+
+        left -= len - t;
+
+        if (on) {
+            run[2 * nr] = b[0];
+            run[2 * nr + 1] = b[1];
+            nr++;
+        } else {
+            run[0] = b[0];
+            run[1] = b[1];
+            nr = 1;
+        }
+    }
+
+    if (on && nr >= 2) {
+        rc_stroke_line(c, run, nr, 0, hw, cap, join);
+    }
+
+    free(run);
+}
+
+/* what a pixel is painted with */
+typedef struct {
+    uint32_t color;             /* 0xAARRGGBB */
+} rpaint;
+
+static uint32_t rp_color(const rpaint* p, int32_t x, int32_t y) {
+    (void)x;
+    (void)y;
+    return p->color;
+}
+
+/* the canvas's coverage painted over the image (premultiplied), the canvas's top-left at pixel (px, py) */
+static void rc_composite(const canvas* c, int32_t px, int32_t py, const rpaint* paint, uint8_t* rgba, int32_t stride) {
+    int32_t i, k;
+
+    for (i = 0; i < c->h; i++) {
+        int32_t acc = 0;
+        uint8_t* row = rgba + (size_t)(py + i) * (size_t)stride + (size_t)px * 4;
+
+        for (k = 0; k < c->w; k++) {
+            int32_t v = acc * 2 * ONE + c->cover[i * c->w + k] * 2 * ONE - c->area[i * c->w + k], cov;
+
+            acc += c->cover[i * c->w + k];
+            v = v < 0 ? -v : v;
+            cov = (int32_t)(((int64_t)v * 255 + ONE * ONE) / (2 * ONE * ONE));
+            cov = cov > 255 ? 255 : cov;
+
+            if (cov) {
+                uint32_t col = rp_color(paint, px + k, py + i);
+                int32_t a = (int32_t)((col >> 24) * (uint32_t)cov + 127) / 255, q;
+                uint8_t* d = row + 4 * k;
+
+                for (q = 0; q < 3; q++) {
+                    int32_t s = (int32_t)((col >> (16 - 8 * q)) & 255) * a / 255;
+
+                    d[q] = (uint8_t)(s + d[q] * (255 - a) / 255);
+                }
+
+                d[3] = (uint8_t)(a + d[3] * (255 - a) / 255);
+            }
+        }
+    }
+}
+
+/* a page coordinate in subpixels of the image */
+static double rc_sub(pd_sp v, pd_sp o, int32_t scale) {
+    return (double)(((int64_t)v - o) * scale / (1 << 24));
+}
+
+/* a path's rings in subpixels relative to (ox, oy) subpixels: each ring given to fn. A curve is flattened here,
+   each cubic into chords about a tenth of a pixel off it */
+static void rc_rings(const pd_draw* a, pd_sp x0, pd_sp y0, int32_t scale, double ox, double oy,
+                     void (*fn)(void*, const double*, int32_t), void* user) {
+    const pd_sp* pts = a->curve && a->ncurve >= 2 ? a->curve : a->points;
+    int32_t np = a->curve && a->ncurve >= 2 ? a->ncurve : a->npoints, i, n = 0, cap = np + 16;
+    double* xy = (double*)malloc((size_t)cap * 2 * sizeof(double));
+
+    if (!xy) {
+        return;
+    }
+
+    for (i = 0; i <= np; i++) {
+        if (i == np || pts[2 * i] == PD_PATH_BREAK) {
+            if (n) {
+                fn(user, xy, n);
+            }
+
+            n = 0;
+            continue;
+        }
+
+        if (pts[2 * i] == PD_PATH_CUBIC) {
+            double p[8], dev;
+            int32_t k, steps;
+
+            if (n == 0 || i + 3 >= np) {
+                break;
+            }
+
+            p[0] = xy[2 * n - 2];
+            p[1] = xy[2 * n - 1];
+
+            for (k = 1; k <= 3; k++) {
+                p[2 * k] = rc_sub(pts[2 * (i + k)], x0, scale) - ox;
+                p[2 * k + 1] = rc_sub(pts[2 * (i + k) + 1], y0, scale) - oy;
+            }
+
+            dev = fabs(p[0] - 2 * p[2] + p[4]) + fabs(p[1] - 2 * p[3] + p[5]) + fabs(p[2] - 2 * p[4] + p[6]) +
+                  fabs(p[3] - 2 * p[5] + p[7]);
+            steps = 1 + (int32_t)sqrt(dev / 32);
+            steps = steps > 256 ? 256 : steps;
+
+            if (n + steps >= cap) {
+                double* m = (double*)realloc(xy, (size_t)(cap = n + steps + np + 16) * 2 * sizeof(double));
+
+                if (!m) {
+                    break;
+                }
+
+                xy = m;
+            }
+
+            for (k = 1; k <= steps; k++) {
+                double t = (double)k / steps, u = 1 - t;
+
+                xy[2 * n] = u * u * u * p[0] + 3 * u * u * t * p[2] + 3 * u * t * t * p[4] + t * t * t * p[6];
+                xy[2 * n + 1] = u * u * u * p[1] + 3 * u * u * t * p[3] + 3 * u * t * t * p[5] + t * t * t * p[7];
+                n++;
+            }
+
+            i += 3;
+            continue;
+        }
+
+        if (n >= cap) {
+            double* m = (double*)realloc(xy, (size_t)(cap = n + np + 16) * 2 * sizeof(double));
+
+            if (!m) {
+                break;
+            }
+
+            xy = m;
+        }
+
+        xy[2 * n] = rc_sub(pts[2 * i], x0, scale) - ox;
+        xy[2 * n + 1] = rc_sub(pts[2 * i + 1], y0, scale) - oy;
+        n++;
+    }
+
+    free(xy);
+}
+
+typedef struct {
+    canvas* c;
+    double hw;                  /* stroke: half its width; fill: 0 */
+    int closed, cap, join, nd;
+    double dash[8];
+} rc_job;
+
+static void rc_ring(void* user, const double* xy, int32_t n) {
+    rc_job* J = (rc_job*)user;
+    int32_t i;
+
+    if (J->hw <= 0) {   /* filled: the ring closed */
+        for (i = 0; i < n; i++) {
+            int32_t j = (i + 1) % n;
+
+            line_add(J->c, rc_clamp(xy[2 * i]), rc_clamp(xy[2 * i + 1]), rc_clamp(xy[2 * j]), rc_clamp(xy[2 * j + 1]));
+        }
+    } else if (J->nd) {
+        rc_dashed(J->c, xy, n, J->closed, J->hw, J->dash, J->nd, J->cap, J->join);
+    } else {
+        rc_stroke_line(J->c, xy, n, J->closed, J->hw, J->cap, J->join);
+    }
+}
+
+static void rc_clear(canvas* c) {
+    memset(c->cover, 0, (size_t)c->w * (size_t)c->h * sizeof(int32_t));
+    memset(c->area, 0, (size_t)c->w * (size_t)c->h * sizeof(int32_t));
+}
+
+pd_status pd_draw_render(const pd_draw* items, int32_t n, pd_sp x0, pd_sp y0, int32_t scale, uint8_t* rgba,
+                         int32_t width, int32_t height, int32_t stride) {
+    int32_t i;
+
+    if ((!items && n) || n < 0 || !rgba || width <= 0 || height <= 0 || stride < 4 * width || scale <= 0 ||
+            scale > (256 << 16)) {
+        return PD_ERR_ARG;
+    }
+
+    for (i = 0; i < n; i++) {
+        const pd_draw* a = &items[i];
+        const pd_path_style* st = a->kind == PD_DRAW_PATH ? a->style : NULL;
+        double hw = 0, grow, bx0, by0, bx1, by1;
+        int32_t px0, py0, px1, py1;
+        canvas c;
+        rpaint paint;
+        rc_job J;
+
+        if (a->kind == PD_DRAW_PATH && (!a->points || a->npoints < 1)) {
+            continue;
+        }
+
+        if (a->kind != PD_DRAW_PATH && a->kind != PD_DRAW_RULE) {
+            continue;
+        }
+
+        if (a->kind == PD_DRAW_PATH && a->line_width > 0 && a->color) {
+            hw = rc_sub(a->line_width, 0, scale) / 2;
+            hw = hw < ONE / 4 ? ONE / 4 : hw;   /* no thinner than a quarter pixel */
+        }
+
+        grow = hw * (st && st->join == PD_JOIN_MITER ? 8 : 1.5) + 2 * ONE;
+        bx0 = rc_sub(a->x, x0, scale) - grow;
+        by0 = rc_sub(a->y, y0, scale) - grow;
+        bx1 = rc_sub(a->x + a->w, x0, scale) + grow;
+        by1 = rc_sub(a->y + a->h, y0, scale) + grow;
+        px0 = bx0 < 0 ? 0 : bx0 > (double)width * ONE ? width : (int32_t)(bx0 / ONE);
+        py0 = by0 < 0 ? 0 : by0 > (double)height * ONE ? height : (int32_t)(by0 / ONE);
+        px1 = bx1 < 0 ? 0 : bx1 >= (double)width * ONE ? width : (int32_t)(bx1 / ONE) + 1;
+        py1 = by1 < 0 ? 0 : by1 >= (double)height * ONE ? height : (int32_t)(by1 / ONE) + 1;
+
+        if (px1 <= px0 || py1 <= py0) {
+            continue;
+        }
+
+        c.w = px1 - px0;
+        c.h = py1 - py0;
+        c.cover = (int32_t*)calloc((size_t)c.w * (size_t)c.h, sizeof(int32_t));
+        c.area = (int32_t*)calloc((size_t)c.w * (size_t)c.h, sizeof(int32_t));
+
+        if (!c.cover || !c.area) {
+            free(c.cover);
+            free(c.area);
+            return PD_ERR_NOMEM;
+        }
+
+        memset(&J, 0, sizeof(J));
+        J.c = &c;
+
+        if (a->kind == PD_DRAW_RULE) {
+            double q[8];
+
+            q[0] = q[6] = rc_sub(a->x, x0, scale) - (double)px0 * ONE;
+            q[1] = q[3] = rc_sub(a->y, y0, scale) - (double)py0 * ONE;
+            q[2] = q[4] = rc_sub(a->x + a->w, x0, scale) - (double)px0 * ONE;
+            q[5] = q[7] = rc_sub(a->y + a->h, y0, scale) - (double)py0 * ONE;
+            rc_ring(&J, q, 4);
+            paint.color = a->color;
+            rc_composite(&c, px0, py0, &paint, rgba, stride);
+        } else {
+            if (a->fill) {
+                rc_rings(a, x0, y0, scale, (double)px0 * ONE, (double)py0 * ONE, rc_ring, &J);
+                paint.color = a->fill;
+                rc_composite(&c, px0, py0, &paint, rgba, stride);
+            }
+
+            if (hw > 0) {
+                int k;
+
+                rc_clear(&c);
+                J.hw = hw;
+                J.closed = (a->path_flags & PD_PATH_CLOSED) != 0;
+                J.cap = st ? st->cap : PD_CAP_FLAT;
+                J.join = st ? st->join : PD_JOIN_ROUND;
+
+                for (k = 0; st && k < st->dash_count && k < 8; k++) {
+                    J.dash[k] = rc_sub(st->dash[k], 0, scale);
+                    J.dash[k] = J.dash[k] < ONE / 8 ? ONE / 8 : J.dash[k];
+                }
+
+                J.nd = st && st->dash_count >= 2 ? (st->dash_count > 8 ? 8 : st->dash_count) & ~1 : 0;
+                rc_rings(a, x0, y0, scale, (double)px0 * ONE, (double)py0 * ONE, rc_ring, &J);
+                paint.color = a->color;
+                rc_composite(&c, px0, py0, &paint, rgba, stride);
+            }
+        }
+
+        free(c.cover);
+        free(c.area);
+    }
+
     return PD_OK;
 }

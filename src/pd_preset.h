@@ -7,7 +7,16 @@
 #define PD_PRESET_MAXPATH 16
 #define PD_PRESET_MAXPT 4096
 
-/* a preset's paths flattened in its box (0..w by 0..h): each path's points (NAN pairs between its rings) */
+#define PD_PRESET_MAXCMD 1024
+
+/* a path command: m, l, c (two control points and the end, from where the path is), z */
+typedef struct {
+    char op;
+    double p[6];
+} pd_preset_cmd;
+
+/* a preset's paths flattened in its box (0..w by 0..h): each path's points (NAN pairs between its rings), and
+   its commands with the curves as they are */
 typedef struct {
     int npath;
     struct {
@@ -15,9 +24,12 @@ typedef struct {
         int closed;         /* a ring of it closed */
         char fill[16];      /* norm, none, darken, darkenLess, lighten, lightenLess */
         int stroke;         /* outlined */
+        int cstart, cn;     /* its commands in c */
     } path[PD_PRESET_MAXPATH];
     double xy[2 * PD_PRESET_MAXPT];
     int n;
+    pd_preset_cmd c[PD_PRESET_MAXCMD];
+    int nc;
 } pd_preset_flat;
 
 /* whether NAME is one of Office's presets */
@@ -25,6 +37,10 @@ int pd_preset_known(const char* name);
 /* the preset at a size with its adjustments ("adj1=5000 adj2=200"; those not given at their defaults); 0 for
    none */
 int pd_preset_flatten(const char* name, double w, double h, const char* adj, pd_preset_flat* out);
+
+/* ECMA's arcTo from (cx, cy): radii wr, hr, start and sweep in 60000ths of a degree; 1 to 4 cubics (6 numbers
+   each, up to 24) in p; how many */
+int pd_preset_arc(double cx, double cy, double wr, double hr, double st_ang, double sw_ang, double* p);
 
 /* the name of a preset's IDX-th adjustment (from 1: "adj", "adj1", ...); 0 for none */
 int pd_preset_adj_name(const char* name, int idx, char* buf, size_t cap);

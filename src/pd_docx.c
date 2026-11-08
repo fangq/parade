@@ -8599,6 +8599,194 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
     }
 }
 
+/* a preset dash (prstDash) as its lengths, dash, gap, ..., in 100000ths of the line's width (ECMA's patterns);
+   how many, 0 for solid */
+static int dw_dash_preset(const char* v, int* out) {
+    static const struct {
+        const char* n;
+        int k, d[6];
+    } t[] = {
+        { "dash", 2, { 4, 3 } }, { "dashDot", 4, { 4, 3, 1, 3 } }, { "dot", 2, { 1, 3 } }, { "lgDash", 2, { 8, 3 } },
+        { "lgDashDot", 4, { 8, 3, 1, 3 } }, { "lgDashDotDot", 6, { 8, 3, 1, 3, 1, 3 } }, { "sysDash", 2, { 3, 1 } },
+        { "sysDashDot", 4, { 3, 1, 1, 1 } }, { "sysDashDotDot", 6, { 3, 1, 1, 1, 1, 1 } }, { "sysDot", 2, { 1, 1 } }
+    };
+    int i, k;
+
+    for (i = 0; i < (int)(sizeof(t) / sizeof(t[0])); i++) {
+        if (!strcmp(v, t[i].n)) {
+            for (k = 0; k < t[i].k; k++) {
+                out[k] = t[i].d[k] * 100000;
+            }
+
+            return t[i].k;
+        }
+    }
+
+    return 0;
+}
+
+/* an arrowhead's type (headEnd, tailEnd) as the drawing resource numbers it: 1 triangle, 2 stealth, 3 diamond,
+   4 oval, 5 an open arrow; 0 none */
+static int dw_arrow_type(const char* v) {
+    return !strcmp(v, "triangle") ? 1 : !strcmp(v, "stealth") ? 2 : !strcmp(v, "diamond") ? 3 : !strcmp(v, "oval") ?
+           4 : !strcmp(v, "arrow") ? 5 : 0;
+}
+
+/* A custom geometry as read: each path's commands in its own space (m, l, c, z: arcs and quadratic curves made
+   cubics), with its own size, fill and outline, so each is drawn as it says */
+#define DW_CG_MAXCMD 2048
+#define DW_CG_MAXPATH 16
+typedef struct {
+    pd_preset_cmd c[DW_CG_MAXCMD];
+    int nc;
+    struct {
+        int start, n;
+        double w, h;        /* its coordinate space (0: the shape's own) */
+        char fill[16];      /* norm, none, darken, lighten, ... */
+        int stroke;
+    } path[DW_CG_MAXPATH];
+    int np;
+    double cx, cy, sx, sy;  /* where the path is, where its ring began */
+    double pt[6];           /* a command's points so far */
+    int npt;
+    char cmd;
+} dw_cust;
+
+static void dw_cust_put(dw_cust* C, char op, const double* p, int np) {
+    if (C->np > 0 && C->nc < DW_CG_MAXCMD) {
+        C->c[C->nc].op = op;
+        memcpy(C->c[C->nc].p, p, (size_t)np * sizeof(double));
+        C->nc++;
+        C->path[C->np - 1].n++;
+    }
+}
+
+/* path I of a custom geometry as points in its own space, curves as 12 chords each, NAN pairs between its rings;
+   how many (at most cap) */
+static int dw_cust_flat(const dw_cust* C, int i, double* xy, int cap, int* closed) {
+    double cx = 0, cy = 0, sx = 0, sy = 0;
+    int k, q, n = 0, ring = 0;
+
+    *closed = 0;
+
+#define CG_PUT(X, Y) do { if (n < cap) { xy[2 * n] = (X); xy[2 * n + 1] = (Y); n++; } } while (0)
+    for (k = C->path[i].start; k < C->path[i].start + C->path[i].n; k++) {
+        const double* p = C->c[k].p;
+
+        if (C->c[k].op == 'm') {
+            if (ring) {
+                CG_PUT(NAN, NAN);
+            }
+
+            ring = 1;
+            sx = cx = p[0];
+            sy = cy = p[1];
+            CG_PUT(cx, cy);
+        } else if (C->c[k].op == 'l') {
+            if (!ring) {
+                ring = 1;
+                CG_PUT(cx, cy);
+            }
+
+            cx = p[0];
+            cy = p[1];
+            CG_PUT(cx, cy);
+        } else if (C->c[k].op == 'c') {
+            if (!ring) {
+                ring = 1;
+                CG_PUT(cx, cy);
+            }
+
+            for (q = 1; q <= 12; q++) {
+                double t = q / 12.0, u = 1 - t;
+
+                CG_PUT(u * u * u * cx + 3 * u * u * t * p[0] + 3 * u * t * t * p[2] + t * t * t * p[4],
+                       u * u * u * cy + 3 * u * u * t * p[1] + 3 * u * t * t * p[3] + t * t * t * p[5]);
+            }
+
+            cx = p[4];
+            cy = p[5];
+        } else if (C->c[k].op == 'z') {
+            *closed = 1;
+            cx = sx;
+            cy = sy;
+        }
+    }
+#undef CG_PUT
+
+    return n;
+}
+
+/* Path commands (m, l, c, z) as a drawing resource's curve, ",\"cv\":[...]": the points mapped by sm from the box
+   at (bx0, by0), scaled gx, gy; a PD_PATH_BREAK pair between rings and a PD_PATH_CUBIC pair before each cubic's
+   three points */
+static void dw_put_cv(pd_buf* o, const pd_preset_cmd* c, int n, const dxform* sm, double bx0, double by0, double gx,
+                      double gy) {
+    double cx = 0, cy = 0, sx = 0, sy = 0, qx, qy;
+    int k, q, ring = 0, first = 1;
+
+#define CV_PT(X, Y) do { fr_pt(sm, bx0 + (X) * gx, by0 + (Y) * gy, &qx, &qy); \
+                         pb_printf(o, "%s%d,%d", first ? "" : ",", (int)emu_sp(qx), (int)emu_sp(qy)); first = 0; } while (0)
+    pb_puts(o, ",\"cv\":[");
+
+    for (k = 0; k < n; k++) {
+        if (c[k].op == 'm') {
+            if (ring) {
+                pb_printf(o, "%s%d,%d", first ? "" : ",", (int)INT32_MIN, (int)INT32_MIN);
+                first = 0;
+            }
+
+            ring = 1;
+            sx = cx = c[k].p[0];
+            sy = cy = c[k].p[1];
+            CV_PT(cx, cy);
+        } else if (c[k].op == 'l' || c[k].op == 'c') {
+            if (!ring) {    /* drawing on from a closed ring: a new one from where that began */
+                if (!first) {
+                    pb_printf(o, ",%d,%d", (int)INT32_MIN, (int)INT32_MIN);
+                }
+
+                ring = 1;
+                CV_PT(cx, cy);
+            }
+
+            if (c[k].op == 'c') {
+                pb_printf(o, ",%d,0", (int)INT32_MIN + 1);
+
+                for (q = 0; q < 3; q++) {
+                    CV_PT(c[k].p[2 * q], c[k].p[2 * q + 1]);
+                }
+
+                cx = c[k].p[4];
+                cy = c[k].p[5];
+            } else {
+                cx = c[k].p[0];
+                cy = c[k].p[1];
+                CV_PT(cx, cy);
+            }
+        } else if (c[k].op == 'z') {
+            cx = sx;
+            cy = sy;
+        }
+    }
+#undef CV_PT
+
+    pb_putc(o, ']');
+}
+
+/* whether path commands have a curve among them */
+static int dw_has_curve(const pd_preset_cmd* c, int n) {
+    int k;
+
+    for (k = 0; k < n; k++) {
+        if (c[k].op == 'c') {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* A Word drawing canvas (wpc) or group (wpg) as one picture: its pictures,
    shapes and text boxes where the group's coordinates put them, written as
    a drawing resource (application/vnd.parade.drawing+json) the layout draws.
@@ -8612,7 +8800,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int nfr = 1, depth = 1, in_grpsppr = 0, root_frame = !canvas, kind = 0, in_sppr = 0, in_ln = 0, in_txbx = 0;
     int in_rpr = 0, in_body_t = 0, para_open = 0, first_item = 1, have_fill = 0, have_line = 0, style_fill = 0;
     int style_line = 0, in_fillref = 0, in_lnref = 0, in_gs = 0, nopara = 1, head_arrow = 0, tail_arrow = 0;
-    int arrow_w[2] = { 3, 3 }, arrow_len[2] = { 3, 3 };  /* head, tail: in line widths, Word's sm 2, med 3, lg 5 */
+    int arrow_w[2] = { 2, 2 }, arrow_len[2] = { 2, 2 };  /* head, tail: 1 sm, 2 med, 3 lg */
+    int dash[8], ndash = 0, lcap = 0, ljoin = 0, lcmpd = 0;   /* the outline's dashes, ends, corners, lines */
     long long ext_h = 0, adj1 = -1;                     /* extrusion depth; a preset's first adjustment */
     char prst[32] = "";                                 /* the shape's preset, for one whose corners its adjustments move */
     uint32_t ext_clr = 0, patt_fg = 0, patt_bg = 0, cv_bg = 0, cv_line = 0;
@@ -8629,12 +8818,12 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     const char* tx_a = NULL, *tx_b = NULL;              /* a text box's w:txbxContent: its inside, read into a story */
     int tx_depth = 0;
     int sid = -1;                                       /* the shape being read: its place among the group's shapes */
-    double cg_xy[4096], cg_pt[6];   /* a custom geometry's points (its own space), NAN pairs between rings */
+    double cg_xy[4096];             /* a polygon's points (its own space), NAN pairs between rings */
     long long cg_w = 0, cg_h = 0;
-    int cg_n = 0, cg_npt = 0, cg_closed = 0, cg_new_ring = 1, k2;
-    char cg_cmd = 'm';
+    int cg_n = 0, cg_closed = 0, k2;
     char blip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
     int crop[4] = { 0, 0, 0, 0 };   /* a picture's srcRect: its sides cut off, in 100000ths */
+    dw_cust* cg = (dw_cust*)calloc(1, sizeof(dw_cust));     /* a custom geometry's paths */
     uint32_t fill2 = 0, shd_clr = 0;    /* a gradient's last stop; a shadow's colour */
     int grad_kind = 0, grad_ang = 0, in_grad = 0, in_shd = 0, has_shd = 0;
     double shd_dist = 0, shd_dir = 0;
@@ -8893,16 +9082,20 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             head_arrow = tail_arrow = 0;
             tx_a = tx_b = NULL;
             tx_depth = 0;
-            arrow_w[0] = arrow_w[1] = arrow_len[0] = arrow_len[1] = 3;
+            arrow_w[0] = arrow_w[1] = arrow_len[0] = arrow_len[1] = 2;
+            ndash = lcap = ljoin = lcmpd = 0;
             ext_h = 0;
             ext_clr = 0;
             adj1 = -1;
             prst[0] = '\0';
             gds.n = 0;
             conn[0] = '\0';
-            cg_n = cg_npt = cg_closed = 0;
+            cg_n = cg_closed = 0;
             cg_w = cg_h = 0;
-            cg_new_ring = 1;
+
+            if (cg) {
+                cg->np = cg->nc = 0;
+            }
             fill = line = sfill = sline = 0;
             tx_rot = tx_upright = tx_vert = tx_actr = 0;
             lw = 9525;
@@ -9038,10 +9231,45 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             } else if (kind == 2) {
                 uint32_t f = have_fill ? fill : style_fill ? sfill : 0, l = have_line ? line : style_line ? sline : 0;
                 char fx[160] = "";  /* the fill's gradient and shadow, for the items that fill */
+                char lx[160], ax[64];   /* the outline's dashes, ends, corners and lines; its arrowheads */
 
                 if (grad_kind && fill2 && have_fill) {
                     snprintf(fx, sizeof(fx), ",\"gk\":%d,\"f2\":%u,\"ga\":%d", grad_kind, (unsigned)fill2,
                              grad_ang + xf.rot);
+                }
+
+                {   /* the outline's style, for the items it outlines; arrowheads for the open ones */
+                    size_t ll = 0;
+                    int q;
+
+                    lx[0] = ax[0] = '\0';
+
+                    if (ndash) {
+                        ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, ",\"dash\":[");
+
+                        for (q = 0; q < ndash; q++) {
+                            ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, "%s%d", q ? "," : "", dash[q]);
+                        }
+
+                        ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, "]");
+                    }
+
+                    if (lcap) {
+                        ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, ",\"cap\":%d", lcap);
+                    }
+
+                    if (ljoin) {
+                        ll += (size_t)snprintf(lx + ll, sizeof(lx) - ll, ",\"join\":%d", ljoin);
+                    }
+
+                    if (lcmpd) {
+                        snprintf(lx + ll, sizeof(lx) - ll, ",\"cmpd\":%d", lcmpd);
+                    }
+
+                    if (head_arrow || tail_arrow) {
+                        snprintf(ax, sizeof(ax), ",\"he\":[%d,%d,%d],\"te\":[%d,%d,%d]", head_arrow, arrow_w[0],
+                                 arrow_len[0], tail_arrow, arrow_w[1], arrow_len[1]);
+                    }
                 }
 
                 if (has_shd && shd_dist > 0) {
@@ -9169,9 +9397,16 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                             }
                         }
 
-                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", pf->path[i].closed && pfl,
+                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s", pf->path[i].closed && pfl,
                                   (unsigned)pfl, (unsigned)pln, (int)emu_sp(lwd),
-                                  pfl && !strcmp(pf->path[i].fill, "norm") ? fx : "");
+                                  pfl && !strcmp(pf->path[i].fill, "norm") ? fx : "", pln ? lx : "",
+                                  pln && !pf->path[i].closed ? ax : "");
+
+                        if (!cam && dw_has_curve(pf->c + pf->path[i].cstart, pf->path[i].cn)) {
+                            dw_put_cv(&o, pf->c + pf->path[i].cstart, pf->path[i].cn, &sm, bx0, by0, 1, 1);
+                        }
+
+                        pb_putc(&o, '}');
                     }
 
                     f = l = 0;
@@ -9180,7 +9415,50 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 free(pf);
                 pf = NULL;
 
-                if (!strcmp(geom, "cust") && cg_n >= 2 && (f || l)) {     /* custom geometry: its path in the box */
+                if (!strcmp(geom, "cust") && cg && cg->np > 0 && (f || l)) {
+                    /* custom geometry: each path in the box, in its own space, filled and outlined as it says */
+                    int i;
+
+                    for (i = 0; i < cg->np; i++) {
+                        double gx = cg->path[i].w > 0 ? bw / cg->path[i].w : 1, gy = cg->path[i].h > 0 ?
+                                    bh / cg->path[i].h : 1, qx, qy;
+                        uint32_t pfl = !f || !strcmp(cg->path[i].fill, "none") ? 0 : dw_shade(f, cg->path[i].fill);
+                        uint32_t pln = cg->path[i].stroke ? l : 0;
+                        int np, closed;
+
+                        np = dw_cust_flat(cg, i, cg_xy, 2048, &closed);
+
+                        if ((!pfl && !pln) || np < 2) {
+                            continue;
+                        }
+
+                        ITEM_SEP();
+                        pb_puts(&o, "{\"path\":[");
+
+                        for (k = 0; k < np; k++) {
+                            if (isnan(cg_xy[2 * k])) {
+                                pb_printf(&o, "%s%d,%d", k ? "," : "", (int)INT32_MIN, (int)INT32_MIN);
+                            } else {
+                                fr_pt(&sm, bx0 + cg_xy[2 * k] * gx, by0 + cg_xy[2 * k + 1] * gy, &qx, &qy);
+                                pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(qx), (int)emu_sp(qy));
+                            }
+                        }
+
+                        pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s", closed, (unsigned)pfl,
+                                  (unsigned)pln, (int)emu_sp(lwd), pfl && !strcmp(cg->path[i].fill, "norm") ? fx : "",
+                                  pln ? lx : "", pln && !closed ? ax : "");
+
+                        if (!cam && dw_has_curve(cg->c + cg->path[i].start, cg->path[i].n)) {  /* its curves as such */
+                            dw_put_cv(&o, cg->c + cg->path[i].start, cg->path[i].n, &sm, bx0, by0, gx, gy);
+                        }
+
+                        pb_putc(&o, '}');
+                    }
+
+                    f = l = 0;
+                }
+
+                if (!strcmp(geom, "cust") && cg_n >= 2 && (f || l)) {     /* a polygon preset: its corners in the box */
                     double gx = cg_w > 0 ? bw / cg_w : 1, gy = cg_h > 0 ? bh / cg_h : 1, qx, qy;
 
                     ITEM_SEP();
@@ -9195,8 +9473,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         }
                     }
 
-                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", cg_closed, (unsigned)f, (unsigned)l,
-                              (int)emu_sp(lwd), f && cg_closed ? fx : "");
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s}", cg_closed, (unsigned)f, (unsigned)l,
+                              (int)emu_sp(lwd), f && cg_closed ? fx : "", l ? lx : "");
                     f = l = 0;
                 }
 
@@ -9289,29 +9567,6 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         py[k] = ry;
                     }
 
-                    /* arrowheads: a filled triangle at the end the line says, as long and wide as Word makes them
-                       (2, 3 or 5 line widths: sm, med, lg); the line stops short of its point */
-                    for (k = 0; isline && l && np >= 2 && k < 2; k++) {
-                        if ((k == 0 && head_arrow) || (k == 1 && tail_arrow)) {
-                            int ti = k ? np - 1 : 0, fi = k ? np - 2 : 1;
-                            double tx = px[ti], ty = py[ti], dx = tx - px[fi], dy = ty - py[fi],
-                                   len = sqrt(dx * dx + dy * dy), unit = lwd > 19050 ? lwd : 19050,
-                                   hl = unit * arrow_len[k], hw = unit * arrow_w[k] / 2;
-
-                            if (len > 0) {
-                                dx /= len;
-                                dy /= len;
-                                ITEM_SEP();
-                                pb_printf(&o, "{\"path\":[%d,%d,%d,%d,%d,%d],\"closed\":1,\"fill\":%u,\"line\":0,\"lw\":0}",
-                                          (int)emu_sp(tx), (int)emu_sp(ty), (int)emu_sp(tx - dx * hl - dy * hw),
-                                          (int)emu_sp(ty - dy * hl + dx * hw), (int)emu_sp(tx - dx * hl + dy * hw),
-                                          (int)emu_sp(ty - dy * hl - dx * hw), (unsigned)l);
-                                px[ti] = tx - dx * hl * 0.8;
-                                py[ti] = ty - dy * hl * 0.8;
-                            }
-                        }
-                    }
-
                     ITEM_SEP();
                     pb_puts(&o, "{\"path\":[");
 
@@ -9319,8 +9574,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(px[k]), (int)emu_sp(py[k]));
                     }
 
-                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}", isline ? 0 : 1,
-                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd), isline ? "" : fx);
+                    pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s}", isline ? 0 : 1,
+                              (unsigned)(isline ? 0 : f), (unsigned)l, (int)emu_sp(lwd), isline ? "" : fx, l ? lx : "",
+                              isline && l ? ax : "");
                     f = l = 0;  /* drawn */
                 }
 
@@ -9330,9 +9586,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                     fr_pt(&sm, bx0, by0, &x0, &y0);
                     fr_pt(&sm, bx0 + bw, by0 + bh, &x1, &y1);
                     ITEM_SEP();
-                    pb_printf(&o, "{\"shape\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s}",
+                    pb_printf(&o, "{\"shape\":\"%s\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s}",
                               geom, (int)emu_sp(x0), (int)emu_sp(y0), (int)emu_sp(x1 - x0), (int)emu_sp(y1 - y0), (unsigned)f,
-                              (unsigned)l, (int)emu_sp(lwd), f ? fx : "");
+                              (unsigned)l, (int)emu_sp(lwd), f ? fx : "", l ? lx : "");
                 }
 
                 if (tx_a && tx_b > tx_a && X->depth < 3) {
@@ -9561,8 +9817,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (!strcmp(t, "ln") && in_sppr) {
             in_ln = g.type == MT_OPEN;
 
-            if (open) {     /* its colour, if it says one (else the style's, lnRef); its width */
+            if (open) {     /* its colour, if it says one (else the style's, lnRef); its width, ends and lines */
                 lw = mu_attr(&g, "w", v, sizeof(v)) ? atoll(v) : 9525;
+                lcap = mu_attr(&g, "cap", v, sizeof(v)) ? (!strcmp(v, "rnd") ? 1 : !strcmp(v, "sq") ? 2 : 0) : 0;
+                lcmpd = mu_attr(&g, "cmpd", v, sizeof(v)) ? (!strcmp(v, "dbl") ? 1 : !strcmp(v, "thickThin") ? 2 :
+                        !strcmp(v, "thinThick") ? 3 : !strcmp(v, "tri") ? 4 : 0) : 0;
             }
         } else if (!strcmp(t, "txbxContent")) {
             in_txbx = g.type == MT_OPEN;
@@ -9702,63 +9961,83 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             cam_rev = mu_attr(&g, "rev", v, sizeof(v)) ? atof(v) : 0;
         } else if (in_sppr && !strcmp(t, "custGeom")) {
             strcpy(geom, "cust");
-        } else if (in_sppr && !strcmp(t, "path") && !strcmp(geom, "cust")) {   /* its coordinate space */
-            cg_w = mu_attr(&g, "w", v, sizeof(v)) ? atoll(v) : 0;
-            cg_h = mu_attr(&g, "h", v, sizeof(v)) ? atoll(v) : 0;
-            cg_new_ring = 1;
-        } else if (in_sppr && !strcmp(geom, "cust") && (!strcmp(t, "moveTo") || !strcmp(t, "lnTo") ||
+
+            if (g.type == MT_CLOSE && cg && cg->np > 0) {   /* its first path, as an extruded freeform's front */
+                cg_n = dw_cust_flat(cg, 0, cg_xy, 2048, &cg_closed);
+                cg_w = (long long)cg->path[0].w;
+                cg_h = (long long)cg->path[0].h;
+            }
+        } else if (in_sppr && cg && !strcmp(t, "path") && !strcmp(geom, "cust")) {
+            /* a path: its own coordinate space, fill and outline */
+            if (cg->np < DW_CG_MAXPATH) {
+                cg->np++;
+                cg->path[cg->np - 1].start = cg->nc;
+                cg->path[cg->np - 1].n = 0;
+                cg->path[cg->np - 1].w = mu_attr(&g, "w", v, sizeof(v)) ? atof(v) : 0;
+                cg->path[cg->np - 1].h = mu_attr(&g, "h", v, sizeof(v)) ? atof(v) : 0;
+                snprintf(cg->path[cg->np - 1].fill, sizeof(cg->path[0].fill), "%.15s",
+                         mu_attr(&g, "fill", v, sizeof(v)) ? v : "norm");
+                cg->path[cg->np - 1].stroke = !(mu_attr(&g, "stroke", v, sizeof(v)) && (!strcmp(v, "0") ||
+                                                !strcmp(v, "false")));
+                cg->cx = cg->cy = cg->sx = cg->sy = 0;
+                cg->npt = 0;
+            }
+        } else if (in_sppr && cg && !strcmp(geom, "cust") && (!strcmp(t, "moveTo") || !strcmp(t, "lnTo") ||
                    !strcmp(t, "cubicBezTo") || !strcmp(t, "quadBezTo"))) {
-            cg_new_ring |= !strcmp(t, "moveTo");
-            cg_cmd = t[0];
-            cg_npt = 0;
-        } else if (in_sppr && !strcmp(geom, "cust") && !strcmp(t, "close")) {
-            cg_closed = 1;
-        } else if (in_sppr && !strcmp(geom, "cust") && !strcmp(t, "pt") && cg_n + 4 < 2048) {
-            double px = mu_attr(&g, "x", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0,
-                   py = mu_attr(&g, "y", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0;
+            cg->cmd = t[0];
+            cg->npt = 0;
+        } else if (in_sppr && cg && !strcmp(geom, "cust") && !strcmp(t, "arcTo")) {
+            /* an arc from where the path is, on the ellipse whose stAng point that is */
+            double p[24];
+            double wr = mu_attr(&g, "wR", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0;
+            double hr = mu_attr(&g, "hR", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0;
+            double st = mu_attr(&g, "stAng", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0;
+            double sw = mu_attr(&g, "swAng", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0;
+            int segs = pd_preset_arc(cg->cx, cg->cy, wr, hr, st, sw, p), q;
 
-            cg_pt[2 * cg_npt] = px;
-            cg_pt[2 * cg_npt + 1] = py;
-            cg_npt++;
+            for (q = 0; q < segs; q++) {
+                dw_cust_put(cg, 'c', p + 6 * q, 6);
+            }
 
-            /* a point, or the end of a curve: a curve as points along it, from where the path is */
-            if ((cg_cmd == 'c' && cg_npt == 3) || (cg_cmd == 'q' && cg_npt == 2) || cg_cmd == 'm' || cg_cmd == 'l') {
-                int curve = (cg_cmd == 'c' || cg_cmd == 'q') && cg_n > 0 && !isnan(cg_xy[2 * cg_n - 2]) && !cg_new_ring;
-                double x0 = curve ? cg_xy[2 * cg_n - 2] : 0, y0 = curve ? cg_xy[2 * cg_n - 1] : 0;
+            cg->cx = p[6 * segs - 2];
+            cg->cy = p[6 * segs - 1];
+        } else if (in_sppr && cg && !strcmp(geom, "cust") && !strcmp(t, "close") && open) {
+            dw_cust_put(cg, 'z', &cg->sx, 0);
+            cg->cx = cg->sx;
+            cg->cy = cg->sy;
+        } else if (in_sppr && cg && !strcmp(geom, "cust") && !strcmp(t, "pt") && cg->npt < 3) {
+            double* pt = &cg->pt[2 * cg->npt];
 
-                if (cg_new_ring && cg_n > 0) {
-                    cg_xy[2 * cg_n] = NAN;
-                    cg_xy[2 * cg_n + 1] = NAN;
-                    cg_n++;
+            pt[0] = mu_attr(&g, "x", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0;
+            pt[1] = mu_attr(&g, "y", v, sizeof(v)) ? dw_guide_arg(&gds, v) : 0;
+            cg->npt++;
+
+            if (cg->cmd == 'm' || cg->cmd == 'l') {
+                dw_cust_put(cg, cg->cmd, cg->pt, 2);
+                cg->cx = cg->pt[0];
+                cg->cy = cg->pt[1];
+
+                if (cg->cmd == 'm') {
+                    cg->sx = cg->cx;
+                    cg->sy = cg->cy;
                 }
 
-                cg_new_ring = 0;
+                cg->npt = 0;
+            } else if (cg->cmd == 'c' && cg->npt == 3) {
+                dw_cust_put(cg, 'c', cg->pt, 6);
+                cg->cx = cg->pt[4];
+                cg->cy = cg->pt[5];
+                cg->npt = 0;
+            } else if (cg->cmd == 'q' && cg->npt == 2) {    /* as a cubic */
+                double c3[6] = { cg->cx + 2.0 / 3 * (cg->pt[0] - cg->cx), cg->cy + 2.0 / 3 * (cg->pt[1] - cg->cy),
+                                 cg->pt[2] + 2.0 / 3 * (cg->pt[0] - cg->pt[2]), cg->pt[3] + 2.0 / 3 * (cg->pt[1] - cg->pt[3]),
+                                 cg->pt[2], cg->pt[3]
+                               };
 
-                if (curve && cg_n + 12 < 2048) {
-                    for (k2 = 1; k2 <= 12; k2++) {
-                        double tt = k2 / 12.0, u = 1 - tt;
-
-                        if (cg_cmd == 'c') {
-                            cg_xy[2 * cg_n] = u * u * u * x0 + 3 * u * u * tt * cg_pt[0] + 3 * u * tt * tt * cg_pt[2] +
-                                              tt * tt * tt * cg_pt[4];
-                            cg_xy[2 * cg_n + 1] = u * u * u * y0 + 3 * u * u * tt * cg_pt[1] + 3 * u * tt * tt * cg_pt[3] +
-                                                  tt * tt * tt * cg_pt[5];
-                        } else {
-                            cg_xy[2 * cg_n] = u * u * x0 + 2 * u * tt * cg_pt[0] + tt * tt * cg_pt[2];
-                            cg_xy[2 * cg_n + 1] = u * u * y0 + 2 * u * tt * cg_pt[1] + tt * tt * cg_pt[3];
-                        }
-
-                        cg_n++;
-                    }
-                } else {
-                    for (k2 = 0; k2 < cg_npt; k2++) {
-                        cg_xy[2 * cg_n] = cg_pt[2 * k2];
-                        cg_xy[2 * cg_n + 1] = cg_pt[2 * k2 + 1];
-                        cg_n++;
-                    }
-                }
-
-                cg_npt = 0;
+                dw_cust_put(cg, 'c', c3, 6);
+                cg->cx = cg->pt[2];
+                cg->cy = cg->pt[3];
+                cg->npt = 0;
             }
         } else if (in_sppr && !strcmp(t, "prstGeom") && mu_attr(&g, "prst", v, sizeof(v))) {
             snprintf(prst, sizeof(prst), "%.31s", v);
@@ -9825,8 +10104,17 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         } else if (cur_clr && (!strcmp(t, "lumMod") || !strcmp(t, "lumOff") || !strcmp(t, "tint") ||
                                !strcmp(t, "shade") || !strcmp(t, "alpha"))) {
             *cur_clr = pd_conv_clr_modify(*cur_clr, t, &g);
+        } else if (in_ln && !strcmp(t, "prstDash") && mu_attr(&g, "val", v, sizeof(v))) {
+            ndash = dw_dash_preset(v, dash);
+        } else if (in_ln && !strcmp(t, "custDash")) {
+            ndash = 0;
+        } else if (in_ln && !strcmp(t, "ds") && ndash < 8) {    /* a dash of a pattern of its own and its gap */
+            dash[ndash++] = mu_attr(&g, "d", v, sizeof(v)) ? atoi(v) : 100000;
+            dash[ndash++] = mu_attr(&g, "sp", v, sizeof(v)) ? atoi(v) : 100000;
+        } else if (in_ln && (!strcmp(t, "round") || !strcmp(t, "bevel") || !strcmp(t, "miter"))) {
+            ljoin = t[0] == 'r' ? 0 : t[0] == 'b' ? 1 : 2;
         } else if (in_ln && (!strcmp(t, "headEnd") || !strcmp(t, "tailEnd"))) {
-            int arrow = mu_attr(&g, "type", v, sizeof(v)) && strcmp(v, "none") != 0, e = t[0] == 'h' ? 0 : 1;
+            int arrow = mu_attr(&g, "type", v, sizeof(v)) ? dw_arrow_type(v) : 0, e = t[0] == 'h' ? 0 : 1;
 
             if (t[0] == 'h') {
                 head_arrow = arrow;
@@ -9835,11 +10123,11 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
 
             if (mu_attr(&g, "w", v, sizeof(v))) {
-                arrow_w[e] = !strcmp(v, "sm") ? 2 : !strcmp(v, "lg") ? 5 : 3;
+                arrow_w[e] = !strcmp(v, "sm") ? 1 : !strcmp(v, "lg") ? 3 : 2;
             }
 
             if (mu_attr(&g, "len", v, sizeof(v))) {
-                arrow_len[e] = !strcmp(v, "sm") ? 2 : !strcmp(v, "lg") ? 5 : 3;
+                arrow_len[e] = !strcmp(v, "sm") ? 1 : !strcmp(v, "lg") ? 3 : 2;
             }
         } else if (in_ln && !strcmp(t, "noFill")) {
             have_line = 1;  /* no line */
@@ -9949,6 +10237,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
     pb_free(&o);
     pb_free(&text);
+    free(cg);
 }
 
 /* a VML style's length (width:228.6pt;height:32.4pt) in EMU; 0 if absent */

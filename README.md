@@ -120,6 +120,28 @@ from content). Streams use Parade's own deflate (`src/pd_zlib.c`,
 cross-checked against zlib). `make pdf-check` runs Ghostscript and
 poppler over the output.
 
+## Drawings
+
+Word canvases and groups, PowerPoint slides' shapes and metafiles become a
+drawing resource (`application/vnd.parade.drawing+json`) that the layout
+turns into display-list paths, the same for the screen and for PDF.
+
+- **Geometry**: Office's preset shapes from their ECMA definitions, and
+  freeforms (custGeom) with lines, curves and arcs (arcTo), each path in
+  its own coordinate space, filled and outlined as it says. Curves stay
+  cubic Beziers in the display list (`pd_draw.curve`, beside the chords
+  in `points` that hit testing uses): PDF draws them with `c`, the
+  rasterizer flattens them to a tenth of a pixel as it draws.
+- **Outlines**: dashes (the preset patterns and custom ones), round,
+  square or flat ends, round, bevelled or mitred corners, compound lines
+  (double, thick-thin, thin-thick, triple) and arrowheads (triangle,
+  stealth, diamond, oval, open; three widths and lengths). A path's style
+  is `pd_draw.style`; PDF strokes it with its own dash, cap and join
+  operators.
+- **Rasterizer**: `pd_draw_render` draws display-list paths into an RGBA
+  image with Parade's integer coverage rasterizer, so a host gets the
+  library's pixels rather than drawing styles itself.
+
 ## International text
 
 - Unicode 15.1 tables generated from the UCD (`make unidata`,
@@ -391,7 +413,7 @@ pd_para_break(p, &prm, NULL);
     include/parade_doc.h public C API: document model, editing, JData I/O
     include/parade_layout.h public C API: pages, display lists, carets
     src/pd_font.c        font metrics reader
-    src/pd_raster.c      glyph outlines (glyf) and the integer rasterizer
+    src/pd_raster.c      glyph outlines (glyf) and the integer rasterizer, for glyphs and drawings' paths
     src/pd_cff.c         CFF Type 2 charstrings
     src/pd_para.c        content building, simple shaper, output, hit testing
     src/pd_break.c       total-fit / first-fit line breaking
