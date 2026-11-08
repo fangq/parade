@@ -4150,6 +4150,83 @@ static void test_pptx_hidden(void) {
     pd_doc_free(d);
 }
 
+/* a paragraph with properties PPR and text T */
+#define PPP(ppr, text) "<a:p><a:pPr" ppr "</a:pPr><a:r><a:rPr sz=\"2000\"/><a:t>" text "</a:t></a:r></a:p>"
+
+/* the text of the story paragraph whose text has NEEDLE in it, up to the tab after its bullet */
+static void bullet_of(const pd_doc* d, const char* needle, char* out, size_t cap) {
+    int32_t i;
+
+    out[0] = '\0';
+
+    for (i = 0; i < pd_doc_story_count(d); i++) {
+        pd_block_id st = pd_doc_story_at(d, i);
+        pd_block_info bi;
+        int32_t k;
+
+        for (k = 0; pd_doc_block_info(d, st, &bi) == PD_OK && k < bi.child_count; k++) {
+            uint32_t n;
+            const char* t = para_text(d, pd_doc_child(d, st, k), &n);
+            const char* tab = (const char*)memchr(t, '\t', n);
+
+            if (tab && n - (size_t)(tab - t) - 1 == strlen(needle) && !memcmp(tab + 1, needle, strlen(needle))) {
+                snprintf(out, cap, "%.*s", (int)(tab - t), t);
+                return;
+            }
+        }
+    }
+}
+
+/* autonumbered paragraphs: the scheme's numbers and what is round them, startAt, each level counting on its own and
+   starting again under a paragraph less deep; a bullet's face and size in points */
+static void test_pptx_autonum(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PSP("2",
+                         PPP("><a:buAutoNum type=\"alphaLcParenR\" startAt=\"3\"/>", "c1")
+                         PPP("><a:buAutoNum type=\"alphaLcParenR\" startAt=\"3\"/>", "c2")
+                         PPP(" lvl=\"1\"><a:buAutoNum type=\"romanUcPeriod\"/>", "r1")
+                         PPP(" lvl=\"1\"><a:buAutoNum type=\"romanUcPeriod\"/>", "r2")
+                         "<a:p><a:pPr lvl=\"1\"><a:buAutoNum type=\"romanUcPeriod\"/></a:pPr></a:p>"
+                         PPP("><a:buAutoNum type=\"alphaLcParenR\" startAt=\"3\"/>", "c3")
+                         PPP(" lvl=\"1\"><a:buAutoNum type=\"romanUcPeriod\"/>", "r3")
+                         PPP("><a:buAutoNum type=\"circleNumWdBlackPlain\"/>", "k1")
+                         PPP("><a:buAutoNum type=\"ea1JpnChsDbPeriod\" startAt=\"12\"/>", "e1")
+                         PPP("><a:buAutoNum type=\"arabicParenBoth\"/>", "p1")
+                         PPP("><a:buNone/>", "none")
+                         PPP("><a:buAutoNum type=\"arabicParenBoth\"/>", "p2")
+                         PPP("><a:buAutoNum type=\"thaiNumPeriod\" startAt=\"5\"/>", "t1")
+                         PPP("><a:buAutoNum type=\"hebrew2Minus\" startAt=\"2\"/>", "h1")
+                         PPP("><a:buAutoNum type=\"circleNumDbPlain\" startAt=\"3\"/>", "o1")
+                         PPP("><a:buSzPts val=\"1200\"/><a:buFont typeface=\"Arial\"/><a:buChar char=\"-\"/>", "dash"))),
+                         NULL);
+    static const char* const want[][2] = {
+        { "c1", "c)" }, { "c2", "d)" }, { "r1", "I." }, { "r2", "II." }, { "c3", "e)" }, { "r3", "I." },
+        { "k1", "\xE2\x9D\xB6" }, { "e1", "\xE5\x8D\x81\xE4\xBA\x8C\xEF\xBC\x8E" }, { "p1", "(1)" },
+        { "p2", "(1)" }, { "t1", "\xE0\xB9\x95." }, { "h1", "\xD7\x91-" }, { "o1", "\xE2\x91\xA2" }, { "dash", "-" }
+    };
+    char buf[64];
+    size_t k;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    for (k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+        bullet_of(d, want[k][0], buf, sizeof(buf));
+        CHECK_STR(buf, want[k][1]);
+    }
+
+    {   /* the dash 12 points, in Arial; the text after it 20 */
+        pd_block_id p = story_para_with(d, "-\tdash");
+        pd_char_props a = chars_at(d, p, 0), b = chars_at(d, p, 3);
+
+        CHECK(p && a.size == PD_PT(12) && !strcmp(a.family, "Arial") && b.size == PD_PT(20));
+    }
+
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5689,6 +5766,7 @@ int main(void) {
     test_pptx();
     test_pptx_smartart();
     test_pptx_hidden();
+    test_pptx_autonum();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();

@@ -13,6 +13,7 @@
 
 #include "pd_conv.h"
 #include "pd_dgm.h"
+#include "pd_doc_internal.h"
 #include "pd_xdoc.h"
 
 /* ---- the package ---- */
@@ -597,6 +598,8 @@ typedef struct {
     int bullet;                 /* while its bullet is put: */
     long bu_colour;             /* the bullet's colour (buClr), -1 the text's */
     double bu_scale;            /* and its size (buSzPct), 0 the text's */
+    long bu_sz;                 /* its size in hundredths of a point (buSzPts), 0 none */
+    const char* bu_face;        /* its face (buFont), NULL the text's */
     long def_sz;                /* the size of runs that give none (hundredths of a point), 0: 18 points */
 } tctx;
 
@@ -650,6 +653,31 @@ static xref ppr_kid(const tctx* T, const xdoc* d, int ppr, const char* name) {
         if ((r.n = xd_kid(T->lvl[k].d, T->lvl[k].n, name)) >= 0) {
             r.d = T->lvl[k].d;
             return r;
+        }
+    }
+
+    r.n = -1;
+    return r;
+}
+
+/* of paragraph property elements that stand for one another (buChar, buAutoNum, buNone...), the nearest: *which its
+   index in NAMES, -1 none */
+static xref ppr_first(const tctx* T, const xdoc* d, int ppr, const char* const* names, int n, int* which) {
+    xref r = { NULL, -1 };
+    int k, q;
+
+    *which = -1;
+
+    for (k = -1; k < T->nlvl; k++) {
+        const xdoc* x = k < 0 ? d : T->lvl[k].d;
+        int e = k < 0 ? ppr : T->lvl[k].n;
+
+        for (q = 0; e >= 0 && q < n; q++) {
+            if ((r.n = xd_kid(x, e, names[q])) >= 0) {
+                r.d = x;
+                *which = q;
+                return r;
+            }
         }
     }
 
@@ -785,6 +813,17 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
 
     pb_puts(o, "<w:rPr>");
     rpr_font(T, d, rpr, v, sizeof(v), &th);
+
+    if (T->bullet && T->bu_face) {  /* the bullet's own face */
+        th = !strcmp(T->bu_face, "+mj-lt") ? PD_FONT_THEME_MAJOR : !strcmp(T->bu_face, "+mn-lt") ?
+             PD_FONT_THEME_MINOR : 0;
+        snprintf(v, sizeof(v), "%s", th == PD_FONT_THEME_MAJOR ? T->P->major : th ? T->P->minor : T->bu_face);
+
+        if (!T->P->theme_path[0] || strcmp(T->P->theme_path, T->P->doc_theme)) {
+            th = 0;
+        }
+    }
+
     heavy = font_weight(v);
     {   /* the face, for the font table */
         int q;
@@ -853,7 +892,8 @@ static void put_rpr(pd_buf* o, const tctx* T, const xdoc* d, int rpr) {
         sz = T->def_sz;
     }
 
-    sz = (long)(sz * T->scale * (T->bullet && T->bu_scale > 0 ? T->bu_scale : 1) + 0.5);
+    sz = T->bullet && T->bu_sz > 0 ? (long)(T->bu_sz * T->scale + 0.5) :
+         (long)(sz * T->scale * (T->bullet && T->bu_scale > 0 ? T->bu_scale : 1) + 0.5);
     pb_printf(o, "<w:sz w:val=\"%ld\"/><w:szCs w:val=\"%ld\"/></w:rPr>", (sz + 25) / 50, (sz + 25) / 50);
 }
 
@@ -928,12 +968,116 @@ static const char* symbol_bullet(const char* ch, const char* face) {
     return "\xE2\x80\xA2";
 }
 
-static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum) {
-    int ppr = xd_kid(d, p, "pPr"), k, first_rpr = -1, pct, sp, any = 0, rtl;
-    char v[64], bu[16] = "";
+/* where a text body's numbered paragraphs are: each level's number so far (0 none) and its scheme */
+typedef struct {
+    int n[9];
+    char scheme[9][32];
+} autonum;
+
+/* an autonumbered paragraph's label: number V in scheme S (ST_TextAutonumberScheme) */
+static void autonum_label(const char* s, int v, char* out, size_t cap) {
+    static const struct {
+        const char* name;
+        int fmt;
+    } kinds[] = {
+        { "alphaLc", PD_NUM_LOWER_ALPHA }, { "alphaUc", PD_NUM_UPPER_ALPHA }, { "romanLc", PD_NUM_LOWER_ROMAN },
+        { "romanUc", PD_NUM_UPPER_ROMAN }, { "arabicDb", PD_NUM_FULLWIDTH }, { "circleNumDb", PD_NUM_CIRCLED },
+        { "circleNumWdWhite", PD_NUM_CIRCLED }, { "ea1", PD_NUM_CJK_COUNTING }, { "arabic1", -1 }, { "arabic2", -2 },
+        { "hebrew2", -3 }, { "thaiAlpha", -4 }, { "hindiAlpha1", -5 }, { "hindiAlpha", -6 }, { "thaiNum", -7 },
+        { "hindiNum", -8 }, { "circleNumWdBlack", -9 }, { "arabic", PD_NUM_DECIMAL }
+    };
+    /* the alphabets: the Arabic one, the Arabic in its abjad order, Hebrew, Thai, Hindi's consonants and vowels */
+    static const char* const abc[6] = {
+        "\xD8\xA3\xD8\xA8\xD8\xAA\xD8\xAB\xD8\xAC\xD8\xAD\xD8\xAE\xD8\xAF\xD8\xB0\xD8\xB1\xD8\xB2\xD8\xB3\xD8\xB4\xD8\xB5"
+        "\xD8\xB6\xD8\xB7\xD8\xB8\xD8\xB9\xD8\xBA\xD9\x81\xD9\x82\xD9\x83\xD9\x84\xD9\x85\xD9\x86\xD9\x87\xD9\x88\xD9\x8A",
+        "\xD8\xA3\xD8\xA8\xD8\xAC\xD8\xAF\xD9\x87\xD9\x88\xD8\xB2\xD8\xAD\xD8\xB7\xD9\x8A\xD9\x83\xD9\x84\xD9\x85\xD9\x86"
+        "\xD8\xB3\xD8\xB9\xD9\x81\xD8\xB5\xD9\x82\xD8\xB1\xD8\xB4\xD8\xAA\xD8\xAB\xD8\xAE\xD8\xB0\xD8\xB6\xD8\xB8\xD8\xBA",
+        "\xD7\x90\xD7\x91\xD7\x92\xD7\x93\xD7\x94\xD7\x95\xD7\x96\xD7\x97\xD7\x98\xD7\x99\xD7\x9B\xD7\x9C\xD7\x9E\xD7\xA0"
+        "\xD7\xA1\xD7\xA2\xD7\xA4\xD7\xA6\xD7\xA7\xD7\xA8\xD7\xA9\xD7\xAA",
+        "\xE0\xB8\x81\xE0\xB8\x82\xE0\xB8\x84\xE0\xB8\x87\xE0\xB8\x88\xE0\xB8\x89\xE0\xB8\x8A\xE0\xB8\x8B\xE0\xB8\x8C"
+        "\xE0\xB8\x8D\xE0\xB8\x8E\xE0\xB8\x8F\xE0\xB8\x90\xE0\xB8\x91\xE0\xB8\x92\xE0\xB8\x93\xE0\xB8\x94\xE0\xB8\x95"
+        "\xE0\xB8\x96\xE0\xB8\x97\xE0\xB8\x98\xE0\xB8\x99\xE0\xB8\x9A\xE0\xB8\x9B\xE0\xB8\x9C\xE0\xB8\x9D\xE0\xB8\x9E"
+        "\xE0\xB8\x9F\xE0\xB8\xA0\xE0\xB8\xA1\xE0\xB8\xA2\xE0\xB8\xA3\xE0\xB8\xA5\xE0\xB8\xA7\xE0\xB8\xA8\xE0\xB8\xA9"
+        "\xE0\xB8\xAA\xE0\xB8\xAB\xE0\xB8\xAC\xE0\xB8\xAD\xE0\xB8\xAE",
+        "\xE0\xA4\x95\xE0\xA4\x96\xE0\xA4\x97\xE0\xA4\x98\xE0\xA4\x99\xE0\xA4\x9A\xE0\xA4\x9B\xE0\xA4\x9C\xE0\xA4\x9D"
+        "\xE0\xA4\x9E\xE0\xA4\x9F\xE0\xA4\xA0\xE0\xA4\xA1\xE0\xA4\xA2\xE0\xA4\xA3\xE0\xA4\xA4\xE0\xA4\xA5\xE0\xA4\xA6"
+        "\xE0\xA4\xA7\xE0\xA4\xA8\xE0\xA4\xAA\xE0\xA4\xAB\xE0\xA4\xAC\xE0\xA4\xAD\xE0\xA4\xAE\xE0\xA4\xAF\xE0\xA4\xB0"
+        "\xE0\xA4\xB2\xE0\xA4\xB5\xE0\xA4\xB6\xE0\xA4\xB7\xE0\xA4\xB8\xE0\xA4\xB9",
+        "\xE0\xA4\x85\xE0\xA4\x86\xE0\xA4\x87\xE0\xA4\x88\xE0\xA4\x89\xE0\xA4\x8A\xE0\xA4\x8B\xE0\xA4\x8F\xE0\xA4\x90"
+        "\xE0\xA4\x93\xE0\xA4\x94"
+    };
+    char num[48];
+    const char* suf, *pre = "";
+    size_t k;
+    int fmt = PD_NUM_DECIMAL;
+
+    for (k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+        if (!strncmp(s, kinds[k].name, strlen(kinds[k].name))) {
+            fmt = kinds[k].fmt;
+            break;
+        }
+    }
+
+    if (fmt >= 0) {
+        pd_doc_format_number(v, fmt, num, sizeof(num));
+    } else if (fmt >= -6) {     /* a letter of an alphabet, each the same length; decimal past its end */
+        const char* a = abc[-fmt - 1];
+        size_t w = fmt >= -3 ? 2 : 3, len = strlen(a) / w;
+
+        if (v >= 1 && (size_t)v <= len) {
+            snprintf(num, sizeof(num), "%.*s", (int)w, a + (size_t)(v - 1) * w);
+        } else {
+            snprintf(num, sizeof(num), "%d", v);
+        }
+    } else if (fmt == -9 && v >= 1 && v <= 10) {    /* white on a black circle: U+2776.. */
+        snprintf(num, sizeof(num), "\xE2\x9D%c", (char)(0xB6 + v - 1));
+    } else if (fmt == -9) {
+        snprintf(num, sizeof(num), "%d", v);
+    } else {    /* Thai or Devanagari digits */
+        char dec[16];
+        size_t q = 0, i;
+
+        snprintf(dec, sizeof(dec), "%d", v);
+
+        for (i = 0; dec[i] && q + 4 < sizeof(num); i++) {
+            int dg = dec[i] - '0';
+
+            if (dg < 0 || dg > 9) {
+                num[q++] = dec[i];
+            } else if (fmt == -7) {     /* U+0E50.. */
+                num[q++] = (char)0xE0;
+                num[q++] = (char)0xB9;
+                num[q++] = (char)(0x90 + dg);
+            } else {    /* U+0966.. */
+                num[q++] = (char)0xE0;
+                num[q++] = (char)0xA5;
+                num[q++] = (char)(0xA6 + dg);
+            }
+        }
+
+        num[q] = '\0';
+    }
+
+    /* what is round it */
+    suf = strstr(s, "ParenBoth") ? ")" : strstr(s, "ParenR") ? ")" : strstr(s, "DbPeriod") ? "\xEF\xBC\x8E" :
+          strstr(s, "Period") ? "." : strstr(s, "Minus") ? "-" : "";
+
+    if (strstr(s, "ParenBoth")) {
+        pre = "(";
+    }
+
+    snprintf(out, cap, "%s%s%s", pre, num, suf);
+}
+
+static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an) {
+    static const char* const types[4] = { "buNone", "buAutoNum", "buChar", "buBlip" };
+    static const char* const clrs[2] = { "buClr", "buClrTx" }, *const szs[3] = { "buSzPct", "buSzPts", "buSzTx" };
+    static const char* const faces[2] = { "buFont", "buFontTx" };
+    int ppr = xd_kid(d, p, "pPr"), k, first_rpr = -1, pct, sp, any = 0, rtl, which, lvl;
+    char v[64], bu[64] = "", bu_face[64] = "";
     xref r;
     long long marl, ind;
-    long bu_colour = -1;
+    long bu_colour = -1, bu_sz = 0;
     double bu_scale = 0, line;
 
     for (k = d->v[p].kid; k >= 0; k = d->v[k].next) {
@@ -993,33 +1137,63 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
     put_rpr(o, T, d, first_rpr);
     pb_puts(o, "</w:pPr>");
 
-    /* its bullet: as text before it */
-    r = ppr_kid(T, d, ppr, "buNone");
+    /* its bullet: as text before it. A number counts on from the last paragraph at its level numbered the same way
+       (from startAt, or 1); a paragraph less deep starts the deeper levels' numbers again, and one not numbered
+       its own level's; an empty one is passed over */
+    lvl = ppr >= 0 ? (int)xd_int(d, ppr, "lvl", 0) : 0;
+    lvl = lvl < 0 ? 0 : lvl > 8 ? 8 : lvl;
+    r = ppr_first(T, d, ppr, types, 4, &which);
 
-    if (any && r.n < 0) {
-        xref c = ppr_kid(T, d, ppr, "buChar"), a = ppr_kid(T, d, ppr, "buAutoNum");
-
-        if (a.n >= 0) {
-            snprintf(bu, sizeof(bu), "%d.", ++*autonum);
-        } else if (c.n >= 0) {
-            xref f = ppr_kid(T, d, ppr, "buFont");
-            char face[64] = "";
-
-            xd_attr(c.d, c.n, "char", v, sizeof(v));
-            xd_attr(f.d, f.n, "typeface", face, sizeof(face));
-            snprintf(bu, sizeof(bu), "%.12s", symbol_bullet(v, face));
+    if (any) {
+        for (k = lvl + 1; k < 9; k++) {
+            an->n[k] = 0;
         }
 
-        if (bu[0]) {
-            xref k2 = ppr_kid(T, d, ppr, "buClr"), z = ppr_kid(T, d, ppr, "buSzPct");
+        if (which == 1) {
+            char sch[32] = "arabicPeriod";
 
-            bu_colour = k2.n >= 0 && k2.d->v[k2.n].kid >= 0 ? colour_of(T->P, k2.d, k2.d->v[k2.n].kid) : -1;
-            bu_scale = z.n >= 0 ? xd_int(z.d, z.n, "val", 100000) / 100000.0 : 0;
+            xd_attr(r.d, r.n, "type", sch, sizeof(sch));
+
+            if (an->n[lvl] > 0 && !strcmp(an->scheme[lvl], sch)) {
+                an->n[lvl]++;
+            } else {
+                an->n[lvl] = (int)xd_int(r.d, r.n, "startAt", 1);
+                snprintf(an->scheme[lvl], sizeof(an->scheme[0]), "%s", sch);
+            }
+
+            autonum_label(sch, an->n[lvl], bu, sizeof(bu));
+        } else {
+            an->n[lvl] = 0;
         }
     }
 
-    if (!bu[0] || !isdigit((unsigned char)bu[0])) {
-        *autonum = 0;   /* a numbered list ends where a paragraph is not numbered */
+    if (any && which >= 1) {
+        xref f = ppr_first(T, d, ppr, faces, 2, &k);
+
+        if (k == 0) {
+            xd_attr(f.d, f.n, "typeface", bu_face, sizeof(bu_face));
+        }
+
+        if (which == 2) {
+            xd_attr(r.d, r.n, "char", v, sizeof(v));
+            snprintf(bu, sizeof(bu), "%.12s", symbol_bullet(v, bu_face));
+
+            if (strcmp(bu, v) || !strncmp(bu_face, "Wingdings", 9) || !strcmp(bu_face, "Symbol") ||
+                    !strcmp(bu_face, "Webdings") || !strcmp(bu_face, "Marlett")) {
+                bu_face[0] = '\0';     /* a symbol font's character made Unicode: in the text's face */
+            }
+        } else if (which == 3) {
+            snprintf(bu, sizeof(bu), "\xE2\x96\xA0");     /* a picture: a square where it is */
+        }
+
+        if (bu[0]) {
+            xref c = ppr_first(T, d, ppr, clrs, 2, &k), z;
+
+            bu_colour = k == 0 && c.d->v[c.n].kid >= 0 ? colour_of(T->P, c.d, c.d->v[c.n].kid) : -1;
+            z = ppr_first(T, d, ppr, szs, 3, &k);
+            bu_scale = k == 0 ? xd_int(z.d, z.n, "val", 100000) / 100000.0 : 0;
+            bu_sz = k == 1 ? (long)xd_int(z.d, z.n, "val", 0) : 0;
+        }
     }
 
     if (bu[0]) {
@@ -1028,6 +1202,8 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, int* autonum
         B.bullet = 1;
         B.bu_colour = bu_colour;
         B.bu_scale = bu_scale;
+        B.bu_sz = bu_sz;
+        B.bu_face = bu_face[0] ? bu_face : NULL;
         pb_puts(o, "<w:r>");
         put_rpr(o, &B, d, first_rpr);
         pb_puts(o, "<w:t xml:space=\"preserve\">");
@@ -1221,7 +1397,8 @@ static void put_tree(conv* C, ppart* pt, int tree, int skip_ph);
 static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, int msp) {
     const xdoc* d = &pt->x;
     const xdoc* ds[6];
-    int ns[6], nn = 0, p, autonum = 0, ts;
+    int ns[6], nn = 0, p, ts;
+    autonum an;
     tctx T;
     int bp = xd_kid(d, tx, "bodyPr"), na = bp >= 0 ? xd_kid(d, bp, "normAutofit") : -1, fr;
 
@@ -1288,6 +1465,7 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
         }
     }
 
+    memset(&an, 0, sizeof(an));
     pb_puts(C->o, "<wps:txbx><w:txbxContent>");
 
     for (p = d->v[tx].kid; p >= 0; p = d->v[p].next) {
@@ -1295,7 +1473,7 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
             int ppr = xd_kid(d, p, "pPr");
 
             lvl_chain(&T, ds, ns, nn, ppr >= 0 ? (int)xd_int(d, ppr, "lvl", 0) : 0);
-            put_paragraph(C->o, &T, d, p, &autonum);
+            put_paragraph(C->o, &T, d, p, &an);
         }
     }
 
@@ -1542,7 +1720,8 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
         col = 0;
 
         for (c = d->v[r].kid; c >= 0; c = d->v[c].next) {
-            int tc = xd_kid(d, c, "tcPr"), tx = xd_kid(d, c, "txBody"), p, autonum = 0;
+            int tc = xd_kid(d, c, "tcPr"), tx = xd_kid(d, c, "txBody"), p;
+            autonum an;
             long fill = tc >= 0 ? fill_colour(C->P, d, tc) : -1;
             long long span = xd_int(d, c, "gridSpan", 1);
             tctx T;
@@ -1623,6 +1802,7 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
 
             pb_puts(C->o, "</w:tcPr>");
             memset(&T, 0, sizeof(T));
+            memset(&an, 0, sizeof(an));
             T.P = C->P;
             T.scale = T.spacing = 1;
             T.font_colour = style >= 0 ? stext : first && row == 0 ? 0xFFFFFF : -1;
@@ -1636,7 +1816,7 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
                                 };
 
                     lvl_chain(&T, ds, ns, 2, 0);
-                    put_paragraph(C->o, &T, d, p, &autonum);
+                    put_paragraph(C->o, &T, d, p, &an);
                 }
             }
 
