@@ -146,6 +146,7 @@ const
   PD_CP_ITALIC_CS = 1 shl 22;
   PD_REV_INSERT = 1;
   PD_REV_DELETE = 2;
+  PD_REV_FORMAT = 3;
   PD_MARKUP_BALLOONS = 0;
   PD_MARKUP_INLINE = 1;
   PD_MARKUP_FINAL = 2;
@@ -153,6 +154,7 @@ const
   PD_MARK_DELETION = 1;
   PD_MARK_INSERTION = 2;
   PD_MARK_COMMENT = 3;
+  PD_MARK_FORMAT = 4;
   PD_UNDERLINE_NONE = 0;
   PD_UNDERLINE_SINGLE = 1;
   PD_UNDERLINE_DOUBLE = 2;
@@ -495,6 +497,8 @@ type
     kind: Int32;
     author: array[0..63] of AnsiChar;
     date: array[0..31] of AnsiChar;
+    move: Int32;              { a moved text's number, its deletion and insertion; 0 not a move }
+    old: pd_char_props;       { PD_REV_FORMAT: the direct formatting it had }
   end;
   Ppd_revision = ^pd_revision;
 

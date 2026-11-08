@@ -375,6 +375,7 @@ typedef struct {
     int nhf;
     int hyph_auto;              /* the document hyphenates: settings.xml autoHyphenation */
     const pd_float_props* frame;    /* the frame whose paragraphs are being written (their w:framePr) */
+    int move_range;             /* the id of the move's range being written */
     pd_block_id pending[8];     /* picture floats to anchor in the next paragraph */
     int npending;
     int page_break;             /* a page break opens the next paragraph */
@@ -510,6 +511,8 @@ static void dx_font_theme_attr(pd_buf* o, int32_t ft) {
     }
 }
 
+static void dx_rpr_set(pd_buf* o, const pd_char_props* c);
+
 static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const char* rstyle) {
     pd_buf* o = x->o;
     size_t mark;
@@ -640,6 +643,25 @@ static void dx_rpr(dxo* x, const pd_char_props* c, const pd_char_props* b, const
         pb_puts(o, "<w:lang w:val=\"");
         xesc(o, c->lang, strlen(c->lang));
         pb_puts(o, "\"/>");
+    }
+
+    {
+        /* a formatting change: what the run had */
+        pd_revision rv;
+
+        if (c->revision && pd_doc_revision_get(x->d, c->revision, &rv) == PD_OK && rv.kind == PD_REV_FORMAT) {
+            pb_printf(o, "<w:rPrChange w:id=\"%d\" w:author=\"", ++x->nrev);
+            xesc(o, rv.author, strlen(rv.author));
+
+            if (rv.date[0]) {
+                pb_puts(o, "\" w:date=\"");
+                xesc(o, rv.date, strlen(rv.date));
+            }
+
+            pb_puts(o, "\"><w:rPr>");
+            dx_rpr_set(o, &rv.old);
+            pb_puts(o, "</w:rPr></w:rPrChange>");
+        }
     }
 
     if (o->n == mark) {     /* nothing: no rPr at all */
@@ -1830,28 +1852,45 @@ static void dx_comment_bounds(dxo* x, pd_block_id p) {
 
 /* one run of text, inside w:ins or w:del when it is a tracked change */
 /* the w:ins or w:del a tracked change's runs go in, opened: its kind (PD_REV_*), 0 when it is none */
+/* a tracked insertion or deletion opened round runs: its kind, 8 more for a move (moveFrom, moveTo, in a range
+   of the move's name), 0 none (a formatting change is in the run's rPr) */
 static int dx_rev_open(dxo* x, pd_rev_id rev) {
     pd_buf* o = x->o;
     pd_revision rv;
+    const char* el;
+    int k;
 
-    if (!rev || pd_doc_revision_get(x->d, rev, &rv) != PD_OK) {
+    if (!rev || pd_doc_revision_get(x->d, rev, &rv) != PD_OK || rv.kind == PD_REV_FORMAT) {
         return 0;
     }
 
-    pb_printf(o, "<w:%s w:id=\"%d\" w:author=\"", rv.kind == PD_REV_DELETE ? "del" : "ins", ++x->nrev);
-    xesc(o, rv.author, strlen(rv.author));
+    el = rv.move ? (rv.kind == PD_REV_DELETE ? "moveFrom" : "moveTo") : rv.kind == PD_REV_DELETE ? "del" : "ins";
 
-    if (rv.date[0]) {
-        pb_puts(o, "\" w:date=\"");
-        xesc(o, rv.date, strlen(rv.date));
+    for (k = rv.move ? 0 : 1; k < 2; k++) {     /* the move's range, then the change */
+        pb_printf(o, k ? "<w:%s w:id=\"%d\" w:author=\"" : "<w:%sRangeStart w:id=\"%d\" w:author=\"", el, ++x->nrev);
+        xesc(o, rv.author, strlen(rv.author));
+
+        if (rv.date[0]) {
+            pb_puts(o, "\" w:date=\"");
+            xesc(o, rv.date, strlen(rv.date));
+        }
+
+        if (k) {
+            pb_puts(o, "\">");
+        } else {
+            pb_printf(o, "\" w:name=\"move%d\"/>", (int)rv.move);
+            x->move_range = x->nrev;
+        }
     }
 
-    pb_puts(o, "\">");
-    return rv.kind;
+    return rv.move ? rv.kind + 8 : rv.kind;
 }
 
 static void dx_rev_close(dxo* x, int kind) {
-    if (kind) {
+    if (kind > 8) {
+        pb_printf(x->o, kind == PD_REV_DELETE + 8 ? "</w:moveFrom><w:moveFromRangeEnd w:id=\"%d\"/>" :
+                  "</w:moveTo><w:moveToRangeEnd w:id=\"%d\"/>", x->move_range);
+    } else if (kind) {
         pb_puts(x->o, kind == PD_REV_DELETE ? "</w:del>" : "</w:ins>");
     }
 }
@@ -6274,6 +6313,13 @@ typedef struct {
         int kept, link;         /* a PD_FIELD_KEPT start, a link opened, to end with it */
     } fs[8];                    /* the fields open, the innermost last */
     int nfs, nfs_over;          /* how many, and those past the eighth (ignored) */
+    /* tracked changes */
+    int in_rprchg;              /* in a run's w:rPrChange: its old w:rPr */
+    pd_char_props old_cp;
+    char chg_author[64], chg_date[32];
+    pd_rev_id fmt_rev;          /* the run's formatting change */
+    char move_name[32][40];     /* the moves' names (moveFromRangeStart, moveToRangeStart), numbered from 1 */
+    int nmove, move_cur;
     int link_depth[16], nlinks;
     /* drawings */
     char blip[64];
@@ -6413,9 +6459,9 @@ static void dw_apply_run(dw* w) {
 
     cp.font_theme = f->font_theme;      /* kept for the families given (pd_doc_format masks it) */
 
-    if (w->rev || w->X->float_rev) {
+    if (w->rev || w->X->float_rev || w->fmt_rev) {
         cp.mask |= PD_CP_REVISION;
-        cp.revision = w->rev ? w->rev : w->X->float_rev;
+        cp.revision = w->rev ? w->rev : w->X->float_rev ? w->X->float_rev : w->fmt_rev;
     }
 
     bld_set_format(w->X->b, &cp);
@@ -11088,6 +11134,55 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             continue;
         }
 
+        if (open && strcmp(t, "rPrChange") == 0 && w->in_rpr && !w->in_mrpr && !w->in_rprchg) {
+            /* a run's formatting changed: what it had, in the w:rPr inside */
+            w->in_rprchg = m.type == MT_OPEN;
+            memset(&w->old_cp, 0, sizeof(w->old_cp));
+            w->chg_author[0] = w->chg_date[0] = '\0';
+            mu_attr(&m, "w:author", w->chg_author, sizeof(w->chg_author));
+            mu_attr(&m, "w:date", w->chg_date, sizeof(w->chg_date));
+            continue;
+        }
+
+        if (w->in_rprchg) {
+            if (m.type == MT_CLOSE && strcmp(t, "rPrChange") == 0) {
+                pd_revision rv;
+
+                memset(&rv, 0, sizeof(rv));
+                rv.kind = PD_REV_FORMAT;
+                memcpy(rv.author, w->chg_author, sizeof(rv.author));
+                memcpy(rv.date, w->chg_date, sizeof(rv.date));
+                rv.old = w->old_cp;
+                w->in_rprchg = 0;
+
+                if (pd_doc_revision_add(X->b->d, &rv, &w->fmt_rev) != PD_OK) {
+                    w->fmt_rev = 0;
+                }
+            } else if (open && strcmp(t, "rPr") != 0) {
+                rpr_elem(X, &m, t, &w->old_cp, NULL, 0);
+            }
+
+            continue;
+        }
+
+        if (open && (!strcmp(t, "moveFromRangeStart") || !strcmp(t, "moveToRangeStart"))) {
+            int k;      /* a move's two ends share its name: their revisions its number */
+
+            if (!mu_attr(&m, "w:name", v, sizeof(v))) {
+                v[0] = '\0';
+            }
+
+            for (k = 0; k < w->nmove && strcmp(w->move_name[k], v); k++) {
+            }
+
+            if (k == w->nmove && k < 32) {
+                snprintf(w->move_name[w->nmove++], sizeof(w->move_name[0]), "%.39s", v);
+            }
+
+            w->move_cur = k + 1;
+            continue;
+        }
+
         if (open) {
             /* elements whose content is ignored */
             if (strcmp(t, "txbxContent") == 0 || strcmp(t, "Fallback") == 0 ||
@@ -11119,6 +11214,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
                 memset(&rv, 0, sizeof(rv));
                 rv.kind = t[0] == 'd' || !strcmp(t, "moveFrom") ? PD_REV_DELETE : PD_REV_INSERT;
+                rv.move = t[0] == 'm' ? (w->move_cur ? w->move_cur : 33) : 0;
                 mu_attr(&m, "w:author", rv.author, sizeof(rv.author));
                 mu_attr(&m, "w:date", rv.date, sizeof(rv.date));
 
@@ -11280,6 +11376,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if (strcmp(t, "r") == 0) {
                 memset(&w->rcp, 0, sizeof(w->rcp));
                 w->rstyle[0] = '\0';
+                w->fmt_rev = 0;
             } else if (strcmp(t, "rPr") == 0) {
                 w->in_rpr = m.type == MT_OPEN;
             } else if (w->in_rpr) {

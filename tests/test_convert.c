@@ -5641,6 +5641,105 @@ static void test_comment_balloons(void) {
     pd_doc_free(d);
 }
 
+/* Moves stay moves (moveFrom/moveTo: a deletion and an insertion sharing a move number, written back as moves)
+   and a run's formatting change (rPrChange) is a revision of kind format holding the old formatting: listed for
+   the margin, written back, accepted (kept as it is) or rejected (the old formatting back). */
+static void test_docx_moves_formats(void) {
+    pd_doc* d = docx_doc(
+                    "word/document.xml",
+                    "<w:document xmlns:w=\"w\"><w:body>"
+                    "<w:p><w:moveFromRangeStart w:id=\"1\" w:name=\"move1\" w:author=\"Al\"/><w:moveFrom w:id=\"2\" w:author=\"Al\">"
+                    "<w:r><w:t>Gone</w:t></w:r></w:moveFrom><w:moveFromRangeEnd w:id=\"1\"/><w:r><w:t xml:space=\"preserve\"> stay "
+                    "</w:t></w:r><w:r><w:rPr><w:b/><w:rPrChange w:id=\"3\" w:author=\"Bo\"><w:rPr><w:i/></w:rPr></w:rPrChange>"
+                    "</w:rPr><w:t>bold</w:t></w:r></w:p>"
+                    "<w:p><w:moveToRangeStart w:id=\"4\" w:name=\"move1\" w:author=\"Al\"/><w:moveTo w:id=\"5\" w:author=\"Al\">"
+                    "<w:r><w:t>Gone</w:t></w:r></w:moveTo><w:moveToRangeEnd w:id=\"4\"/></w:p>"
+                    "</w:body></w:document>",
+                    NULL);
+    int pass;
+
+    for (pass = 0; pass < 2; pass++) {
+        pd_block_id p0, p1;
+        pd_char_props a, f, t;
+        pd_revision ra, rt, rf;
+        pd_range r;
+
+        CHECK(d != NULL);
+
+        if (!d) {
+            break;
+        }
+
+        p0 = pd_doc_next_paragraph(d, 0);
+        p1 = pd_doc_next_paragraph(d, p0);
+        a = chars_at(d, p0, 0);
+        t = chars_at(d, p1, 0);
+        f = chars_at(d, p0, 10);
+        CHECK(pd_doc_revision_get(d, a.revision, &ra) == PD_OK && ra.kind == PD_REV_DELETE && ra.move > 0);
+        CHECK(pd_doc_revision_get(d, t.revision, &rt) == PD_OK && rt.kind == PD_REV_INSERT && rt.move == ra.move);
+        CHECK(f.weight == 700 && pd_doc_revision_get(d, f.revision, &rf) == PD_OK && rf.kind == PD_REV_FORMAT &&
+              (rf.old.mask & PD_CP_ITALIC) && rf.old.italic && !strcmp(rf.author, "Bo"));
+
+        if (have_layout_font()) {   /* the formatting change listed for the margin */
+            pd_layout* L = NULL;
+            pd_markup_item mk[8];
+            int32_t n = 0, k, fmt = 0;
+
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+            if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+                    pd_layout_page_markup(L, 0, mk, 8, &n) == PD_OK) {
+                for (k = 0; k < n; k++) {
+                    fmt += mk[k].kind == PD_MARK_FORMAT && mk[k].range.start.offset == 10;
+                }
+            }
+
+            CHECK(fmt == 1);
+            pd_layout_free(L);
+        }
+
+        if (pass == 0) {
+            buf_t b = { NULL, 0 };
+            char* xml;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            xml = docx_part(&b, "word/document.xml");
+            CHECK(strstr(xml, "<w:moveFrom ") && strstr(xml, "<w:moveTo ") && strstr(xml, "w:name=\"move") &&
+                  strstr(xml, "<w:rPrChange "));
+            free(xml);
+            free(b.p);
+            d = docx_again(d);
+            continue;
+        }
+
+        {
+            /* kept in Parade's own format */
+            buf_t b = { NULL, 0 };
+            pd_doc* j = NULL;
+
+            CHECK(pd_doc_save(d, PD_JDATA_TEXT, to_buf, &b) == PD_OK && pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &j) == PD_OK);
+            CHECK(j && pd_doc_revision_get(j, chars_at(j, pd_doc_next_paragraph(j, 0), 10).revision, &rf) == PD_OK &&
+                  rf.kind == PD_REV_FORMAT && rf.old.italic && pd_doc_revision_get(j, chars_at(j, pd_doc_next_paragraph(j, 0),
+                          0).revision, &ra) == PD_OK && ra.move > 0);
+            pd_doc_free(j);
+            free(b.p);
+        }
+
+        /* rejected: italic and not bold, no revision; accepted (undone first): bold, no revision */
+        r.start = at(p0, 10);
+        r.end = at(p0, 14);
+        CHECK(pd_doc_revision_resolve(d, r, 0) == PD_OK);
+        f = chars_at(d, p0, 10);
+        CHECK(f.weight == 400 && f.italic && !f.revision);
+        CHECK(pd_doc_undo(d) == PD_OK);
+        CHECK(pd_doc_revision_resolve(d, r, 1) == PD_OK);
+        f = chars_at(d, p0, 10);
+        CHECK(f.weight == 700 && !f.italic && !f.revision);
+    }
+
+    pd_doc_free(d);
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -6331,6 +6430,7 @@ int main(void) {
     test_docx_text_boxes();
     test_docx_nested_fields();
     test_comment_balloons();
+    test_docx_moves_formats();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");

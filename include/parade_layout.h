@@ -141,7 +141,8 @@ PD_API pd_status pd_layout_page_items(const pd_layout* layout, int32_t page, pd_
 typedef enum {
     PD_MARK_DELETION = 1,       /**< deleted text: a balloon in PD_MARKUP_BALLOONS, else struck through in place */
     PD_MARK_INSERTION = 2,      /**< inserted text (in the text, in the author's colour) */
-    PD_MARK_COMMENT = 3         /**< a comment (not its replies, which share its range) */
+    PD_MARK_COMMENT = 3,        /**< a comment (not its replies, which share its range) */
+    PD_MARK_FORMAT = 4          /**< formatting changed (the text shown as it is now) */
 } pd_mark_kind;
 
 typedef struct {

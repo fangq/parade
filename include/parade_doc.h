@@ -1033,13 +1033,18 @@ PD_API pd_status pd_doc_marker_set(pd_doc* doc, pd_marker_id marker, pd_pos pos)
  */
 typedef enum {
     PD_REV_INSERT = 1,
-    PD_REV_DELETE = 2
+    PD_REV_DELETE = 2,
+    PD_REV_FORMAT = 3           /**< formatting changed: the text shown as it is now, old saying what it had */
 } pd_rev_kind;
 
 typedef struct {
     int32_t kind;               /**< pd_rev_kind */
     char author[64];            /**< UTF-8 */
     char date[32];              /**< ISO 8601 ("2026-10-06T03:40:00Z"), may be empty */
+    int32_t move;               /**< insertions and deletions: text moved, the deletion where it was and the insertion
+                                     where it went sharing this number (Word's moveFrom, moveTo); 0 not a move */
+    pd_char_props old;          /**< PD_REV_FORMAT: the direct formatting the text had before (masked); rejecting
+                                     the change gives it back */
 } pd_revision;
 
 PD_API pd_status pd_doc_revision_add(pd_doc* doc, const pd_revision* rev, pd_rev_id* out);
@@ -1072,7 +1077,8 @@ typedef enum {
 /** how layouts show tracked changes (default PD_MARKUP_BALLOONS) */
 PD_API void      pd_doc_set_markup(pd_doc* doc, int32_t mode);
 PD_API int32_t   pd_doc_markup(const pd_doc* doc);
-/** accept (1) or reject (0) every change in a range, as one undo step */
+/** accept (1) or reject (0) every change in a range, as one undo step (a formatting change rejected gives the text
+    its old direct formatting) */
 PD_API pd_status pd_doc_revision_resolve(pd_doc* doc, pd_range range, int32_t accept);
 /**
  * The next change from a position (dir > 0) or the previous one (dir < 0):

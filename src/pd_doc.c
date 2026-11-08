@@ -4831,12 +4831,22 @@ pd_status pd_doc_revision_add(pd_doc* d, const pd_revision* rev, pd_rev_id* out)
     pd_revision r;
     int32_t i;
 
-    if (!d || !rev || !out || (rev->kind != PD_REV_INSERT && rev->kind != PD_REV_DELETE)) {
+    if (!d || !rev || !out || (rev->kind != PD_REV_INSERT && rev->kind != PD_REV_DELETE && rev->kind != PD_REV_FORMAT) ||
+            rev->move < 0) {
         return PD_ERR_ARG;
     }
 
     memset(&r, 0, sizeof(r));
     r.kind = rev->kind;
+    r.move = rev->kind == PD_REV_FORMAT ? 0 : rev->move;
+
+    if (rev->kind == PD_REV_FORMAT) {   /* only what its mask says, so equal changes compare equal */
+        r.old.mask = rev->old.mask & ~PD_CP_REVISION;
+        cp_apply(&r.old, &rev->old);
+        r.old.mask &= ~PD_CP_REVISION;
+        r.old.revision = 0;
+    }
+
     memcpy(r.author, rev->author, sizeof(r.author) - 1);
     memcpy(r.date, rev->date, sizeof(r.date) - 1);
     r.author[strlen(r.author)] = '\0';     /* bytes after the end are cleared, so equal revisions compare equal */
@@ -4848,7 +4858,8 @@ pd_status pd_doc_revision_add(pd_doc* d, const pd_revision* rev, pd_rev_id* out)
     }
 
     for (i = 0; i < d->nrevs; i++) {
-        if (d->revs[i].kind == r.kind && !strcmp(d->revs[i].author, r.author) && !strcmp(d->revs[i].date, r.date)) {
+        if (d->revs[i].kind == r.kind && !strcmp(d->revs[i].author, r.author) && !strcmp(d->revs[i].date, r.date) &&
+                d->revs[i].move == r.move && !memcmp(&d->revs[i].old, &r.old, sizeof(r.old))) {
             *out = (pd_rev_id)(i + 1);
             return PD_OK;
         }
@@ -4981,6 +4992,10 @@ void pd_doc_markup_props(const pd_doc* d, pd_char_props* cp) {
         return;
     }
 
+    if (r->kind == PD_REV_FORMAT) {
+        return;     /* shown as it is now, as Word shows it (the change is in the margin) */
+    }
+
     ins = r->kind == PD_REV_INSERT;
 
     if (d->markup == PD_MARKUP_FINAL || d->markup == PD_MARKUP_ORIGINAL) {
@@ -5063,6 +5078,10 @@ static int act_resolve(pd_doc* d, const pd_revision* r, void* user) {
         return 0;
     }
 
+    if (r->kind == PD_REV_FORMAT) {
+        return accept ? 3 : 4;      /* 4: its old formatting back */
+    }
+
     return (r->kind == PD_REV_DELETE) == (accept != 0) ? 1 : 3;     /* 3: back to plain text */
 }
 
@@ -5102,6 +5121,13 @@ static pd_status for_revisions(pd_doc* d, pd_range r, const char* label, run_act
                 content_delete(&b->st, rs[i].start, rs[i].end);
                 markers_delete(d, cur, rs[i].start, rs[i].end);
                 removed = 1;
+            } else if (a == 4) {    /* a formatting change rejected: the old direct formatting, no revision */
+                const pd_revision* rv = rev_of(d, format_rev(d, rs[i].format));
+
+                if (rv && (range_map_formats(d, &b->st, rs[i].start, rs[i].end, 1, NULL, 0xFFFFFFFFu, 0) ||
+                           (rv->old.mask && range_map_formats(d, &b->st, rs[i].start, rs[i].end, 0, &rv->old, 0, 0)))) {
+                    st = PD_ERR_NOMEM;
+                }
             } else if (a >= 2) {
                 pd_char_props cp;
 

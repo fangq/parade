@@ -5818,7 +5818,7 @@ static void emit_comments(const pd_layout* L, dlist_t* D, int32_t page) {
         char t[1600];
         size_t tn = 0;
 
-        if (!ln || (mk[i].kind != PD_MARK_COMMENT && !(mk[i].kind == PD_MARK_DELETION &&
+        if (!ln || (mk[i].kind != PD_MARK_COMMENT && !((mk[i].kind == PD_MARK_DELETION || mk[i].kind == PD_MARK_FORMAT) &&
                     pd_doc_markup(d) == PD_MARKUP_BALLOONS))) {
             free(ln);
             continue;
@@ -5837,11 +5837,19 @@ static void emit_comments(const pd_layout* L, dlist_t* D, int32_t page) {
                     tn = tn < sizeof(t) ? tn : sizeof(t) - 1;
                 }
             }
+        } else if (mk[i].kind == PD_MARK_FORMAT) {
+            pd_revision rv;
+
+            memset(&rv, 0, sizeof(rv));
+            pd_doc_revision_get(d, mk[i].id, &rv);
+            tn = (size_t)snprintf(t, sizeof(t), "%s%sFormatted", rv.author, rv.author[0] ? ": " : "");
         } else {    /* the deleted text, objects left out */
             const blk* b = pd_doc_blk(d, mk[i].range.start.block);
+            pd_revision rv;
             uint32_t o;
 
-            tn = (size_t)snprintf(t, sizeof(t), "Deleted: ");
+            tn = (size_t)snprintf(t, sizeof(t), "%s: ", pd_doc_revision_get(d, mk[i].id, &rv) == PD_OK && rv.move ?
+                                  "Moved" : "Deleted");
 
             for (o = mk[i].range.start.offset; b && o < mk[i].range.end.offset && o < b->st.len && tn < 400; o++) {
                 if (o + 2 < b->st.len && !memcmp(b->st.text + o, "\xEF\xBF\xBC", 3)) {
@@ -6264,7 +6272,8 @@ pd_status pd_layout_page_markup(const pd_layout* L, int32_t page, pd_markup_item
                 r.start.block = r.end.block = cur;
                 r.start.offset = b->st.runs[k].start;
                 r.end.offset = b->st.runs[j].end;
-                past = mark_add(L, &M, page, rv.kind == PD_REV_DELETE ? PD_MARK_DELETION : PD_MARK_INSERTION, ov.revision,
+                past = mark_add(L, &M, page, rv.kind == PD_REV_DELETE ? PD_MARK_DELETION : rv.kind == PD_REV_FORMAT ?
+                                PD_MARK_FORMAT : PD_MARK_INSERTION, ov.revision,
                                 r, rv.author) > page;
                 k = j + 1;
             }
