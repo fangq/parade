@@ -3221,7 +3221,10 @@ static void dx_ppr_tail(pd_buf* o, const pd_para_props* pp, uint32_t m, int hyph
             pb_printf(o, " w:after=\"%d\"", TW(pp->space_after));
         }
 
-        if (m & PD_PP_LINE_SPACING) {   /* Parade's multiple of the font's line height is Word's auto rule */
+        if ((m & PD_PP_LINE_SPACING) && (pp->line_rule == PD_LINE_AT_LEAST || pp->line_rule == PD_LINE_EXACT)) {
+            pb_printf(o, " w:line=\"%d\" w:lineRule=\"%s\"", TW(pp->line_height),
+                      pp->line_rule == PD_LINE_EXACT ? "exact" : "atLeast");
+        } else if (m & PD_PP_LINE_SPACING) {    /* Parade's multiple of the font's line height is Word's auto rule */
             pb_printf(o, " w:line=\"%d\" w:lineRule=\"auto\"", (int)SCALE(pp->line_spacing, 240, 1000));
         }
 
@@ -4519,12 +4522,10 @@ typedef struct {
     int external;
 } drel;
 
-/* what a w:pPr and a w:rPr say, as masked overrides. An exact or at-least line
-   height is kept as a length until the font size is known (line_abs). */
+/* what a w:pPr and a w:rPr say, as masked overrides */
 typedef struct {
     pd_para_props pp;
     pd_char_props cp;
-    pd_sp line_abs;
 } dprops;
 
 typedef struct {
@@ -5108,10 +5109,12 @@ static void ppr_elem(const dxi* X, const pd_markup* m, const char* t, dprops* pr
 
             if (strcmp(rule, "auto") == 0) {    /* in 240ths of a line */
                 pp->line_spacing = line * 1000 / 240;
-                pr->line_abs = 0;
+                pp->line_rule = PD_LINE_MULTIPLE;
+                pp->line_height = 0;
             } else {                            /* exact or at least, in twips */
                 pp->line_spacing = 1000;
-                pr->line_abs = twips(line);
+                pp->line_rule = strcmp(rule, "exact") == 0 ? PD_LINE_EXACT : PD_LINE_AT_LEAST;
+                pp->line_height = twips(line);
             }
         }
     } else if (strcmp(t, "ind") == 0) {
@@ -5246,7 +5249,8 @@ static void pr_over(dprops* d, const dprops* s) {
 
     if (sp->mask & PD_PP_LINE_SPACING) {
         dp->line_spacing = sp->line_spacing;
-        d->line_abs = s->line_abs;
+        dp->line_rule = sp->line_rule;
+        dp->line_height = sp->line_height;
     }
 
     if (sp->mask & PD_PP_TABS) {    /* Word's stops add up along the chain, and a clear takes one away */
@@ -5324,15 +5328,6 @@ static void style_chain(const dxi* X, const char* id, dprops* out, int depth) {
     if (st) {
         style_chain(X, st->based_on, out, depth + 1);
         pr_over(out, &st->pr);
-    }
-}
-
-/* An exact line height as Parade's multiple of the font's own line height,
-   taken as 1.15 em -- near enough for the faces documents use (Times 1.15,
-   Arial 1.15, Calibri 1.22). */
-static void line_finish(dprops* pr, pd_sp size) {
-    if (pr->line_abs > 0 && size > 0) {
-        pr->pp.line_spacing = (int32_t)((int64_t)pr->line_abs * 100000 / ((int64_t)size * 115));
     }
 }
 
@@ -6442,6 +6437,8 @@ static void dx_tpart(const dxi* X, const dtpart* a, pd_table_style_part* p) {
     dprops pr = a->pr;
     int k;
 
+    (void)X;
+
     memset(p, 0, sizeof(*p));
 
     if (!a->given) {
@@ -6449,8 +6446,6 @@ static void dx_tpart(const dxi* X, const dtpart* a, pd_table_style_part* p) {
     }
 
     p->given = 1;
-    line_finish(&pr, (pr.cp.mask & PD_CP_SIZE) ? pr.cp.size : (X->defaults.cp.mask & PD_CP_SIZE) ?
-                X->defaults.cp.size : PD_PT(10));
     p->para = pr.pp;
     p->para.mask &= ~PD_PP_NEXT_STYLE;
     p->chr = pr.cp;
@@ -6659,7 +6654,6 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid, const
         memset(&sty, 0, sizeof(sty));
         style_chain(X, wid, &sty, 0);
         pd_doc_style_resolve(b->d, normal, &rp, &rc);
-        line_finish(&sty, (sty.cp.mask & PD_CP_SIZE) ? sty.cp.size : rc.size);
         sty.pp.mask &= ~PD_PP_NEXT_STYLE;
 
         /* only what differs from Normal: the same style read again says the same */
@@ -6672,7 +6666,13 @@ static pd_style_id custom_style_define(dxi* X, pd_bld* b, const char* wid, const
         SAME_P(PD_PP_INDENT_FIRST, indent_first)
         SAME_P(PD_PP_SPACE_BEFORE, space_before)
         SAME_P(PD_PP_SPACE_AFTER, space_after)
-        SAME_P(PD_PP_LINE_SPACING, line_spacing)
+        if ((sty.pp.mask & PD_PP_LINE_SPACING) && (sty.pp.line_rule != rp.line_rule ||
+                sty.pp.line_height != rp.line_height)) {
+            /* a length where Normal has none (or another): said, whatever the multiple */
+        } else {
+            SAME_P(PD_PP_LINE_SPACING, line_spacing)
+        }
+
         SAME_P(PD_PP_KEEP_NEXT, keep_with_next)
         SAME_P(PD_PP_KEEP_LINES, keep_lines)
         SAME_P(PD_PP_BREAK_BEFORE, page_break_before)
@@ -6885,7 +6885,6 @@ static void dw_begin_para(dw* w) {
         } else {
             pd_doc_style_resolve(b->d, sid, &rp, &w->tcp);
         }
-        line_finish(&full, (full.cp.mask & PD_CP_SIZE) ? full.cp.size : w->tcp.size);
         w->pcp = full.cp;
 
 #define DW_DIFF(bit, field) \
@@ -6900,6 +6899,15 @@ static void dw_begin_para(dw* w) {
         DW_DIFF(PD_PP_SPACE_BEFORE, space_before)
         DW_DIFF(PD_PP_SPACE_AFTER, space_after)
         DW_DIFF(PD_PP_LINE_SPACING, line_spacing)
+
+        if ((f->mask & PD_PP_LINE_SPACING) && (f->line_spacing != rp.line_spacing || f->line_rule != rp.line_rule ||
+                                               f->line_height != rp.line_height)) {
+            b->pp.mask |= PD_PP_LINE_SPACING;
+            b->pp.line_spacing = f->line_spacing;
+            b->pp.line_rule = f->line_rule;
+            b->pp.line_height = f->line_height;
+        }
+
         DW_DIFF(PD_PP_KEEP_NEXT, keep_with_next)
         DW_DIFF(PD_PP_KEEP_LINES, keep_lines)
         DW_DIFF(PD_PP_BREAK_BEFORE, page_break_before)
@@ -11281,7 +11289,6 @@ pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all
             pd_char_props rc;
 
             pd_doc_style_resolve(d, normal, &rp, &rc);
-            line_finish(&base, (base.cp.mask & PD_CP_SIZE) ? base.cp.size : rc.size);
             pr_over(&cur, &base);
             pd_doc_style_define(d, "Normal", (pd_style_kind)kind, parent, &cur.pp, &cur.cp, NULL);
         }

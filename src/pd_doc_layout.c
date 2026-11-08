@@ -147,6 +147,8 @@ void pd_doc_effective_pp(const pd_doc* d, const blk* b, pd_para_props* pp, pd_sp
     OVER(PD_PP_SPACE_BEFORE, space_before);
     OVER(PD_PP_SPACE_AFTER, space_after);
     OVER(PD_PP_LINE_SPACING, line_spacing);
+    OVER(PD_PP_LINE_SPACING, line_rule);
+    OVER(PD_PP_LINE_SPACING, line_height);
     OVER(PD_PP_KEEP_NEXT, keep_with_next);
     OVER(PD_PP_KEEP_LINES, keep_lines);
     OVER(PD_PP_WIDOWS, widows);
@@ -496,6 +498,12 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
     prm->align = pp.align;
     prm->mode = pp.break_mode;
     prm->line_spacing = pp.line_spacing;
+
+    if (pp.line_rule == PD_LINE_AT_LEAST || pp.line_rule == PD_LINE_EXACT) {   /* a length, not a multiple */
+        prm->line_spacing = 1000;
+        *(pp.line_rule == PD_LINE_EXACT ? &prm->line_exact : &prm->baseline_skip) = pp.line_height;
+    }
+
     prm->direction = pp.direction;
 
     {   /* a word processor's section: full line boxes, so that paragraphs stack as lines do */

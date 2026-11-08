@@ -752,8 +752,9 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
                 int64_t step = ((int64_t)desc + asc + gap) * prm->line_spacing / 1000;
 
                 step = step < prm->baseline_skip ? prm->baseline_skip : step;
+                step = prm->line_exact > 0 ? prm->line_exact : step;
 
-                if (prm->line_grid > 0) {   /* whole grid lines, the text in the middle of them */
+                if (prm->line_grid > 0 && prm->line_exact <= 0) {   /* whole grid lines, the text in the middle of them */
                     int64_t snapped = (step + prm->line_grid - 1) / prm->line_grid * prm->line_grid;
 
                     y += (pd_sp)((snapped - step) / 2);
@@ -769,7 +770,9 @@ static pd_status build_lines(ctx_t* c, const int32_t* seq, int32_t n) {
                 step = prm->baseline_skip;
             }
 
-            if (prm->line_grid > 0) {
+            if (prm->line_exact > 0) {  /* exactly: the text may overlap the line above, as in Word */
+                step = prm->line_exact;
+            } else if (prm->line_grid > 0) {
                 step = (step + prm->line_grid - 1) / prm->line_grid * prm->line_grid;
             }
 

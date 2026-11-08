@@ -213,6 +213,8 @@ void pd_doc_pp_normalize(pd_para_props* pp) {
     KEEP(PD_PP_SPACE_BEFORE, space_before);
     KEEP(PD_PP_SPACE_AFTER, space_after);
     KEEP(PD_PP_LINE_SPACING, line_spacing);
+    KEEP(PD_PP_LINE_SPACING, line_rule);
+    KEEP(PD_PP_LINE_SPACING, line_height);
     KEEP(PD_PP_KEEP_NEXT, keep_with_next);
     KEEP(PD_PP_KEEP_LINES, keep_lines);
     KEEP(PD_PP_WIDOWS, widows);
@@ -367,6 +369,8 @@ static void pp_apply(pd_para_props* dst, const pd_para_props* src) {
     SET(PD_PP_SPACE_BEFORE, space_before);
     SET(PD_PP_SPACE_AFTER, space_after);
     SET(PD_PP_LINE_SPACING, line_spacing);
+    SET(PD_PP_LINE_SPACING, line_rule);
+    SET(PD_PP_LINE_SPACING, line_height);
     SET(PD_PP_KEEP_NEXT, keep_with_next);
     SET(PD_PP_KEEP_LINES, keep_lines);
     SET(PD_PP_WIDOWS, widows);

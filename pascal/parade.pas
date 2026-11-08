@@ -308,6 +308,10 @@ const
   PD_LINENUM_SECTION = 1;
   PD_LINENUM_CONTINUOUS = 2;
 
+  PD_LINE_MULTIPLE = 0;
+  PD_LINE_AT_LEAST = 1;
+  PD_LINE_EXACT = 2;
+
   PD_NOTES_CONTINUOUS = 0;
   PD_NOTES_SECTION = 1;
   PD_NOTES_PAGE = 2;
@@ -393,6 +397,7 @@ type
     protrusion, expansion: Int32;
     full_lines: Int32;
     line_grid: pd_sp;
+    line_exact: pd_sp;        { every baseline exactly this far below the one above; 0 off }
   end;
   Ppd_params = ^pd_params;
 
@@ -522,6 +527,8 @@ type
     snap_grid: Int32;         { lines on the section's grid (1) }
     border_theme: UInt32;     { pd_theme_color reference of the border, 0 = none }
     shading_theme: UInt32;    { pd_theme_color reference of the shading, 0 = none }
+    line_rule: Int32;         { PD_LINE_*: a multiple (line_spacing), at least or exactly line_height }
+    line_height: pd_sp;
   end;
   Ppd_para_props = ^pd_para_props;
 

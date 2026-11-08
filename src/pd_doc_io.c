@@ -125,6 +125,11 @@ static void save_pp(pj_writer* w, const pd_para_props* p) {
 
     if (m & PD_PP_LINE_SPACING) {
         put_int(w, "LineSpacing", p->line_spacing);
+
+        if (p->line_rule) {
+            put_int(w, "LineRule", p->line_rule);
+            put_int(w, "LineHeight", p->line_height);
+        }
     }
 
     if (m & PD_PP_KEEP_NEXT) {
@@ -1306,6 +1311,8 @@ static void load_pp(const pj_node* o, pd_para_props* p, loader* L) {
     F("SpaceBefore", PD_PP_SPACE_BEFORE, space_before, SP_MIN, SP_MAX);
     F("SpaceAfter", PD_PP_SPACE_AFTER, space_after, SP_MIN, SP_MAX);
     F("LineSpacing", PD_PP_LINE_SPACING, line_spacing, 0, 100000);
+    F("LineRule", PD_PP_LINE_SPACING, line_rule, 0, 2);
+    F("LineHeight", PD_PP_LINE_SPACING, line_height, 0, PD_PT(1000));
     F("KeepWithNext", PD_PP_KEEP_NEXT, keep_with_next, 0, 1);
     F("KeepLines", PD_PP_KEEP_LINES, keep_lines, 0, 1);
     F("Widows", PD_PP_WIDOWS, widows, 0, 1000);

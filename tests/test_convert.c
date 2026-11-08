@@ -876,6 +876,8 @@ static pd_para_props para_resolved(const pd_doc* d, pd_block_id p) {
     if (o.mask & PD_PP_SPACE_BEFORE) r.space_before = o.space_before;
     if (o.mask & PD_PP_SPACE_AFTER) r.space_after = o.space_after;
     if (o.mask & PD_PP_LINE_SPACING) r.line_spacing = o.line_spacing;
+    if (o.mask & PD_PP_LINE_SPACING) r.line_rule = o.line_rule;
+    if (o.mask & PD_PP_LINE_SPACING) r.line_height = o.line_height;
     if (o.mask & PD_PP_SHADING) r.shading = o.shading;
     if (o.mask & PD_PP_SHADING) r.shading_theme = o.shading_theme;
     if (o.mask & PD_PP_BORDER) {
@@ -1088,7 +1090,7 @@ static void check_docx_styles(const pd_doc* d) {
 
     /* direct paragraph properties: centred, exactly 24pt lines on 12pt text */
     pp = para_resolved(d, p[3]);
-    CHECK(pp.align == PD_ALIGN_CENTER && pp.line_spacing > 1700 && pp.line_spacing < 1780);
+    CHECK(pp.align == PD_ALIGN_CENTER && pp.line_rule == PD_LINE_EXACT && pp.line_height == PD_PT(24));
 
     /* a heading in the theme's heading font; a run that turns the bold off */
     pd_doc_block_info(d, p[4], &bi);
@@ -5114,6 +5116,84 @@ static void test_docx_text_small(void) {
     pd_doc_free(d);
 }
 
+/* the baseline (y) of the first glyph drawn for a code point on page 0; 0 when there is none */
+static pd_sp glyph_y(pd_doc* d, uint32_t cp) {
+    pd_layout* L = NULL;
+    int32_t n = 0, k;
+    pd_sp y = 0;
+    pd_draw* it;
+
+    pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+    if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+            pd_layout_page_items(L, 0, NULL, 0, &n) == PD_OK && (it = (pd_draw*)malloc(((size_t)n + 1) *
+                    sizeof(pd_draw))) != NULL) {
+        pd_layout_page_items(L, 0, it, n, &n);
+
+        for (k = 0; k < n && !y; k++) {
+            y = it[k].kind == PD_DRAW_GLYPH && it[k].text == cp ? it[k].y : 0;
+        }
+
+        free(it);
+    }
+
+    pd_layout_free(L);
+    return y;
+}
+
+/* Word's exact and at-least line spacing are lengths, not multiples of the font size: 24pt exactly on 12pt text,
+   6pt exactly (the lines overlap, as in Word), at least 30pt, and at least 6pt (a single line then); read, laid
+   out at those distances, and written back with their rules. */
+static void test_docx_line_rules(void) {
+    static const char* const rules[4][2] = { { "480", "exact" }, { "120", "exact" }, { "600", "atLeast" },
+        { "120", "atLeast" }
+    };
+    static const int32_t want[4] = { 24, 6, 30, 0 };
+    int k, pass;
+
+    for (k = 0; k < 4; k++) {
+        char xml[600];
+        pd_doc* d;
+        pd_doc* back = NULL;
+        buf_t b;
+
+        snprintf(xml, sizeof(xml), "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:spacing w:line=\"%s\" "
+                 "w:lineRule=\"%s\"/></w:pPr><w:r><w:rPr><w:sz w:val=\"24\"/></w:rPr><w:t>A</w:t><w:br/>"
+                 "<w:t>B</w:t></w:r></w:p></w:body></w:document>", rules[k][0], rules[k][1]);
+        d = docx_doc("word/document.xml", xml, NULL);
+        CHECK(d != NULL);
+
+        if (!d) {
+            continue;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+
+        for (pass = 0; pass < 2 && have_layout_font(); pass++) {
+            pd_doc* x = pass ? back : d;
+            pd_sp step;
+
+            if (!x) {
+                continue;
+            }
+
+            step = glyph_y(x, 'B') - glyph_y(x, 'A');
+
+            if (want[k]) {
+                CHECK(step == PD_PT(want[k]));
+            } else {    /* at least 6pt: the font's own single line, as with no rule (Liberation Serif 12pt: 13.8) */
+                CHECK(step > PD_PT(13) && step < PD_PT(15));
+            }
+        }
+
+        pd_doc_free(back);
+        pd_doc_free(d);
+    }
+}
+
 /* Word's tab stops: a style's, a paragraph adding to them and clearing one,
    leaders, the document's default interval; through JData and DOCX. */
 static void test_docx_tabs(void) {
@@ -5798,6 +5878,7 @@ int main(void) {
     printf("docx endnotes\n");
     test_docx_endnotes();
     test_docx_text_small();
+    test_docx_line_rules();
     printf("docx tab stops\n");
     test_docx_tabs();
     printf("markdown import\n");
