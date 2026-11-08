@@ -3812,7 +3812,7 @@ static void test_docx_shape_effects(void) {
     size_t sl = 0;
     pd_doc* d = NULL;
     pd_layout* L = NULL;
-    int32_t n = 0, k, sh = -1, gl = -1, so = -1, in = -1, re = -1;
+    int32_t n = 0, k, sh = -1, gl = -1, so = -1, in = -1, re = -1, rb = -1;
     pd_draw* it;
     uint8_t rgb[3];
 
@@ -3823,8 +3823,10 @@ static void test_docx_shape_effects(void) {
     sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 0, 1016000, "rect", "00FF00", "<a:softEdge rad=\"76200\"/>");
     sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1016000, 1016000, "rect", "FFFFFF",
                            "<a:innerShdw blurRad=\"25400\" dist=\"76200\" dir=\"2700000\"><a:srgbClr val=\"000000\"/></a:innerShdw>");
-    snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1905000, 0, "rect", "FF0000",
-             "<a:reflection stA=\"100000\" endA=\"0\" endPos=\"50000\" dist=\"0\"/>");
+    sl += (size_t)snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1905000, 0, "rect", "FF0000",
+                           "<a:reflection stA=\"100000\" endA=\"0\" endPos=\"50000\" dist=\"0\"/>");
+    snprintf(shapes + sl, sizeof(shapes) - sl, sp, 1905000, 1016000, "rect", "FF0000",
+             "<a:reflection blurRad=\"76200\" stA=\"100000\" endA=\"0\" endPos=\"50000\" dist=\"0\"/>");
     it = group_items(shapes, &d, &L, &n);
 
     if (!it) {
@@ -3840,7 +3842,8 @@ static void test_docx_shape_effects(void) {
         gl = st && st->glow_color ? k : gl;
         so = st && st->soft_edge ? k : so;
         in = st && st->inner_color ? k : in;
-        re = st && st->refl_alpha0 ? k : re;
+        re = st && st->refl_alpha0 && !st->refl_blur ? k : re;
+        rb = st && st->refl_alpha0 && st->refl_blur ? k : rb;
     }
 
     CHECK(sh >= 0 && gl >= 0 && so >= 0 && in >= 0 && re >= 0);
@@ -3871,6 +3874,9 @@ static void test_docx_shape_effects(void) {
         CHECK(v > 180 && rgb[0] > 180);
         CHECK(alpha_at(&it[re], it[re].x + PD_PT(25), it[re].y + it[re].h + PD_PT(15), NULL) < v);
         CHECK(alpha_at(&it[re], it[re].x + PD_PT(25), it[re].y + it[re].h + PD_PT(30), NULL) == 0);
+        /* blurred 6 pt: it spills past the box's side, where the sharp one leaves nothing */
+        CHECK(alpha_at(&it[re], it[re].x + it[re].w + PD_PT(2), it[re].y + it[re].h + PD_PT(4), NULL) == 0);
+        CHECK(rb >= 0 && alpha_at(&it[rb], it[rb].x + it[rb].w + PD_PT(2), it[rb].y + it[rb].h + PD_PT(4), NULL) > 0);
     }
 
     {
@@ -3887,7 +3893,7 @@ static void test_docx_shape_effects(void) {
             pics += !memcmp(b.p + k, "/BitsPerComponent 8 /SMask ", 27);
         }
 
-        CHECK(pics == 5);   /* shadow, glow, the softened fill, the inner shadow, the reflection */
+        CHECK(pics == 6);   /* shadow, glow, the softened fill, the inner shadow, the two reflections */
         free(b.p);
     }
 

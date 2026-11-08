@@ -1501,6 +1501,26 @@ static pd_status rc_item(const pd_draw* a, int layers, pd_sp x0, pd_sp y0, int32
             rc_item(a, PD_LAYER_BODY | PD_LAYER_STROKE | PD_LAYER_INNER, x0 + (pd_sp)(px0 * ONE / k / ONE),
                     y0 + (pd_sp)(py0 * ONE / k / ONE), scale, img, w, h, w * 4);
 
+            if (st->refl_blur > 0) {    /* blurred: each channel of it (premultiplied, as drawn) on its own */
+                uint8_t* pl = (uint8_t*)malloc((size_t)w * (size_t)h);
+                int32_t r = (int32_t)(st->refl_blur * k / 3 + 0.5), q;
+                size_t j, n = (size_t)w * (size_t)h;
+
+                for (q = 0; pl && r > 0 && q < 4; q++) {
+                    for (j = 0; j < n; j++) {
+                        pl[j] = img[4 * j + q];
+                    }
+
+                    rc_blur(pl, w, h, r);
+
+                    for (j = 0; j < n; j++) {
+                        img[4 * j + q] = pl[j];
+                    }
+                }
+
+                free(pl);
+            }
+
             for (y = 0; y < h; y++) {
                 int32_t sy = (int32_t)floor(2 * mirror - (y + 0.5));
                 double f = (y + 0.5 - mirror) / sh * 100000, al;
