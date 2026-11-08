@@ -11903,6 +11903,21 @@ pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all
         }
     }
 
+    {   /* the first section's left margin, for the pictures placed from the page's edge before its end is read */
+        static const char key[] = "<w:pgMar ";
+        size_t i, j;
+
+        for (i = 0; i + sizeof(key) - 1 < len && memcmp(xml + i, key, sizeof(key) - 1); i++) {
+        }
+
+        for (j = i; j + 8 < len && xml[j] != '>' && memcmp(xml + j, " w:left=\"", 9); j++) {
+        }
+
+        if (j + 9 < len && xml[j] != '>') {
+            X.margin_left = twips(atoi(xml + j + 9));
+        }
+    }
+
     bld_init(&b, d);
     X.b = &b;
     read_fonts(&X);

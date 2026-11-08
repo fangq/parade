@@ -1099,20 +1099,24 @@ static void check_docx_styles(const pd_doc* d) {
     CHECK(strcmp(cp.family, "Calibri Light") == 0 && cp.size == PD_PT(10) && cp.weight == 400);
 }
 
-/* a document from the parts of a .docx: name, text, name, text, ..., NULL.
-   A word/media/ part names a file whose bytes it holds. */
-static pd_doc* docx_doc(const char* first, ...) {
+/* a document from the parts of a package in format FMT: PRE's NPRE names and texts, then name, text, name, text,
+   ..., NULL. A word/media/ (ppt/media/) part names a file whose bytes it holds. */
+static pd_doc* parts_doc(int fmt, const char* const* pre, int npre, const char* first, va_list ap) {
     const char* names[16];
     const char* texts[16];
     size_t lens[16];
     char* files[16];
     int n = 0, i;
-    va_list ap;
     const char* nm;
     buf_t z;
     pd_doc* d = NULL;
 
-    va_start(ap, first);
+    for (; n < npre; n++) {
+        names[n] = pre[2 * n];
+        texts[n] = pre[2 * n + 1];
+        lens[n] = strlen(texts[n]);
+        files[n] = NULL;
+    }
 
     for (nm = first; nm && n < 16; nm = va_arg(ap, const char*)) {
         names[n] = nm;
@@ -1120,7 +1124,8 @@ static pd_doc* docx_doc(const char* first, ...) {
         lens[n] = strlen(texts[n]);
         files[n] = NULL;
 
-        if (strncmp(nm, "word/media/", 11) == 0 || strncmp(nm, "word/fonts/", 11) == 0) {
+        if (strncmp(nm, "word/media/", 11) == 0 || strncmp(nm, "word/fonts/", 11) == 0 ||
+                strncmp(nm, "ppt/media/", 10) == 0) {
             FILE* f = fopen(texts[n], "rb");
             long sz;
 
@@ -1138,7 +1143,6 @@ static pd_doc* docx_doc(const char* first, ...) {
         n++;
     }
 
-    va_end(ap);
     z = stored_zip_n(names, texts, lens, n);
 
     for (i = 0; i < n; i++) {
@@ -1146,11 +1150,49 @@ static pd_doc* docx_doc(const char* first, ...) {
     }
 
 
-    if (pd_doc_import(z.p, z.n, PD_CONV_DOCX, &d) != PD_OK) {
+    if (pd_doc_import(z.p, z.n, fmt, &d) != PD_OK) {
         d = NULL;
     }
 
     free(z.p);
+    return d;
+}
+
+/* a document from the parts of a .docx: name, text, name, text, ..., NULL */
+static pd_doc* docx_doc(const char* first, ...) {
+    va_list ap;
+    pd_doc* d;
+
+    va_start(ap, first);
+    d = parts_doc(PD_CONV_DOCX, NULL, 0, first, ap);
+    va_end(ap);
+    return d;
+}
+
+/* a presentation of N slides, ppt/slides/slide1.xml.., from the parts given (name, text, ..., NULL); its
+   presentation part made here, its slides 10 by 7.5 inches */
+static pd_doc* pptx_doc(int nslides, const char* first, ...) {
+    static char pres[2048], prels[2048];
+    const char* pre[4] = { "ppt/presentation.xml", pres, "ppt/_rels/presentation.xml.rels", prels };
+    va_list ap;
+    pd_doc* d;
+    size_t a, b;
+    int k;
+
+    a = (size_t)snprintf(pres, sizeof(pres), "<p:presentation xmlns:p=\"p\" xmlns:r=\"r\"><p:sldIdLst>");
+    b = (size_t)snprintf(prels, sizeof(prels), "<Relationships>");
+
+    for (k = 1; k <= nslides; k++) {
+        a += (size_t)snprintf(pres + a, sizeof(pres) - a, "<p:sldId id=\"%d\" r:id=\"rIdS%d\"/>", 255 + k, k);
+        b += (size_t)snprintf(prels + b, sizeof(prels) - b, "<Relationship Id=\"rIdS%d\" Target=\"slides/slide%d.xml\"/>",
+                              k, k);
+    }
+
+    snprintf(pres + a, sizeof(pres) - a, "</p:sldIdLst><p:sldSz cx=\"9144000\" cy=\"6858000\"/></p:presentation>");
+    snprintf(prels + b, sizeof(prels) - b, "</Relationships>");
+    va_start(ap, first);
+    d = parts_doc(PD_CONV_PPTX, pre, 2, first, ap);
+    va_end(ap);
     return d;
 }
 
@@ -4061,6 +4103,349 @@ static void test_pptx(void) {
     pd_doc_free(d);
 }
 
+/* a slide of a presentation made by pptx_doc: its attributes, its shapes */
+#define PSLD(attrs, body) "<p:sld xmlns:p=\"p\" xmlns:a=\"a\" xmlns:r=\"r\"" attrs "><p:cSld><p:spTree>" body \
+    "</p:spTree></p:cSld></p:sld>"
+/* a text box (ID a string) at the slide's corner, 4 by 2 inches, with paragraphs BODY */
+#define PSP(id, body) "<p:sp><p:nvSpPr><p:cNvPr id=\"" id "\" name=\"s\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>" \
+    "<p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"3657600\" cy=\"1828800\"/></a:xfrm><a:prstGeom prst=\"rect\">" \
+    "<a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>" body "</p:txBody></p:sp>"
+#define PP(text) "<a:p><a:r><a:t>" text "</a:t></a:r></a:p>"
+
+/* the drawing items of slide K's canvas, as text (caller frees); NULL if none */
+static char* slide_json(const pd_doc* d, int k) {
+    pd_block_id fl = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), k), 0);
+    pd_inline o;
+
+    return pd_doc_inline_at(d, at(pd_doc_child(d, fl, 0), 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE ?
+           drawing_json(d, o.resource) : NULL;
+}
+
+/* a hidden slide (show="0") is not shown in the slide show: no page of it, the slides after it numbered as
+   PowerPoint numbers them */
+static void test_pptx_hidden(void) {
+    pd_doc* d = pptx_doc(3,
+                         "ppt/slides/slide1.xml", PSLD("", PSP("2", PP("One"))),
+                         "ppt/slides/slide2.xml", PSLD(" show=\"0\"", PSP("2", PP("Two"))),
+                         "ppt/slides/slide3.xml", PSLD("", PSP("2", PP("Three")
+                                 "<a:p><a:fld id=\"{1}\" type=\"slidenum\"><a:t>9</a:t></a:fld></a:p>")),
+                         NULL);
+    pd_block_info ri;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    CHECK(pd_doc_block_info(d, pd_doc_root(d), &ri) == PD_OK && ri.child_count == 2);
+    CHECK(story_para_with(d, "One") && story_para_with(d, "Three") && !story_para_with(d, "Two"));
+    CHECK(story_para_with(d, "3") && text_is(d, story_para_with(d, "3"), "3"));
+    {   /* the second page the third slide's */
+        char* js = slide_json(d, 1);
+
+        CHECK(js != NULL);
+        free(js);
+    }
+    pd_doc_free(d);
+}
+
+/* a deck of one slide: its canvas at the page's corner. (Its section's margins, none, are read after the canvas, the
+   last section's being at the document's end; a picture placed from the page's edge was put an inch to the left of
+   it, Word's default margin.) */
+static void test_pptx_one_slide(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PSP("2", PP("Alone"))), NULL);
+    pd_float_props fp;
+
+    CHECK(d && pd_doc_float_props(d, pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), &fp) == PD_OK &&
+          fp.offset_x == 0);
+    pd_doc_free(d);
+}
+
+/* a paragraph with properties PPR and text T */
+#define PPP(ppr, text) "<a:p><a:pPr" ppr "</a:pPr><a:r><a:rPr sz=\"2000\"/><a:t>" text "</a:t></a:r></a:p>"
+
+/* the text of the story paragraph whose text has NEEDLE in it, up to the tab after its bullet */
+static void bullet_of(const pd_doc* d, const char* needle, char* out, size_t cap) {
+    int32_t i;
+
+    out[0] = '\0';
+
+    for (i = 0; i < pd_doc_story_count(d); i++) {
+        pd_block_id st = pd_doc_story_at(d, i);
+        pd_block_info bi;
+        int32_t k;
+
+        for (k = 0; pd_doc_block_info(d, st, &bi) == PD_OK && k < bi.child_count; k++) {
+            uint32_t n;
+            const char* t = para_text(d, pd_doc_child(d, st, k), &n);
+            const char* tab = (const char*)memchr(t, '\t', n);
+
+            if (tab && n - (size_t)(tab - t) - 1 == strlen(needle) && !memcmp(tab + 1, needle, strlen(needle))) {
+                snprintf(out, cap, "%.*s", (int)(tab - t), t);
+                return;
+            }
+        }
+    }
+}
+
+/* autonumbered paragraphs: the scheme's numbers and what is round them, startAt, each level counting on its own and
+   starting again under a paragraph less deep; a bullet's face and size in points */
+static void test_pptx_autonum(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PSP("2",
+                         PPP("><a:buAutoNum type=\"alphaLcParenR\" startAt=\"3\"/>", "c1")
+                         PPP("><a:buAutoNum type=\"alphaLcParenR\" startAt=\"3\"/>", "c2")
+                         PPP(" lvl=\"1\"><a:buAutoNum type=\"romanUcPeriod\"/>", "r1")
+                         PPP(" lvl=\"1\"><a:buAutoNum type=\"romanUcPeriod\"/>", "r2")
+                         "<a:p><a:pPr lvl=\"1\"><a:buAutoNum type=\"romanUcPeriod\"/></a:pPr></a:p>"
+                         PPP("><a:buAutoNum type=\"alphaLcParenR\" startAt=\"3\"/>", "c3")
+                         PPP(" lvl=\"1\"><a:buAutoNum type=\"romanUcPeriod\"/>", "r3")
+                         PPP("><a:buAutoNum type=\"circleNumWdBlackPlain\"/>", "k1")
+                         PPP("><a:buAutoNum type=\"ea1JpnChsDbPeriod\" startAt=\"12\"/>", "e1")
+                         PPP("><a:buAutoNum type=\"arabicParenBoth\"/>", "p1")
+                         PPP("><a:buNone/>", "none")
+                         PPP("><a:buAutoNum type=\"arabicParenBoth\"/>", "p2")
+                         PPP("><a:buAutoNum type=\"thaiNumPeriod\" startAt=\"5\"/>", "t1")
+                         PPP("><a:buAutoNum type=\"hebrew2Minus\" startAt=\"2\"/>", "h1")
+                         PPP("><a:buAutoNum type=\"circleNumDbPlain\" startAt=\"3\"/>", "o1")
+                         PPP("><a:buSzPts val=\"1200\"/><a:buFont typeface=\"Arial\"/><a:buChar char=\"-\"/>", "dash"))),
+                         NULL);
+    static const char* const want[][2] = {
+        { "c1", "c)" }, { "c2", "d)" }, { "r1", "I." }, { "r2", "II." }, { "c3", "e)" }, { "r3", "I." },
+        { "k1", "\xE2\x9D\xB6" }, { "e1", "\xE5\x8D\x81\xE4\xBA\x8C\xEF\xBC\x8E" }, { "p1", "(1)" },
+        { "p2", "(1)" }, { "t1", "\xE0\xB9\x95." }, { "h1", "\xD7\x91-" }, { "o1", "\xE2\x91\xA2" }, { "dash", "-" }
+    };
+    char buf[64];
+    size_t k;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    for (k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+        bullet_of(d, want[k][0], buf, sizeof(buf));
+        CHECK_STR(buf, want[k][1]);
+    }
+
+    {   /* the dash 12 points, in Arial; the text after it 20 */
+        pd_block_id p = story_para_with(d, "-\tdash");
+        pd_char_props a = chars_at(d, p, 0), b = chars_at(d, p, 3);
+
+        CHECK(p && a.size == PD_PT(12) && !strcmp(a.family, "Arial") && b.size == PD_PT(20));
+    }
+
+    pd_doc_free(d);
+}
+
+/* a picture bullet (buBlip): the picture before the text, as tall as the text, square */
+static void test_pptx_picture_bullet(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PSP("2",
+                         PPP("><a:buBlip><a:blip r:embed=\"rIdB\"/></a:buBlip>", "pictured"))),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdB\" "
+                         "Target=\"../media/b.png\"/></Relationships>",
+                         "ppt/media/b.png", "tests/data/rgba.png", NULL);
+    pd_block_id p = 0;
+    pd_inline o;
+    int32_t i;
+
+    CHECK(d != NULL);
+
+    for (i = 0; d && i < pd_doc_story_count(d); i++) {
+        pd_block_id q = pd_doc_child(d, pd_doc_story_at(d, i), 0);
+        uint32_t n;
+        const char* t = para_text(d, q, &n);
+
+        if (n >= 8 && !memcmp(t + n - 8, "pictured", 8)) {
+            p = q;
+        }
+    }
+
+    CHECK(p && pd_doc_inline_at(d, at(p, 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE && o.width == PD_PT(20) &&
+          o.height == PD_PT(20));
+    pd_doc_free(d);
+}
+
+/* an embedded object (a worksheet, here) drawn as the picture its frame keeps of it, from whichever alternative has
+   one, where the frame is */
+static void test_pptx_ole(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("",
+                         "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"60\" name=\"Ole\"/><p:cNvGraphicFramePr/><p:nvPr/>"
+                         "</p:nvGraphicFramePr><p:xfrm><a:off x=\"254000\" y=\"508000\"/><a:ext cx=\"1270000\" "
+                         "cy=\"635000\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/"
+                         "presentationml/2006/ole\"><mc:AlternateContent xmlns:mc=\"mc\"><mc:Choice Requires=\"v\">"
+                         "<p:oleObj spid=\"_x0000_s1\" name=\"Worksheet\" r:id=\"rIdO\" progId=\"Excel.Sheet.12\"><p:embed/>"
+                         "</p:oleObj></mc:Choice><mc:Fallback><p:oleObj name=\"Worksheet\" r:id=\"rIdO\" "
+                         "progId=\"Excel.Sheet.12\"><p:embed/><p:pic><p:nvPicPr><p:cNvPr id=\"0\" name=\"\"/><p:cNvPicPr/>"
+                         "<p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rIdI\"/><a:stretch><a:fillRect/></a:stretch>"
+                         "</p:blipFill><p:spPr><a:xfrm><a:off x=\"254000\" y=\"508000\"/><a:ext cx=\"1270000\" "
+                         "cy=\"635000\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"
+                         "</p:oleObj></mc:Fallback></mc:AlternateContent></a:graphicData></a:graphic></p:graphicFrame>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdI\" "
+                         "Target=\"../media/i.png\"/><Relationship Id=\"rIdO\" Target=\"../embeddings/o.bin\"/></Relationships>",
+                         "ppt/media/i.png", "tests/data/rgba.png", NULL);
+    char* js = d ? slide_json(d, 0) : NULL;
+
+    CHECK(js && strstr(js, "\"x\":1310720,\"y\":2621440,\"w\":6553600,\"h\":3276800}"));  /* 20, 40; 100 by 50 */
+    free(js);
+    pd_doc_free(d);
+}
+
+/* a chart on a slide: drawn where its frame is, its part and its workbook kept; one in a group where the group
+   draws it */
+static void test_pptx_chart(void) {
+#define PCHART(id, x, y, cx, cy, rid) "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"" id "\" name=\"Chart\"/>" \
+    "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"" x "\" y=\"" y "\"/><a:ext cx=\"" cx \
+    "\" cy=\"" cy "\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">" \
+    "<c:chart xmlns:c=\"c\" r:id=\"" rid "\"/></a:graphicData></a:graphic></p:graphicFrame>"
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PCHART("4", "1270000", "635000", "3810000", "2540000", "rIdC")
+                         "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"5\" name=\"G\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"
+                         "<p:grpSpPr><a:xfrm><a:off x=\"5080000\" y=\"3810000\"/><a:ext cx=\"2540000\" cy=\"1270000\"/>"
+                         "<a:chOff x=\"100\" y=\"100\"/><a:chExt cx=\"1270000\" cy=\"635000\"/></a:xfrm></p:grpSpPr>"
+                         PCHART("6", "100", "100", "1270000", "635000", "rIdC") "</p:grpSp>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdC\" "
+                         "Target=\"../charts/chart3.xml\"/></Relationships>",
+                         "ppt/charts/chart3.xml", "<c:chartSpace xmlns:c=\"c\" xmlns:a=\"a\" xmlns:r=\"r\"><c:chart><c:plotArea>"
+                         "<c:barChart><c:barDir val=\"col\"/><c:ser><c:idx val=\"0\"/><c:val><c:numRef><c:numCache><c:ptCount "
+                         "val=\"3\"/><c:pt idx=\"0\"><c:v>3</c:v></c:pt><c:pt idx=\"1\"><c:v>5</c:v></c:pt><c:pt idx=\"2\">"
+                         "<c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart>"
+                         "<c:externalData r:id=\"rId1\"/></c:chartSpace>",
+                         "ppt/charts/_rels/chart3.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../embeddings/Book1.xlsx\"/></Relationships>",
+                         "ppt/embeddings/Book1.xlsx", "PK-not-really", NULL);
+    pd_block_id sec = d ? pd_doc_child(d, pd_doc_root(d), 0) : 0;
+    int k;
+
+    CHECK(d != NULL);
+
+    for (k = 0; d && k < 2; k++) {  /* the first at (100, 50) points, 300 by 200; the second at (400, 300), 200 by 100 */
+        pd_block_id fl = pd_doc_child(d, sec, 1 + k);
+        pd_float_props fp;
+        pd_inline o;
+        char* js = NULL;
+
+        memset(&o, 0, sizeof(o));
+        CHECK(pd_doc_float_props(d, fl, &fp) == PD_OK && fp.offset_x == PD_PT(k ? 400 : 100) &&
+              fp.offset_y == PD_PT(k ? 300 : 50) && fp.offset_from == PD_FROM_PAGE);
+
+        if (pd_doc_inline_at(d, at(pd_doc_child(d, fl, 0), 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE) {
+            js = drawing_json(d, o.resource);
+        }
+
+        CHECK(o.width == PD_PT(k ? 200 : 300) && o.height == PD_PT(k ? 100 : 200));
+        CHECK(js && strstr(js, "\"chart\":") && strstr(js, "\"data\":") && count_of(js, "\"shape\":\"rect\"") >= 3);
+        free(js);
+    }
+
+    pd_doc_free(d);
+#undef PCHART
+}
+
+/* a placeholder with nothing of its own takes its layout placeholder's geometry, fill, outline and text box (its warp,
+   its columns), and its master placeholder's style (its text's colour from the style's font) */
+static void test_pptx_ph_inherit(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"B\"/><p:cNvSpPr/>"
+                         "<p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>"
+                         PP("Inherits") "</p:txBody></p:sp>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>",
+                         "ppt/slideLayouts/slideLayout1.xml", "<p:sldLayout xmlns:p=\"p\" xmlns:a=\"a\"><p:cSld><p:spTree>"
+                         "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"B\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/>"
+                         "</p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1270000\" y=\"1270000\"/><a:ext cx=\"2540000\" "
+                         "cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"ellipse\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr "
+                         "val=\"FF0000\"/></a:solidFill><a:ln w=\"25400\"><a:solidFill><a:srgbClr val=\"00FF00\"/></a:solidFill>"
+                         "</a:ln></p:spPr><p:txBody><a:bodyPr numCol=\"2\"><a:prstTxWarp prst=\"textArchUp\"><a:avLst/>"
+                         "</a:prstTxWarp></a:bodyPr><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:sldLayout>",
+                         "ppt/slideLayouts/_rels/slideLayout1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                         "Target=\"../slideMasters/slideMaster1.xml\"/></Relationships>",
+                         "ppt/slideMasters/slideMaster1.xml", "<p:sldMaster xmlns:p=\"p\" xmlns:a=\"a\"><p:cSld><p:spTree>"
+                         "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"B\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/>"
+                         "</p:nvPr></p:nvSpPr><p:spPr/><p:style><a:lnRef idx=\"0\"><a:srgbClr val=\"000000\"/></a:lnRef>"
+                         "<a:fillRef idx=\"0\"><a:srgbClr val=\"000000\"/></a:fillRef><a:effectRef idx=\"0\"><a:srgbClr "
+                         "val=\"000000\"/></a:effectRef><a:fontRef idx=\"minor\"><a:srgbClr val=\"0000FF\"/></a:fontRef>"
+                         "</p:style><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:sldMaster>",
+                         NULL);
+    char* js = d ? slide_json(d, 0) : NULL;
+    pd_block_id p = d ? story_para_with(d, "Inherits") : 0;
+
+    CHECK(js && strstr(js, "\"shape\":\"ellipse\",\"x\":6553600,\"y\":6553600,\"w\":13107200,\"h\":6553600,"
+                       "\"fill\":4294901760,\"line\":4278255360,\"lw\":131072"));
+    CHECK(js && strstr(js, "numCol=\\\"2\\\"") && strstr(js, "<a:prstTxWarp prst=\\\"textArchUp\\\">"));
+    CHECK(p && (chars_at(d, p, 0).color & 0xFFFFFFu) == 0x0000FFu);
+    free(js);
+    pd_doc_free(d);
+}
+
+/* a run's capitals and small capitals, its letter spacing, its East Asian face, its highlight; a link to an address
+   a link of the document's */
+static void test_pptx_run_props(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PSP("2",
+                         "<a:p><a:r><a:rPr sz=\"2000\" cap=\"all\" spc=\"300\"/><a:t>Start </a:t></a:r>"
+                         "<a:r><a:rPr sz=\"2000\" cap=\"small\"><a:hlinkClick r:id=\"rIdL\"/></a:rPr><a:t>linked</a:t></a:r>"
+                         "<a:r><a:rPr sz=\"2000\"><a:highlight><a:srgbClr val=\"FFFF00\"/></a:highlight>"
+                         "<a:ea typeface=\"Noto Sans CJK JP\"/></a:rPr><a:t>\xE6\x97\xA5\xE6\x9C\xAC</a:t></a:r></a:p>")),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdL\" "
+                         "Target=\"https://example.com/x?a=1&amp;b=2\" TargetMode=\"External\"/></Relationships>", NULL);
+    pd_block_id p = d ? story_para_with(d, "Start") : 0;
+    const char* t;
+    uint32_t n = 0, i, ln = 0, ja = 0;
+    pd_char_props a, b, c;
+    pd_inline o;
+
+    CHECK(p != 0);
+
+    if (!p) {
+        pd_doc_free(d);
+        return;
+    }
+
+    pd_doc_para_text(d, p, &t, &n);
+
+    for (i = 0; i + 2 < n; i++) {
+        ln = !ln && t[i] == 'l' && !memcmp(t + i, "linked", 6) ? i : ln;
+        ja = !ja && (unsigned char)t[i] == 0xE6 ? i : ja;
+    }
+
+    a = chars_at(d, p, 0);
+    b = chars_at(d, p, ln);
+    c = chars_at(d, p, ja);
+    CHECK(a.caps && !a.small_caps && a.letter_space == PD_PT(3));
+    CHECK(ln && b.small_caps && !b.caps && b.letter_space == 0);
+    CHECK(ja && (c.background & 0xFFFFFFu) == 0xFFFF00u && !strcmp(c.family_ea, "Noto Sans CJK JP") &&
+          (b.background & 0xFFFFFFu) == 0);
+    CHECK(object_in(d, p, PD_INLINE_LINK, &o) && o.source_len == 29 && !memcmp(o.source, "https://example.com/x?a=1&b=2",
+            29));
+    pd_doc_free(d);
+}
+
+/* an equation (Office Math in a14:m, in the Choice of an mc:AlternateContent that asks for a14) read as one, not its
+   fallback */
+static void test_pptx_math(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", "<mc:AlternateContent xmlns:mc=\"mc\"><mc:Choice "
+                         "xmlns:a14=\"a14\" Requires=\"a14\">" PSP("2", "<a:p><a14:m><m:oMathPara xmlns:m=\"m\"><m:oMath>"
+                                 "<m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f>"
+                                 "</m:oMath></m:oMathPara></a14:m></a:p>") "</mc:Choice><mc:Fallback>"
+                         PSP("2", PP("MATHFALLBACK")) "</mc:Fallback></mc:AlternateContent>"), NULL);
+    int32_t i;
+    int found = 0;
+    pd_inline o;
+
+    CHECK(d != NULL);
+
+    for (i = 0; d && i < pd_doc_story_count(d); i++) {
+        pd_block_id p = pd_doc_child(d, pd_doc_story_at(d, i), 0);
+
+        if (object_in(d, p, PD_INLINE_EQUATION, &o) && o.source && strstr(o.source, "\\frac{a}{b}")) {
+            found = 1;
+            CHECK(chars_at(d, p, 0).size == PD_PT(18));     /* PowerPoint's size, not Word's */
+        }
+    }
+
+    CHECK(found && !story_para_with(d, "MATHFALLBACK"));
+    pd_doc_free(d);
+}
+
 /* SmartArt with no drawing saved of it, laid out from its definition: a block list in rows as many to a row as
    makes them biggest, the last row centred; a process with arrows in the gaps between its steps; a hierarchy, each
    box over its children's, lines bent down to them. And one with a drawing saved of it older than its text. */
@@ -5742,6 +6127,15 @@ int main(void) {
     test_docx_float_from_page();
     test_pptx();
     test_pptx_smartart();
+    test_pptx_hidden();
+    test_pptx_one_slide();
+    test_pptx_autonum();
+    test_pptx_picture_bullet();
+    test_pptx_ole();
+    test_pptx_chart();
+    test_pptx_ph_inherit();
+    test_pptx_run_props();
+    test_pptx_math();
     test_docx_smartart();
     test_docx_turned_text();
     test_docx_rtl();
