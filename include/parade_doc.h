@@ -320,6 +320,12 @@ typedef struct {
 #define PD_LINE_THICK_THIN 7    /**< a thick line inside a thin one */
 #define PD_LINE_TRIPLE     8
 #define PD_LINE_DOT_DASH   9
+#define PD_LINE_ART      100    /**< an art border (Word's apples, hearts, ...): PD_LINE_ART + its place in Word's list
+                                     (pd_doc_border_art), width the size of each picture */
+
+/** an art border's style by Word's name ("hearts"), 0 if it is none; and its name */
+PD_API int32_t     pd_doc_border_art(const char* name);
+PD_API const char* pd_doc_border_art_name(int32_t style);
 
 /** one side of a border: how it is drawn, its width, colour and distance from what it surrounds */
 typedef struct {

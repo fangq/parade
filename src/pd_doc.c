@@ -1782,6 +1782,227 @@ void pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap) {
     }
 }
 
+
+/* Word's art page borders (ST_Border's pictures), in the order PD_LINE_ART + i numbers them */
+static const char* const border_arts[] = {
+    "apples",
+    "archedScallops",
+    "babyPacifier",
+    "babyRattle",
+    "balloons3Colors",
+    "balloonsHotAir",
+    "basicBlackDashes",
+    "basicBlackDots",
+    "basicBlackSquares",
+    "basicThinLines",
+    "basicWhiteDashes",
+    "basicWhiteDots",
+    "basicWhiteSquares",
+    "basicWideInline",
+    "basicWideMidline",
+    "basicWideOutline",
+    "bats",
+    "birds",
+    "birdsFlight",
+    "cabins",
+    "cakeSlice",
+    "candyCorn",
+    "celticKnotwork",
+    "certificateBanner",
+    "chainLink",
+    "champagneBottle",
+    "checkedBarBlack",
+    "checkedBarColor",
+    "checkered",
+    "christmasTree",
+    "circlesLines",
+    "circlesRectangles",
+    "classicalWave",
+    "clocks",
+    "compass",
+    "confetti",
+    "confettiGrays",
+    "confettiOutline",
+    "confettiStreamers",
+    "confettiWhite",
+    "cornerTriangles",
+    "couponCutoutDashes",
+    "couponCutoutDots",
+    "crazyMaze",
+    "creaturesButterfly",
+    "creaturesFish",
+    "creaturesInsects",
+    "creaturesLadyBug",
+    "crossStitch",
+    "cup",
+    "decoArch",
+    "decoArchColor",
+    "decoBlocks",
+    "diamondsGray",
+    "doubleD",
+    "doubleDiamonds",
+    "earth1",
+    "earth2",
+    "earth3",
+    "eclipsingSquares1",
+    "eclipsingSquares2",
+    "eggsBlack",
+    "fans",
+    "film",
+    "firecrackers",
+    "flowersBlockPrint",
+    "flowersDaisies",
+    "flowersModern1",
+    "flowersModern2",
+    "flowersPansy",
+    "flowersRedRose",
+    "flowersRoses",
+    "flowersTeacup",
+    "flowersTiny",
+    "gems",
+    "gingerbreadMan",
+    "gradient",
+    "handmade1",
+    "handmade2",
+    "heartBalloon",
+    "heartGray",
+    "hearts",
+    "heebieJeebies",
+    "holly",
+    "houseFunky",
+    "hypnotic",
+    "iceCreamCones",
+    "lightBulb",
+    "lightning1",
+    "lightning2",
+    "mapPins",
+    "mapleLeaf",
+    "mapleMuffins",
+    "marquee",
+    "marqueeToothed",
+    "moons",
+    "mosaic",
+    "musicNotes",
+    "northwest",
+    "ovals",
+    "packages",
+    "palmsBlack",
+    "palmsColor",
+    "paperClips",
+    "papyrus",
+    "partyFavor",
+    "partyGlass",
+    "pencils",
+    "people",
+    "peopleWaving",
+    "peopleHats",
+    "poinsettias",
+    "postageStamp",
+    "pumpkin1",
+    "pushPinNote2",
+    "pushPinNote1",
+    "pyramids",
+    "pyramidsAbove",
+    "quadrants",
+    "rings",
+    "safari",
+    "sawtooth",
+    "sawtoothGray",
+    "scaredCat",
+    "seattle",
+    "shadowedSquares",
+    "sharksTeeth",
+    "shorebirdTracks",
+    "skyrocket",
+    "snowflakeFancy",
+    "snowflakes",
+    "sombrero",
+    "southwest",
+    "stars",
+    "starsTop",
+    "stars3d",
+    "starsBlack",
+    "starsShadowed",
+    "sun",
+    "swirligig",
+    "tornPaper",
+    "tornPaperBlack",
+    "trees",
+    "triangleParty",
+    "triangles",
+    "triangle1",
+    "triangle2",
+    "triangleCircle1",
+    "triangleCircle2",
+    "shapes1",
+    "shapes2",
+    "twistedLines1",
+    "twistedLines2",
+    "vine",
+    "waveline",
+    "weavingAngles",
+    "weavingBraid",
+    "weavingRibbon",
+    "weavingStrips",
+    "whiteFlowers",
+    "woodwork",
+    "xIllusions",
+    "zanyTriangles",
+    "zigZag",
+    "zigZagStitch"
+};
+
+const char* pd_doc_border_art_name(int32_t style) {
+    int32_t i = style - PD_LINE_ART;
+
+    return i >= 0 && i < (int32_t)(sizeof(border_arts) / sizeof(border_arts[0])) ? border_arts[i] : NULL;
+}
+
+int32_t pd_doc_border_art(const char* name) {
+    int32_t i;
+
+    for (i = 0; i < (int32_t)(sizeof(border_arts) / sizeof(border_arts[0])); i++) {
+        if (!strcmp(border_arts[i], name)) {
+            return PD_LINE_ART + i;
+        }
+    }
+
+    return 0;
+}
+
+/* the motif an art border is drawn with (PD_ART_*): the geometric ones as they are, the pictures by their names */
+int32_t pd_doc_border_art_motif(int32_t style) {
+    static const struct {
+        const char* key;
+        int32_t motif;
+    } k[] = {
+        { "basicWideMidline", PD_ART_MIDLINE }, { "basicWideInline", PD_ART_INLINE },
+        { "basicWideOutline", PD_ART_OUTLINE }, { "basicThinLines", PD_ART_THINLINES }, { "basicWhite", PD_ART_HOLLOW },
+        { "Dashes", PD_ART_DASH }, { "Dots", PD_ART_DOT }, { "Squares", PD_ART_SQUARE }, { "checke", PD_ART_SQUARE },
+        { "mosaic", PD_ART_SQUARE }, { "Blocks", PD_ART_SQUARE }, { "quadrants", PD_ART_SQUARE },
+        { "Stamp", PD_ART_SQUARE }, { "film", PD_ART_SQUARE }, { "marquee", PD_ART_SQUARE }, { "packages", PD_ART_SQUARE },
+        { "heart", PD_ART_HEART }, { "Heart", PD_ART_HEART }, { "star", PD_ART_STAR }, { "snowflake", PD_ART_STAR },
+        { "sun", PD_ART_STAR }, { "firecracker", PD_ART_STAR }, { "skyrocket", PD_ART_STAR }, { "compass", PD_ART_STAR },
+        { "crossStitch", PD_ART_STAR }, { "xIllusions", PD_ART_STAR }, { "riangle", PD_ART_TRIANGLE },
+        { "pyramid", PD_ART_TRIANGLE }, { "sawtooth", PD_ART_TRIANGLE }, { "sharksTeeth", PD_ART_TRIANGLE },
+        { "zigZag", PD_ART_ZIGZAG }, { "wave", PD_ART_ZIGZAG }, { "Wave", PD_ART_ZIGZAG }, { "Scallops", PD_ART_ZIGZAG },
+        { "Arch", PD_ART_ZIGZAG }, { "confetti", PD_ART_DOT }, { "ircle", PD_ART_DOT }, { "rings", PD_ART_DOT },
+        { "eggs", PD_ART_DOT }, { "moons", PD_ART_DOT }, { "ovals", PD_ART_DOT }, { "balloons", PD_ART_DOT },
+        { "Lines", PD_ART_DASH }, { "chainLink", PD_ART_DASH }, { "iamond", PD_ART_DIAMOND }, { "gems", PD_ART_DIAMOND },
+        { "doubleD", PD_ART_DIAMOND }
+    };
+    const char* n = pd_doc_border_art_name(style);
+    size_t i;
+
+    for (i = 0; n && i < sizeof(k) / sizeof(k[0]); i++) {
+        if (strstr(n, k[i].key)) {
+            return k[i].motif;
+        }
+    }
+
+    return PD_ART_DIAMOND;  /* flowers, creatures, things: a small diamond each */
+}
+
 pd_status pd_doc_list_label(const pd_doc* d, pd_block_id para, char* buf, int32_t cap) {
     blk* b = para_of(d, para);
     const dlist* l;
@@ -3940,7 +4161,7 @@ void pd_doc_para_border_lines(const pd_para_props* pp, pd_border_line* out) {
 
 /* a border side's line is one Parade draws */
 int pd_doc_line_ok(const pd_border_line* l) {
-    return l->style >= PD_LINE_NONE && l->style <= PD_LINE_DOT_DASH && l->width >= 0 && l->width <= PD_PT(100) &&
+    return ((l->style >= PD_LINE_NONE && l->style <= PD_LINE_DOT_DASH) || pd_doc_border_art_name(l->style)) && l->width >= 0 && l->width <= PD_PT(100) &&
            l->space >= 0 && l->space <= PD_PT(1000);
 }
 

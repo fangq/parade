@@ -3297,12 +3297,13 @@ static const char* line_style_name(int32_t style) {
                                    "thickThinSmallGap", "triple", "dotDash"
                                  };
 
-    return style >= 0 && style <= PD_LINE_DOT_DASH ? names[style] : "single";
+    return style >= 0 && style <= PD_LINE_DOT_DASH ? names[style] : pd_doc_border_art_name(style) ?
+           pd_doc_border_art_name(style) : "single";
 }
 
 /* one side of a border as Word's element NAME (space in points) */
 static void dx_border_line(pd_buf* o, const char* name, const pd_border_line* l) {
-    int sz = (int)SCALE(l->width, 8, 65536);
+    int sz = (int)SCALE(l->width, l->style >= PD_LINE_ART ? 1 : 8, 65536);   /* an art border's in points */
 
     if (l->style == PD_LINE_NONE) {
         return;
@@ -6329,7 +6330,7 @@ static int32_t line_style_of(const char* v) {
         }
     }
 
-    return PD_LINE_SINGLE;
+    return pd_doc_border_art(v) ? pd_doc_border_art(v) : PD_LINE_SINGLE;
 }
 
 /* one side of a w:pBdr or w:pgBorders (space in points; on a page from its edge or the text) as a border line */
@@ -6343,7 +6344,7 @@ static void border_line(const dxi* X, const pd_markup* m, pd_border_line* l, int
         return;
     }
 
-    l->width = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / 8);
+    l->width = (pd_sp)((int64_t)attr_int(m, "w:sz", 4) * 65536 / (l->style >= PD_LINE_ART ? 1 : 8));  /* art: points */
     l->width = l->width > 0 ? l->width > PD_PT(100) ? PD_PT(100) : l->width : PD_PT(0.25);
     l->space = (pd_sp)attr_int(m, "w:space", 0) * 65536;
     l->space = l->space < 0 ? 0 : l->space > PD_PT(page ? 1000 : 31) ? PD_PT(page ? 1000 : 31) : l->space;

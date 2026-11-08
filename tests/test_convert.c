@@ -10624,6 +10624,67 @@ static void test_docx_float_valign(void) {
     pd_doc_free(d);
 }
 
+/* art page borders: hearts (red, 20 pt) across the top and bottom drawn as a row of motifs with their strokes, black
+   dots down the sides as small squares; the art and its size in points kept through a .docx */
+static void test_docx_art_borders(void) {
+    static const char* doc =
+        "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>Art</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" "
+        "w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\" w:header=\"720\" "
+        "w:footer=\"720\" w:gutter=\"0\"/><w:pgBorders w:offsetFrom=\"page\"><w:top w:val=\"hearts\" w:sz=\"20\" "
+        "w:space=\"24\" w:color=\"FF0000\"/><w:left w:val=\"basicBlackDots\" w:sz=\"12\" w:space=\"24\" w:color=\"000000\"/>"
+        "<w:bottom w:val=\"hearts\" w:sz=\"20\" w:space=\"24\" w:color=\"FF0000\"/><w:right w:val=\"basicBlackDots\" "
+        "w:sz=\"12\" w:space=\"24\" w:color=\"000000\"/></w:pgBorders></w:sectPr></w:body></w:document>";
+    pd_doc* d = docx_doc("word/document.xml", doc, NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 2 && have_layout_font(); pass++) {
+        pd_layout* L = NULL;
+        pd_draw* it;
+        int32_t n = 0, k, red_strokes = 0, red_top = 0, dots_left = 0;
+
+        pd_doc_set_font_resolver(d, layout_resolver, NULL);
+        CHECK(pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK);
+        pd_layout_page_items(L, 0, NULL, 0, &n);
+        it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+        pd_layout_page_items(L, 0, it, n, &n);
+
+        for (k = 0; k < n; k++) {   /* hearts: red, along the top 24 pt down; dots: black squares down the left */
+            uint32_t col = it[k].kind == PD_DRAW_PATH ? (it[k].color ? it[k].color : it[k].fill) : it[k].color;
+
+            red_strokes += it[k].kind == PD_DRAW_PATH && col == 0xFFFF0000u;
+            red_top += col == 0xFFFF0000u && it[k].y < PD_PT(24 + 20 + 1) && it[k].y >= PD_PT(23);
+            dots_left += it[k].kind == PD_DRAW_RULE && col == 0xFF000000u && it[k].x >= PD_PT(23) &&
+                         it[k].x < PD_PT(24 + 12) && it[k].w < PD_PT(8) && it[k].h < PD_PT(8);
+        }
+
+        CHECK(red_top > 40);        /* a row of hearts across the 564 pt between the borders' ends */
+        CHECK(red_strokes > 40);    /* their diamonds' strokes */
+        CHECK(dots_left > 40);      /* a 12 pt dot a cell down 744 pt */
+        free(it);
+        pd_layout_free(L);
+
+        if (pass == 0) {
+            buf_t b = { 0 };
+            unsigned char* x;
+            size_t xn;
+            pd_doc* t = NULL;
+
+            CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+            x = pd_zip_get((const unsigned char*)b.p, b.n, "word/document.xml", &xn);
+            CHECK(x && strstr((char*)x, "w:val=\"hearts\" w:sz=\"20\"") && strstr((char*)x, "w:val=\"basicBlackDots\""));
+            free(x);
+            CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &t) == PD_OK);
+            free(b.p);
+            pd_doc_free(d);
+            d = t;
+        }
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -10743,6 +10804,7 @@ int main(void) {
     test_wordart_on_path();
     test_docx_linked_textboxes();
     test_docx_float_valign();
+    test_docx_art_borders();
     test_svg_out();
     test_drawing_png();
     test_docx_canvas_kept();

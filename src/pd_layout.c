@@ -732,6 +732,10 @@ static int add_rule(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp
 static pd_sp line_thickness(const pd_border_line* l) {
     pd_sp w = l->width, thin = w / 4 > PD_PT(0.5) ? w / 4 : PD_PT(0.5);
 
+    if (l->style >= PD_LINE_ART) {  /* an art border: a picture as wide as said, each along it */
+        return w;
+    }
+
     switch (l->style) {
         case PD_LINE_NONE:
             return 0;
@@ -836,9 +840,17 @@ static void stroke_rule(void* ctx, pd_sp x, pd_sp y, pd_sp w, pd_sp h, uint32_t 
 }
 
 /* a border line as rules of a page (line_strokes) */
+static void art_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l,
+                     int horiz, int32_t region, pd_block_id block);
+
 static void border_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l,
                         int horiz, int outer, int32_t region, pd_block_id block) {
     rule_ctx c;
+
+    if (l->style >= PD_LINE_ART) {
+        art_band(L, page, x, y, w, h, l, horiz, region, block);
+        return;
+    }
 
     c.L = L;
     c.page = page;
@@ -950,6 +962,101 @@ static void add_diag(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_s
     if (lw > 0 && add_rule(L, page, x, y, w, h, color, region, block) == 0) {
         L->pages[page].rules[L->pages[page].nrules - 1].diag = diag;
         L->pages[page].rules[L->pages[page].nrules - 1].lw = lw;
+    }
+}
+
+/* An art border along a band (horiz: across, from x; else down, from y): its motif in cells as big as the band is
+   thick, as many as fit, spread evenly -- rules, and rules drawn corner to corner (diagonals) */
+static void art_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, const pd_border_line* l,
+                     int horiz, int32_t region, pd_block_id block) {
+    pd_sp sz = horiz ? h : w, len = horiz ? w : h, step, lw;
+    uint32_t c = l->color ? l->color : 0xFF000000u;
+    int32_t motif = pd_doc_border_art_motif(l->style), n, i;
+
+    if (sz <= 0 || len <= 0) {
+        return;
+    }
+
+    lw = sz / 8 > PD_PT(0.5) ? sz / 8 : PD_PT(0.5);
+
+    if (motif == PD_ART_MIDLINE || motif == PD_ART_INLINE || motif == PD_ART_OUTLINE || motif == PD_ART_THINLINES) {
+        /* lines the whole way: a wide one in the middle; a wide and a thin one (thin inside, outside); thin ones */
+        pd_sp a = motif == PD_ART_MIDLINE ? sz / 4 : motif == PD_ART_THINLINES ? 0 : motif == PD_ART_INLINE ? sz / 2 : 0;
+        pd_sp t = motif == PD_ART_MIDLINE ? sz / 2 : motif == PD_ART_THINLINES ? lw : sz / 2;
+
+        add_rule(L, page, horiz ? x : x + a, horiz ? y + a : y, horiz ? w : t, horiz ? t : h, c, region, block);
+
+        if (motif != PD_ART_MIDLINE) {  /* the second line */
+            pd_sp b = motif == PD_ART_THINLINES ? sz - lw : motif == PD_ART_INLINE ? sz / 6 : sz - sz / 4;
+
+            add_rule(L, page, horiz ? x : x + b, horiz ? y + b : y, horiz ? w : lw, horiz ? lw : h, c, region, block);
+        }
+
+        return;
+    }
+
+    n = (int32_t)(len / sz);
+    n = n < 1 ? 1 : n;
+    step = len / n;
+
+    for (i = 0; i < n; i++) {
+        pd_sp cx = horiz ? x + i * step + (step - sz) / 2 : x, cy = horiz ? y : y + i * step + (step - sz) / 2;
+        pd_sp m = sz / 2, q = sz / 4;
+
+        switch (motif) {
+            case PD_ART_DOT:
+                add_rule(L, page, cx + sz * 3 / 10, cy + sz * 3 / 10, sz * 2 / 5, sz * 2 / 5, c, region, block);
+                break;
+
+            case PD_ART_SQUARE:
+                add_rule(L, page, cx + sz / 8, cy + sz / 8, sz * 3 / 4, sz * 3 / 4, c, region, block);
+                break;
+
+            case PD_ART_DASH:
+                add_rule(L, page, horiz ? cx + sz / 8 : cx + sz * 3 / 8, horiz ? cy + sz * 3 / 8 : cy + sz / 8,
+                         horiz ? sz * 3 / 4 : sz / 4, horiz ? sz / 4 : sz * 3 / 4, c, region, block);
+                break;
+
+            case PD_ART_HOLLOW: {   /* white squares: their outlines */
+                pd_sp a = sz / 6, b = sz * 2 / 3;
+
+                add_rule(L, page, cx + a, cy + a, b, lw, c, region, block);
+                add_rule(L, page, cx + a, cy + a + b - lw, b, lw, c, region, block);
+                add_rule(L, page, cx + a, cy + a, lw, b, c, region, block);
+                add_rule(L, page, cx + a + b - lw, cy + a, lw, b, c, region, block);
+                break;
+            }
+
+            case PD_ART_TRIANGLE:   /* its point up, its base along the bottom */
+                add_diag(L, page, cx, cy, m, sz, 2, lw, c, region, block);
+                add_diag(L, page, cx + m, cy, m, sz, 1, lw, c, region, block);
+                add_rule(L, page, cx, cy + sz - lw, sz, lw, c, region, block);
+                break;
+
+            case PD_ART_ZIGZAG:     /* up and down, cell after cell */
+                add_diag(L, page, cx, cy, m, sz, 2, lw, c, region, block);
+                add_diag(L, page, cx + m, cy, m, sz, 1, lw, c, region, block);
+                break;
+
+            case PD_ART_STAR:       /* a cross and an X */
+                add_diag(L, page, cx + q / 2, cy + q / 2, sz - q, sz - q, 1, lw, c, region, block);
+                add_diag(L, page, cx + q / 2, cy + q / 2, sz - q, sz - q, 2, lw, c, region, block);
+                add_rule(L, page, cx, cy + m - lw / 2, sz, lw, c, region, block);
+                add_rule(L, page, cx + m - lw / 2, cy, lw, sz, c, region, block);
+                break;
+
+            case PD_ART_HEART:      /* a diamond with its two lobes */
+                add_rule(L, page, cx + q / 2, cy + q / 2, q, q, c, region, block);
+                add_rule(L, page, cx + sz - q - q / 2, cy + q / 2, q, q, c, region, block);
+                /* (and the diamond below) */
+                /* fallthrough */
+            default:                /* a diamond */
+                add_diag(L, page, cx, cy, m, m, 2, lw, c, region, block);
+                add_diag(L, page, cx + m, cy, m, m, 1, lw, c, region, block);
+                add_diag(L, page, cx, cy + m, m, m, 1, lw, c, region, block);
+                add_diag(L, page, cx + m, cy + m, m, m, 2, lw, c, region, block);
+                break;
+        }
     }
 }
 

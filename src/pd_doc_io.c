@@ -1554,7 +1554,8 @@ static void load_lines(loader* L, const pj_node* x, pd_border_line* l, int n) {
         const pj_node* r = pj_at(x, k);
 
         REQUIRE(r && r->type == PJ_ARR);
-        l[k].style = (int32_t)int_or(pj_at(r, 0), 0, 0, PD_LINE_DOT_DASH, L);
+        l[k].style = (int32_t)int_or(pj_at(r, 0), 0, 0, PD_LINE_ART + 200, L);
+        l[k].style = l[k].style > PD_LINE_DOT_DASH && !pd_doc_border_art_name(l[k].style) ? PD_LINE_SINGLE : l[k].style;
         l[k].width = (pd_sp)int_or(pj_at(r, 1), 0, 0, PD_PT(100), L);
         l[k].color = (uint32_t)int_or(pj_at(r, 2), 0, 0, 0xFFFFFFFFLL, L);
         l[k].space = (pd_sp)int_or(pj_at(r, 3), 0, 0, PD_PT(1000), L);

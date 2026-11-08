@@ -242,6 +242,10 @@ pd_doc*   pd_doc_alloc(void);
 void      pd_doc_install_builtin_styles(pd_doc* d);
 int       pd_doc_intern_raw(pd_doc* d, const dformat* f, pd_format_id* out);
 void      pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap);
+/* the motif an art border style is drawn with */
+enum { PD_ART_DOT, PD_ART_SQUARE, PD_ART_DASH, PD_ART_HOLLOW, PD_ART_MIDLINE, PD_ART_INLINE, PD_ART_OUTLINE,
+       PD_ART_THINLINES, PD_ART_TRIANGLE, PD_ART_ZIGZAG, PD_ART_DIAMOND, PD_ART_HEART, PD_ART_STAR };
+int32_t   pd_doc_border_art_motif(int32_t style);
 /* a paragraph's effective properties: style chain, direct properties, list indent */
 /* the theme's colours and fonts in properties linked to it */
 void      pd_doc_theme_cp(const pd_doc* d, pd_char_props* cp);
