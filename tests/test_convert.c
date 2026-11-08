@@ -5555,6 +5555,111 @@ static void test_docx_num_formats(void) {
     free(doc);
 }
 
+/* what Parade does not model goes back as it came: extended and custom properties, custom XML data with its
+   own relationships, and settings.xml -- track changes, protection, the compatibility mode and extensions kept,
+   merged in the schema's order with what Parade writes; through two saves, nothing doubled */
+static void test_docx_kept_parts(void) {
+    static const char* names[] = { "[Content_Types].xml", "_rels/.rels", "word/_rels/document.xml.rels",
+                                   "word/document.xml", "word/settings.xml", "docProps/app.xml", "docProps/custom.xml",
+                                   "customXml/item1.xml", "customXml/itemProps1.xml", "customXml/_rels/item1.xml.rels"
+                                 };
+    static const char* texts[] = {
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" "
+        "ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" "
+        "ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/"
+        "vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/docProps/"
+        "app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/>"
+        "<Override PartName=\"/docProps/custom.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
+        "custom-properties+xml\"/><Override PartName=\"/customXml/itemProps1.xml\" ContentType=\"application/"
+        "vnd.openxmlformats-officedocument.customXmlProperties+xml\"/></Types>",
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" "
+        "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/"
+        "document.xml\"/><Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+        "relationships/extended-properties\" Target=\"docProps/app.xml\"/><Relationship Id=\"rId4\" Type=\"http://"
+        "schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties\" Target=\"docProps/"
+        "custom.xml\"/></Relationships>",
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId9\" "
+        "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml\" Target=\"../customXml/"
+        "item1.xml\"/></Relationships>",
+        "<w:document xmlns:w=\"w\"><w:body><w:p><w:r><w:t>kept</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" "
+        "w:h=\"15840\"/></w:sectPr></w:body></w:document>",
+        "<w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w15=\"x15\">"
+        "<w:zoom w:percent=\"120\"/><w:mirrorMargins/><w:trackRevisions/><w:documentProtection w:edit=\"readOnly\" "
+        "w:enforcement=\"1\"/><w:defaultTabStop w:val=\"720\"/><w:compat><w:compatSetting w:name=\"compatibilityMode\" "
+        "w:uri=\"http://schemas.microsoft.com/office/word\" w:val=\"14\"/></w:compat><w:docVars><w:docVar w:name=\"a\" "
+        "w:val=\"b\"/></w:docVars><w15:chartTrackingRefBased/></w:settings>",
+        "<Properties xmlns=\"x\"><Application>Microsoft Office Word</Application><Company>Lab</Company></Properties>",
+        "<Properties xmlns=\"y\"><property name=\"Grant\"><vt:lpwstr xmlns:vt=\"v\">R01</vt:lpwstr></property></Properties>",
+        "<b:Sources xmlns:b=\"bib\"/>",
+        "<ds:datastoreItem xmlns:ds=\"ds\" ds:itemID=\"{1}\"/>",
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" "
+        "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps\" "
+        "Target=\"itemProps1.xml\"/></Relationships>"
+    };
+    buf_t z = stored_zip(names, texts, 10), b = { 0 };
+    pd_doc* d = NULL, *t = NULL;
+    int pass;
+
+    CHECK(pd_doc_import(z.p, z.n, PD_CONV_DOCX, &d) == PD_OK);
+
+    for (pass = 0; d && pass < 2; pass++) {
+        unsigned char* p;
+        size_t n;
+        char* st, *a, *c;
+
+        b.n = 0;
+        CHECK(pd_doc_export(pass ? t : d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        p = pd_zip_get((const unsigned char*)b.p, b.n, "docProps/custom.xml", &n);
+        CHECK(p && strstr((char*)p, "R01"));
+        free(p);
+        p = pd_zip_get((const unsigned char*)b.p, b.n, "docProps/app.xml", &n);
+        CHECK(p && strstr((char*)p, "<Company>Lab</Company>"));
+        free(p);
+        p = pd_zip_get((const unsigned char*)b.p, b.n, "customXml/itemProps1.xml", &n);
+        CHECK(p != NULL);
+        free(p);
+        p = pd_zip_get((const unsigned char*)b.p, b.n, "customXml/_rels/item1.xml.rels", &n);
+        CHECK(p != NULL);
+        free(p);
+        p = pd_zip_get((const unsigned char*)b.p, b.n, "_rels/.rels", &n);
+        CHECK(p && strstr((char*)p, "Target=\"docProps/custom.xml\"") &&
+              strstr((char*)p, "/extended-properties\" Target=\"docProps/app.xml\""));
+        free(p);
+        p = pd_zip_get((const unsigned char*)b.p, b.n, "word/_rels/document.xml.rels", &n);
+        CHECK(p && strstr((char*)p, "/customXml\" Target=\"../customXml/item1.xml\""));
+        free(p);
+        p = pd_zip_get((const unsigned char*)b.p, b.n, "[Content_Types].xml", &n);
+        CHECK(p && strstr((char*)p, "PartName=\"/docProps/custom.xml\"") &&
+              strstr((char*)p, "PartName=\"/customXml/itemProps1.xml\""));
+        free(p);
+        p = pd_zip_get((const unsigned char*)b.p, b.n, "word/settings.xml", &n);
+        st = (char*)p;
+        CHECK(st && strstr(st, "<w:trackRevisions/>") && strstr(st, "w:edit=\"readOnly\"") &&
+              strstr(st, "<w15:chartTrackingRefBased/>") && strstr(st, "w:name=\"a\"") &&
+              strstr(st, "xmlns:w15=\"x15\""));
+        CHECK(st && strstr(st, "w:val=\"14\"") && !strstr(st, "w:val=\"15\""));  /* its own compatibility mode */
+        a = st ? strstr(st, "<w:compat>") : NULL;
+        CHECK(a && !strstr(a + 1, "<w:compat>"));     /* once */
+        a = st ? strstr(st, "<w:mirrorMargins/>") : NULL;
+        CHECK(a && !strstr(a + 1, "<w:mirrorMargins/>"));
+        a = st ? strstr(st, "<w:trackRevisions/>") : NULL;     /* the schema's order */
+        c = st ? strstr(st, "<w:defaultTabStop") : NULL;
+        CHECK(a && c && a < c && strstr(st, "<w:zoom") < a);
+        c = st ? strstr(st, "<w:docVars>") : NULL;
+        CHECK(c && strstr(st, "<w:compat>") < c && c < strstr(st, "<w15:chartTrackingRefBased/>"));
+        free(p);
+
+        if (pass == 0) {
+            CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &t) == PD_OK);
+        }
+    }
+
+    pd_doc_free(t);
+    pd_doc_free(d);
+    free(b.p);
+    free(z.p);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -5573,6 +5678,7 @@ int main(void) {
     printf("docx lists\n");
     test_docx_lists();
     test_docx_num_formats();
+    test_docx_kept_parts();
     printf("docx headers and footers\n");
     test_docx_headers();
     printf("docx tables\n");

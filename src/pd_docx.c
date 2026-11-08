@@ -4022,6 +4022,565 @@ static void dx_core(const pd_doc* d, pd_buf* o) {
     pb_puts(o, "</cp:coreProperties>");
 }
 
+
+/* ------------------------------------------------------------------ */
+/* parts kept as they came                                            */
+/* ------------------------------------------------------------------ */
+
+/* What Parade does not model goes back as it came: the package's extended and custom properties and thumbnail,
+   custom XML data, the glossary (building blocks), web settings, and settings.xml itself, merged on writing with
+   what Parade sets.  Kept in one resource of the document, entries of
+   name NUL content-type NUL source NUL relationship-type NUL length(4, little endian) bytes,
+   source "pkg" (from _rels/.rels), "doc" (from document.xml's), "" (a part those parts reach). */
+#define KEEP_MIME "application/vnd.parade.docx-kept-parts"
+#define KEEP_MAX 400
+
+typedef struct {
+    pd_buf b;
+    int n;
+    char names[KEEP_MAX][128];
+} dkeep;
+
+/* a relationship target from the part at base resolved to a part name ("word/x.xml" + "../customXml/a.xml") */
+static void keep_resolve(const char* base, const char* target, char* out, size_t cap) {
+    char tmp[256];
+    size_t n;
+    const char* t = target;
+
+    if (*t == '/') {
+        snprintf(out, cap, "%s", t + 1);
+        return;
+    }
+
+    snprintf(tmp, sizeof(tmp), "%s", base);
+    n = strlen(tmp);
+
+    while (n > 0 && tmp[n - 1] != '/') {    /* the base's folder */
+        n--;
+    }
+
+    tmp[n] = '\0';
+
+    while (strncmp(t, "../", 3) == 0) {
+        t += 3;
+
+        if (n > 0) {
+            n--;
+
+            while (n > 0 && tmp[n - 1] != '/') {
+                n--;
+            }
+
+            tmp[n] = '\0';
+        }
+    }
+
+    while (strncmp(t, "./", 2) == 0) {
+        t += 2;
+    }
+
+    snprintf(out, cap, "%s%s", tmp, t);
+}
+
+/* the relationships part of a part ("word/document.xml" -> "word/_rels/document.xml.rels") */
+static void keep_rels_name(const char* part, char* out, size_t cap) {
+    const char* sl = strrchr(part, '/');
+
+    if (sl) {
+        snprintf(out, cap, "%.*s_rels/%s.rels", (int)(sl - part + 1), part, sl + 1);
+    } else {
+        snprintf(out, cap, "_rels/%s.rels", part);
+    }
+}
+
+static int keep_ext_eq(const char* a, const char* b) {
+    for (; *a && *b; a++, b++) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return 0;
+        }
+    }
+
+    return !*a && !*b;
+}
+
+/* a part's content type from [Content_Types].xml: its override, else its extension's default */
+static void keep_ctype(const char* ct, size_t ctn, const char* name, char* out, size_t cap) {
+    pd_markup m;
+    char v[256];
+    const char* ext = strrchr(name, '.');
+
+    out[0] = '\0';
+    mu_init(&m, ct, ctn, 0);
+
+    while (mu_next(&m) != MT_END) {
+        if (m.type != MT_OPEN && m.type != MT_EMPTY) {
+            continue;
+        }
+
+        if (strcmp(mu_local(m.name), "Override") == 0 && mu_attr(&m, "PartName", v, sizeof(v)) &&
+                strcmp(v[0] == '/' ? v + 1 : v, name) == 0) {
+            mu_attr(&m, "ContentType", out, cap);
+            return;
+        }
+
+        if (ext && !out[0] && strcmp(mu_local(m.name), "Default") == 0 && mu_attr(&m, "Extension", v, sizeof(v)) &&
+                keep_ext_eq(v, ext + 1)) {
+            mu_attr(&m, "ContentType", out, cap);
+        }
+    }
+}
+
+static int keep_has(const dkeep* k, const char* name) {
+    int i;
+
+    for (i = 0; i < k->n; i++) {
+        if (strcmp(k->names[i], name) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void keep_entry(dkeep* k, const char* name, const char* ctype, const char* src, const char* rtype,
+                       const void* data, size_t len) {
+    unsigned char l4[4];
+
+    if (k->n >= KEEP_MAX || strlen(name) >= sizeof(k->names[0]) || keep_has(k, name)) {
+        return;
+    }
+
+    snprintf(k->names[k->n++], sizeof(k->names[0]), "%s", name);
+    pb_put(&k->b, name, strlen(name) + 1);
+    pb_put(&k->b, ctype, strlen(ctype) + 1);
+    pb_put(&k->b, src, strlen(src) + 1);
+    pb_put(&k->b, rtype, strlen(rtype) + 1);
+    l4[0] = (unsigned char)(len & 255);
+    l4[1] = (unsigned char)((len >> 8) & 255);
+    l4[2] = (unsigned char)((len >> 16) & 255);
+    l4[3] = (unsigned char)((len >> 24) & 255);
+    pb_put(&k->b, l4, 4);
+    pb_put(&k->b, data, len);
+}
+
+/* a part kept, with its relationships and the parts they reach inside the package */
+static void keep_part(dkeep* k, const zipr* z, const char* ct, size_t ctn, const char* name, const char* src,
+                      const char* rtype, int depth) {
+    unsigned char* data;
+    size_t len;
+    char ctype[256], rn[300];
+
+    if (depth > 4 || keep_has(k, name) || (data = zip_read(z, name, &len)) == NULL) {
+        return;
+    }
+
+    keep_ctype(ct, ctn, name, ctype, sizeof(ctype));
+    keep_entry(k, name, ctype, src, rtype, data, len);
+    free(data);
+    keep_rels_name(name, rn, sizeof(rn));
+
+    if ((data = zip_read(z, rn, &len)) != NULL) {
+        pd_markup m;
+        char t[256], mode[32], full[300];
+
+        keep_entry(k, rn, "application/vnd.openxmlformats-package.relationships+xml", "", "", data, len);
+        mu_init(&m, (const char*)data, len, 0);
+
+        while (mu_next(&m) != MT_END) {
+            if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "Relationship") == 0 &&
+                    mu_attr(&m, "Target", t, sizeof(t)) &&
+                    !(mu_attr(&m, "TargetMode", mode, sizeof(mode)) && strcmp(mode, "External") == 0)) {
+                keep_resolve(name, t, full, sizeof(full));
+                keep_part(k, z, ct, ctn, full, "", "", depth + 1);
+            }
+        }
+
+        free(data);
+    }
+}
+
+/* the relationship types whose parts are kept, from the package (pkg) or the main document (doc) */
+static int keep_type(const char* type, int doc) {
+    static const char* pkg[] = { "/extended-properties", "/custom-properties", "/custom-properties" };
+    static const char* dt[] = { "/customXml", "/glossaryDocument", "/webSettings" };
+    const char** l = doc ? dt : pkg;
+    size_t tl = strlen(type), i;
+
+    for (i = 0; i < 3; i++) {
+        size_t ln = strlen(l[i]);
+
+        if (tl >= ln && strcmp(type + tl - ln, l[i]) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* what of a package is kept as it came, made a resource of d */
+static void keep_read(const zipr* z, pd_doc* d) {
+    dkeep* k = (dkeep*)calloc(1, sizeof(dkeep));
+    unsigned char* ct, *rels;
+    size_t ctn = 0, rn = 0;
+    int doc;
+
+    if (!k) {
+        return;
+    }
+
+    ct = zip_read(z, "[Content_Types].xml", &ctn);
+
+    for (doc = 0; doc < 2; doc++) {
+        pd_markup m;
+
+        if ((rels = zip_read(z, doc ? "word/_rels/document.xml.rels" : "_rels/.rels", &rn)) == NULL) {
+            continue;
+        }
+
+        mu_init(&m, (const char*)rels, rn, 0);
+
+        while (mu_next(&m) != MT_END) {
+            char type[256], t[256], mode[32], full[300];
+
+            if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "Relationship") == 0 &&
+                    mu_attr(&m, "Type", type, sizeof(type)) && mu_attr(&m, "Target", t, sizeof(t)) &&
+                    keep_type(type, doc) && !(mu_attr(&m, "TargetMode", mode, sizeof(mode)) &&
+                                              strcmp(mode, "External") == 0)) {
+                keep_resolve(doc ? "word/document.xml" : "", t, full, sizeof(full));
+                keep_part(k, z, ct ? (const char*)ct : "", ctn, full, doc ? "doc" : "pkg", type, 0);
+            }
+        }
+
+        free(rels);
+    }
+
+    {   /* settings.xml, to be merged; its relationships only when they all point out of the package */
+        unsigned char* s = zip_read(z, "word/settings.xml", &rn);
+
+        if (s) {
+            unsigned char* sr = zip_read(z, "word/_rels/settings.xml.rels", &ctn);
+
+            keep_entry(k, "word/settings.xml", "", "settings", "", s, rn);
+
+            if (sr) {
+                pd_markup m;
+                int all_ext = 1;
+                char mode[32];
+
+                mu_init(&m, (const char*)sr, ctn, 0);
+
+                while (mu_next(&m) != MT_END) {
+                    if ((m.type == MT_OPEN || m.type == MT_EMPTY) && strcmp(mu_local(m.name), "Relationship") == 0 &&
+                            !(mu_attr(&m, "TargetMode", mode, sizeof(mode)) && strcmp(mode, "External") == 0)) {
+                        all_ext = 0;
+                    }
+                }
+
+                if (all_ext) {
+                    keep_entry(k, "word/_rels/settings.xml.rels", "", "settings-rels", "", sr, ctn);
+                }
+
+                free(sr);
+            }
+
+            free(s);
+        }
+    }
+
+    if (k->n > 0 && !k->b.err) {
+        pd_res_id r;
+
+        pd_doc_add_resource(d, KEEP_MIME, k->b.p, k->b.n, &r);
+    }
+
+    free(ct);
+    pb_free(&k->b);
+    free(k);
+}
+
+typedef struct {
+    const char* name, *ctype, *src, *rtype;
+    const unsigned char* data;
+    size_t len;
+} dkept;
+
+/* the next entry of a kept-parts resource at *pos; 0 at its end or where it is broken */
+static int keep_next(const unsigned char* p, size_t n, size_t* pos, dkept* e) {
+    const char* f[4];
+    size_t i = *pos, len;
+    int k;
+
+    for (k = 0; k < 4; k++) {
+        const unsigned char* z = i < n ? (const unsigned char*)memchr(p + i, 0, n - i) : NULL;
+
+        if (!z) {
+            return 0;
+        }
+
+        f[k] = (const char*)p + i;
+        i = (size_t)(z - p) + 1;
+    }
+
+    if (i + 4 > n) {
+        return 0;
+    }
+
+    len = (size_t)p[i] | ((size_t)p[i + 1] << 8) | ((size_t)p[i + 2] << 16) | ((size_t)p[i + 3] << 24);
+    i += 4;
+
+    if (len > n - i) {
+        return 0;
+    }
+
+    e->name = f[0];
+    e->ctype = f[1];
+    e->src = f[2];
+    e->rtype = f[3];
+    e->data = p + i;
+    e->len = len;
+    *pos = i + len;
+    return 1;
+}
+
+/* relationships to the kept parts of a source ("pkg": the package's, "doc": document.xml's) */
+static void dx_keep_rels(pd_buf* o, const void* kdata, size_t klen, const char* src) {
+    size_t kp = 0;
+    dkept e;
+    int i = 0;
+
+    while (klen && keep_next((const unsigned char*)kdata, klen, &kp, &e)) {
+        if (strcmp(e.src, src) != 0) {
+            continue;
+        }
+
+        pb_printf(o, "<Relationship Id=\"rIdK%d\" Type=\"", ++i);
+        xesc(o, e.rtype, strlen(e.rtype));
+        pb_puts(o, "\" Target=\"");
+
+        if (strcmp(src, "doc") == 0) {     /* from word/ */
+            if (strncmp(e.name, "word/", 5) == 0) {
+                xesc(o, e.name + 5, strlen(e.name + 5));
+            } else {
+                pb_puts(o, "../");
+                xesc(o, e.name, strlen(e.name));
+            }
+        } else {
+            xesc(o, e.name, strlen(e.name));
+        }
+
+        pb_puts(o, "\"/>");
+    }
+}
+
+/* the top-level children of a settings part: where each starts and ends, and its name */
+typedef struct {
+    size_t a, b;
+    char name[64];
+} dsel;
+
+static int settings_children(const char* s, size_t n, dsel* out, int cap, size_t* body_a, size_t* body_b) {
+    pd_markup m;
+    int depth = 0, cnt = 0;
+    size_t before = 0;
+
+    *body_a = *body_b = 0;
+    mu_init(&m, s, n, 0);
+
+    for (;;) {
+        int t;
+
+        before = m.pos;
+        t = mu_next(&m);
+
+        if (t == MT_END) {
+            break;
+        }
+
+        if (t == MT_OPEN || t == MT_EMPTY) {
+            if (depth == 0) {
+                if (strcmp(mu_local(m.name), "settings") == 0 && t == MT_OPEN) {
+                    *body_a = m.pos;
+                    depth = 1;
+                }
+
+                continue;
+            }
+
+            if (depth == 1 && cnt < cap) {
+                out[cnt].a = before;
+                snprintf(out[cnt].name, sizeof(out[cnt].name), "%s", m.name);
+                out[cnt].b = m.pos;
+
+                if (t == MT_EMPTY) {
+                    cnt++;
+                }
+            }
+
+            if (t == MT_OPEN) {
+                depth++;
+            }
+        } else if (t == MT_CLOSE) {
+            depth--;
+
+            if (depth == 1 && cnt < cap) {
+                out[cnt++].b = m.pos;
+            } else if (depth == 0) {
+                *body_b = before;
+                break;
+            }
+        }
+    }
+
+    return cnt;
+}
+
+/* where a settings element goes, in CT_Settings's order (extensions: after what precedes them) */
+static int settings_rank(const char* qname) {
+    static const char* order[] = {
+        "writeProtection", "view", "zoom", "removePersonalInformation", "removeDateAndTime",
+        "doNotDisplayPageBoundaries", "displayBackgroundShape", "printPostScriptOverText",
+        "printFractionalCharacterWidth", "printFormsData", "embedTrueTypeFonts", "embedSystemFonts",
+        "saveSubsetFonts", "saveFormsData", "mirrorMargins", "alignBordersAndEdges", "bordersDoNotSurroundHeader",
+        "bordersDoNotSurroundFooter", "gutterAtTop", "hideSpellingErrors", "hideGrammaticalErrors",
+        "activeWritingStyle", "proofState", "formsDesign", "attachedTemplate", "linkStyles",
+        "stylePaneFormatFilter", "stylePaneSortMethod", "documentType", "mailMerge", "revisionView",
+        "trackRevisions", "doNotTrackMoves", "doNotTrackFormatting", "documentProtection", "autoFormatOverride",
+        "styleLockTheme", "styleLockQFSet", "defaultTabStop", "autoHyphenation", "consecutiveHyphenLimit",
+        "hyphenationZone", "doNotHyphenateCaps", "showEnvelope", "summaryLength", "clickAndTypeStyle",
+        "defaultTableStyle", "evenAndOddHeaders", "bookFoldRevPrinting", "bookFoldPrinting",
+        "bookFoldPrintingSheets", "drawingGridHorizontalSpacing", "drawingGridVerticalSpacing",
+        "displayHorizontalDrawingGridEvery", "displayVerticalDrawingGridEvery",
+        "doNotUseMarginsForDrawingGridOrigin", "drawingGridHorizontalOrigin", "drawingGridVerticalOrigin",
+        "doNotShadeFormData", "noPunctuationKerning", "characterSpacingControl", "printTwoOnOne",
+        "strictFirstAndLastChars", "noLineBreaksAfter", "noLineBreaksBefore", "savePreviewPicture",
+        "doNotValidateAgainstSchema", "saveInvalidXml", "ignoreMixedContent", "alwaysShowPlaceholderText",
+        "doNotDemarcateInvalidXml", "saveXmlDataOnly", "useXSLTWhenSaving", "saveThroughXslt", "showXMLTags",
+        "alwaysMergeEmptyNamespace", "updateFields", "hdrShapeDefaults", "footnotePr", "endnotePr", "compat",
+        "docVars", "rsids", "mathPr", "attachedSchema", "themeFontLang", "clrSchemeMapping",
+        "doNotIncludeSubdocsInStats", "doNotAutoCompressPictures", "forceUpgrade", "captions",
+        "readModeInkLockDown", "smartTagType", "schemaLibrary", "shapeDefaults", "doNotEmbedSmartTags",
+        "decimalSymbol", "listSeparator"
+    };
+    size_t i;
+
+    if (strncmp(qname, "w:", 2) != 0 && strncmp(qname, "m:", 2) != 0 && strncmp(qname, "sl:", 3) != 0 &&
+            strncmp(qname, "o:", 2) != 0) {
+        return -1;  /* w14:, w15:, ...: an extension */
+    }
+
+    for (i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+        if (strcmp(mu_local(qname), order[i]) == 0) {
+            return (int)i * 2 + 2;
+        }
+    }
+
+    return -1;
+}
+
+/* settings Parade writes from what it models: these of the kept part give way to Parade's, or to their
+   absence; the rest of the kept part stays, compatibility settings included */
+static int settings_parade_owns(const char* qname) {
+    static const char* own[] = { "mirrorMargins", "defaultTabStop", "autoHyphenation", "evenAndOddHeaders",
+                                 "footnotePr", "endnotePr", "displayBackgroundShape"
+                               };
+    size_t i;
+
+    for (i = 0; i < sizeof(own) / sizeof(own[0]); i++) {
+        if (strncmp(qname, "w:", 2) == 0 && strcmp(qname + 2, own[i]) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* Parade's settings part (gen) merged into the kept one: gen's elements, and the kept ones it does not own or
+   have, in the schema's order; the result in out.  The kept root element (its namespaces) is kept.  0 when
+   either cannot be read, out untouched */
+static int settings_merge(const char* gen, size_t gn, const char* kept, size_t kn, int keep_rels, pd_buf* out) {
+    dsel g[160], k[320];
+    int ng, nk, i, j, rank, prev, *kr;
+    size_t ga, gb, ka, kb;
+    pd_buf o;
+
+    ng = settings_children(gen, gn, g, 160, &ga, &gb);
+    nk = settings_children(kept, kn, k, 320, &ka, &kb);
+
+    if (ka == 0 || kb == 0 || ga == 0 || gb == 0 || (kr = (int*)calloc((size_t)nk + 1, sizeof(int))) == NULL) {
+        return 0;
+    }
+
+    for (i = 0, prev = 0; i < nk; i++) {    /* an extension sits just after what it follows */
+        rank = settings_rank(k[i].name);
+        kr[i] = rank < 0 ? prev + 1 : rank;
+        prev = rank < 0 ? prev : rank;
+    }
+
+    memset(&o, 0, sizeof(o));
+    pb_put(&o, kept, ka);   /* the declaration and the kept root, with its namespaces */
+
+    for (rank = 0; rank <= 2 * 100 + 2; rank++) {
+        for (j = 0; j < ng; j++) {
+            int r = settings_rank(g[j].name);
+
+            if ((r < 0 ? 2 * 100 + 2 : r) == rank) {
+                int dup = 0;
+
+                if (strcmp(g[j].name, "w:compat") == 0) {   /* the document's own compatibility wins */
+                    for (i = 0; i < nk && !dup; i++) {
+                        dup = strcmp(k[i].name, "w:compat") == 0;
+                    }
+                }
+
+                if (!dup) {
+                    pb_put(&o, gen + g[j].a, g[j].b - g[j].a);
+                }
+            }
+        }
+
+        for (i = 0; i < nk; i++) {
+            int theirs = 0;
+
+            if (kr[i] != rank || settings_parade_owns(k[i].name)) {
+                continue;
+            }
+
+            for (j = 0; j < ng && !theirs; j++) {
+                theirs = strcmp(g[j].name, k[i].name) == 0 && strcmp(k[i].name, "w:compat") != 0;
+            }
+
+            if (!keep_rels) {   /* what names a relationship that is not kept (a template in the package) */
+                pd_markup m;
+
+                mu_init(&m, kept + k[i].a, k[i].b - k[i].a, 0);
+
+                if (mu_next(&m) == MT_OPEN || m.type == MT_EMPTY) {
+                    char v[8];
+
+                    theirs |= mu_attr(&m, "r:id", v, sizeof(v));
+                }
+            }
+
+            if (!theirs) {
+                pb_put(&o, kept + k[i].a, k[i].b - k[i].a);
+            }
+        }
+    }
+
+    pb_put(&o, kept + kb, kn - kb);
+    free(kr);
+
+    if (o.err) {
+        pb_free(&o);
+        return 0;
+    }
+
+    out->n = 0;
+    pb_put(out, o.p, o.n);
+    pb_free(&o);
+    return 1;
+}
+
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
     return pd_docx_export_as(d, out, 0);
 }
@@ -4034,6 +4593,9 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     pd_buf themeb = { 0 };
     const void* theme = NULL;
     size_t theme_len = 0;
+    const void* kdata = NULL;     /* the parts kept as they came (KEEP_MIME) */
+    size_t klen = 0;
+    int has_keep = 0, keep_srels = 0;
     zipw z;
     pd_block_info ri;
     int32_t s, i, ncomments;
@@ -4160,6 +4722,7 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     }
 
     /* the package */
+    has_keep = dx_kept(d, KEEP_MIME, &kdata, &klen);
     z.o = out;
     pb_puts(&part, XML_DECL);
     pb_puts(&part, "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
@@ -4215,6 +4778,21 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
                 "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml\"/>");
     }
 
+    if (has_keep) {     /* the parts kept as they came */
+        size_t kp = 0;
+        dkept e;
+
+        while (keep_next((const unsigned char*)kdata, klen, &kp, &e)) {
+            if (e.ctype[0] && e.src[0] != 's' && !strstr(e.name, ".rels")) {
+                pb_puts(&part, "<Override PartName=\"/");
+                xesc(&part, e.name, strlen(e.name));
+                pb_puts(&part, "\" ContentType=\"");
+                xesc(&part, e.ctype, strlen(e.ctype));
+                pb_puts(&part, "\"/>");
+            }
+        }
+    }
+
     pb_puts(&part, "</Types>");
     zip_add(&z, "[Content_Types].xml", part.p, part.n);
     part.n = 0;
@@ -4223,7 +4801,9 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
             "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
             "officeDocument\" Target=\"word/document.xml\"/>"
             "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/"
-            "core-properties\" Target=\"docProps/core.xml\"/></Relationships>");
+            "core-properties\" Target=\"docProps/core.xml\"/>");
+    dx_keep_rels(&part, kdata, has_keep ? klen : 0, "pkg");
+    pb_puts(&part, "</Relationships>");
     zip_add(&z, "_rels/.rels", part.p, part.n);
     part.n = 0;
     dx_core(d, &part);
@@ -4287,6 +4867,40 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     pb_puts(&part, "<w:footnotePr><w:footnote w:id=\"-1\"/><w:footnote w:id=\"0\"/></w:footnotePr>"
             "<w:compat><w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" "
             "w:val=\"15\"/></w:compat></w:settings>");
+    if (has_keep) {     /* merged into the settings the document came with */
+        size_t kp = 0;
+        dkept e, ks;
+        int found = 0;
+
+        memset(&ks, 0, sizeof(ks));
+
+        while (keep_next((const unsigned char*)kdata, klen, &kp, &e)) {
+            if (strcmp(e.src, "settings") == 0) {
+                ks = e;
+                found = 1;
+            } else if (strcmp(e.src, "settings-rels") == 0) {
+                keep_srels = 1;
+            }
+        }
+
+        if (found) {
+            pd_buf mg;
+
+            memset(&mg, 0, sizeof(mg));
+
+            if (settings_merge(part.p, part.n, (const char*)ks.data, ks.len, keep_srels, &mg)) {
+                part.n = 0;
+                pb_put(&part, mg.p, mg.n);
+            } else {
+                keep_srels = 0;
+            }
+
+            pb_free(&mg);
+        } else {
+            keep_srels = 0;
+        }
+    }
+
     zip_add(&z, "word/settings.xml", part.p, part.n);
 
     if (has_fonts) {
@@ -4375,8 +4989,20 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     }
 
     pb_put(&part, x->rels.p, x->rels.n);
+    dx_keep_rels(&part, kdata, has_keep ? klen : 0, "doc");
     pb_puts(&part, "</Relationships>");
     zip_add(&z, "word/_rels/document.xml.rels", part.p, part.n);
+
+    if (has_keep) {
+        size_t kp = 0;
+        dkept e;
+
+        while (keep_next((const unsigned char*)kdata, klen, &kp, &e)) {
+            if (strcmp(e.src, "settings") != 0 && (strcmp(e.src, "settings-rels") != 0 || keep_srels)) {
+                zip_add(&z, e.name, e.data, e.len);
+            }
+        }
+    }
 
     for (i = 0; i < x->nmedia; i++) {
         const char* mime;
@@ -11168,6 +11794,8 @@ pd_status pd_docx_import_ex(pd_doc* d, const unsigned char* s, size_t n, int all
     bld_init(&b, d);
     X.b = &b;
     read_fonts(&X);
+
+    keep_read(&X.z, d);
 
     if (theme_xml) {
         pd_res_id tr;
