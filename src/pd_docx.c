@@ -695,7 +695,8 @@ static int dx_media(dxo* x, pd_res_id res, const char** rid_name) {
     snprintf(x->media[x->nmedia].mime, sizeof(x->media[0].mime), "%s", mime);
     snprintf(x->media[x->nmedia].name, sizeof(x->media[0].name), "image%d.%s", x->nmedia + 1,
              strstr(mime, "png") ? "png" : strstr(mime, "gif") ? "gif" : strstr(mime, "emf") ? "emf" :
-             strstr(mime, "wmf") ? "wmf" : "jpeg");
+             strstr(mime, "wmf") ? "wmf" : strstr(mime, "bmp") ? "bmp" : strstr(mime, "tiff") ? "tiff" :
+             strstr(mime, "webp") ? "webp" : "jpeg");
     pb_printf(&x->rels, "<Relationship Id=\"rIdm%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
               "relationships/image\" Target=\"media/%s\"/>", x->nmedia + 1, x->media[x->nmedia].name);
     *rid_name = x->media[x->nmedia].name;
@@ -4962,6 +4963,9 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
             "<Default Extension=\"png\" ContentType=\"image/png\"/>"
             "<Default Extension=\"jpeg\" ContentType=\"image/jpeg\"/>"
             "<Default Extension=\"gif\" ContentType=\"image/gif\"/>"
+            "<Default Extension=\"bmp\" ContentType=\"image/bmp\"/>"
+            "<Default Extension=\"tiff\" ContentType=\"image/tiff\"/>"
+            "<Default Extension=\"webp\" ContentType=\"image/webp\"/>"
             "<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>"
             "<Default Extension=\"wmf\" ContentType=\"image/x-wmf\"/>"
             "<Default Extension=\"odttf\" ContentType=\"application/vnd.openxmlformats-officedocument.obfuscatedFont\"/>"
@@ -8154,8 +8158,13 @@ static pd_res_id dw_resource(dxi* X, const char* rid) {
                            len >= 8 && !memcmp(u, "\x89PNG\r\n\x1a\n", 8) ? "image/png" :
                            len >= 6 && (!memcmp(u, "GIF87a", 6) || !memcmp(u, "GIF89a", 6)) ? "image/gif" :
                            len >= 3 && u[0] == 0xFF && u[1] == 0xD8 && u[2] == 0xFF ? "image/jpeg" :
+                           len >= 2 && u[0] == 'B' && u[1] == 'M' ? "image/bmp" :
+                           len >= 4 && (!memcmp(u, "II*\0", 4) || !memcmp(u, "MM\0*", 4)) ? "image/tiff" :
+                           len >= 12 && !memcmp(u, "RIFF", 4) && !memcmp(u + 8, "WEBP", 4) ? "image/webp" :
                            ext && ext_is(ext, ".png") ? "image/png" : ext && ext_is(ext, ".gif") ? "image/gif" :
-                           ext && (ext_is(ext, ".jpg") || ext_is(ext, ".jpeg")) ? "image/jpeg" : "application/octet-stream";
+                           ext && (ext_is(ext, ".jpg") || ext_is(ext, ".jpeg")) ? "image/jpeg" :
+                           ext && ext_is(ext, ".bmp") ? "image/bmp" :
+                           ext && (ext_is(ext, ".tif") || ext_is(ext, ".tiff")) ? "image/tiff" : "application/octet-stream";
 
         if (pd_doc_add_resource(X->b->d, mime, data, len, &res) != PD_OK) {
             res = 0;

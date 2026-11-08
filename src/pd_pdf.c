@@ -814,6 +814,450 @@ static void png_unfilter(unsigned char* raw, uint32_t rows, uint32_t stride, uin
     }
 }
 
+/* a Windows bitmap: 1, 4, 8, 16, 24 and 32 bits a pixel, uncompressed or with bit fields (no RLE), bottom-up
+   or top-down; 32-bit ones with a non-zero alpha channel keep it */
+static int bmp_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
+                      unsigned char** alpha) {
+    uint32_t off, hs, bpp, comp, ncol, masks[4] = { 0, 0, 0, 0 }, x, y, stride;
+    int32_t W, H;
+    int top = 0, any_alpha = 0, k;
+    const unsigned char* pal;
+
+#define U16(q) ((uint32_t)(q)[0] | ((uint32_t)(q)[1] << 8))
+#define U32(q) ((uint32_t)(q)[0] | ((uint32_t)(q)[1] << 8) | ((uint32_t)(q)[2] << 16) | ((uint32_t)(q)[3] << 24))
+
+    if (n < 54 || p[0] != 'B' || p[1] != 'M') {
+        return -1;
+    }
+
+    off = U32(p + 10);
+    hs = U32(p + 14);
+
+    if (hs < 40 || 14 + hs > n) {
+        return -1;
+    }
+
+    W = (int32_t)U32(p + 18);
+    H = (int32_t)U32(p + 22);
+    bpp = U16(p + 28);
+    comp = U32(p + 30);
+    ncol = U32(p + 46);
+
+    if (H < 0) {
+        top = 1;
+        H = -H;
+    }
+
+    if (W <= 0 || H <= 0 || W > 16384 || H > 16384 || (comp != 0 && comp != 3 && comp != 6) ||
+            !(bpp == 1 || bpp == 4 || bpp == 8 || bpp == 16 || bpp == 24 || bpp == 32)) {
+        return -1;
+    }
+
+    if (comp == 3 || comp == 6) {   /* the masks: in the header (V4/V5) or just after it */
+        const unsigned char* mq = hs >= 52 ? p + 14 + 40 : p + 14 + hs;
+
+        if ((size_t)(mq - p) + 16 > n) {
+            return -1;
+        }
+
+        for (k = 0; k < (hs >= 56 || comp == 6 ? 4 : 3); k++) {
+            masks[k] = U32(mq + 4 * k);
+        }
+    } else if (bpp == 16) {
+        masks[0] = 0x7C00;
+        masks[1] = 0x03E0;
+        masks[2] = 0x001F;
+    } else if (bpp == 32) {
+        masks[0] = 0x00FF0000;
+        masks[1] = 0x0000FF00;
+        masks[2] = 0x000000FF;
+        masks[3] = 0xFF000000;
+    }
+
+    pal = p + 14 + hs + ((comp == 3 && hs == 40) ? 12 : 0);
+    ncol = ncol ? ncol : (bpp <= 8 ? 1u << bpp : 0);
+    stride = ((uint32_t)W * bpp + 31) / 32 * 4;
+
+    if (off > n || (uint64_t)stride * (uint32_t)H > n - off || (bpp <= 8 && (size_t)(pal - p) + 4 * ncol > n)) {
+        return -1;
+    }
+
+    *rgb = (unsigned char*)malloc((size_t)W * (size_t)H * 3);
+    *alpha = (unsigned char*)malloc((size_t)W * (size_t)H);
+
+    if (!*rgb || !*alpha) {
+        free(*rgb);
+        free(*alpha);
+        *rgb = *alpha = NULL;
+        return -1;
+    }
+
+    for (y = 0; y < (uint32_t)H; y++) {
+        const unsigned char* row = p + off + (size_t)stride * (top ? y : (uint32_t)H - 1 - y);
+        unsigned char* o = *rgb + (size_t)y * (size_t)W * 3, *oa = *alpha + (size_t)y * (size_t)W;
+
+        for (x = 0; x < (uint32_t)W; x++) {
+            uint32_t r = 0, g = 0, b = 0, a = 255;
+
+            if (bpp <= 8) {
+                uint32_t idx = (row[x * bpp / 8] >> (8 - bpp - (x * bpp % 8))) & ((1u << bpp) - 1);
+
+                if (idx < ncol) {
+                    b = pal[4 * idx];
+                    g = pal[4 * idx + 1];
+                    r = pal[4 * idx + 2];
+                }
+            } else if (bpp == 24) {
+                b = row[3 * x];
+                g = row[3 * x + 1];
+                r = row[3 * x + 2];
+            } else {
+                uint32_t v = bpp == 16 ? U16(row + 2 * x) : U32(row + 4 * x), c[4];
+
+                for (k = 0; k < 4; k++) {   /* each channel scaled from its mask's width to eight bits */
+                    uint32_t mk = masks[k], sh = 0, bits = 0;
+
+                    if (!mk) {
+                        c[k] = k == 3 ? 255 : 0;
+                        continue;
+                    }
+
+                    while (!((mk >> sh) & 1)) {
+                        sh++;
+                    }
+
+                    while (sh + bits < 32 && ((mk >> (sh + bits)) & 1)) {
+                        bits++;
+                    }
+
+                    c[k] = ((v & mk) >> sh) * 255 / ((1u << bits) - 1);
+                }
+
+                r = c[0];
+                g = c[1];
+                b = c[2];
+                a = c[3];
+            }
+
+            o[3 * x] = (unsigned char)r;
+            o[3 * x + 1] = (unsigned char)g;
+            o[3 * x + 2] = (unsigned char)b;
+            oa[x] = (unsigned char)a;
+            any_alpha |= a != 0;
+        }
+    }
+
+    if (bpp == 32 && !any_alpha) {  /* an alpha channel all zero: none, as Windows has it */
+        memset(*alpha, 255, (size_t)W * (size_t)H);
+    }
+
+    for (k = 0; (size_t)k < (size_t)W * (size_t)H && (*alpha)[k] == 255; k++) {
+    }
+
+    if ((size_t)k == (size_t)W * (size_t)H) {
+        free(*alpha);
+        *alpha = NULL;
+    }
+
+    *w = W;
+    *h = H;
+    return 0;
+#undef U16
+#undef U32
+}
+
+/* TIFF's LZW: codes MSB first, 9 to 12 bits, early change; out holds cap bytes. The bytes written */
+static size_t tiff_lzw(const unsigned char* in, size_t n, unsigned char* out, size_t cap) {
+    unsigned short pre[4096];
+    unsigned char suf[4096], first[4096];
+    unsigned short len[4096];
+    unsigned char stack[4096];
+    size_t bitpos = 0, o = 0;
+    int next = 258, width = 9, old = -1, i;
+
+    for (i = 0; i < 256; i++) {
+        suf[i] = first[i] = (unsigned char)i;
+        len[i] = 1;
+    }
+
+    while ((bitpos + (size_t)width) <= n * 8 && o < cap) {
+        int code = 0, c, sp = 0;
+
+        for (i = 0; i < width; i++, bitpos++) {
+            code = (code << 1) | ((in[bitpos / 8] >> (7 - bitpos % 8)) & 1);
+        }
+
+        if (code == 257) {
+            break;
+        }
+
+        if (code == 256) {
+            next = 258;
+            width = 9;
+            old = -1;
+            continue;
+        }
+
+        if (old < 0) {
+            if (code > 255) {
+                break;
+            }
+
+            out[o++] = (unsigned char)code;
+            old = code;
+            continue;
+        }
+
+        if (code < next) {
+            c = code;
+        } else if (code == next) {
+            stack[sp++] = first[old];
+            c = old;
+        } else {
+            break;
+        }
+
+        while (c > 255 && sp < 4095) {
+            stack[sp++] = suf[c];
+            c = pre[c];
+        }
+
+        stack[sp++] = (unsigned char)c;
+
+        if (next < 4096) {
+            pre[next] = (unsigned short)old;
+            suf[next] = (unsigned char)c;
+            first[next] = first[old];
+            len[next] = (unsigned short)(len[old] + 1);
+            next++;
+        }
+
+        while (sp > 0 && o < cap) {
+            out[o++] = stack[--sp];
+        }
+
+        width = next + 1 >= 4096 ? 12 : next + 1 >= 2048 ? 12 : next + 1 >= 1024 ? 11 : next + 1 >= 512 ? 10 : 9;
+        old = code;
+    }
+
+    (void)len;
+    return o;
+}
+
+/* a baseline TIFF's first image: 8 bits a sample, gray, RGB(A) or a palette (1, 4, 8 bits), chunky, in strips,
+   uncompressed, PackBits, LZW or Deflate, with or without horizontal prediction */
+static int tiff_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
+                       unsigned char** alpha) {
+    int le, k, spp = 1, photo = 1, pred = 1, extra = 0;
+    uint32_t ifd, ne, W = 0, H = 0, bps = 1, comp = 1, rps = 0, nstrips = 0, x, y, row_bytes, ofs_at = 0, cnt_at = 0;
+    uint32_t ofs_type = 4, cnt_type = 4, cmap_at = 0;
+    unsigned char* raw = NULL;
+    size_t rawn, got = 0;
+
+    if (n < 8) {
+        return -1;
+    }
+
+    le = p[0] == 'I' && p[1] == 'I';
+
+    if (!le && !(p[0] == 'M' && p[1] == 'M')) {
+        return -1;
+    }
+
+#define T16(q) (le ? (uint32_t)(q)[0] | ((uint32_t)(q)[1] << 8) : ((uint32_t)(q)[0] << 8) | (uint32_t)(q)[1])
+#define T32(q) (le ? (uint32_t)(q)[0] | ((uint32_t)(q)[1] << 8) | ((uint32_t)(q)[2] << 16) | ((uint32_t)(q)[3] << 24) : \
+                ((uint32_t)(q)[0] << 24) | ((uint32_t)(q)[1] << 16) | ((uint32_t)(q)[2] << 8) | (uint32_t)(q)[3])
+
+    if (T16(p + 2) != 42) {
+        return -1;
+    }
+
+    ifd = T32(p + 4);
+
+    if (ifd > n - 2) {
+        return -1;
+    }
+
+    ne = T16(p + ifd);
+
+    if ((size_t)ifd + 2 + 12 * (size_t)ne > n) {
+        return -1;
+    }
+
+    for (k = 0; k < (int)ne; k++) {
+        const unsigned char* e = p + ifd + 2 + 12 * k;
+        uint32_t tag = T16(e), type = T16(e + 2), count = T32(e + 4), v = type == 3 ? T16(e + 8) : T32(e + 8);
+
+        switch (tag) {
+        case 256: W = v; break;
+        case 257: H = v; break;
+        case 258: bps = count == 1 ? v : (T32(e + 8) < n - 1 ? T16(p + T32(e + 8)) : 0); break;
+        case 259: comp = v; break;
+        case 262: photo = (int)v; break;
+        case 273: ofs_at = count == 1 ? 0 : T32(e + 8); ofs_type = type; nstrips = count;
+            if (count == 1) {
+                ofs_at = (uint32_t)(e + 8 - p);
+            }
+            break;
+        case 277: spp = (int)v; break;
+        case 278: rps = v; break;
+        case 279: cnt_at = count == 1 ? (uint32_t)(e + 8 - p) : T32(e + 8); cnt_type = type; break;
+        case 317: pred = (int)v; break;
+        case 320: cmap_at = T32(e + 8); break;
+        case 338: extra = 1; break;
+        case 284: if (v != 1) return -1; break;     /* planar: not read */
+        default: break;
+        }
+    }
+
+    if (W == 0 || H == 0 || W > 16384 || H > 16384 || nstrips == 0 || nstrips > 65536 || spp < 1 || spp > 4 ||
+            !(bps == 8 || (photo == 3 && (bps == 1 || bps == 4 || bps == 8)) || (photo <= 1 && bps == 1)) ||
+            !(comp == 1 || comp == 5 || comp == 8 || comp == 32946 || comp == 32773)) {
+        return -1;
+    }
+
+    rps = rps ? rps : H;
+    row_bytes = (W * (uint32_t)spp * bps + 7) / 8;
+    rawn = (size_t)row_bytes * H;
+
+    if ((raw = (unsigned char*)calloc(rawn ? rawn : 1, 1)) == NULL) {
+        return -1;
+    }
+
+    for (k = 0; k < (int)nstrips && got < rawn; k++) {
+        size_t so, sc, want = rawn - got;
+        const unsigned char* oe = p + ofs_at + (size_t)k * (ofs_type == 3 ? 2 : 4);
+        const unsigned char* ce = p + cnt_at + (size_t)k * (cnt_type == 3 ? 2 : 4);
+
+        if ((size_t)(oe - p) + 4 > n || (size_t)(ce - p) + 4 > n) {
+            break;
+        }
+
+        so = ofs_type == 3 ? T16(oe) : T32(oe);
+        sc = cnt_type == 3 ? T16(ce) : T32(ce);
+
+        if (so > n || sc > n - so) {
+            break;
+        }
+
+        want = want < (size_t)rps * row_bytes ? want : (size_t)rps * row_bytes;
+
+        if (comp == 1) {
+            size_t c = sc < want ? sc : want;
+
+            memcpy(raw + got, p + so, c);
+            got += want;
+        } else if (comp == 5) {
+            tiff_lzw(p + so, sc, raw + got, want);
+            got += want;
+        } else if (comp == 32773) {     /* PackBits */
+            size_t i = 0, o2 = 0;
+
+            while (i < sc && o2 < want) {
+                int c = (signed char)p[so + i++];
+
+                if (c >= 0) {
+                    size_t m = (size_t)c + 1;
+
+                    m = m > sc - i ? sc - i : m;
+                    m = m > want - o2 ? want - o2 : m;
+                    memcpy(raw + got + o2, p + so + i, m);
+                    i += m;
+                    o2 += m;
+                } else if (c != -128 && i < sc) {
+                    size_t m = (size_t)(1 - c);
+
+                    m = m > want - o2 ? want - o2 : m;
+                    memset(raw + got + o2, p[so + i++], m);
+                    o2 += m;
+                }
+            }
+
+            got += want;
+        } else {    /* Deflate */
+            unsigned char* d = NULL;
+            size_t dn = 0;
+
+            if (pd_inflate(p + so, sc, 1, want, &d, &dn) == 0) {
+                memcpy(raw + got, d, dn < want ? dn : want);
+            }
+
+            free(d);
+            got += want;
+        }
+    }
+
+    if (pred == 2 && bps == 8) {    /* horizontal differencing */
+        for (y = 0; y < H; y++) {
+            unsigned char* r = raw + (size_t)y * row_bytes;
+
+            for (x = (uint32_t)spp; x < row_bytes; x++) {
+                r[x] = (unsigned char)(r[x] + r[x - (uint32_t)spp]);
+            }
+        }
+    }
+
+    *rgb = (unsigned char*)malloc((size_t)W * H * 3);
+    *alpha = (spp == 4 || (spp == 2 && photo <= 1)) && extra ? (unsigned char*)malloc((size_t)W * H) : NULL;
+
+    if (!*rgb || ((spp == 4 || spp == 2) && extra && !*alpha)) {
+        free(raw);
+        free(*rgb);
+        free(*alpha);
+        *rgb = *alpha = NULL;
+        return -1;
+    }
+
+    for (y = 0; y < H; y++) {
+        const unsigned char* r = raw + (size_t)y * row_bytes;
+
+        for (x = 0; x < W; x++) {
+            unsigned char* o = *rgb + ((size_t)y * W + x) * 3;
+            unsigned rr, gg, bb;
+
+            if (photo == 3) {   /* a palette: 16-bit colours, all reds, then greens, then blues */
+                uint32_t idx = bps == 8 ? r[x] : (r[x * bps / 8] >> (8 - bps - (x * bps % 8))) & ((1u << bps) - 1);
+                size_t nc = (size_t)1 << bps;
+
+                if (cmap_at && cmap_at + 6 * nc <= n) {
+                    rr = T16(p + cmap_at + 2 * idx) >> 8;
+                    gg = T16(p + cmap_at + 2 * (nc + idx)) >> 8;
+                    bb = T16(p + cmap_at + 2 * (2 * nc + idx)) >> 8;
+                } else {
+                    rr = gg = bb = idx * 255 / (unsigned)(nc - 1);
+                }
+            } else if (photo <= 1) {    /* gray: 0 white (WhiteIsZero) or 0 black */
+                unsigned v = bps == 8 ? r[x * (uint32_t)spp] : ((r[x / 8] >> (7 - x % 8)) & 1) * 255;
+
+                rr = gg = bb = photo == 0 ? 255 - v : v;
+
+                if (*alpha) {
+                    (*alpha)[(size_t)y * W + x] = r[x * (uint32_t)spp + 1];
+                }
+            } else {
+                rr = r[x * (uint32_t)spp];
+                gg = r[x * (uint32_t)spp + 1];
+                bb = r[x * (uint32_t)spp + 2];
+
+                if (*alpha) {
+                    (*alpha)[(size_t)y * W + x] = r[x * (uint32_t)spp + 3];
+                }
+            }
+
+            o[0] = (unsigned char)rr;
+            o[1] = (unsigned char)gg;
+            o[2] = (unsigned char)bb;
+        }
+    }
+
+    free(raw);
+    *w = (int32_t)W;
+    *h = (int32_t)H;
+    return 0;
+#undef T16
+#undef T32
+}
+
 /* a GIF's first frame on its logical screen, transparent where the frame leaves it or marks it so */
 static int gif_decode(const unsigned char* p, size_t n, int32_t* w, int32_t* h, unsigned char** rgb,
                       unsigned char** alpha) {
@@ -2030,7 +2474,9 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
             char dict[200];
 
             if (png_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &alpha) == 0 ||
-                    gif_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &alpha) == 0) {
+                    gif_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &alpha) == 0 ||
+                    bmp_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &alpha) == 0 ||
+                    tiff_decode((const unsigned char*)data, len, &iw, &ih, &rgb, &alpha) == 0) {
                 int32_t sm = alpha ? new_obj(&w) : 0;
 
                 snprintf(dict, sizeof(dict), "/Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB "

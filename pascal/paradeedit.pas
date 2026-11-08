@@ -2074,7 +2074,7 @@ begin
     M := StrPas(Mime);
     Inc(FPrefetchRes);
     if (Pos('image/png', M) = 1) or (Pos('image/jpeg', M) = 1) or (Pos('image/gif', M) = 1) or
-      (Pos('image/bmp', M) = 1) then
+      (Pos('image/bmp', M) = 1) or (Pos('image/tiff', M) = 1) then
     begin
       if (Integer(FPrefetchRes) - 1 > Length(FPics)) or (FPics[FPrefetchRes - 2] = nil) then
       begin

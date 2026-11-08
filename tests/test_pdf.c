@@ -149,6 +149,70 @@ static int xref_ok(const buf_t* b) {
     return ok;
 }
 
+/* a picture in a format the PDF writer decodes itself (BMP, TIFF uncompressed, PackBits, LZW, Deflate, with a
+   palette): its pixels, exactly, in the uncompressed PDF's image */
+static void check_decoded(const char* path, const char* mime, const unsigned char* px, size_t npx, int w, int h) {
+    pd_doc* d;
+    pd_layout* L = NULL;
+    pd_pdf_options opt;
+    buf_t u = { NULL, 0 };
+    char dict[64];
+
+    pd_doc_new(&d);
+    pd_doc_set_font_resolver(d, resolver, NULL);
+    add_image(d, pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), path, mime, PD_PT(72), PD_PT(48));
+    pd_layout_new(d, &L);
+    pd_layout_update(L, NULL);
+    pd_pdf_options_init(&opt);
+    opt.compress = 0;
+    CHECK(pd_layout_write_pdf(L, &opt, sink, &u) == PD_OK);
+    snprintf(dict, sizeof(dict), "/Width %d /Height %d /ColorSpace /DeviceRGB", w, h);
+    CHECK(has(&u, dict));
+
+    {
+        size_t i;
+        int found = 0;
+
+        for (i = 0; i + npx <= u.n && !found; i++) {
+            found = memcmp(u.p + i, px, npx) == 0;
+        }
+
+        if (!found) {
+            fprintf(stderr, "  %s: its pixels are not in the PDF\n", path);
+        }
+
+        CHECK(found);
+    }
+
+    free(u.p);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+static void test_decoded_images(void) {
+    static const unsigned char px[18] = { 0x12, 0x34, 0x56, 0xAB, 0xCD, 0xEF, 0xF0, 0x0F, 0x80, 0x01, 0x80, 0xFE,
+                                          0x99, 0x11, 0x22, 0x33, 0xEE, 0x77
+                                        };
+    unsigned char* big = (unsigned char*)malloc(70 * 60 * 3);
+    int x, y;
+
+    for (y = 0; y < 60; y++) {  /* what tests/data/big_lzw.tif holds: enough to fill LZW's table past 9 bits */
+        for (x = 0; x < 70; x++) {
+            big[(y * 70 + x) * 3] = (unsigned char)((x * 7) & 255);
+            big[(y * 70 + x) * 3 + 1] = (unsigned char)((y * 5) & 255);
+            big[(y * 70 + x) * 3 + 2] = (unsigned char)((x * y + x / 3) & 255);
+        }
+    }
+
+    check_decoded("tests/data/px24.bmp", "image/bmp", px, 18, 3, 2);
+    check_decoded("tests/data/px_lzw.tif", "image/tiff", px, 18, 3, 2);
+    check_decoded("tests/data/px_pack.tif", "image/tiff", px, 18, 3, 2);
+    check_decoded("tests/data/px_zip.tif", "image/tiff", px, 18, 3, 2);
+    check_decoded("tests/data/px_pal.tif", "image/tiff", px, 18, 3, 2);
+    check_decoded("tests/data/big_lzw.tif", "image/tiff", big, 70 * 60 * 3, 70, 60);
+    free(big);
+}
+
 int main(void) {
     pd_doc* d;
     pd_layout* L;
@@ -243,6 +307,7 @@ int main(void) {
     free(u.p);
     pd_layout_free(L);
     pd_doc_free(d);
+    test_decoded_images();
     pd_font_free(latin);
     pd_font_free(cjk);
     printf("%d checks, %d failures\n", checks, failures);
