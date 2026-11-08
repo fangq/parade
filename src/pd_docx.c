@@ -3865,8 +3865,81 @@ static int dx_kept(const pd_doc* d, const char* type, const void** data, size_t*
     return found;
 }
 
-/* the document's font table (PD_FONT_TABLE_MIME) as word/fontTable.xml; 0 when it has none */
-static int dx_font_table(const pd_doc* d, pd_buf* o) {
+/* a font the document carries, written embedded: its resource, part number and obfuscation key */
+typedef struct {
+    pd_res_id res;
+    unsigned char key[16];
+} dembed;
+
+/* a carried font's resource type: its family, weight and italic (0 when it is no such font) */
+static int embed_of(const char* mime, char* family, size_t cap, int* bold, int* italic) {
+    const char* f = strstr(mime, "family=\""), *e, *w, *it;
+
+    if (strncmp(mime, "font/ttf;", 9) != 0 || !f) {
+        return 0;
+    }
+
+    f += 8;
+
+    if ((e = strchr(f, '"')) == NULL || (size_t)(e - f) >= cap) {
+        return 0;
+    }
+
+    memcpy(family, f, (size_t)(e - f));
+    family[e - f] = '\0';
+    w = strstr(e, "weight=");
+    it = strstr(e, "italic=");
+    *bold = w && atoi(w + 7) >= 600;
+    *italic = it && atoi(it + 7) != 0;
+    return 1;
+}
+
+/* a font's embed elements (and their relationships, the fonts to write in emb) for the fonts the document
+   carries of a family, in Word's order: regular, bold, italic, bold italic */
+static void dx_font_embeds(const pd_doc* d, const char* fam, size_t flen, pd_buf* o, pd_buf* rels, dembed* emb,
+                           int* nemb) {
+    static const char* el[4] = { "embedRegular", "embedBold", "embedItalic", "embedBoldItalic" };
+    static const int pos[16] = { 35, 33, 31, 29, 27, 25, 22, 20, 17, 15, 12, 10, 7, 5, 3, 1 };
+    int v;
+
+    for (v = 0; v < 4; v++) {
+        const char* mime;
+        const void* data;
+        size_t n;
+        pd_res_id r;
+
+        for (r = 1; pd_doc_resource(d, r, &mime, &data, &n) == PD_OK; r++) {
+            char family[64], guid[39] = "{00000000-0000-0000-0000-000000000000}";
+            int bold, italic, i;
+            uint32_t h;
+
+            if (!embed_of(mime, family, sizeof(family), &bold, &italic) || strlen(family) != flen ||
+                    memcmp(family, fam, flen) != 0 || bold + 2 * italic != v || n <= 32 || *nemb >= 64) {
+                continue;
+            }
+
+            emb[*nemb].res = r;
+            h = pd_crc32(data, n);     /* a key from the font itself: the same file, the same bytes */
+
+            for (i = 0; i < 16; i++) {
+                h = h * 1103515245u + 12345u + (uint32_t)i;
+                emb[*nemb].key[i] = (unsigned char)(h >> 24);
+                guid[pos[i]] = "0123456789ABCDEF"[emb[*nemb].key[i] >> 4];
+                guid[pos[i] + 1] = "0123456789ABCDEF"[emb[*nemb].key[i] & 15];
+            }
+
+            ++*nemb;
+            pb_printf(o, "<w:%s r:id=\"rIdF%d\" w:fontKey=\"%s\"/>", el[v], *nemb, guid);
+            pb_printf(rels, "<Relationship Id=\"rIdF%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                      "relationships/font\" Target=\"fonts/font%d.odttf\"/>", *nemb, *nemb);
+            break;
+        }
+    }
+}
+
+/* the document's font table (PD_FONT_TABLE_MIME) as word/fontTable.xml, with the fonts it carries embedded
+   (their relationships into rels, which to write into emb); 0 when it has none */
+static int dx_font_table(const pd_doc* d, pd_buf* o, pd_buf* rels, dembed* emb, int* nemb) {
     static const char* generic[] = { "auto", "roman", "swiss", "modern", "script", "decorative" };
     static const char* pitch[] = { "default", "fixed", "variable" };
     const char* table = NULL, *mime, *p, *end;
@@ -3930,7 +4003,9 @@ static int dx_font_table(const pd_doc* d, pd_buf* o) {
         k = fl[2] ? f[2][0] - '0' : 0;
         pb_printf(o, "<w:family w:val=\"%s\"/>", generic[k >= 0 && k <= 5 ? k : 0]);
         k = fl[3] ? f[3][0] - '0' : 0;
-        pb_printf(o, "<w:pitch w:val=\"%s\"/></w:font>", pitch[k >= 0 && k <= 2 ? k : 0]);
+        pb_printf(o, "<w:pitch w:val=\"%s\"/>", pitch[k >= 0 && k <= 2 ? k : 0]);
+        dx_font_embeds(d, f[0], fl[0], o, rels, emb, nemb);
+        pb_puts(o, "</w:font>");
     }
 
     pb_puts(o, "</w:fonts>");
@@ -4588,7 +4663,9 @@ pd_status pd_docx_export(const pd_doc* d, pd_buf* out) {
 /* a .docx, or (tmpl) a Word template, .dotx: the same package, its main part another type */
 pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     dxo* x = (dxo*)calloc(1, sizeof(dxo));
-    pd_buf doc, part, cxml, cext, fonts;
+    pd_buf doc, part, cxml, cext, fonts, frels;
+    dembed emb[64];                 /* the fonts the document carries, written embedded */
+    int nemb = 0;
     int has_fonts, has_theme;
     pd_buf themeb = { 0 };
     const void* theme = NULL;
@@ -4609,6 +4686,7 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     memset(&cxml, 0, sizeof(cxml));
     memset(&cext, 0, sizeof(cext));
     memset(&fonts, 0, sizeof(fonts));
+    memset(&frels, 0, sizeof(frels));
     memset(&z, 0, sizeof(z));
     x->d = d;
     pd_numbers_init(&x->nb, d);
@@ -4700,7 +4778,7 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
 
     pb_puts(&doc, "</w:body></w:document>");
     ncomments = dx_comments(d, &cxml, &cext);
-    has_fonts = dx_font_table(d, &fonts);
+    has_fonts = dx_font_table(d, &fonts, &frels, emb, &nemb);
     has_theme = dx_kept(d, THEME_MIME, &theme, &theme_len);
 
     {   /* the theme as the document has it now: the part it came with, its colours and fonts changed where they
@@ -4733,6 +4811,7 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
             "<Default Extension=\"gif\" ContentType=\"image/gif\"/>"
             "<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>"
             "<Default Extension=\"wmf\" ContentType=\"image/x-wmf\"/>"
+            "<Default Extension=\"odttf\" ContentType=\"application/vnd.openxmlformats-officedocument.obfuscatedFont\"/>"
             "<Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"/>"
             "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
             "wordprocessingml.");
@@ -4905,6 +4984,38 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
 
     if (has_fonts) {
         zip_add(&z, "word/fontTable.xml", fonts.p, fonts.n);
+
+        if (nemb > 0) {     /* the fonts it carries: obfuscated as Word does, and found through its relationships */
+            part.n = 0;
+            pb_puts(&part, XML_DECL);
+            pb_puts(&part, "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+            pb_put(&part, frels.p, frels.n);
+            pb_puts(&part, "</Relationships>");
+            zip_add(&z, "word/_rels/fontTable.xml.rels", part.p, part.n);
+
+            for (i = 0; i < nemb; i++) {
+                const char* mime;
+                const void* data;
+                size_t n;
+                char name[48];
+                int k;
+
+                if (pd_doc_resource(d, emb[i].res, &mime, &data, &n) != PD_OK || n <= 32) {
+                    continue;
+                }
+
+                part.n = 0;
+                pb_put(&part, data, n);
+
+                for (k = 0; k < 16 && !part.err; k++) {
+                    part.p[k] ^= (char)emb[i].key[k];
+                    part.p[k + 16] ^= (char)emb[i].key[k];
+                }
+
+                snprintf(name, sizeof(name), "word/fonts/font%d.odttf", (int)i + 1);
+                zip_add(&z, name, part.p, part.n);
+            }
+        }
     }
 
     if (has_theme) {
@@ -5061,6 +5172,7 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
     i = doc.err || part.err || x->rels.err || x->notes.err || x->endnotes.err || cxml.err || cext.err;
     pb_free(&cxml);
     pb_free(&fonts);
+    pb_free(&frels);
     pb_free(&themeb);
     pb_free(&cext);
     pb_free(&part);

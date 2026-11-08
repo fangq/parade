@@ -4836,6 +4836,43 @@ static void test_docx_embedded_font(void) {
     }
 
     CHECK(found);
+
+    if (d) {    /* and carried on through Parade's own .docx: embedded again, obfuscated, the same font read back */
+        buf_t b = { 0 };
+        pd_doc* t = NULL;
+        unsigned char* tab;
+        size_t tn;
+
+        found = 0;
+        CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        tab = pd_zip_get((const unsigned char*)b.p, b.n, "word/fontTable.xml", &tn);
+        CHECK(tab && strstr((char*)tab, "<w:embedBold r:id="));
+        free(tab);
+        tab = pd_zip_get((const unsigned char*)b.p, b.n, "word/fonts/font1.odttf", &tn);
+        CHECK(tab && tn == (size_t)n && memcmp(tab, font, 32) != 0 && !memcmp(tab + 32, font + 32, tn - 32));
+        free(tab);
+        CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &t) == PD_OK);
+
+        for (r = 1; t; r++) {
+            const char* mime;
+            const void* data;
+            size_t len;
+
+            if (pd_doc_resource(t, r, &mime, &data, &len) != PD_OK) {
+                break;
+            }
+
+            if (!strncmp(mime, "font/ttf", 8)) {
+                found = 1;
+                CHECK(strstr(mime, "weight=700") && len == (size_t)n && !memcmp(data, font, len));
+            }
+        }
+
+        CHECK(found);
+        pd_doc_free(t);
+        free(b.p);
+    }
+
     pd_doc_free(d);
     free(font);
 }
