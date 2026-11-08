@@ -629,6 +629,7 @@ type
     style: pd_style_id;      { its table style (PD_STYLE_TABLE), 0 = none }
     look: Int32;             { PD_TLOOK_*: the style's conditional parts it shows }
     border_given: Int32;     { with a style: the PD_TBORDER_* rules it sets itself }
+    cell_spacing: pd_sp;     { room around every cell inside the table's frame (tblCellSpacing) }
   end;
   Ppd_table_props = ^pd_table_props;
 

@@ -687,6 +687,8 @@ typedef struct {
     int32_t look;               /**< PD_TLOOK_*: which of the style's conditional parts apply */
     int32_t border_given;       /**< with a style: the PD_TBORDER_* rules the table sets itself (border, border_sides,
                                      border_color); the others are the style's */
+    pd_sp cell_spacing;         /**< room around every cell, inside the table's frame (Word's tblCellSpacing): each
+                                     cell then has its own box of rules, 0 = cells share their edges */
 } pd_table_props;
 
 /* which parts of a table style a table shows (Word's tblLook) */

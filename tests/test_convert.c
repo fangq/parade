@@ -6038,6 +6038,71 @@ static void test_cell_diagonals(void) {
     pd_doc_free(d);
 }
 
+/* Cells apart (tblCellSpacing): each cell its own box of rules, 5pt in from the table's frame and 10pt from the
+   next cell, so a row shows six upright rules where shared edges would show three; also after .docx and native
+   round trips, and HTML spaces its cells */
+static void test_cell_spacing(void) {
+    pd_doc* d = docx_doc("word/document.xml", WDOC(
+                             "<w:tbl><w:tblPr><w:tblCellSpacing w:w=\"100\" w:type=\"dxa\"/><w:tblBorders>"
+                             "<w:top w:val=\"single\" w:sz=\"4\"/><w:left w:val=\"single\" w:sz=\"4\"/>"
+                             "<w:bottom w:val=\"single\" w:sz=\"4\"/><w:right w:val=\"single\" w:sz=\"4\"/>"
+                             "<w:insideH w:val=\"single\" w:sz=\"4\"/><w:insideV w:val=\"single\" w:sz=\"4\"/>"
+                             "</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w=\"3000\"/><w:gridCol w:w=\"3000\"/>"
+                             "</w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B"
+                             "</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"), NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; d && pass < 3; pass++) {
+        pd_layout* L = laid_out(d);
+        pd_doc* back = NULL;
+        buf_t b;
+
+        if (L) {
+            int32_t n, k, j, nx = 0;
+            pd_sp xs[16];
+            pd_draw* it = page_draws(L, 0, &n);
+
+            for (k = 0; it && k < n; k++) {
+                if (it[k].kind == PD_DRAW_RULE && it[k].h > PD_PT(5) && it[k].w < PD_PT(2)) {
+                    for (j = 0; j < nx && xs[j] != it[k].x; j++) {
+                    }
+
+                    if (j == nx && nx < 16) {
+                        xs[nx++] = it[k].x;
+                    }
+                }
+            }
+
+            CHECK(nx == 6);
+            free(it);
+            pd_layout_free(L);
+        }
+
+        if (pass == 2) {
+            break;
+        }
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, pass ? PD_CONV_JDATA : PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        CHECK(pd_doc_import(b.p, b.n, pass ? PD_CONV_JDATA : PD_CONV_DOCX, &back) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = back;
+    }
+
+    if (d) {
+        buf_t b;
+
+        memset(&b, 0, sizeof(b));
+        CHECK(pd_doc_export(d, PD_CONV_HTML, to_buf, &b) == PD_OK && b.p && strstr(b.p, "border-spacing:10.00pt"));
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -6068,6 +6133,7 @@ int main(void) {
     test_cell_width();
     test_cell_text_dir();
     test_cell_diagonals();
+    test_cell_spacing();
     printf("docx floats\n");
     test_docx_floats();
     printf("docx writer\n");

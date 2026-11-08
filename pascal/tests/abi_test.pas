@@ -327,6 +327,7 @@ begin
   WriteLn('pd_table_props.style ', PtrUInt(@v_pd_table_props.style) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.look ', PtrUInt(@v_pd_table_props.look) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_table_props.border_given ', PtrUInt(@v_pd_table_props.border_given) - PtrUInt(@v_pd_table_props));
+  WriteLn('pd_table_props.cell_spacing ', PtrUInt(@v_pd_table_props.cell_spacing) - PtrUInt(@v_pd_table_props));
   WriteLn('pd_row_props ', SizeOf(pd_row_props));
   WriteLn('pd_row_props.grid_before ', PtrUInt(@v_pd_row_props.grid_before) - PtrUInt(@v_pd_row_props));
   WriteLn('pd_row_props.grid_after ', PtrUInt(@v_pd_row_props.grid_after) - PtrUInt(@v_pd_row_props));

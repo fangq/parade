@@ -3917,7 +3917,8 @@ int pd_doc_table_props_ok(const pd_table_props* tp) {
             tp->header_rows > 1000 || tp->cell_padding < 0 || tp->border < 0 || tp->ncols < 0 ||
             tp->ncols > PD_TABLE_MAX_COLS || tp->indent < -PD_PT(10000) || tp->indent > PD_PT(10000) ||
             tp->width_pct < 0 || tp->width_pct > 1000 || tp->border_sides < 0 || tp->border_sides > 63 ||
-            tp->direction < PD_DIR_AUTO || tp->direction > PD_DIR_RTL) {
+            tp->direction < PD_DIR_AUTO || tp->direction > PD_DIR_RTL || tp->cell_spacing < 0 ||
+            tp->cell_spacing > PD_PT(1000)) {
         return 0;
     }
 

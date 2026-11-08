@@ -665,6 +665,10 @@ static void save_block_ex(pj_writer* w, const saver* sv, const blk* b, int kids)
                 put_int(w, "BorderGiven", p->border_given);
             }
 
+            if (p->cell_spacing) {
+                put_int(w, "CellSpacing", p->cell_spacing);
+            }
+
             if (p->ncols) {
                 pj_key(w, "ColumnWidths");
                 pj_arr_begin(w);
@@ -1856,6 +1860,7 @@ static void load_table(loader* L, const pj_node* o, pd_table_props* p) {
     REQUIRE(!p->style || L->d->styles[p->style - 1].kind == PD_STYLE_TABLE);
     p->look = (int32_t)int_or(pj_get(x, "Look"), 0, 0, 63, L);
     p->border_given = (int32_t)int_or(pj_get(x, "BorderGiven"), 0, 0, 63, L);
+    p->cell_spacing = (pd_sp)int_or(pj_get(x, "CellSpacing"), 0, 0, PD_PT(1000), L);
 
     if ((c = pj_get(x, "ColumnWidths")) != NULL) {
         int32_t i;

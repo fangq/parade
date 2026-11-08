@@ -1552,7 +1552,7 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
     pd_sp* mn, *mx, *w, *pref, avail, fixed = 0;
     int64_t smin = 0, smax = 0;
     int32_t r, k, c, j, pass, nauto = 0;
-    pd_sp pad = tp->cell_padding;
+    pd_sp pad = tp->cell_padding + tp->cell_spacing;   /* (cells apart: the room around one is like padding) */
 
     memset(T, 0, sizeof(*T));
     T->block = t->id;
@@ -1612,7 +1612,7 @@ static void table_grid(pd_layout* L, const blk* t, pd_sp colw, ptable* T) {
                 }
 
                 if (cell->st.cell.text_dir) {   /* turned: as wide as its lines' stack */
-                    a = b = cell_across(L, cell, tp->cell_padding_v >= 0 ? tp->cell_padding_v : pad);
+                    a = b = cell_across(L, cell, tp->cell_padding_v >= 0 ? tp->cell_padding_v + tp->cell_spacing : pad);
                 } else {
                     cell_minmax(L, cell->id, &a, &b);
                 }
@@ -1706,6 +1706,9 @@ static pd_status build_table(filler* F, const blk* t, pd_sp* prev_after, int* pr
     int32_t r, k, c, pass, ti;
     pd_sp pad = tp->cell_padding, padv = tp->cell_padding_v >= 0 ? tp->cell_padding_v : pad;
     pd_status st = PD_OK;
+
+    pad += tp->cell_spacing;
+    padv += tp->cell_spacing;
 
     table_grid(F->L, t, F->colw, &T);
 
@@ -2354,6 +2357,9 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
     pd_sp* rowh;
     int32_t r, k, c;
 
+    pad += t->st.tp.cell_spacing;
+    padv += t->st.tp.cell_spacing;
+
     table_grid(L, t, width, &T);
     T.block = t->id;
 
@@ -2490,6 +2496,60 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
     return h;
 }
 
+/* The rules of a cell of a table whose cells are apart (cell_spacing): its own box, inset by the spacing (top and
+   bot: how far, 0 for a slice's cut edge), its edges its own or the table's inner rules; and the part of the
+   table's frame beside it, its outer rules */
+static void spaced_rules(filler* F, const ptable* T, const blk* row, const blk* cell, int32_t c, int32_t span,
+                         int32_t k, pd_sp cx, pd_sp y, pd_sp cw, pd_sp h, pd_sp top, pd_sp bot, int first, int last) {
+    pd_sp sp = T->tp.cell_spacing, bw;
+    pd_sp bx = cx + sp, bwid = cw - 2 * sp, by = y + top, bh = h - top - bot;
+    uint32_t bc;
+
+    if (cell->st.cell.merge_up) {
+        return;
+    }
+
+    bw = edge_rule(T, cell, PD_BORDER_LEFT, NULL, 0, PD_TBORDER_LEFT, PD_TBORDER_INSIDE_V, 0, &bc);
+    add_rule(F->L, F->page, bx, by, bw, bh, bc, 0, cell->id);
+    bw = edge_rule(T, cell, PD_BORDER_RIGHT, NULL, 0, PD_TBORDER_RIGHT, PD_TBORDER_INSIDE_V, 0, &bc);
+    add_rule(F->L, F->page, bx + bwid - bw, by, bw, bh, bc, 0, cell->id);
+
+    if (top) {
+        bw = edge_rule(T, cell, PD_BORDER_TOP, NULL, 0, PD_TBORDER_TOP, PD_TBORDER_INSIDE_H, 0, &bc);
+        add_rule(F->L, F->page, bx, by, bwid, bw, bc, 0, cell->id);
+    }
+
+    if (bot) {
+        bw = edge_rule(T, cell, PD_BORDER_BOTTOM, NULL, 0, PD_TBORDER_BOTTOM, PD_TBORDER_INSIDE_H, 0, &bc);
+        add_rule(F->L, F->page, bx, by + bh - bw, bwid, bw, bc, 0, cell->id);
+    }
+
+    /* the frame: the table's outer rules, not a cell's */
+    bw = edge_rule(T, NULL, 0, NULL, 0, PD_TBORDER_LEFT, 0, 1, &bc);
+
+    if (c == row_c0(row) && bw > 0) {
+        add_rule(F->L, F->page, cx, y, bw, h, bc, 0, cell->id);
+    }
+
+    bw = edge_rule(T, NULL, 0, NULL, 0, PD_TBORDER_RIGHT, 0, 1, &bc);
+
+    if ((c + span >= T->ncols || k + 1 == row->nkids) && bw > 0) {
+        add_rule(F->L, F->page, cx + cw - bw, y, bw, h, bc, 0, cell->id);
+    }
+
+    bw = edge_rule(T, NULL, 0, NULL, 0, PD_TBORDER_TOP, 0, 1, &bc);
+
+    if (first && top && bw > 0) {
+        add_rule(F->L, F->page, cx, y, cw, bw, bc, 0, cell->id);
+    }
+
+    bw = edge_rule(T, NULL, 0, NULL, 0, PD_TBORDER_BOTTOM, 0, 1, &bc);
+
+    if (last && bot && bw > 0) {
+        add_rule(F->L, F->page, cx, y + h - bw, cw, bw, bc, 0, cell->id);
+    }
+}
+
 /* one table row: cell backgrounds, contents and grid rules */
 static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
     const pd_doc* d = F->L->doc;
@@ -2499,12 +2559,16 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
     const blk* next = t && v->line + 1 < t->nkids ? d->tab[t->kids[v->line + 1]] : NULL;
     const blk* prev = t && v->line > 0 ? d->tab[t->kids[v->line - 1]] : NULL;
     pd_sp pad = T->tp.cell_padding, padv = T->tp.cell_padding_v >= 0 ? T->tp.cell_padding_v : pad, tx = x + T->x;
+    pd_sp sp = T->tp.cell_spacing, top = v->part <= 1 ? sp : 0, bot = v->part == 0 || v->part == 3 ? sp : 0;
     int32_t k, c = 0;
     pd_status st;
 
     if (!row) {
         return;
     }
+
+    pad += sp;
+    padv += sp;
 
     for (k = 0, c = row_c0(row); k < row->nkids && c < T->ncols; k++) {
         const blk* cell = d->tab[row->kids[k]];
@@ -2523,20 +2587,23 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
         if (v->part && !cell->st.cell.merge_up) {     /* a slice: the lines that start in it, from the top */
             if (cell_fill(F->L->doc, cell)) {
-                add_rule(F->L, F->page, cx, y, cw, v->h, cell_fill(F->L->doc, cell), 0, cell->id);
+                add_rule(F->L, F->page, cx + sp, y + top, cw - 2 * sp, v->h - top - bot, cell_fill(F->L->doc, cell), 0,
+                         cell->id);
             }
 
             place_stack_clip(F->L, cell->id, inner, F->page, cx + pad, y - v->from + padv, v->from - padv,
                              v->from - padv + v->h, 0, 0);
         } else if (!cell->st.cell.merge_up && cell->st.cell.text_dir) {
             if (cell_fill(F->L->doc, cell)) {
-                add_rule(F->L, F->page, cx, y, cw, ch, cell_fill(F->L->doc, cell), 0, cell->id);
+                add_rule(F->L, F->page, cx + sp, y + sp, cw - 2 * sp, ch - 2 * sp, cell_fill(F->L->doc, cell), 0,
+                         cell->id);
             }
 
             place_turned(F->L, cell, F->page, cx, y, cw, ch, pad, padv, 0);
         } else if (!cell->st.cell.merge_up) {
             if (cell_fill(F->L->doc, cell)) {
-                add_rule(F->L, F->page, cx, y, cw, ch, cell_fill(F->L->doc, cell), 0, cell->id);
+                add_rule(F->L, F->page, cx + sp, y + sp, cw - 2 * sp, ch - 2 * sp, cell_fill(F->L->doc, cell), 0,
+                         cell->id);
             }
 
             h = stack_height(F->L, cell->id, inner, &st);
@@ -2565,6 +2632,12 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
             for (e = 0; e < 2; e++) {
                 add_diag(F->L, F->page, cx, y, cw, ch, e + 1, dp.diag_width[e], dp.diag_color[e], 0, cell->id);
             }
+        }
+
+        if (sp > 0) {   /* cells apart: each its own box of rules, the table's frame round them all */
+            spaced_rules(F, T, row, cell, c, span, k, cx, y, cw, v->h, top, bot, v->line == 0, !next);
+            c += span;
+            continue;
         }
 
         /* left edge: every cell's; right edge: the last one's (the next cell's left is the rest) */

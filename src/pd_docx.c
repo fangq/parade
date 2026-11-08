@@ -2625,7 +2625,13 @@ static void dx_table(dxo* x, pd_block_id t, pd_sp width) {
 
     if (tp.align == PD_ALIGN_CENTER || tp.align == PD_ALIGN_RIGHT) {
         pb_puts(o, tp.align == PD_ALIGN_CENTER ? "<w:jc w:val=\"center\"/>" : "<w:jc w:val=\"right\"/>");
-    } else if (tp.indent) {
+    }
+
+    if (tp.cell_spacing > 0) {
+        pb_printf(o, "<w:tblCellSpacing w:w=\"%d\" w:type=\"dxa\"/>", TW(tp.cell_spacing));
+    }
+
+    if (tp.align != PD_ALIGN_CENTER && tp.align != PD_ALIGN_RIGHT && tp.indent) {
         pb_printf(o, "<w:tblInd w:w=\"%d\" w:type=\"dxa\"/>", TW(tp.indent));
     }
 
@@ -6051,6 +6057,7 @@ typedef struct {               /* a table being read */
     pd_sp ind, width_pct;
     int has_ind;
     int rtl;                    /* w:bidiVisual: its columns from the right */
+    pd_sp spacing;              /* w:tblCellSpacing */
     pd_style_id sid;            /* its style as one of the document's: the cells and their text take it there */
     pd_sp row_h;                /* w:trHeight of the row under way */
     int cspan;                  /* the grid columns the cell under way takes */
@@ -6551,6 +6558,7 @@ static void dw_table_props(dw* w) {
         tp.cell_padding_v = T->mar[0] >= 0 ? T->mar[0] : T->st.mar[0] >= 0 ? T->st.mar[0] : 0;
         tp.indent = T->has_ind ? T->ind : T->st.has_ind ? T->st.ind : 0;
         tp.direction = T->rtl ? PD_DIR_RTL : PD_DIR_AUTO;
+        tp.cell_spacing = T->spacing;
         tp.width_pct = (int32_t)T->width_pct;
 
         if (tp.width_pct > 0) {
@@ -10670,6 +10678,12 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->tabs[w->ntab - 1].look = look;
             } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "bidiVisual") == 0) {
                 w->tabs[w->ntab - 1].rtl = attr_on(&m);
+            } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblCellSpacing") == 0) {
+                if (!mu_attr(&m, "w:type", v, sizeof(v)) || strcmp(v, "dxa") == 0) {
+                    pd_sp sp = twips(attr_int(&m, "w:w", 0));
+
+                    w->tabs[w->ntab - 1].spacing = sp > 0 && sp < PD_PT(1000) ? sp : 0;
+                }
             } else if (w->in_tblpr && w->ntab >= 1 && w->ntab <= 8 && strcmp(t, "tblInd") == 0) {
                 w->tabs[w->ntab - 1].ind = twips(attr_int(&m, "w:w", 0));
                 w->tabs[w->ntab - 1].has_ind = 1;

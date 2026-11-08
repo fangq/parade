@@ -43,7 +43,7 @@ STRUCTS = {
                         "footnote_skip add_spacing line_numbers line_number_start line_number_distance "
                         "line_number_restart mirror_margins gutter page_valign line_pitch direction",
     "pd_table_props": "width align header_rows cell_padding border border_color ncols col_width indent width_pct "
-                      "border_sides cell_padding_v direction border_theme style look border_given",
+                      "border_sides cell_padding_v direction border_theme style look border_given cell_spacing",
     "pd_row_props": "grid_before grid_after width_before width_after height height_exact split",
     "pd_cell_props": "col_span valign background merge_up min_height border_set border_on border_width border_color "
                      "edge_width background_theme border_theme width width_pct text_dir diag_width diag_color",
