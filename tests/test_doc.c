@@ -1669,6 +1669,55 @@ static void test_deflate(void) {
     CHECK(pd_inflate(z, zn, 1, 0, &r, &rn) == 0 && rn == n && !memcmp(r, b, n));
     CHECK(zn < n * 50 / 100);
     free(r);
+    r = NULL;
+    CHECK(pd_inflate(z, zn, 1, n, &r, &rn) == 0 && rn == n && !memcmp(r, b, n));  /* its size known: in parallel */
+    free(r);
+    CHECK(pd_inflate(z, zn, 1, n - 1, &r, &rn) != 0);   /* a byte more than room is made for */
+    z[zn - 1] ^= 1;
+    CHECK(pd_inflate(z, zn, 1, n, &r, &rn) != 0);       /* the Adler-32 wrong */
+    free(z);
+
+    /* random stretches holding 00 00 FF FF -- written as stored blocks, so the full flush's mark appears where no
+       block starts -- between text: the chance marks are tried and refused, and what comes out is right, on one
+       thread as on four */
+    for (i = 0; i < n; i++) {
+        s = s * 1103515245u + 12345u;
+        b[i] = (i >> 20) % 2 ? (unsigned char)"abcdefgh ,."[(s >> 16) % 11] : (unsigned char)(s >> 16);
+    }
+
+    for (i = 100; i + 4 < n; i += 9973) {
+        if (!((i >> 20) % 2)) {
+            memcpy(b + i, "\0\0\xFF\xFF", 4);
+        }
+    }
+
+    CHECK(pd_deflate(b, n, 1, &z, &zn) == 0);
+    {
+        size_t k, marks = 0;
+
+        for (k = 0; k + 4 <= zn; k++) {
+            marks += !memcmp(z + k, "\0\0\xFF\xFF", 4);
+        }
+
+        CHECK(marks > 50);  /* more than the three blocks' own */
+    }
+    r = NULL;
+    CHECK(pd_inflate(z, zn, 1, n, &r, &rn) == 0 && rn == n && !memcmp(r, b, n));
+    free(r);
+#ifndef _WIN32
+    setenv("PD_ZLIB_THREADS", "1", 1);
+    r = NULL;
+    CHECK(pd_inflate(z, zn, 1, n, &r, &rn) == 0 && rn == n && !memcmp(r, b, n));
+    free(r);
+    unsetenv("PD_ZLIB_THREADS");
+#endif
+    free(z);
+
+    /* a stream of one block run, no full flush in it (an input under one zlibmt block): inflated serially */
+    CHECK(pd_deflate(b, (size_t)3 << 20, 1, &z, &zn) == 0);
+    r = NULL;
+    CHECK(pd_inflate(z, zn, 1, (size_t)3 << 20, &r, &rn) == 0 && rn == (size_t)3 << 20 && !memcmp(r, b, rn));
+    free(r);
     free(z);
     free(b);
 }

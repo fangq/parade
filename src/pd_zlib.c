@@ -1039,382 +1039,983 @@ int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t
     return 0;
 }
 
-/* the Adler-32 of a whole buffer, for inflate's check */
-static uint32_t adler32(const unsigned char* p, size_t n) {
-    return adler32_part(1, p, n);
-}
-
 /* ------------------------------------------------------------------ */
 /* inflate                                                            */
 /* ------------------------------------------------------------------ */
 
+/* mimamo's inflate, ported: table driven -- a ten-bit first-level table for literals and lengths, eight bits for
+   distances, second-level tables for longer codes -- read from a 64-bit bit buffer refilled eight bytes at a time.
+
+   And in parallel where it can be proven: a full flush leaves no reliable mark (00 00 FF FF also occurs by chance
+   inside compressed data), so the stream is split among threads, each looks for the first mark in its share and
+   inflates from just after it with no history, stopping at the first block boundary past the next share's start.
+   A start is accepted only when the inflate before it, itself accepted, ends exactly there at a block boundary:
+   the serial parse then provably reaches the same point, and as the speculative inflate refused any
+   back-reference before its own start, its output is what a serial one makes. A chance match, or a stream with
+   no full flushes, fails that test, and the gap is inflated serially, with the history in place. The Adler-32 is
+   checked over the whole either way. So any stream inflates correctly, and a zlibmt one on every core. */
+
+enum { OP_LIT = 0, OP_LEN = 1, OP_EOB = 2, OP_SUB = 3, OP_BAD = 4 };
+
+/* table entries: bits 0-3 the code bits to drop, 4-7 the kind, 8-15 the extra bits (or a second-level table's
+   index bits), 16-31 the literal, base length or distance, or the second-level table's offset */
+#define ENTRY(op, bits, extra, value) (((uint32_t)(value) << 16) | ((uint32_t)(extra) << 8) | ((uint32_t)(op) << 4) | \
+                                       (uint32_t)(bits))
+
+#define LIT_ROOT 10
+#define DIST_ROOT 8
+#define LIT_SIZE (1024 + 286 * 32)  /* the root and, at most, a 32-entry table for every long code */
+#define DIST_SIZE (256 + 30 * 128)
+
 typedef struct {
-    const unsigned char* p;
-    size_t n, i;
-    uint32_t bits;
-    int nbits;
-    int err;
-} bitr;
+    uint32_t* t;
+    int root, size;
+} htab;
 
-static uint32_t get_bits(bitr* r, int n) {
-    uint32_t v;
+static int lengths_ok(const uint8_t* len, int n) {
+    int count[16] = { 0 }, left = 1, i, b;
 
-    while (r->nbits < n) {
-        if (r->i >= r->n) {
-            r->err = 1;
-            return 0;
-        }
-
-        r->bits |= (uint32_t)r->p[r->i++] << r->nbits;
-        r->nbits += 8;
+    for (i = 0; i < n; i++) {
+        count[len[i]]++;
     }
 
-    v = r->bits & ((1u << n) - 1);
-    r->bits >>= n;
-    r->nbits -= n;
+    for (b = 1; b < 16; b++) {
+        left = (left << 1) - count[b];
+
+        if (left < 0) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/* a decoding table from code lengths (dist: the distance alphabet); 0 for an over-subscribed set. An incomplete one
+   is accepted: its unused codes decode as errors */
+static int htab_build(const uint8_t* len, int n, int root, int dist, htab* h, int cap) {
+    int count[16] = { 0 }, i, b, s;
+    uint32_t next[16] = { 0 }, c = 0, rsize = 1u << root, rmask = rsize - 1, pre, k;
+    uint8_t subbits[1 << 10];
+    uint32_t rev[320];
+
+    if (!lengths_ok(len, n)) {
+        return 0;
+    }
+
+    for (i = 0; i < n; i++) {
+        count[len[i]]++;
+    }
+
+    count[0] = 0;
+
+    for (b = 1; b < 16; b++) {
+        c = (c + (uint32_t)count[b - 1]) << 1;
+        next[b] = c;
+    }
+
+    memset(subbits, 0, sizeof(subbits));
+    h->root = root;
+    h->size = (int)rsize;
+
+    for (k = 0; k < rsize; k++) {
+        h->t[k] = ENTRY(OP_BAD, 0, 0, 0);
+    }
+
+    for (s = 0; s < n; s++) {
+        if (len[s]) {
+            rev[s] = reverse_bits(next[len[s]]++, len[s]);
+
+            if (len[s] > root) {
+                pre = rev[s] & rmask;
+                subbits[pre] = (uint8_t)(len[s] - root) > subbits[pre] ? (uint8_t)(len[s] - root) : subbits[pre];
+            }
+        }
+    }
+
+    for (pre = 0; pre < rsize; pre++) {
+        if (subbits[pre]) {
+            uint32_t sz = 1u << subbits[pre];
+
+            if (h->size + (int)sz > cap) {
+                return 0;
+            }
+
+            h->t[pre] = ENTRY(OP_SUB, root, subbits[pre], h->size);
+
+            for (k = 0; k < sz; k++) {
+                h->t[h->size + (int)k] = ENTRY(OP_BAD, 0, 0, 0);
+            }
+
+            h->size += (int)sz;
+        }
+    }
+
+    for (s = 0; s < n; s++) {
+        int l = len[s];
+        uint32_t op = OP_BAD, extra = 0, value = 0;
+
+        if (!l) {
+            continue;
+        }
+
+        if (dist) {
+            if (s < 30) {
+                op = OP_LEN;
+                extra = dist_extra[s];
+                value = dist_base[s];
+            }
+        } else if (s < 256) {
+            op = OP_LIT;
+            value = (uint32_t)s;
+        } else if (s == 256) {
+            op = OP_EOB;
+        } else if (s < 286) {
+            op = OP_LEN;
+            extra = len_extra[s - 257];
+            value = len_base[s - 257];
+        }
+
+        if (l <= root) {
+            uint32_t e = ENTRY(op, l, extra, value);
+
+            for (k = rev[s]; k < rsize; k += 1u << l) {
+                h->t[k] = e;
+            }
+        } else {
+            uint32_t off, sb, e = ENTRY(op, l - root, extra, value);
+
+            pre = rev[s] & rmask;
+            off = h->t[pre] >> 16;
+            sb = subbits[pre];
+
+            for (k = rev[s] >> root; k < (1u << sb); k += 1u << (l - root)) {
+                h->t[off + k] = e;
+            }
+        }
+    }
+
+    return 1;
+}
+
+static struct {
+    int ready;
+    uint32_t lit[LIT_SIZE], dist[DIST_SIZE];
+    htab hl, hd;
+} FT;
+
+static void fixed_init(void) {
+    uint8_t l[288], d[30];
+    int i;
+
+    if (FT.ready) {
+        return;
+    }
+
+    tables_init();
+
+    for (i = 0; i < 288; i++) {
+        l[i] = i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8;
+    }
+
+    for (i = 0; i < 30; i++) {
+        d[i] = 5;
+    }
+
+    FT.hl.t = FT.lit;
+    FT.hd.t = FT.dist;
+    htab_build(l, 288, LIT_ROOT, 0, &FT.hl, LIT_SIZE);
+    htab_build(d, 30, DIST_ROOT, 1, &FT.hd, DIST_SIZE);
+    FT.ready = 1;
+}
+
+/* where inflate writes: a fixed span, or one that grows to at most limit. Everything before op is the history */
+typedef struct {
+    unsigned char* base;
+    size_t op, cap, limit;
+    int grow;
+} iout;
+
+static int iout_room(iout* o, size_t k) {
+    size_t nc;
+    unsigned char* q;
+
+    if (o->op + k <= o->cap) {
+        return 1;
+    }
+
+    if (!o->grow || o->op + k > o->limit) {
+        return 0;
+    }
+
+    nc = o->cap * 2 > (size_t)1 << 16 ? o->cap * 2 : (size_t)1 << 16;
+    nc = nc < o->op + k ? o->op + k : nc;
+    nc = nc > o->limit ? o->limit : nc;
+
+    if ((q = (unsigned char*)realloc(o->base, nc)) == NULL) {
+        return 0;
+    }
+
+    o->base = q;
+    o->cap = nc;
+    return 1;
+}
+
+enum { SEG_FINAL, SEG_STOPPED, SEG_ERROR };
+
+typedef struct {
+    const unsigned char* p;
+    size_t n, i;                /* the next byte to load; past n, zeros are loaded */
+    uint64_t buf;
+    int cnt;
+    iout* out;
+    uint32_t lit[LIT_SIZE], dist[DIST_SIZE];
+} infl;
+
+static size_t inf_pos(const infl* f) {
+    return f->i * 8 - (size_t)f->cnt;
+}
+
+static void inf_refill(infl* f) {
+    if (f->i + 8 <= f->n) {
+        uint64_t v;
+        const unsigned char* q = f->p + f->i;
+
+        v = (uint64_t)q[0] | (uint64_t)q[1] << 8 | (uint64_t)q[2] << 16 | (uint64_t)q[3] << 24 |
+            (uint64_t)q[4] << 32 | (uint64_t)q[5] << 40 | (uint64_t)q[6] << 48 | (uint64_t)q[7] << 56;
+        f->buf |= v << f->cnt;
+        f->i += (size_t)((63 - f->cnt) >> 3);
+        f->cnt |= 56;
+    } else {
+        while (f->cnt <= 56) {
+            uint64_t b = f->i < f->n ? f->p[f->i] : 0;
+
+            f->buf |= b << f->cnt;
+            f->i++;
+            f->cnt += 8;
+        }
+    }
+}
+
+static void inf_need(infl* f, int k) {
+    if (f->cnt < k) {
+        inf_refill(f);
+    }
+}
+
+static void inf_drop(infl* f, int k) {
+    f->buf >>= k;
+    f->cnt -= k;
+}
+
+static unsigned inf_take(infl* f, int k) {
+    unsigned v = (unsigned)(f->buf & (((uint64_t)1 << k) - 1));
+
+    inf_drop(f, k);
     return v;
 }
 
-typedef struct {
-    uint16_t count[16];
-    uint16_t sym[320];
-} huff;
+static uint32_t inf_decode(infl* f, const htab* h) {
+    uint32_t e = h->t[f->buf & ((1u << h->root) - 1)];
 
-static int huff_build(huff* h, const uint8_t* lens, int n) {
-    uint16_t offs[16];
-    int i, left = 1;
-
-    memset(h->count, 0, sizeof(h->count));
-
-    for (i = 0; i < n; i++) {
-        h->count[lens[i]]++;
+    if (((e >> 4) & 15) == OP_SUB) {
+        inf_drop(f, (int)(e & 15));
+        e = h->t[(e >> 16) + (f->buf & ((1u << ((e >> 8) & 0xFF)) - 1))];
     }
 
-    h->count[0] = 0;
+    inf_drop(f, (int)(e & 15));
+    return e;
+}
 
-    for (i = 1; i < 16; i++) {      /* over-subscribed sets are invalid */
-        left <<= 1;
-        left -= h->count[i];
+static int inf_stored(infl* f) {
+    unsigned len, nlen;
 
-        if (left < 0) {
-            return -1;
+    inf_drop(f, f->cnt & 7);
+    inf_need(f, 32);
+    len = inf_take(f, 16);
+    nlen = inf_take(f, 16);
+
+    if ((len ^ 0xFFFFu) != nlen) {
+        return 0;
+    }
+
+    f->i -= (size_t)(f->cnt >> 3);  /* the whole bytes still held go back to the input */
+    f->buf = 0;
+    f->cnt = 0;
+
+    if (f->i + len > f->n || !iout_room(f->out, len)) {
+        return 0;
+    }
+
+    if (len) {
+        memcpy(f->out->base + f->out->op, f->p + f->i, len);
+    }
+
+    f->out->op += len;
+    f->i += len;
+    return 1;
+}
+
+static int inf_header(infl* f, htab* lit, htab* dist) {
+    int hlit, hdist, hclen, i, total;
+    uint8_t cl[19] = { 0 }, clsym[128], clbits[128], lens[316];
+
+    inf_need(f, 14);
+    hlit = (int)inf_take(f, 5) + 257;
+    hdist = (int)inf_take(f, 5) + 1;
+    hclen = (int)inf_take(f, 4) + 4;
+
+    if (hlit > 286 || hdist > 30) {
+        return 0;
+    }
+
+    for (i = 0; i < hclen; i++) {
+        inf_need(f, 3);
+        cl[cl_order[i]] = (uint8_t)inf_take(f, 3);
+    }
+
+    if (!lengths_ok(cl, 19)) {
+        return 0;
+    }
+
+    {   /* the code-length code is at most seven bits: one direct table */
+        uint32_t next[8] = { 0 }, c = 0, k;
+        int count[8] = { 0 }, b, s;
+
+        memset(clbits, 0, sizeof(clbits));
+
+        for (i = 0; i < 19; i++) {
+            count[cl[i]]++;
+        }
+
+        count[0] = 0;
+
+        for (b = 1; b < 8; b++) {
+            c = (c + (uint32_t)count[b - 1]) << 1;
+            next[b] = c;
+        }
+
+        for (s = 0; s < 19; s++) {
+            if (cl[s]) {
+                uint32_t r = reverse_bits(next[cl[s]]++, cl[s]);
+
+                for (k = r; k < 128; k += 1u << cl[s]) {
+                    clsym[k] = (uint8_t)s;
+                    clbits[k] = cl[s];
+                }
+            }
         }
     }
 
-    offs[1] = 0;
+    total = hlit + hdist;
 
-    for (i = 1; i < 15; i++) {
-        offs[i + 1] = (uint16_t)(offs[i] + h->count[i]);
+    for (i = 0; i < total;) {
+        unsigned k;
+        int s, rep;
+        uint8_t v = 0;
+
+        inf_need(f, 14);
+        k = (unsigned)(f->buf & 127);
+
+        if (!clbits[k]) {
+            return 0;
+        }
+
+        inf_drop(f, clbits[k]);
+        s = clsym[k];
+
+        if (s < 16) {
+            lens[i++] = (uint8_t)s;
+            continue;
+        }
+
+        if (s == 16) {
+            if (i == 0) {
+                return 0;
+            }
+
+            v = lens[i - 1];
+            rep = 3 + (int)inf_take(f, 2);
+        } else if (s == 17) {
+            rep = 3 + (int)inf_take(f, 3);
+        } else {
+            rep = 11 + (int)inf_take(f, 7);
+        }
+
+        if (i + rep > total) {
+            return 0;
+        }
+
+        while (rep--) {
+            lens[i++] = v;
+        }
     }
 
-    for (i = 0; i < n; i++) {
-        if (lens[i]) {
-            h->sym[offs[lens[i]]++] = (uint16_t)i;
+    if (lens[256] == 0) {
+        return 0;
+    }
+
+    lit->t = f->lit;
+    dist->t = f->dist;
+    return htab_build(lens, hlit, LIT_ROOT, 0, lit, LIT_SIZE) && htab_build(lens + hlit, hdist, DIST_ROOT, 1, dist,
+            DIST_SIZE);
+}
+
+static int inf_codes(infl* f, const htab* lit, const htab* dist) {
+    iout* o = f->out;
+
+    for (;;) {
+        uint32_t e, op;
+        size_t len, d, k;
+        unsigned char* q;
+        const unsigned char* s;
+
+        if (f->cnt < 48) {
+            /* past the end the bits are zeros, and zeros can spell a match that never ends the block: once the
+               codes have used bits the input does not have, it is corrupt */
+            if (inf_pos(f) > f->n * 8) {
+                return 0;
+            }
+
+            inf_refill(f);
         }
+
+        e = inf_decode(f, lit);
+        op = (e >> 4) & 15;
+
+        if (op == OP_LIT) {
+            if (o->op >= o->cap && !iout_room(o, 1)) {
+                return 0;
+            }
+
+            o->base[o->op++] = (unsigned char)(e >> 16);
+            continue;
+        }
+
+        if (op != OP_LEN) {
+            return op == OP_EOB;
+        }
+
+        len = (e >> 16) + inf_take(f, (int)((e >> 8) & 0xFF));
+        e = inf_decode(f, dist);
+
+        if (((e >> 4) & 15) != OP_LEN) {
+            return 0;
+        }
+
+        d = (e >> 16) + inf_take(f, (int)((e >> 8) & 0xFF));
+
+        if (d > o->op) {
+            return 0;   /* before the start of the history */
+        }
+
+        if (o->op + len + 8 > o->cap && !iout_room(o, len + 8)) {
+            if (!iout_room(o, len)) {
+                return 0;
+            }
+
+            q = o->base + o->op;
+            s = q - d;
+
+            for (k = 0; k < len; k++) {
+                q[k] = s[k];
+            }
+
+            o->op += len;
+            continue;
+        }
+
+        q = o->base + o->op;
+        s = q - d;
+
+        if (d >= 8) {
+            for (k = 0; k < len; k += 8) {
+                memcpy(q + k, s + k, 8);
+            }
+        } else if (d == 1) {
+            memset(q, s[0], len);
+        } else {
+            for (k = 0; k < len; k++) {
+                q[k] = s[k];
+            }
+        }
+
+        o->op += len;
+    }
+}
+
+/* raw inflate from any bit up to the final block, or to a block boundary at or past stop_bit; *end_bit where the
+   stream stood */
+static int segment(const unsigned char* p, size_t n, size_t start_bit, size_t stop_bit, iout* out, size_t* end_bit) {
+    infl* f = (infl*)malloc(sizeof(infl));
+    int st = SEG_ERROR;
+
+    if (!f) {
+        *end_bit = start_bit;
+        return SEG_ERROR;
+    }
+
+    f->p = p;
+    f->n = n;
+    f->i = start_bit >> 3;
+    f->buf = 0;
+    f->cnt = 0;
+    f->out = out;
+    inf_refill(f);
+    inf_drop(f, (int)(start_bit & 7));
+
+    for (;;) {
+        unsigned last, type;
+        int ok = 0;
+        htab lit, dist;
+
+        if (inf_pos(f) >= stop_bit) {
+            st = SEG_STOPPED;
+            break;
+        }
+
+        inf_need(f, 3);
+        last = inf_take(f, 1);
+        type = inf_take(f, 2);
+
+        if (type == 0) {
+            ok = inf_stored(f);
+        } else if (type == 1) {
+            ok = inf_codes(f, &FT.hl, &FT.hd);
+        } else if (type == 2) {
+            ok = inf_header(f, &lit, &dist) && inf_codes(f, &lit, &dist);
+        }
+
+        if (!ok || inf_pos(f) > n * 8) {
+            st = SEG_ERROR;
+            break;
+        }
+
+        if (last) {
+            st = SEG_FINAL;
+            break;
+        }
+    }
+
+    *end_bit = inf_pos(f);
+    free(f);
+    return st;
+}
+
+/* just past the first full-flush mark 00 00 FF FF in [lo, hi), or 0 */
+static size_t find_flush(const unsigned char* p, size_t lo, size_t hi) {
+    size_t i = lo > 2 ? lo : 2;
+
+    while (i + 1 < hi) {
+        const unsigned char* q = (const unsigned char*)memchr(p + i, 0xFF, hi - 1 - i);
+        size_t j;
+
+        if (!q) {
+            return 0;
+        }
+
+        j = (size_t)(q - p);
+
+        if (p[j + 1] == 0xFF && p[j - 1] == 0 && p[j - 2] == 0) {
+            return j + 2;
+        }
+
+        i = j + 1;
     }
 
     return 0;
 }
 
-static int decode(bitr* r, const huff* h) {
-    int code = 0, first = 0, index = 0, len;
-
-    for (len = 1; len < 16; len++) {
-        code |= (int)get_bits(r, 1);
-
-        if (r->err) {
-            return -1;
-        }
-
-        if (code - h->count[len] < first) {
-            return h->sym[index + (code - first)];
-        }
-
-        index += h->count[len];
-        first += h->count[len];
-        first <<= 1;
-        code <<= 1;
-    }
-
-    r->err = 1;
-    return -1;
-}
-
+/* f(i, ctx) for i in [0, count) on up to `threads` threads */
 typedef struct {
-    unsigned char* p;
-    size_t n, cap, limit;
-    int err;
-} outbuf;
+    size_t count, next;
+    void (*fn)(size_t, void*);
+    void* ctx;
+#ifdef _WIN32
+    CRITICAL_SECTION lock;
+#else
+    pthread_mutex_t lock;
+#endif
+} pfor_job;
 
-static void out_byte(outbuf* o, unsigned char c) {
-    if (o->n >= o->limit) {
-        o->err = 1;
-        return;
-    }
+static void pfor_work(pfor_job* J) {
+    for (;;) {
+        size_t i;
 
-    if (o->n >= o->cap) {
-        size_t nc = o->cap ? o->cap * 2 : 4096;
-        unsigned char* q;
+#ifdef _WIN32
+        EnterCriticalSection(&J->lock);
+#else
+        pthread_mutex_lock(&J->lock);
+#endif
+        i = J->next++;
+#ifdef _WIN32
+        LeaveCriticalSection(&J->lock);
+#else
+        pthread_mutex_unlock(&J->lock);
+#endif
 
-        nc = nc > o->limit ? o->limit : nc;
-        q = (unsigned char*)realloc(o->p, nc);
-
-        if (!q) {
-            o->err = 1;
+        if (i >= J->count) {
             return;
         }
 
-        o->p = q;
-        o->cap = nc;
-    }
-
-    o->p[o->n++] = c;
-}
-
-static int inflate_codes(bitr* r, outbuf* o, const huff* lit, const huff* dist) {
-    for (;;) {
-        int sym = decode(r, lit);
-
-        if (r->err || o->err || sym < 0) {
-            return -1;
-        }
-
-        if (sym < 256) {
-            out_byte(o, (unsigned char)sym);
-        } else if (sym == 256) {
-            return 0;
-        } else {
-            int len, ds, d;
-            size_t k;
-
-            sym -= 257;
-
-            if (sym >= 29) {
-                return -1;
-            }
-
-            len = len_base[sym] + (int)get_bits(r, len_extra[sym]);
-            ds = decode(r, dist);
-
-            if (ds < 0 || ds >= 30) {
-                return -1;
-            }
-
-            d = dist_base[ds] + (int)get_bits(r, dist_extra[ds]);
-
-            if (r->err || (size_t)d > o->n) {
-                return -1;
-            }
-
-            for (k = 0; k < (size_t)len && !o->err; k++) {
-                out_byte(o, o->p[o->n - (size_t)d]);
-            }
-        }
+        J->fn(i, J->ctx);
     }
 }
 
-/* inflate raw deflate data (zlib = 1: skip the zlib header and check Adler-32); limit caps the output */
+#ifdef _WIN32
+static DWORD WINAPI pfor_thread(LPVOID arg) {
+    pfor_work((pfor_job*)arg);
+    return 0;
+}
+#else
+static void* pfor_thread(void* arg) {
+    pfor_work((pfor_job*)arg);
+    return NULL;
+}
+#endif
+
+static void pfor(size_t count, int threads, void (*fn)(size_t, void*), void* ctx) {
+    pfor_job J;
+    int t, started = 0;
+#ifdef _WIN32
+    HANDLE th[64];
+#else
+    pthread_t th[64];
+#endif
+
+    memset(&J, 0, sizeof(J));
+    J.count = count;
+    J.fn = fn;
+    J.ctx = ctx;
+    threads = (size_t)threads < count ? threads : (int)count;
+    threads = threads > 64 ? 64 : threads;
+#ifdef _WIN32
+    InitializeCriticalSection(&J.lock);
+#else
+    pthread_mutex_init(&J.lock, NULL);
+#endif
+
+    for (t = 1; t < threads; t++) {
+#ifdef _WIN32
+        if ((th[started] = CreateThread(NULL, 0, pfor_thread, &J, 0, NULL)) != NULL) {
+            started++;
+        }
+#else
+        if (pthread_create(&th[started], NULL, pfor_thread, &J) == 0) {
+            started++;
+        }
+#endif
+    }
+
+    pfor_work(&J);
+
+    for (t = 0; t < started; t++) {
+#ifdef _WIN32
+        WaitForSingleObject(th[t], INFINITE);
+        CloseHandle(th[t]);
+#else
+        pthread_join(th[t], NULL);
+#endif
+    }
+
+#ifdef _WIN32
+    DeleteCriticalSection(&J.lock);
+#else
+    pthread_mutex_destroy(&J.lock);
+#endif
+}
+
+/* the speculative inflates: piece j from cand[j - 1] (j 0: the start, into the output itself) */
+typedef struct {
+    const unsigned char* p;
+    size_t n, m;
+    const size_t* cand;
+    iout* out;
+    iout* piece;
+    int* st;
+    size_t* end;
+} spec_job;
+
+static void spec_one(size_t j, void* ctx) {
+    spec_job* S = (spec_job*)ctx;
+
+    if (j == 0) {
+        S->st[0] = segment(S->p, S->n, 0, S->cand[0] * 8, S->out, &S->end[0]);
+    } else {
+        iout* o = &S->piece[j - 1];
+        size_t to = j < S->m ? S->cand[j] : S->n;
+
+        o->grow = 1;
+        o->limit = S->out->limit;
+        o->cap = (to - S->cand[j - 1]) * 3 + 65536;
+        o->cap = o->cap > o->limit ? o->limit : o->cap;
+        o->base = (unsigned char*)malloc(o->cap ? o->cap : 1);
+
+        if (!o->base) {
+            o->cap = 0;
+            S->st[j] = SEG_ERROR;
+            return;
+        }
+
+        S->st[j] = segment(S->p, S->n, S->cand[j - 1] * 8, j < S->m ? S->cand[j] * 8 : (size_t)-1, o, &S->end[j]);
+    }
+}
+
+typedef struct {
+    unsigned char* dst;
+    const unsigned char* src;
+    size_t len;
+} copy_job;
+
+static void copy_one(size_t i, void* ctx) {
+    copy_job* C = (copy_job*)ctx + i;
+
+    if (C->len) {
+        memcpy(C->dst, C->src, C->len);
+    }
+}
+
+/* raw deflate data into out, in parallel where that can be proven; 1 when it reaches its final block */
+static int inflate_body(const unsigned char* p, size_t n, iout* out, int threads, size_t* end_bit) {
+    const size_t share = (size_t)1 << 20;
+    size_t* cand = NULL, m = 0, k, ns, j, bit, np = 0;
+    int wide = !out->grow && out->cap - out->op >= 2 * share && n >= 1024, cur, ok;
+    spec_job S;
+    copy_job* pend = NULL;
+
+    /* a stream that comes out large is worth splitting however small it is: zlibmt's blocks of a long run of alike
+       numbers deflate to a few hundred bytes each, and inflating them is the work */
+    if (threads > 1 && (n >= 4 * share || wide)) {
+        ns = n >= 4 * share ? n / share : n / 512;
+        ns = ns < (size_t)threads * 8 ? ns : (size_t)threads * 8;
+
+        if (ns > 1 && (cand = (size_t*)malloc(ns * sizeof(size_t))) != NULL) {
+            for (k = 1; k < ns; k++) {
+                size_t at = find_flush(p, k * n / ns, (k + 1) * n / ns);
+
+                if (at && at < n && (m == 0 || at > cand[m - 1])) {
+                    cand[m++] = at;
+                }
+            }
+        }
+    }
+
+    if (m == 0) {
+        free(cand);
+        return segment(p, n, 0, (size_t)-1, out, end_bit) == SEG_FINAL;
+    }
+
+    memset(&S, 0, sizeof(S));
+    S.p = p;
+    S.n = n;
+    S.m = m;
+    S.cand = cand;
+    S.out = out;
+    S.piece = (iout*)calloc(m, sizeof(iout));
+    S.st = (int*)calloc(m + 1, sizeof(int));
+    S.end = (size_t*)calloc(m + 1, sizeof(size_t));
+    pend = (copy_job*)calloc(m, sizeof(copy_job));
+
+    if (!S.piece || !S.st || !S.end || !pend) {
+        free(S.piece);
+        free(S.st);
+        free(S.end);
+        free(pend);
+        free(cand);
+        return segment(p, n, 0, (size_t)-1, out, end_bit) == SEG_FINAL;
+    }
+
+    /* the output's own start runs as piece 0 while the others run beside it: it grows (or not) as the output does,
+       and the pieces only read the input */
+    pfor(m + 1, threads, spec_one, &S);
+
+    cur = S.st[0];
+    bit = S.end[0];
+    j = 1;  /* the next candidate is cand[j - 1], its result S.st[j] */
+    ok = 1;
+
+    while (cur == SEG_STOPPED && ok) {
+        while (j <= m && cand[j - 1] * 8 < bit) {
+            j++;
+        }
+
+        if (j <= m && cand[j - 1] * 8 == bit && S.st[j] != SEG_ERROR) {     /* proven: its output is in place */
+            iout* b = &S.piece[j - 1];
+
+            if (!iout_room(out, b->op)) {
+                ok = 0;
+                break;
+            }
+
+            pend[np].dst = NULL;    /* where it goes, fixed once no growth can move the output */
+            pend[np].src = b->base;
+            pend[np].len = b->op;
+            pend[np].dst = (unsigned char*)(uintptr_t)out->op;
+            np++;
+            out->op += b->op;
+            cur = S.st[j];
+            bit = S.end[j];
+            j++;
+            continue;
+        }
+
+        if (j <= m && cand[j - 1] * 8 == bit) {
+            j++;    /* a real boundary whose piece failed */
+        }
+
+        for (k = 0; k < np; k++) {  /* the pieces placed before the serial stretch needs them as history */
+            pend[k].dst = out->base + (size_t)(uintptr_t)pend[k].dst;
+        }
+
+        pfor(np, threads, copy_one, pend);
+        np = 0;
+        cur = segment(p, n, bit, j <= m ? cand[j - 1] * 8 : (size_t)-1, out, &bit);
+    }
+
+    for (k = 0; k < np; k++) {
+        pend[k].dst = out->base + (size_t)(uintptr_t)pend[k].dst;
+    }
+
+    if (ok) {
+        pfor(np, threads, copy_one, pend);
+    }
+
+    for (k = 0; k < m; k++) {
+        free(S.piece[k].base);
+    }
+
+    free(S.piece);
+    free(S.st);
+    free(S.end);
+    free(pend);
+    free(cand);
+    *end_bit = bit;
+    return ok && cur == SEG_FINAL;
+}
+
+/* the Adler-32 of a large buffer, in pieces on every thread */
+typedef struct {
+    const unsigned char* p;
+    size_t n;
+    uint32_t* part;
+} sum_job;
+
+#define SUM_PIECE ((size_t)4 << 20)
+
+static void sum_one(size_t i, void* ctx) {
+    sum_job* S = (sum_job*)ctx;
+    size_t len = S->n - i * SUM_PIECE < SUM_PIECE ? S->n - i * SUM_PIECE : SUM_PIECE;
+
+    S->part[i] = adler32_part(1, S->p + i * SUM_PIECE, len);
+}
+
+static uint32_t adler32_mt(const unsigned char* p, size_t n, int threads) {
+    size_t np = (n + SUM_PIECE - 1) / SUM_PIECE, i;
+    sum_job S;
+    uint32_t s;
+
+    if (np <= 1 || threads <= 1 || (S.part = (uint32_t*)malloc(np * sizeof(uint32_t))) == NULL) {
+        return adler32_part(1, p, n);
+    }
+
+    S.p = p;
+    S.n = n;
+    pfor(np, threads, sum_one, &S);
+    s = S.part[0];
+
+    for (i = 1; i < np; i++) {
+        s = adler32_combine(s, S.part[i], n - i * SUM_PIECE < SUM_PIECE ? n - i * SUM_PIECE : SUM_PIECE);
+    }
+
+    free(S.part);
+    return s;
+}
+
+/* inflate raw deflate data (zlib = 1: skip the zlib header and check Adler-32); limit caps the output. With a limit
+   given (an expected size, as callers have) the output is that span, and a large one is inflated in parallel */
 int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen) {
-    bitr r;
-    outbuf o;
-    int last = 0;
+    const unsigned char* p = (const unsigned char*)data;
+    iout o;
+    size_t end_bit = 0, body = zlib ? 2 : 0;
+    int threads;
 
-    memset(&r, 0, sizeof(r));
+    fixed_init();
     memset(&o, 0, sizeof(o));
-    r.p = (const unsigned char*)data;
-    r.n = n;
     o.limit = limit ? limit : (size_t)1 << 30;
 
-    if (zlib) {
-        if (n < 6 || (r.p[0] & 0x0F) != 8 || ((r.p[0] << 8) | r.p[1]) % 31 != 0 || (r.p[1] & 0x20)) {
-            return -1;
-        }
-
-        r.i = 2;
+    if (zlib && (n < 6 || (p[0] & 0x0F) != 8 || (p[0] >> 4) > 7 || ((p[0] << 8) | p[1]) % 31 != 0 || (p[1] & 0x20))) {
+        return -1;  /* not deflate, a bad check, or a preset dictionary */
     }
 
-    while (!last) {
-        int type;
-
-        last = (int)get_bits(&r, 1);
-        type = (int)get_bits(&r, 2);
-
-        if (r.err) {
-            break;
-        }
-
-        if (type == 0) {    /* stored */
-            uint32_t len, nlen;
-
-            r.bits = 0;
-            r.nbits = 0;
-
-            if (r.i + 4 > r.n) {
-                r.err = 1;
-                break;
-            }
-
-            len = r.p[r.i] | ((uint32_t)r.p[r.i + 1] << 8);
-            nlen = r.p[r.i + 2] | ((uint32_t)r.p[r.i + 3] << 8);
-            r.i += 4;
-
-            if ((len ^ 0xFFFF) != nlen || r.i + len > r.n) {
-                r.err = 1;
-                break;
-            }
-
-            while (len-- && !o.err) {
-                out_byte(&o, r.p[r.i++]);
-            }
-        } else if (type == 1) {     /* fixed */
-            uint8_t lens[320];
-            huff lit, dist;
-            int k;
-
-            for (k = 0; k < 144; k++) {
-                lens[k] = 8;
-            }
-
-            for (; k < 256; k++) {
-                lens[k] = 9;
-            }
-
-            for (; k < 280; k++) {
-                lens[k] = 7;
-            }
-
-            for (; k < 288; k++) {
-                lens[k] = 8;
-            }
-
-            huff_build(&lit, lens, 288);
-
-            for (k = 0; k < 30; k++) {
-                lens[k] = 5;
-            }
-
-            huff_build(&dist, lens, 30);
-
-            if (inflate_codes(&r, &o, &lit, &dist)) {
-                r.err = 1;
-            }
-        } else if (type == 2) {     /* dynamic */
-            static const uint8_t order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
-            uint8_t lens[320], cl[19];
-            huff lit, dist, clh;
-            int nlit = (int)get_bits(&r, 5) + 257, ndist = (int)get_bits(&r, 5) + 1, ncl = (int)get_bits(&r, 4) + 4;
-            int k, idx = 0;
-
-            if (r.err || nlit > 286 || ndist > 30) {
-                r.err = 1;
-                break;
-            }
-
-            memset(cl, 0, sizeof(cl));
-
-            for (k = 0; k < ncl; k++) {
-                cl[order[k]] = (uint8_t)get_bits(&r, 3);
-            }
-
-            if (huff_build(&clh, cl, 19)) {
-                r.err = 1;
-                break;
-            }
-
-            while (idx < nlit + ndist && !r.err) {
-                int sym = decode(&r, &clh), rep = 0;
-                uint8_t v = 0;
-
-                if (sym < 0) {
-                    r.err = 1;
-                    break;
-                }
-
-                if (sym < 16) {
-                    lens[idx++] = (uint8_t)sym;
-                    continue;
-                }
-
-                if (sym == 16) {
-                    if (idx == 0) {
-                        r.err = 1;
-                        break;
-                    }
-
-                    v = lens[idx - 1];
-                    rep = 3 + (int)get_bits(&r, 2);
-                } else if (sym == 17) {
-                    rep = 3 + (int)get_bits(&r, 3);
-                } else {
-                    rep = 11 + (int)get_bits(&r, 7);
-                }
-
-                if (idx + rep > nlit + ndist) {
-                    r.err = 1;
-                    break;
-                }
-
-                while (rep--) {
-                    lens[idx++] = v;
-                }
-            }
-
-            if (r.err || huff_build(&lit, lens, nlit) || huff_build(&dist, lens + nlit, ndist) ||
-                    inflate_codes(&r, &o, &lit, &dist)) {
-                r.err = 1;
-            }
-        } else {
-            r.err = 1;
-        }
-
-        if (r.err || o.err) {
-            break;
-        }
+    /* a span of the size expected -- no more than deflate can make of this much input (1032 to 1), so a claimed
+       size alone cannot make it allocate much */
+    if (limit && limit <= (size_t)256 << 20 && limit / 1032 <= n + 64) {
+        o.cap = limit;
+        o.grow = 0;
+    } else {
+        o.cap = n * 4 + 4096 < o.limit ? n * 4 + 4096 : o.limit;
+        o.grow = 1;
     }
 
-    if (r.err || o.err) {
-        free(o.p);
+    if ((o.base = (unsigned char*)malloc(o.cap ? o.cap : 1)) == NULL) {
+        return -1;
+    }
+
+    threads = cpu_count();
+
+    if (!inflate_body(p + body, n - body, &o, threads, &end_bit)) {
+        free(o.base);
         return -1;
     }
 
     if (zlib) {
-        size_t at;
+        size_t at = body + (end_bit + 7) / 8;
         uint32_t want;
 
-        r.bits = 0;
-        r.nbits = 0;
-        at = r.i;
-
-        if (at + 4 > r.n) {
-            free(o.p);
+        if (at + 4 > n) {
+            free(o.base);
             return -1;
         }
 
-        want = ((uint32_t)r.p[at] << 24) | ((uint32_t)r.p[at + 1] << 16) | ((uint32_t)r.p[at + 2] << 8) | r.p[at + 3];
+        want = ((uint32_t)p[at] << 24) | ((uint32_t)p[at + 1] << 16) | ((uint32_t)p[at + 2] << 8) | p[at + 3];
 
-        if (want != adler32(o.p ? o.p : (const unsigned char*)"", o.n)) {
-            free(o.p);
+        if (want != adler32_mt(o.base, o.op, threads)) {
+            free(o.base);
             return -1;
         }
     }
 
-    *out = o.p ? o.p : (unsigned char*)malloc(1);
-    *outlen = o.n;
-    return *out ? 0 : -1;
+    *out = o.base;
+    *outlen = o.op;
+    return 0;
 }
 
+/* CRC-32 (zip, PNG), a table a byte */
 uint32_t pd_crc32(const void* data, size_t n) {
+    static uint32_t table[256];
+    static int ready;
     const unsigned char* p = (const unsigned char*)data;
     uint32_t c = 0xFFFFFFFFu;
     size_t i;
-    int k;
+
+    if (!ready) {
+        uint32_t k, v;
+        int b;
+
+        for (k = 0; k < 256; k++) {
+            v = k;
+
+            for (b = 0; b < 8; b++) {
+                v = (v >> 1) ^ (0xEDB88320u & (0u - (v & 1)));
+            }
+
+            table[k] = v;
+        }
+
+        ready = 1;
+    }
 
     for (i = 0; i < n; i++) {
-        c ^= p[i];
-
-        for (k = 0; k < 8; k++) {
-            c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1)));
-        }
+        c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
     }
 
     return c ^ 0xFFFFFFFFu;
