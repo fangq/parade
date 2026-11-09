@@ -1543,6 +1543,41 @@ begin
   Check(Abs(Boxes[0, 0].h - H0 - Round(30 / (E.Zoom * 96 / 72 / K))) <= 2 * K,
     Format('a row''s foot dragged: %.1f pt taller', [(Boxes[0, 0].h - H0) / K]));
   E.Undo;
+  { a table further down, scrolled to by the wheel with the caret left at the top: its border dragged, the view
+    stays where it is }
+  E.NewDocument;
+  for I := 1 to 60 do
+    E.InsertText('A paragraph to push the table down the pages.' + #10);
+  E.InsertTable(2, 2);
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  E.Repaint;
+  Application.ProcessMessages;
+  Tbl := 0;
+  for R := 0 to pd_layout_page_count(E.Layout) - 1 do
+    if (pd_layout_page_cells(E.Layout, R, @Buf[0], 64, N) = PD_OK) and (N > 0) and (Tbl = 0) then
+    begin
+      Tbl := 1;
+      CPage := R;
+      Boxes[0, 0] := Buf[0];
+    end;
+  Check(Tbl <> 0, 'the table further down');
+  I := 0;
+  repeat
+    TParadeWheel(E).DoMouseWheel([], -120, Point(50, 50));
+    E.Repaint;
+    Application.ProcessMessages;
+    A := E.PageToClient(CPage, (Boxes[0, 0].x + Boxes[0, 0].w) / K, (Boxes[0, 0].y + Boxes[0, 0].h div 2) / K);
+    Inc(I);
+  until ((A.Y > 40) and (A.Y < E.ClientHeight - 40)) or (I > 400);
+  Check((A.Y > 40) and (A.Y < E.ClientHeight - 40), 'scrolled to it by the wheel');
+  TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+  TParadeWheel(E).MouseMove([ssLeft], A.X + 30, A.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], A.X + 30, A.Y);
+  E.Repaint;
+  Application.ProcessMessages;
+  B := E.PageToClient(CPage, (Boxes[0, 0].x + Boxes[0, 0].w) / K, (Boxes[0, 0].y + Boxes[0, 0].h div 2) / K);
+  Check(Abs(B.Y - A.Y) <= 2, Format('a border dragged there: the view where it was (the table at %d, was %d)',
+    [B.Y, A.Y]));
 end;
 
 procedure Fail(E: Exception);

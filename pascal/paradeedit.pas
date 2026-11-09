@@ -161,6 +161,7 @@ type
     FCanvasPage: Boolean;          { the document is a page to draw on: its page a canvas, not an object to select }
     FCornerPage: Integer;          { the page whose corner is dragged }
     FTblDrag: Integer;             { a table's border dragged: 0 none, 1 a column's edge, 2 a row's foot }
+    FKeepView: Boolean;            { the next Changed leaves the view where it is, not taken to the caret }
     FTblTable, FTblRow: pd_block_id;
     FTblEdge, FTblPage: Integer;   { which of FTblEdges, on which page }
     FTblEdges: TParadeSpArray;     { the table's column edges across, on the page }
@@ -2371,7 +2372,10 @@ begin
   FModified := True;
   FHasDesiredX := False;
   Relayout;
-  EnsureCaretVisible;
+  if FKeepView then
+    FKeepView := False    { an edit made where the mouse is (a table's border dragged): the view stays }
+  else
+    EnsureCaretVisible;
   FCaretOn := True;
   if Assigned(FOnChange) then
     FOnChange(Self);
@@ -5409,6 +5413,7 @@ begin
     pd_doc_begin_group(FDoc, 'Column width');
     pd_doc_set_table_props(FDoc, FTblTable, Tp);
     pd_doc_end_group(FDoc);
+    FKeepView := True;
     Changed;
   end
   else if FTblDrag = 2 then
@@ -5430,6 +5435,7 @@ begin
           pd_doc_set_cell_props(FDoc, pd_doc_child(FDoc, FTblRow, I), Cp);
         end;
     pd_doc_end_group(FDoc);
+    FKeepView := True;
     Changed;
   end;
 end;
