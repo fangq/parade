@@ -45,6 +45,9 @@ type
   PGlyphBmp = ^TGlyphBmp;
 
   TParadeBlockArray = array of pd_block_id;
+  TParadeCellBoxes = array of pd_cell_box;
+  TParadeSpArray = array of pd_sp;
+  TParadeRanges = array of pd_range;
 
   { a place a cross-reference can point at }
   TParadeRefTarget = record
@@ -157,6 +160,13 @@ type
     FSnapShapes: Boolean;          { a drag snaps to the other shapes' edges and middles, and the canvas's }
     FCanvasPage: Boolean;          { the document is a page to draw on: its page a canvas, not an object to select }
     FCornerPage: Integer;          { the page whose corner is dragged }
+    FTblDrag: Integer;             { a table's border dragged: 0 none, 1 a column's edge, 2 a row's foot }
+    FTblTable, FTblRow: pd_block_id;
+    FTblEdge, FTblPage: Integer;   { which of FTblEdges, on which page }
+    FTblEdges: TParadeSpArray;     { the table's column edges across, on the page }
+    FTblRowTop: pd_sp;             { the dragged row's top on the page }
+    FTblTo: Integer;               { where the border is now: X for a column, Y for a row }
+    FTblSpan: TRect;               { the table's extent in the control, for the guide }
     FSnapGrid: Double;             { and to a grid this many points apart (0: none) }
     FShapeOld, FShapeNew: array[0..3] of Double;   { its box before, and as the drag has it (drawing units) }
     FFrameKey: string;             { the text box the caret is in, as last looked up: story and revision }
@@ -293,7 +303,18 @@ type
     procedure ResizeColumns(Table: pd_block_id; At, Count: Integer);
     function ChildCount(Block: pd_block_id): Integer;
     procedure MoveCellContent(From, Into: pd_block_id);
-    function SelectedCells: TParadeBlockArray;
+    { the table cells laid out on a page, their boxes }
+    function PageCells(Page: Integer): TParadeCellBoxes;
+    function PageAtY(Y: Integer): Integer;
+    function TableOfCell(Cell: pd_block_id): pd_block_id;
+    function GridCount(Table: pd_block_id): Integer;
+    { a table's border under a point of the control: a column's edge (Kind 1, Edge of Edges) or a row's foot (2) }
+    function TableEdgeAt(X, Y: Integer; out Kind: Integer; out Table, Row: pd_block_id; out Edge, Page: Integer;
+      out Edges: TParadeSpArray; out RowTop: pd_sp; out Span: TRect): Boolean;
+    procedure ApplyTableDrag;
+    function CellRange(Cell: pd_block_id): pd_range;
+    { what the selection covers: its range, or each selected cell's text }
+    function SelRanges: TParadeRanges;
     function PlainText(Block: pd_block_id): string;
     function StyleNameOf(Block: pd_block_id): string;
     function TocStyle(Level: Integer; Room: pd_sp): pd_style_id;
@@ -774,6 +795,10 @@ type
     { ---- the Table tab: the table the caret is in ---- }
     { the cell, row and table around a position; False when it is not in a table }
     function CellAt(const P: pd_pos; out Cell, Row, Table: pd_block_id): Boolean;
+    { the cells between the selection's ends (a rectangle in the grid), or the caret's }
+    function SelectedCells: TParadeBlockArray;
+    { the selection runs from one cell to another of the same table: the rectangle of cells is what is selected }
+    function CellSelection: Boolean;
     function InTable: Boolean;
     procedure TableInsertRow(Below: Boolean);
     procedure TableInsertColumn(Right: Boolean);
@@ -3138,12 +3163,21 @@ begin
 end;
 
 procedure TParadeEdit.ApplyCharProps(const Props: pd_char_props);
+var
+  Rs: TParadeRanges;
+  I: Integer;
 begin
   if FReadOnly or (Props.mask = 0) then
     Exit;
   if HasSelection then
   begin
-    pd_doc_set_char_props(FDoc, PdRange(SelStart, SelEnd), Props);
+    Rs := SelRanges;
+    if Length(Rs) > 1 then
+      pd_doc_begin_group(FDoc, 'Format');
+    for I := 0 to High(Rs) do
+      pd_doc_set_char_props(FDoc, Rs[I], Props);
+    if Length(Rs) > 1 then
+      pd_doc_end_group(FDoc);
     FPending.mask := 0;
     Changed;
   end
@@ -3257,12 +3291,18 @@ end;
 procedure TParadeEdit.SetTextColor(RGB: Integer);
 var
   P: pd_char_props;
+  Rs: TParadeRanges;
+  I: Integer;
 begin
   if RGB < 0 then
   begin   { back to the style's colour }
     if HasSelection and not FReadOnly then
     begin
-      pd_doc_clear_char_props(FDoc, PdRange(SelStart, SelEnd), PD_CP_COLOR);
+      Rs := SelRanges;
+      pd_doc_begin_group(FDoc, 'Format');
+      for I := 0 to High(Rs) do
+        pd_doc_clear_char_props(FDoc, Rs[I], PD_CP_COLOR);
+      pd_doc_end_group(FDoc);
       Changed;
     end;
     Exit;
@@ -3285,11 +3325,18 @@ begin
 end;
 
 procedure TParadeEdit.ClearFormatting;
+var
+  Rs: TParadeRanges;
+  I: Integer;
 begin
   FPending.mask := 0;
   if FReadOnly or not HasSelection then
     Exit;
-  pd_doc_clear_char_props(FDoc, PdRange(SelStart, SelEnd), $FFFFFFFF and not UInt32(PD_CP_REVISION));
+  Rs := SelRanges;
+  pd_doc_begin_group(FDoc, 'Clear formatting');
+  for I := 0 to High(Rs) do
+    pd_doc_clear_char_props(FDoc, Rs[I], $FFFFFFFF and not UInt32(PD_CP_REVISION));
+  pd_doc_end_group(FDoc);
   Changed;
 end;
 
@@ -5167,6 +5214,264 @@ begin
       end;
       Inc(G, CellSpan(pd_doc_child(FDoc, Row, K)));
     end;
+  end;
+end;
+
+function TParadeEdit.PageCells(Page: Integer): TParadeCellBoxes;
+var
+  N: Int32;
+begin
+  Result := nil;
+  if (pd_layout_page_cells(FLayout, Page, nil, 0, N) <> PD_OK) or (N <= 0) then
+    Exit;
+  SetLength(Result, N);
+  if pd_layout_page_cells(FLayout, Page, @Result[0], N, N) <> PD_OK then
+    Result := nil;
+end;
+
+function TParadeEdit.PageAtY(Y: Integer): Integer;
+var
+  Page: Integer;
+  Info: pd_page_info;
+begin
+  for Page := 0 to PageCount - 1 do
+  begin
+    pd_layout_page_info(FLayout, Page, Info);
+    if (Y < PageTop(Page) + Round(Info.height * PxPerSp) + FPageGap div 2) or (Page = PageCount - 1) then
+      Exit(Page);
+  end;
+  Result := -1;
+end;
+
+function TParadeEdit.TableOfCell(Cell: pd_block_id): pd_block_id;
+var
+  Info: pd_block_info;
+begin
+  Result := 0;
+  if (pd_doc_block_info(FDoc, Cell, Info) = PD_OK) and (pd_doc_block_info(FDoc, Info.parent, Info) = PD_OK) then
+    Result := Info.parent;
+end;
+
+function TParadeEdit.GridCount(Table: pd_block_id): Integer;
+var
+  Ti, Ri: pd_block_info;
+  Rp: pd_row_props;
+  R, K, N: Integer;
+  Row: pd_block_id;
+begin
+  Result := 0;
+  if pd_doc_block_info(FDoc, Table, Ti) <> PD_OK then
+    Exit;
+  for R := 0 to Ti.child_count - 1 do
+  begin
+    Row := pd_doc_child(FDoc, Table, R);
+    if (pd_doc_block_info(FDoc, Row, Ri) <> PD_OK) or (pd_doc_row_props(FDoc, Row, Rp) <> PD_OK) then
+      Continue;
+    N := Rp.grid_before + Rp.grid_after;
+    for K := 0 to Ri.child_count - 1 do
+      Inc(N, CellSpan(pd_doc_child(FDoc, Row, K)));
+    Result := Max(Result, N);
+  end;
+end;
+
+function TParadeEdit.TableEdgeAt(X, Y: Integer; out Kind: Integer; out Table, Row: pd_block_id; out Edge,
+  Page: Integer; out Edges: TParadeSpArray; out RowTop: pd_sp; out Span: TRect): Boolean;
+var
+  B: TParadeCellBoxes;
+  SX, SY, Tol, E, Best: pd_sp;
+  I, J, K, Hit: Integer;
+  X0, Y0, X1, Y1: pd_sp;
+  Info: pd_block_info;
+
+  procedure AddEdge(V: pd_sp);
+  var
+    Q, R: Integer;
+  begin
+    for Q := 0 to High(Edges) do
+      if Abs(Edges[Q] - V) <= PD_SP_PER_PT div 4 then
+        Exit;
+    R := Length(Edges);
+    SetLength(Edges, R + 1);
+    while (R > 0) and (Edges[R - 1] > V) do
+    begin
+      Edges[R] := Edges[R - 1];
+      Dec(R);
+    end;
+    Edges[R] := V;
+  end;
+
+begin
+  Result := False;
+  Kind := 0; Table := 0; Row := 0; Edge := -1; Edges := nil; RowTop := 0;
+  Span := Rect(0, 0, 0, 0);
+  Page := PageAtY(Y);
+  if Page < 0 then
+    Exit;
+  B := PageCells(Page);
+  if Length(B) = 0 then
+    Exit;
+  SX := Round((X - PageLeft(Page)) / PxPerSp);
+  SY := Round((Y - PageTop(Page)) / PxPerSp);
+  Tol := Round(3 / PxPerSp);
+  Hit := -1;
+  for I := 0 to High(B) do     { a column's edge first: the right edge of a cell (the left of the table's first is its
+                                 indent, not a column's) }
+    with B[I] do
+      if (Abs(SX - (x + w)) <= Tol) and (SY >= y) and (SY <= y + h) then
+      begin
+        Hit := I;
+        Kind := 1;
+        Break;
+      end;
+  if Hit < 0 then
+    for I := 0 to High(B) do
+      with B[I] do
+        if (Abs(SY - (y + h)) <= Tol) and (SX >= x) and (SX <= x + w) then
+        begin
+          Hit := I;
+          Kind := 2;
+          Break;
+        end;
+  if Hit < 0 then
+    Exit;
+  Table := TableOfCell(B[Hit].cell);
+  if (Table = 0) or (pd_doc_block_info(FDoc, B[Hit].cell, Info) <> PD_OK) then
+    Exit;
+  Row := Info.parent;
+  RowTop := B[Hit].y;
+  X0 := High(pd_sp); Y0 := High(pd_sp); X1 := Low(pd_sp); Y1 := Low(pd_sp);
+  for J := 0 to High(B) do
+    if TableOfCell(B[J].cell) = Table then
+    begin
+      AddEdge(B[J].x);
+      AddEdge(B[J].x + B[J].w);
+      X0 := Min(X0, B[J].x); Y0 := Min(Y0, B[J].y);
+      X1 := Max(X1, B[J].x + B[J].w); Y1 := Max(Y1, B[J].y + B[J].h);
+    end;
+  Span := Rect(PageLeft(Page) + Round(X0 * PxPerSp), PageTop(Page) + Round(Y0 * PxPerSp),
+    PageLeft(Page) + Round(X1 * PxPerSp), PageTop(Page) + Round(Y1 * PxPerSp));
+  if Kind = 1 then
+  begin
+    E := B[Hit].x + B[Hit].w;
+    Best := High(pd_sp);
+    for K := 0 to High(Edges) do
+      if Abs(Edges[K] - E) < Best then
+      begin
+        Best := Abs(Edges[K] - E);
+        Edge := K;
+      end;
+    if Edge < 1 then
+      Exit;
+  end;
+  Result := True;
+end;
+
+procedure TParadeEdit.ApplyTableDrag;
+var
+  Tp: pd_table_props;
+  Rp: pd_row_props;
+  Cp: pd_cell_props;
+  Ri: pd_block_info;
+  N, I: Integer;
+  D, Lo, Hi, Sum, NewH: pd_sp;
+begin
+  if FReadOnly then
+    Exit;
+  if FTblDrag = 1 then
+  begin   { a column's edge: the column before it wider or narrower, the one after it the other way (the table's
+            right edge: the last column alone, the table with it) }
+    N := Length(FTblEdges) - 1;
+    if (N < 1) or (N > PD_TABLE_MAX_COLS) or (N <> GridCount(FTblTable)) or
+       (pd_doc_table_props(FDoc, FTblTable, Tp) <> PD_OK) then
+      Exit;
+    D := Round((FTblTo - PageLeft(FTblPage)) / PxPerSp) - FTblEdges[FTblEdge];
+    Lo := FTblEdges[FTblEdge - 1] + PD_SP_PER_PT * 12 - FTblEdges[FTblEdge];
+    if FTblEdge < N then
+      Hi := FTblEdges[FTblEdge + 1] - PD_SP_PER_PT * 12 - FTblEdges[FTblEdge]
+    else
+      Hi := High(pd_sp) div 4;
+    D := Max(Lo, Min(Hi, D));
+    if D = 0 then
+      Exit;
+    Tp.ncols := N;
+    Sum := 0;
+    for I := 0 to N - 1 do
+    begin
+      Tp.col_width[I] := FTblEdges[I + 1] - FTblEdges[I];
+      if I = FTblEdge - 1 then
+        Inc(Tp.col_width[I], D)
+      else if I = FTblEdge then
+        Dec(Tp.col_width[I], D);
+      Inc(Sum, Tp.col_width[I]);
+    end;
+    Tp.width := Sum;
+    Tp.width_pct := 0;
+    pd_doc_begin_group(FDoc, 'Column width');
+    pd_doc_set_table_props(FDoc, FTblTable, Tp);
+    pd_doc_end_group(FDoc);
+    Changed;
+  end
+  else if FTblDrag = 2 then
+  begin   { a row's foot: the row at least that tall (exactly, if it was exact) }
+    NewH := Max(PD_SP_PER_PT * 6, Round((FTblTo - PageTop(FTblPage)) / PxPerSp) - FTblRowTop);
+    if (pd_doc_row_props(FDoc, FTblRow, Rp) <> PD_OK) or (pd_doc_block_info(FDoc, FTblRow, Ri) <> PD_OK) then
+      Exit;
+    pd_doc_begin_group(FDoc, 'Row height');
+    if Rp.height_exact <> 0 then
+    begin
+      Rp.height := NewH;
+      pd_doc_set_row_props(FDoc, FTblRow, Rp);
+    end
+    else
+      for I := 0 to Ri.child_count - 1 do
+        if pd_doc_cell_props(FDoc, pd_doc_child(FDoc, FTblRow, I), Cp) = PD_OK then
+        begin
+          Cp.min_height := NewH;
+          pd_doc_set_cell_props(FDoc, pd_doc_child(FDoc, FTblRow, I), Cp);
+        end;
+    pd_doc_end_group(FDoc);
+    Changed;
+  end;
+end;
+
+function TParadeEdit.CellSelection: Boolean;
+var
+  C1, R1, T1, C2, R2, T2: pd_block_id;
+begin
+  Result := HasSelection and CellAt(AnchorPos, C1, R1, T1) and CellAt(CaretPos, C2, R2, T2) and (T1 = T2) and
+    (C1 <> C2);
+end;
+
+function TParadeEdit.CellRange(Cell: pd_block_id): pd_range;
+var
+  A, B: pd_block_id;
+  Info: pd_block_info;
+begin
+  A := Cell;
+  while (pd_doc_block_info(FDoc, A, Info) = PD_OK) and (Info.kind <> PD_BLOCK_PARAGRAPH) and (Info.child_count > 0) do
+    A := pd_doc_child(FDoc, A, 0);
+  B := Cell;
+  while (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.kind <> PD_BLOCK_PARAGRAPH) and (Info.child_count > 0) do
+    B := pd_doc_child(FDoc, B, Info.child_count - 1);
+  Result := PdRange(PdPos(A, 0), PdPos(B, Length(ParaText(B))));
+end;
+
+function TParadeEdit.SelRanges: TParadeRanges;
+var
+  Cells: TParadeBlockArray;
+  I: Integer;
+begin
+  if CellSelection then
+  begin
+    Cells := SelectedCells;
+    SetLength(Result, Length(Cells));
+    for I := 0 to High(Cells) do
+      Result[I] := CellRange(Cells[I]);
+  end
+  else
+  begin
+    SetLength(Result, 1);
+    Result[0] := PdRange(SelStart, SelEnd);
   end;
 end;
 
@@ -13103,7 +13408,7 @@ end;
 procedure TParadeEdit.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   P: pd_pos;
-  I, Page: Integer;
+  I, Page, TK: Integer;
   Info: pd_page_info;
 begin
   inherited MouseDown(Button, Shift, X, Y);
@@ -13121,6 +13426,15 @@ begin
     FShapeDrag := 16;
     FShapeFrom := Point(X, Y);
     FBandTo := FShapeFrom;
+    Exit;
+  end;
+  if (Button = mbLeft) and (Shift * [ssShift, ssCtrl, ssDouble, ssTriple] = []) and not FShapeOn and
+     (FDrawKind = '') and TableEdgeAt(X, Y, TK, FTblTable, FTblRow, FTblEdge, FTblPage, FTblEdges, FTblRowTop,
+     FTblSpan) then
+  begin   { a table's border: dragged to size its column or row }
+    FTblDrag := TK;
+    FTblTo := IfThen(TK = 1, X, Y);
+    FDragging := False;
     Exit;
   end;
   if (Button = mbLeft) and (ssTriple in Shift) and not FShapeOn and PointToPos(X, Y, P) then
@@ -13177,8 +13491,48 @@ var
   Pg: Int32;
   PX, PY, W, H, JW, JH: Double;
   Edge: Boolean;
+  TK, TE, TPg: Integer;
+  TT, TR: pd_block_id;
+  TEs: TParadeSpArray;
+  TTop: pd_sp;
+  TSpan: TRect;
+
+  { dragging from a cell of a table: the position in the cell the mouse is over, though the nearest text is
+    another's (an empty cell, below a short one's text) }
+  function InCellUnder(MX, MY: Integer; const At: pd_pos): pd_pos;
+  var
+    C1, R1, T1, C2, R2, T2: pd_block_id;
+    B: TParadeCellBoxes;
+    Pg2, I: Integer;
+    SX, SY: pd_sp;
+  begin
+    Result := At;
+    if not CellAt(AnchorPos, C1, R1, T1) then
+      Exit;
+    Pg2 := PageAtY(MY);
+    if Pg2 < 0 then
+      Exit;
+    B := PageCells(Pg2);
+    SX := Round((MX - PageLeft(Pg2)) / PxPerSp);
+    SY := Round((MY - PageTop(Pg2)) / PxPerSp);
+    for I := High(B) downto 0 do     { the innermost: a nested table's cells are placed after their cell }
+      with B[I] do
+        if (SX >= x) and (SX < x + w) and (SY >= y) and (SY < y + h) then
+        begin
+          if (TableOfCell(cell) = T1) and not (CellAt(At, C2, R2, T2) and (C2 = cell)) then
+            Result := CellRange(cell).start;
+          Exit;
+        end;
+  end;
+
 begin
   inherited MouseMove(Shift, X, Y);
+  if FTblDrag > 0 then
+  begin   { a table's border: its guide follows }
+    FTblTo := IfThen(FTblDrag = 1, X, Y);
+    Invalidate;
+    Exit;
+  end;
   if FShapeDrag >= 0 then
   begin
     ShapeDragMove(X, Y, Shift);
@@ -13201,6 +13555,9 @@ begin
       Want := crSizeAll
     else if not FDragging and OnPageCorner(X, Y) then
       Want := crSizeNWSE
+    else if not FDragging and not FShapeOn and
+      TableEdgeAt(X, Y, TK, TT, TR, TE, TPg, TEs, TTop, TSpan) then
+      Want := IfThen(TK = 1, crHSplit, crVSplit)
     else if not FDragging and FShapeOn then
       case ShapeHandleAt(X, Y, Sid) of
         0, 4: Want := crSizeNWSE;
@@ -13215,6 +13572,7 @@ begin
   end;
   if FDragging and PointToPos(X, Y, P) then
   begin
+    P := InCellUnder(X, Y, P);
     pd_doc_marker_set(FDoc, FCaret, P);
     Invalidate;
   end;
@@ -13236,6 +13594,14 @@ var
 begin
   inherited MouseUp(Button, Shift, X, Y);
   FDragging := False;
+  if FTblDrag > 0 then
+  begin
+    FTblTo := IfThen(FTblDrag = 1, X, Y);
+    ApplyTableDrag;
+    FTblDrag := 0;
+    Invalidate;
+    Exit;
+  end;
   if FShapeDrag >= 0 then
   begin
     D := FShapeDrag;
@@ -13495,7 +13861,6 @@ var
   VTop, VBot, PY0, PY1: Double;
   Keep: Boolean;
   J: Integer;
-  Over: Boolean;
 
   { a range behind the text: one band per line, the line's full height, from
     the first character in it to the last -- the spaces between them too --
@@ -13507,8 +13872,7 @@ var
     NB := 0;
     SetLength(Bands, 0);
     for I := 0 to N - 1 do
-      if ((Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE)) and
-         ((not Over and (Items[I].region in [0, 4])) or (Over and (Items[I].region in [3, 5]))) then
+      if ((Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE)) and (Items[I].region in [0, 3, 4, 5]) then
       begin
         { the band of this line: the last one, or a new one }
         K := NB - 1;
@@ -13562,18 +13926,31 @@ var
   end;
 
   { comments' ranges, lightly in their authors' colours; the selection over them; the others' selections }
-  procedure HighlightAll(AOver: Boolean);
+  procedure HighlightAll;
   var
     C: Int32;
     Cm: pd_comment;
+    Cells: TParadeBlockArray;
+    Boxes: TParadeCellBoxes;
+    Q, R: Integer;
   begin
-    Over := AOver;
     if pd_doc_comment_count(FDoc) > 0 then
       for C := 1 to pd_doc_comment_count(FDoc) do
         if (pd_doc_comment_get(FDoc, C, Cm) = PD_OK) and (Cm.parent = 0) and (Cm.resolved = 0) and
            (Compare(Cm.range.start, Cm.range.finish) < 0) then
           Highlight(Cm.range.start, Cm.range.finish, pd_doc_author_color(FDoc, Cm.author) and $FFFFFF, 40, False);
-    if HasSelection then
+    if HasSelection and CellSelection then
+    begin   { from cell to cell: the rectangle of cells, each whole }
+      Cells := SelectedCells;
+      Boxes := PageCells(Page);
+      for Q := 0 to High(Boxes) do
+        for R := 0 to High(Cells) do
+          if Boxes[Q].cell = Cells[R] then
+            with Boxes[Q] do
+              FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale),
+                OY + Round((y + h) * PxScale), $003390FF, 80);
+    end
+    else if HasSelection then
       Highlight(SelStart, SelEnd, $003390FF, 80, True);
     for C := 0 to High(FRemote) do   { the others' selections, faintly in their colours }
       with FRemote[C] do
@@ -13638,7 +14015,6 @@ begin
   end;
   N := K;
 
-  HighlightAll(False);   { the body's text: behind it }
   for I := 0 to N - 1 do
     with Items[I] do
       case kind of
@@ -13732,8 +14108,8 @@ begin
           end;
       end;
 
-  HighlightAll(True);    { a text box's, a float's: over it, since its shape's fill (a slide's ground) is drawn over
-                           anything put behind }
+  HighlightAll;   { over what is drawn, see-through: a shaded cell's, a text box's or a slide's ground would cover
+                    it from behind }
   if FShowMarks and not FCanvasPage then     { (the canvas page's paragraph under the canvas: not shown) }
     PaintMarks(Img, Page, OX, OY, PxScale);
 
@@ -14060,6 +14436,17 @@ begin
   PaintTextBoxFrame;
   PaintShapeSelection;
   PaintPageCorner;
+  if FTblDrag > 0 then
+  begin   { the dragged border's guide, across or down the table }
+    Canvas.Pen.Color := clBlack;
+    Canvas.Pen.Style := psDot;
+    Canvas.Pen.Width := 1;
+    if FTblDrag = 1 then
+      Canvas.Line(FTblTo, FTblSpan.Top - 8, FTblTo, FTblSpan.Bottom + 8)
+    else
+      Canvas.Line(FTblSpan.Left - 8, FTblTo, FTblSpan.Right + 8, FTblTo);
+    Canvas.Pen.Style := psSolid;
+  end;
 end;
 
 procedure TParadeEdit.RenderPage(Page: Integer; Bmp: TBitmap; Scale: Double);
@@ -14441,7 +14828,7 @@ var
   G: PGlyphBmp;
   PX: Double;
 begin
-  Pad := Round(5 * FZoom);
+  Pad := Round(3 * FZoom);
   Result := 2 * Pad;
   FB := ResolveFont(Self, 'sans-serif', 400, 0);
   FH := ResolveFont(Self, 'sans-serif', 700, 0);
@@ -14450,9 +14837,9 @@ begin
   if FH = nil then
     FH := FB;
   try
-    pd_style_init(SH, FH, PD_SP_PER_PT * 8);
+    pd_style_init(SH, FH, PD_SP_PER_PT * 7);
     SH.color := Col;
-    pd_style_init(SB, FB, PD_SP_PER_PT * 8);
+    pd_style_init(SB, FB, PD_SP_PER_PT * 7);
     SB.color := $00303030;
     for K := 0 to High(Segs) do
       if Segs[K] <> '' then
@@ -14597,7 +14984,7 @@ begin
         Y := NextY;
       H := BalloonHeight(Segs, BW, PxScale, nil, 0, 0, Col);
       { the balloon: rounded, framed in the colour, white tinted with it inside }
-      Rad := 6 * FZoom;
+      Rad := 4 * FZoom;
       FillPolygonImg(Img, RoundRectPts(BX, Y, BX + BW, Y + H, Rad), Col);
       FillPolygonImg(Img, RoundRectPts(BX + 1.2, Y + 1.2, BX + BW - 1.2, Y + H - 1.2, Rad - 1.2), $00FFFFFF);
       FillPolygonImg(Img, RoundRectPts(BX + 1.2, Y + 1.2, BX + BW - 1.2, Y + H - 1.2, Rad - 1.2), Col or (28 shl 24));
@@ -14626,13 +15013,13 @@ begin
           SetLength(FBalloons, Length(FBalloons) + 1);
           FBalloons[High(FBalloons)] := FBalloons[High(FBalloons) - 1 - J];
           FBalloons[High(FBalloons)].R.Top := Y + BalloonHeight(Copy(Segs, 0, Reps[J].Segs), BW, PxScale, nil, 0, 0,
-            Col) - Round(5 * FZoom);
+            Col) - Round(3 * FZoom);
           if J > 0 then
             FBalloons[High(FBalloons) - 1].R.Bottom := FBalloons[High(FBalloons)].R.Top;
           FBalloons[High(FBalloons)].Id := Reps[J].Id;
         end;
       SetLength(Reps, 0);
-      NextY := Y + H + Round(6 * FZoom);
+      NextY := Y + H + Round(4 * FZoom);
     end;
 end;
 

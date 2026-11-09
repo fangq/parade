@@ -1377,6 +1377,174 @@ begin
   end;
 end;
 
+{ a table by the mouse: a drag from cell to cell selects the rectangle of cells (painted and formatted so); a
+  selection in a shaded cell shows; a border shows the sizing cursor, and dragged sizes its column or row }
+procedure TestTableMouse(E: TParadeEdit);
+const
+  K = PD_SP_PER_PT;
+var
+  Tbl: pd_block_id;
+  Cells: array[0..2, 0..2] of pd_block_id;
+  Boxes: array[0..2, 0..2] of pd_cell_box;
+  Buf: array[0..63] of pd_cell_box;
+  N: Int32;
+  R, C, I: Integer;
+  A, B: TPoint;
+  Img: TLazIntfImage;
+  P: pd_char_props;
+  Sel, Plain, Before, After: TFPColor;
+  W0, W1, H0: pd_sp;
+  CPage: Int32;
+  CX, Base, Asc, Desc: pd_sp;
+
+  function Pt(const Bx: pd_cell_box; FX, FY: Double): TPoint;
+  begin
+    Result := E.PageToClient(0, (Bx.x + Bx.w * FX) / K, (Bx.y + Bx.h * FY) / K);
+  end;
+
+  procedure ReadBoxes;
+  var
+    Q, R2, C2: Integer;
+  begin
+    pd_layout_page_cells(E.Layout, 0, @Buf[0], 64, N);
+    for R2 := 0 to 2 do
+      for C2 := 0 to 2 do
+        for Q := 0 to N - 1 do
+          if Buf[Q].cell = Cells[R2, C2] then
+            Boxes[R2, C2] := Buf[Q];
+  end;
+
+  function WeightIn(Cell: pd_block_id): Integer;
+  var
+    Rs: array[0..7] of pd_run;
+    NR: Int32;
+    Pr: pd_char_props;
+    Para: pd_block_id;
+  begin
+    Result := -1;
+    Para := pd_doc_child(E.Doc, Cell, 0);
+    if (pd_doc_para_runs(E.Doc, Para, @Rs[0], 8, NR) = PD_OK) and (NR > 0) and
+       (pd_doc_format_resolve(E.Doc, Para, Rs[0].format, Pr) = PD_OK) then
+      Result := Pr.weight;
+  end;
+
+  function Differs(const X, Y: TFPColor): Boolean;
+  begin
+    Result := (Abs(X.red - Y.red) > $0800) or (Abs(X.green - Y.green) > $0800) or (Abs(X.blue - Y.blue) > $0800);
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertTable(3, 3);
+  E.CellAt(E.CaretPos, Cells[0, 0], Tbl, Tbl);
+  for R := 0 to 2 do
+    for C := 0 to 2 do
+    begin
+      Cells[R, C] := pd_doc_child(E.Doc, pd_doc_child(E.Doc, Tbl, R), C);
+      pd_doc_insert_text(E.Doc, PdPos(pd_doc_child(E.Doc, Cells[R, C], 0), 0), PAnsiChar('w' + IntToStr(R) + IntToStr(C)),
+        3, PD_FORMAT_INHERIT, nil);
+    end;
+  E.ExternalChange;
+  E.Repaint;
+  Application.ProcessMessages;
+  ReadBoxes;
+  Check((N = 9) and (Boxes[0, 0].w > 0) and (Boxes[0, 0].x + Boxes[0, 0].w = Boxes[0, 1].x),
+    Format('the cells'' boxes from the layout (%d)', [N]));
+  { from the middle cell of the first row to the first of the second: the four cells of that rectangle, not the
+    text between in reading order (which would take the first row's last cell and not its first) }
+  A := Pt(Boxes[0, 1], 0.5, 0.5);
+  B := Pt(Boxes[1, 0], 0.5, 0.5);
+  TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+  TParadeWheel(E).MouseMove([ssLeft], (A.X + B.X) div 2, (A.Y + B.Y) div 2);
+  TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y);
+  Check(Length(E.SelectedCells) = 4, Format('a drag from cell to cell: the rectangle''s four cells (%d)',
+    [Length(E.SelectedCells)]));
+  Img := TLazIntfImage.Create(0, 0);
+  try
+    E.RenderView(Img);
+    A := Pt(Boxes[0, 0], 0.9, 0.85);
+    B := Pt(Boxes[0, 2], 0.9, 0.85);
+    Sel := Img.Colors[A.X, A.Y];
+    Plain := Img.Colors[B.X, B.Y];
+    Check(Differs(Sel, Plain) and (Sel.blue > Sel.red),
+      Format('painted: the first cell, though its text is before the anchor, and not the row''s last (%.4x %.4x)',
+      [Sel.red, Plain.red]));
+    FillChar(P, SizeOf(P), 0);
+    P.mask := PD_CP_WEIGHT;
+    P.weight := 700;
+    E.ApplyCharProps(P);
+    Check((WeightIn(Cells[0, 0]) = 700) and
+      (WeightIn(Cells[1, 1]) = 700) and
+      (WeightIn(Cells[0, 2]) <> 700),
+      'bold on it: those four cells'' text, not the row''s last cell');
+    E.Undo;
+    Check(WeightIn(Cells[0, 0]) <> 700, 'undone in one step');
+
+    { a shaded cell: a word double-clicked in it shows selected }
+    A := Pt(Boxes[2, 2], 0.5, 0.5);
+    E.ClickAt(0, (Boxes[2, 2].x + Boxes[2, 2].w div 2) / K, (Boxes[2, 2].y + Boxes[2, 2].h div 2) / K, False);
+    E.SetCellShading($C0C0C0);
+    E.Repaint;
+    Application.ProcessMessages;
+    pd_layout_caret(E.Layout, PdPos(pd_doc_child(E.Doc, Cells[2, 2], 0), 1), CPage, CX, Base, Asc, Desc);
+    A := E.PageToClient(0, CX / K, (Base - Asc / 2) / K);
+    E.RenderView(Img);
+    B := E.PageToClient(0, CX / K + 0.5, (Base - Asc * 0.9) / K);
+    Before := Img.Colors[B.X, B.Y];
+    TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], A.X, A.Y);
+    TParadeWheel(E).MouseDown(mbLeft, [ssDouble], A.X, A.Y);
+    TParadeWheel(E).DblClick;
+    TParadeWheel(E).MouseUp(mbLeft, [], A.X, A.Y);
+    E.RenderView(Img);
+    After := Img.Colors[B.X, B.Y];
+    Check((E.SelectedText = 'w22') and Differs(Before, After),
+      Format('a word in a shaded cell double-clicked: selected (%s) and painted so (%.4x, was %.4x)',
+      [E.SelectedText, After.blue, Before.blue]));
+  finally
+    Img.Free;
+  end;
+
+  { the sizing cursor over a column's edge and a row's foot }
+  E.ClickAt(0, (Boxes[0, 0].x + 4 * K) / K, (Boxes[0, 0].y + 4 * K) / K, False);
+  ReadBoxes;
+  A := E.PageToClient(0, (Boxes[0, 0].x + Boxes[0, 0].w) / K, (Boxes[0, 0].y + Boxes[0, 0].h div 2) / K);
+  TParadeWheel(E).MouseMove([], A.X, A.Y);
+  Check(E.Cursor = crHSplit, 'over a column''s edge: the cursor to size it');
+  B := E.PageToClient(0, (Boxes[0, 0].x + Boxes[0, 0].w div 2) / K, (Boxes[0, 0].y + Boxes[0, 0].h) / K);
+  TParadeWheel(E).MouseMove([], B.X, B.Y);
+  Check(E.Cursor = crVSplit, 'over a row''s foot: the cursor to size it');
+  TParadeWheel(E).MouseMove([], Pt(Boxes[1, 1], 0.5, 0.5).X, Pt(Boxes[1, 1], 0.5, 0.5).Y);
+  Check((E.Cursor <> crHSplit) and (E.Cursor <> crVSplit), 'inside a cell: not');
+  { the edge dragged 40 px right: the first column wider, the second narrower by as much, the table as wide }
+  W0 := Boxes[0, 0].w;
+  W1 := Boxes[0, 1].w;
+  TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+  TParadeWheel(E).MouseMove([ssLeft], A.X + 20, A.Y);
+  TParadeWheel(E).MouseMove([ssLeft], A.X + 40, A.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], A.X + 40, A.Y);
+  ReadBoxes;
+  I := Round(40 / (E.Zoom * 96 / 72 / K));
+  Check((Abs(Boxes[0, 0].w - W0 - I) <= 2 * K) and (Abs(W1 - Boxes[0, 1].w - I) <= 2 * K) and
+    (E.SelectedText = ''),
+    Format('a column''s edge dragged: %.1f pt wider, the next %.1f pt narrower (40 px = %.1f pt)',
+    [(Boxes[0, 0].w - W0) / K, (W1 - Boxes[0, 1].w) / K, I / K]));
+  E.Undo;
+  ReadBoxes;
+  Check(Abs(Boxes[0, 0].w - W0) <= K, 'undone');
+  { the first row's foot dragged 30 px down: that row taller }
+  H0 := Boxes[0, 0].h;
+  B := E.PageToClient(0, (Boxes[0, 0].x + Boxes[0, 0].w div 2) / K, (Boxes[0, 0].y + Boxes[0, 0].h) / K);
+  TParadeWheel(E).MouseDown(mbLeft, [], B.X, B.Y);
+  TParadeWheel(E).MouseMove([ssLeft], B.X, B.Y + 30);
+  TParadeWheel(E).MouseUp(mbLeft, [], B.X, B.Y + 30);
+  ReadBoxes;
+  Check(Abs(Boxes[0, 0].h - H0 - Round(30 / (E.Zoom * 96 / 72 / K))) <= 2 * K,
+    Format('a row''s foot dragged: %.1f pt taller', [(Boxes[0, 0].h - H0) / K]));
+  E.Undo;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -2302,6 +2470,8 @@ begin
   Check(E.PageCount = 2, 'two pages back from .docx');
   Check(E.HeaderFooterText(True) = 'Page {page} of {pages}', 'the footer back from .docx: ' + E.HeaderFooterText(True));
 
+  Step('table by the mouse');
+  TestTableMouse(E);
   { 8e. the Table tab }
   Step('table');
   E.NewDocument;
