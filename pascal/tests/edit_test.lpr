@@ -1545,6 +1545,16 @@ begin
     { the second slide's transition kept as it came while it is not changed }
     Check(B.Load(E.SlideTiming(1)) and (B.Trans.Kind = 'push') and (B.Trans.Dir = 'r') and (B.Trans.Speed = 'slow') and
       (Pos(B.Trans.Raw, B.Save) > 0), 'the second slide''s push read, and kept as it was');
+    { one of PowerPoint 2010's, read with nothing else around it: changed, written for those who know it, a fade for
+      those who do not }
+    Check(B.Load('<pd:tail xmlns:pd="urn:parade" xmlns:p="pns" xmlns:p14="p14ns"><p:transition spd="fast">' +
+      '<p14:vortex dir="r"/></p:transition></pd:tail>') and (B.Trans.Kind = 'p14:vortex') and (B.Trans.Dir = 'r'),
+      'a vortex read');
+    B.SetTransition(B.Trans.Kind, B.Trans.Dir, 'slow', True, -1);
+    Check(Pos('<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice ' +
+      'Requires="p14"><p:transition spd="slow"><p14:vortex dir="r"/></p:transition></mc:Choice><mc:Fallback>' +
+      '<p:transition spd="slow"><p:fade/></p:transition></mc:Fallback></mc:AlternateContent>', B.Save) > 0,
+      'slowed: in a choice, with a fade for the rest: ' + B.Save);
     { on the slide: set, a change of the document; the show plays it; exported and read again }
     Sh := E.SlideAnimShapes(0);
     N4 := -1;

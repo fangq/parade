@@ -911,6 +911,12 @@ begin
       Tr := Tr + '/>';
     end;
     Tr := Tr + '</p:transition>';
+    if Pos(':', Trans.Kind) > 0 then   { PowerPoint 2010's (p14:vortex): for those who know it, a fade for others }
+      Tr := '<mc:AlternateContent' + IfThen(Pos('xmlns:mc=', FNs) = 0,
+        ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"') + '><mc:Choice Requires="' +
+        Copy(Trans.Kind, 1, Pos(':', Trans.Kind) - 1) + '">' + Tr + '</mc:Choice><mc:Fallback>' +
+        StringReplace(Tr, '<' + Trans.Kind + Trans.KindAttrs + IfThen(Trans.Dir <> '', ' dir="' + Trans.Dir + '"') +
+        '/>', '<p:fade/>', []) + '</mc:Fallback></mc:AlternateContent>';
   end;
   { the timing }
   Tm := '';
