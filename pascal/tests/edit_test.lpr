@@ -7,7 +7,7 @@ program edit_test;
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, Math, ctypes, parade, paradeedit,
-  paradefonts, paradeshow;
+  paradefonts, paradeshow, paradeanim;
 
 type
   { the wheel, as the mouse turns it }
@@ -1449,6 +1449,156 @@ begin
   if (pd_doc_block_info(E.Doc, B3, Info) = PD_OK) and (Info.list = 0) then Inc(I);
   Check(I = 2, 'out of the list');
   Check(not E.CurrentListLevels(Got, Lvl), 'no list at the caret');
+end;
+
+{ the animations edited (paradeanim): tests/data/anim.pptx's read as a list of effects, written again as the same
+  timing, changed, set on the slide, played and exported as changed }
+procedure TestAnimEdit(E: TParadeEdit);
+var
+  A, B: TParadeAnim;
+  T0, T1: TShowTiming;
+  S: TParadeShow;
+  Xml, Saved, Tmp: string;
+  Sh: TParadeAnimShapes;
+  I, K, N4, N5, N8: Integer;
+  Same: Boolean;
+begin
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/anim.pptx');
+  A := TParadeAnim.Create;
+  B := TParadeAnim.Create;
+  T0 := TShowTiming.Create;
+  T1 := TShowTiming.Create;
+  try
+    Xml := E.SlideTiming(0);
+    Check(A.Load(Xml) and (Length(A.Effects) = 5), 'the first slide''s timing read as five effects: ' +
+      IntToStr(Length(A.Effects)));
+    if Length(A.Effects) <> 5 then
+      Exit;
+    Check((A.Effects[0].Start = asClick) and (A.Effects[1].Start = asClick) and (A.Effects[2].Start = asClick) and
+      (A.Effects[3].Start = asWith) and (A.Effects[4].Start = asClick), 'on clicks, the oval''s with the box''s');
+    Check((A.Effects[0].Cls = 'entr') and (A.Effects[0].Preset = 1) and (A.Effects[0].ParaSt = 0) and
+      (A.Effects[1].Preset = 10) and (A.Effects[1].ParaSt = 1) and (A.Effects[2].Preset = 2) and
+      (A.Effects[2].Shape = 4) and (A.Effects[2].ParaSt = -1) and (A.Effects[3].Cls = 'exit') and
+      (A.Effects[3].Shape = 5) and (A.Effects[4].Cls = 'emph') and (A.Effects[4].Shape = 8),
+      'each its kind, its shape, its paragraph');
+    Check((A.Effects[1].Dur = 500) and (A.ClickOf(3) = 3) and (A.ClickOf(4) = 4), 'their durations, their clicks');
+    Check(AnimPresetName('entr', 2) + '/' + AnimPresetName('exit', 10) + '/' + AnimPresetName('emph', 8) =
+      'Fly In/Fade/Spin', 'their names');
+    { written again: the same to the show }
+    Saved := A.Save;
+    T0.Parse(Xml);
+    T1.Parse(Saved);
+    Same := (T0.StepCount = T1.StepCount) and (Length(T0.Targets) = Length(T1.Targets));
+    for I := 0 to Min(T0.StepCount, T1.StepCount) - 1 do
+    begin
+      Same := Same and (Length(T0.Steps[I].Effects) = Length(T1.Steps[I].Effects)) and
+        SameValue(T0.Steps[I].Len, T1.Steps[I].Len);
+      for K := 0 to Min(Length(T0.Steps[I].Effects), Length(T1.Steps[I].Effects)) - 1 do
+        Same := Same and (Length(T0.Steps[I].Effects[K].Behs) = Length(T1.Steps[I].Effects[K].Behs)) and
+          SameValue(T0.Steps[I].Effects[K].Start, T1.Steps[I].Effects[K].Start);
+    end;
+    Check(Same and (Saved <> Xml), 'written again (not as it came): the same steps, effects and times');
+    Check(B.Load(Saved) and (B.Save = Saved), 'and that read and written again, the same');
+    { changed: the fade twice as long; a fade-in after the spin; the second click's moved first }
+    A.Effects[1].Dur := 1000;
+    I := A.Add(8, 'entr', 10, 0, asAfter, 700);
+    Check(I = 5, 'one added at the end');
+    Saved := A.Save;     { its time nodes numbered 1, 2, 3 ... in order, as PowerPoint wants them }
+    K := 0;
+    Same := True;
+    I := Pos('<p:cTn id="', Saved);
+    while I > 0 do
+    begin
+      Inc(K);
+      Same := Same and (Copy(Saved, I + 11, Length(IntToStr(K)) + 1) = IntToStr(K) + '"');
+      I := PosEx('<p:cTn id="', Saved, I + 1);
+    end;
+    Check(Same and (K > 20), 'its time nodes numbered in order: ' + IntToStr(K));
+    I := 5;
+    T1.Parse(A.Save);
+    Check((T1.StepCount = 5) and SameValue(T1.Steps[2].Len, 1000), 'the fade a second long: ' +
+      FloatToStr(T1.Steps[2].Len));
+    Check((Length(T1.Steps[4].Effects) = 2) and SameValue(T1.Steps[4].Effects[1].Start, T1.Steps[4].Effects[0].Len) and
+      SameValue(T1.Steps[4].Len, T1.Steps[4].Effects[0].Len + 700), 'the new one after the spin, in its click');
+    A.Move(1, 0);
+    A.Effects[1].Start := asWith;
+    T1.Parse(A.Save);
+    Check((T1.StepCount = 4) and (Length(T1.Steps[1].Effects) = 2), 'moved first, the other with it: one click fewer');
+    A.Delete(5);
+    A.SetPreset(4, 'entr', 22, 4);
+    T1.Parse(A.Save);
+    Check((Length(T1.Steps[3].Effects) = 1) and (T1.Steps[3].Effects[0].Cls = 'entr') and
+      (Pos('filter="wipe(up)"', A.Save) > 0) and (Pos('presetID="22" presetClass="entr" presetSubtype="4"', A.Save) > 0),
+      'the spin made a wipe up; the one after it deleted');
+    { the first effect not on a click: on the slide's start }
+    A.Effects[0].Start := asAfter;
+    T1.Parse(A.Save);
+    Check((Length(T1.Steps[0].Effects) = 2) and (T1.StepCount = 3), 'the first two by themselves, as the slide begins');
+    { the transition, set }
+    A.SetTransition('wipe', 'd', 'slow', False, 2000);
+    T1.Parse(A.Save);
+    Check(T1.Trans.Present and (T1.Trans.Kind = 'wipe') and (T1.Trans.Dir = 'd') and not T1.Trans.AdvClick and
+      (T1.Trans.AdvTime = 2000), 'a transition: wiped down, slowly, on by itself after two seconds');
+    A.Effects := nil;
+    A.SetTransition('', '', 'fast', True, -1);
+    Check(A.Save = '', 'nothing left, none');
+    { the second slide's transition kept as it came while it is not changed }
+    Check(B.Load(E.SlideTiming(1)) and (B.Trans.Kind = 'push') and (B.Trans.Dir = 'r') and (B.Trans.Speed = 'slow') and
+      (Pos(B.Trans.Raw, B.Save) > 0), 'the second slide''s push read, and kept as it was');
+    { on the slide: set, a change of the document; the show plays it; exported and read again }
+    Sh := E.SlideAnimShapes(0);
+    N4 := -1;
+    N5 := -1;
+    N8 := -1;
+    for I := 0 to High(Sh) do
+      if Sh[I].Id = 4 then
+        N4 := I
+      else if Sh[I].Id = 5 then
+        N5 := I
+      else if Sh[I].Id = 8 then
+        N8 := I;
+    Check((N4 >= 0) and (N5 >= 0) and (N8 >= 0) and (Sh[N4].Name <> ''), 'the slide''s shapes, by id and name: ' +
+      IfThen(N4 >= 0, Sh[N4].Name, '?'));
+    E.GoToSlide(0);
+    Check(E.SelectAnimShape(8) and (E.SelectedAnimShape = 8), 'a shape selected by its id, and read back');
+    A.Load(E.SlideTiming(0));
+    A.Delete(4);
+    A.Add(8, 'exit', 53, 16, asClick, 600);
+    E.Modified := False;
+    Check(E.SetSlideTiming(0, A.Save) and E.Modified and
+      (ParadeTailInner(E.SlideTiming(0)) = ParadeTailInner(A.Save)) and (ParadeTailInner(A.Save) <> ''), 'set on the slide: read back, '
+      + 'the document changed');
+    Check(not E.SetSlideTiming(0, A.Save), 'set the same again: no change');
+    S := TParadeShow.Create(E, 400, 300, 0);
+    try
+      T1 := S.TimingOf(0);
+      Check((T1 <> nil) and (T1.StepCount = 5) and (T1.Steps[4].Effects[0].Cls = 'exit'), 'the show plays it as set');
+      T1 := nil;
+    finally
+      S.Free;
+    end;
+    Check(E.NewSlide(0, True) and (E.SlideCount = 3) and (ParadeTailInner(E.SlideTiming(1)) = ParadeTailInner(E.SlideTiming(0))),
+      'a slide duplicated: its animations with it');
+    Tmp := GetTempDir + 'edit_anim_' + IntToStr(GetProcessID) + '.pptx';
+    E.SaveToFile(Tmp);
+    E.LoadFromFile(Tmp);
+    DeleteFile(Tmp);
+    B.Load(E.SlideTiming(0));
+    Check((E.SlideCount = 3) and (Length(B.Effects) = 5) and (B.Effects[4].Cls = 'exit') and (B.Effects[4].Preset = 53)
+      and (Length(E.SlideAnimShapes(0)) > 0), 'exported and read again: the zoom out there');
+    Same := False;
+    for I := 0 to High(E.SlideAnimShapes(0)) do
+      Same := Same or (E.SlideAnimShapes(0)[I].Id = B.Effects[4].Shape);
+    Check(Same, 'naming a shape the slide has, by its id there');
+    B.Load(E.SlideTiming(1));
+    Check(Length(B.Effects) = 5, 'the duplicate''s too');
+  finally
+    A.Free;
+    B.Free;
+    T0.Free;
+    if T1 <> nil then
+      T1.Free;
+  end;
 end;
 
 { the slide show (paradeshow): tests/data/anim.pptx's timing read, and what it plays seen in the frames -- the time
@@ -3268,6 +3418,8 @@ begin
   TestFormatProps(E);
   Step('slide show');
   TestSlideShow(E);
+  Step('animations edited');
+  TestAnimEdit(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

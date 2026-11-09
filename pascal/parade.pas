@@ -1162,6 +1162,9 @@ function pd_docx_drawing_rebuild(doc: Ppd_doc; drawing: pd_res_id; xml: PAnsiCha
 { a slide's kept transition and animations (p:transition, p:timing) in one <pd:tail> element; buf nil: len only }
 function pd_pptx_slide_timing(doc: Ppd_doc; section: pd_block_id; buf: PAnsiChar; cap: Int32; out len: Int32): pd_status;
   cdecl; PDEXT;
+{ set it (the same form; nil/0 or an empty <pd:tail> leaves none): a new resource, not an undo step }
+function pd_pptx_set_slide_timing(doc: Ppd_doc; section: pd_block_id; xml: PAnsiChar; len: Int32): pd_status;
+  cdecl; PDEXT;
 
 { helpers }
 function PT(v: Double): pd_sp; inline;

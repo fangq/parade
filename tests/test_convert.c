@@ -6270,6 +6270,40 @@ static void test_pptx_write_kept_masters(void) {
             CHECK(tb && strstr(tb, "xmlns:p=\"") && strstr(tb, "xmlns:a=\""));     /* its prefixes declared */
             free(tb);
         }
+        {   /* set since: read back as set, written in its place by the shapes' new ids; set empty, none */
+            static const char nt[] = "<?xml version=\"1.0\"?>\n<pd:tail xmlns:pd=\"urn:parade\" xmlns:p=\"pns\" "
+                "xmlns:p14=\"p14ns\"><p:transition spd=\"fast\"><p:wipe dir=\"u\"/></p:transition><p:timing><p:tnLst>"
+                "<p:par><p:cTn id=\"1\" nodeType=\"tmRoot\"><p:childTnLst><p:set><p:cBhvr><p:cTn id=\"2\"/><p:tgtEl>"
+                "<p:spTgt spid=\"40\"/></p:tgtEl></p:cBhvr></p:set></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>"
+                "</pd:tail>\n";
+            pd_block_id s1s = pd_doc_child(d, pd_doc_root(d), 1), s0s = pd_doc_child(d, pd_doc_root(d), 0);
+            int32_t tl = 0;
+            char tb[2048], *x2, *x1;
+            pd_doc* again;
+            buf_t b2;
+            size_t n2 = 0;
+
+            CHECK(pd_pptx_set_slide_timing(d, s1s, nt, (int32_t)strlen(nt)) == PD_OK);
+            CHECK(pd_pptx_set_slide_timing(d, s1s, "<p:timing/>", 11) == PD_ERR_ARG);    /* not in one: refused */
+            CHECK(pd_pptx_slide_timing(d, s1s, tb, (int32_t)sizeof(tb) - 1, &tl) == PD_OK);
+            tb[tl > 0 && tl < (int32_t)sizeof(tb) ? tl : 0] = '\0';
+            CHECK(strstr(tb, "<p:wipe dir=\"u\"/>") && strstr(tb, "xmlns:p14=\"p14ns\"") &&
+                  !strstr(tb, "<p:bldLst>") && strstr(tb, "</p:timing></pd:tail>"));
+            CHECK(pd_pptx_set_slide_timing(d, s0s, "<pd:tail xmlns:pd=\"urn:parade\"/>", 33) == PD_OK);
+            CHECK(pd_pptx_slide_timing(d, s0s, NULL, 0, &tl) == PD_ERR_ARG);
+            again = pptx_again(d, &b2);
+            x1 = b2.p ? (char*)pd_zip_get((const unsigned char*)b2.p, b2.n, "ppt/slides/slide1.xml", &n2) : NULL;
+            x2 = b2.p ? (char*)pd_zip_get((const unsigned char*)b2.p, b2.n, "ppt/slides/slide2.xml", &n2) : NULL;
+            CHECK(x1 && !strstr(x1, "<p:transition") && !strstr(x1, "<p:timing"));
+            CHECK(x2 && strstr(x2, "<p:transition spd=\"fast\"><p:wipe dir=\"u\"/></p:transition><p:timing>") &&
+                  !strstr(x2, "<p:spTgt spid=\"40\"/>") && strstr(x2, "xmlns:p14=\"p14ns\"") && !strstr(x2, "<p:bldLst>"));
+            CHECK(again && pd_pptx_slide_timing(again, pd_doc_child(again, pd_doc_root(again), 1), tb,
+                                                (int32_t)sizeof(tb) - 1, &tl) == PD_OK && tl > 0);
+            free(x1);
+            free(x2);
+            free(b2.p);
+            pd_doc_free(again);
+        }
         {
             pd_doc* plain = NULL;
             int32_t tl = 0;

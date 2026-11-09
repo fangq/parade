@@ -88,6 +88,13 @@ PD_API pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const c
  * length; with buf NULL (or cap too small: PD_ERR_RANGE) only that. PD_ERR_ARG when the slide has none.
  */
 PD_API pd_status pd_pptx_slide_timing(const pd_doc* doc, pd_block_id section, char* buf, int32_t cap, int32_t* len);
+/**
+ * Set a slide's transition and animations: XML in pd_pptx_slide_timing's form (a <pd:tail> declaring the
+ * namespaces it uses, holding p:transition and/or p:timing); NULL/0, or an empty <pd:tail>, leaves it none. Read
+ * back by pd_pptx_slide_timing and written by the PowerPoint export; spid="..." names shapes by the ids the slide
+ * was read with (pd_draw.shape). A new resource of the document each time (the latest counts), not an undo step.
+ */
+PD_API pd_status pd_pptx_set_slide_timing(pd_doc* doc, pd_block_id section, const char* xml, int32_t len);
 /** Office's preset shapes (DrawingML prstGeom): how many, and the name of each (NULL past the last) */
 PD_API int pd_preset_count(void);
 PD_API const char* pd_preset_name(int i);

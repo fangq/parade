@@ -86,6 +86,12 @@ type
     Story: pd_block_id;      { a text box's: the story of its text; 0 for a shape without }
   end;
   TParadeShapeBoxes = array of TParadeShapeBox;
+  { a shape of a slide its animations can name: its DrawingML id (pd_draw.shape) and name }
+  TParadeAnimShape = record
+    Id: Int32;
+    Name: string;
+  end;
+  TParadeAnimShapes = array of TParadeAnimShape;
   TIntegerArray = array of Integer;
   { a point of a drawing (its units) }
   TParadeDrawPoint = record
@@ -670,6 +676,16 @@ type
     procedure RenderSlide(Img: TLazIntfImage; Page: Integer; PxScale: Double; Paper: TColor;
       Filter: TParadeItemFilter = nil);
     function SetSlideHidden(Index: Integer; Hidden: Boolean): Boolean;
+    { a slide's transition and animations: pd_pptx_slide_timing's <pd:tail> XML, '' none; set (the same form, ''
+      none) as a change of the document but not a step of undo }
+    function SlideTiming(Index: Integer): string;
+    function SetSlideTiming(Index: Integer; const Xml: string): Boolean;
+    { the shapes on a slide its animations can name (not the layout's or the master's), in their order }
+    function SlideAnimShapes(Index: Integer): TParadeAnimShapes;
+    { the selected shape of the slide being edited, or the text box the caret is in: its id, 0 none }
+    function SelectedAnimShape: Int32;
+    { the shape with that id on the slide being edited selected, as a click on it would; False if it is not there }
+    function SelectAnimShape(Id: Int32): Boolean;
     function CurrentSlide: Integer;
     function GoToSlide(Index: Integer): Boolean;
     { a slide's page at the top of the view, the selection as it is }
@@ -991,6 +1007,9 @@ type
 { B's masked properties over A's (and its mask bits added): what setting B on something that has A comes to }
 procedure MergeCharProps(var A: pd_char_props; const B: pd_char_props);
 procedure MergeParaProps(var A: pd_para_props; const B: pd_para_props);
+
+{ what a slide's <pd:tail> XML holds (its transition, timing ...), without the element around it; '' none }
+function ParadeTailInner(const Xml: string): string;
 
 implementation
 
@@ -9715,6 +9734,216 @@ begin
   end;
 end;
 
+function TParadeEdit.SlideTiming(Index: Integer): string;
+var
+  Sec: pd_block_id;
+  Len: Int32;
+  Buf: RawByteString;
+begin
+  Result := '';
+  Sec := SlideSection(Index);
+  Len := 0;
+  if (Sec = 0) or (pd_pptx_slide_timing(FDoc, Sec, nil, 0, Len) <> PD_OK) or (Len <= 0) then
+    Exit;
+  SetLength(Buf, Len);
+  if pd_pptx_slide_timing(FDoc, Sec, PAnsiChar(Buf), Len, Len) = PD_OK then
+    Result := string(Buf);
+end;
+
+function ParadeTailInner(const Xml: string): string;
+var
+  P, Q: Integer;
+begin
+  Result := '';
+  P := Pos('<pd:tail', Xml);
+  if P = 0 then
+    Exit;
+  Q := PosEx('>', Xml, P);
+  if (Q = 0) or (Xml[Q - 1] = '/') then
+    Exit;
+  P := RPos('</pd:tail>', Xml);
+  if P > Q then
+    Result := Trim(Copy(Xml, Q + 1, P - Q - 1));
+end;
+
+function TParadeEdit.SetSlideTiming(Index: Integer; const Xml: string): Boolean;
+var
+  Sec: pd_block_id;
+  S: RawByteString;
+begin
+  Sec := SlideSection(Index);
+  S := RawByteString(Xml);
+  Result := not FReadOnly and (Sec <> 0) and (ParadeTailInner(SlideTiming(Index)) <> ParadeTailInner(Xml)) and
+    (pd_pptx_set_slide_timing(FDoc, Sec, PAnsiChar(S), Length(S)) = PD_OK);
+  if Result then
+  begin
+    FModified := True;
+    if Assigned(FOnChange) then
+      FOnChange(Self);
+  end;
+end;
+
+{ the name of the shape whose id is Id in a drawing's kept XML (its cNvPr), '' none }
+function AnimShapeName(const Xml: string; Id: Int32): string;
+var
+  P, E, A: Integer;
+  Tag, Want: string;
+begin
+  Result := '';
+  Want := 'id="' + IntToStr(Id) + '"';
+  P := Pos('cNvPr ', Xml);
+  while P > 0 do
+  begin
+    E := PosEx('>', Xml, P);
+    if E = 0 then
+      Exit;
+    Tag := Copy(Xml, P, E - P);
+    if Pos(' ' + Want, Tag) > 0 then
+    begin
+      A := Pos(' name="', Tag);
+      if A > 0 then
+      begin
+        Result := Copy(Tag, A + 7, MaxInt);
+        Result := Copy(Result, 1, Pos('"', Result) - 1);
+        Result := StringReplace(StringReplace(StringReplace(Result, '&quot;', '"', [rfReplaceAll]), '&lt;', '<',
+          [rfReplaceAll]), '&gt;', '>', [rfReplaceAll]);
+        Result := StringReplace(Result, '&amp;', '&', [rfReplaceAll]);
+      end;
+      Exit;
+    end;
+    P := PosEx('cNvPr ', Xml, E);
+  end;
+end;
+
+function TParadeEdit.SlideAnimShapes(Index: Integer): TParadeAnimShapes;
+var
+  P: pd_pos;
+  J: TJSONObject;
+  Items: TJSONArray;
+  Xml: string;
+  I, K, N: Integer;
+  Id: Int64;
+  Seen: Boolean;
+begin
+  Result := nil;
+  if (Index < 0) or (Index >= SlideCount) or not SectionCanvas(FDoc, SlideSection(Index), P) then
+    Exit;
+  J := DrawingJson(FDoc, P);
+  if J = nil then
+    Exit;
+  try
+    Xml := J.Get('xml', '');
+    Items := J.Find('items') as TJSONArray;
+    N := 0;
+    if Items <> nil then
+      for I := 0 to Items.Count - 1 do
+        if Items[I] is TJSONObject then
+        begin
+          Id := TJSONObject(Items[I]).Get('nv', Int64(0));
+          if (Id <= 0) or (Id >= 1000000) then     { the layout's and the master's from 1000000 }
+            Continue;
+          Seen := False;
+          for K := 0 to N - 1 do
+            Seen := Seen or (Result[K].Id = Id);
+          if Seen then
+            Continue;
+          SetLength(Result, N + 1);
+          Result[N].Id := Int32(Id);
+          Result[N].Name := AnimShapeName(Xml, Int32(Id));
+          Inc(N);
+        end;
+  finally
+    J.Free;
+  end;
+end;
+
+{ the id ("nv") of the item of the drawing at P drawn for shape Sid, or (Sid < 0) for the text box of Story; 0 none }
+function DrawingAnimId(Doc: Ppd_doc; const P: pd_pos; Sid: Integer; Story: pd_block_id): Int32;
+var
+  J: TJSONObject;
+  Items: TJSONArray;
+  It: TJSONObject;
+  I: Integer;
+  Id, Last: Int64;
+begin
+  Result := 0;
+  J := DrawingJson(Doc, P);
+  if J = nil then
+    Exit;
+  try
+    Items := J.Find('items') as TJSONArray;
+    Last := 0;
+    if Items <> nil then
+      for I := 0 to Items.Count - 1 do
+        if Items[I] is TJSONObject then
+        begin
+          It := TJSONObject(Items[I]);
+          Id := It.Get('nv', Int64(0));
+          if It.Find('sid') <> nil then
+            Last := Id;
+          if ((Sid >= 0) and (It.Find('sid') <> nil) and (It.Get('sid', -1) = Sid)) or
+             ((Sid < 0) and (Story <> 0) and (It.Get('story', Int64(0)) = Story)) then
+          begin
+            if Id = 0 then
+              Id := Last;
+            if (Id > 0) and (Id < 1000000) then
+              Result := Int32(Id);
+            Exit;
+          end;
+        end;
+  finally
+    J.Free;
+  end;
+end;
+
+function TParadeEdit.SelectedAnimShape: Int32;
+var
+  At, P: pd_pos;
+  Sid: Integer;
+  B: pd_block_id;
+  Info: pd_block_info;
+begin
+  Result := 0;
+  if not FCanvasPage then
+    Exit;
+  if SelectedShape(At, Sid) then
+  begin
+    if Sid >= 0 then
+      Result := DrawingAnimId(FDoc, At, Sid, 0);
+    Exit;
+  end;
+  B := CaretPos.block;  { the caret in a text box: its story's }
+  while (B <> 0) and (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.kind <> PD_BLOCK_STORY) do
+    B := Info.parent;
+  if (B <> 0) and (pd_doc_block_info(FDoc, B, Info) <> PD_OK) then
+    B := 0;
+  if (B <> 0) and SectionCanvas(FDoc, SlideSection(CurrentSlide), P) then
+    Result := DrawingAnimId(FDoc, P, -1, B);
+end;
+
+function TParadeEdit.SelectAnimShape(Id: Int32): Boolean;
+var
+  P: pd_pos;
+  Boxes: TParadeShapeBoxes;
+  I: Integer;
+begin
+  Result := False;
+  if (Id <= 0) or not SectionCanvas(FDoc, SlideSection(CurrentSlide), P) then
+    Exit;
+  Boxes := DrawingShapes(P);
+  for I := 0 to High(Boxes) do
+    if DrawingAnimId(FDoc, P, Boxes[I].Sid, 0) = Id then
+    begin
+      SetLength(FShapeMore, 0);
+      FShapeOn := True;
+      FShapeAt := P;
+      FShapeSid := Boxes[I].Sid;
+      SetCaret(P, False);
+      Invalidate;
+      Exit(True);
+    end;
+end;
+
 procedure TParadeEdit.ShowSlide(Index: Integer);
 var
   P: pd_pos;
@@ -9783,6 +10012,8 @@ begin
     pd_doc_end_group(FDoc);
   end;
   Changed;
+  if Result and Copy and (SlideTiming(Max(0, After)) <> '') then   { its transition and animations, its shapes' ids the same }
+    SetSlideTiming(After + 1, SlideTiming(Max(0, After)));
   if Result then
     GoToSlide(After + 1);
   if SectionCanvas(FDoc, Sec, P) then

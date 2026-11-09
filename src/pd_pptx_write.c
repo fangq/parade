@@ -208,6 +208,7 @@ static void put_fill(pd_buf* o, uint32_t c) {
 /* ---- what the reader kept of the package ---- */
 
 #define PD_PPTX_KEEP_MIME "application/vnd.parade.pptx-kept-parts"
+#define PD_PPTX_TAIL_MIME "application/vnd.parade.pptx-tail"   /* a slide's tail set since: "<section>\n" and as kept */
 
 typedef struct {
     const char* name, *ctype, *src, *extra;
@@ -375,11 +376,12 @@ pd_status pd_pptx_slide_timing(const pd_doc* d, pd_block_id section, char* buf, 
         }
     }
 
+    P->d = d;
     memset(&ns, 0, sizeof(ns));
     memset(&out, 0, sizeof(out));
     snprintf(key, sizeof(key), "%u", (unsigned)section);
 
-    if (P->kdata && kept_tail(P, key, &ns, &xml, &xn) && xn > 0) {
+    if (kept_tail(P, key, &ns, &xml, &xn) && xn > 0) {
         pb_printf(&out, "<pd:tail xmlns:pd=\"urn:parade\" %s", NS);
         pb_put(&out, ns.p ? ns.p : "", ns.n);
         pb_puts(&out, ">");
@@ -404,13 +406,165 @@ pd_status pd_pptx_slide_timing(const pd_doc* d, pd_block_id section, char* buf, 
     return st;
 }
 
+pd_status pd_pptx_set_slide_timing(pd_doc* d, pd_block_id section, const char* xml, int32_t len) {
+    pd_buf b;
+    pd_res_id r;
+    pd_status st = PD_OK;
+    const char* s = xml, *e = xml ? xml + (len > 0 ? len : 0) : NULL;
+
+    if (!d || !section || len < 0 || (!xml && len)) {
+        return PD_ERR_ARG;
+    }
+
+    memset(&b, 0, sizeof(b));
+    pb_printf(&b, "%u\n", (unsigned)section);
+
+    while (s && s < e && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) {
+        s++;
+    }
+
+    if (s && e - s >= 5 && !memcmp(s, "<?xml", 5)) {   /* (a declaration before it) */
+        const char* q = s;
+
+        while (q + 1 < e && !(q[0] == '?' && q[1] == '>')) {
+            q++;
+        }
+
+        for (s = q + 2; s < e && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n'); s++) {
+        }
+    }
+
+    if (s && s < e) {   /* <pd:tail ns...>xml</pd:tail>: its namespaces on a line, then what it holds */
+        const char* a, *in, *end = NULL;
+        int self = 0;
+
+        if (e - s < 9 || memcmp(s, "<pd:tail", 8) || !(s[8] == ' ' || s[8] == '>' || s[8] == '/' || s[8] == '\n' ||
+                                                       s[8] == '\t' || s[8] == '\r')) {
+            pb_free(&b);
+            return PD_ERR_ARG;
+        }
+
+        for (a = s + 8; a < e && *a != '>';) {  /* each name="value" */
+            const char* n0, *n1, *v;
+            char q;
+
+            while (a < e && (*a == ' ' || *a == '\t' || *a == '\r' || *a == '\n')) {
+                a++;
+            }
+
+            if (a < e && *a == '/') {
+                self = 1;
+                a++;
+                continue;
+            }
+
+            if (a >= e || *a == '>') {
+                break;
+            }
+
+            for (n0 = a; a < e && *a != '=' && *a != '>' && *a != ' '; a++) {
+            }
+
+            n1 = a;
+
+            if (a + 1 >= e || *a != '=' || (a[1] != '"' && a[1] != '\'')) {
+                pb_free(&b);
+                return PD_ERR_ARG;
+            }
+
+            q = a[1];
+
+            for (v = a + 2; v < e && *v != q; v++) {
+            }
+
+            if (v >= e) {
+                pb_free(&b);
+                return PD_ERR_ARG;
+            }
+
+            if (!(n1 - n0 == 8 && !memcmp(n0, "xmlns:pd", 8))) {
+                pb_puts(&b, " ");
+                pb_put(&b, n0, (size_t)(v + 1 - n0));
+            }
+
+            a = v + 1;
+        }
+
+        if (a >= e) {
+            pb_free(&b);
+            return PD_ERR_ARG;
+        }
+
+        in = a + 1;
+
+        if (!self) {
+            const char* q;
+
+            for (q = e - 10; q >= in; q--) {
+                if (!memcmp(q, "</pd:tail>", 10)) {
+                    end = q;
+                    break;
+                }
+            }
+
+            if (!end) {
+                pb_free(&b);
+                return PD_ERR_ARG;
+            }
+
+            while (in < end && (*in == ' ' || *in == '\t' || *in == '\r' || *in == '\n')) {
+                in++;
+            }
+        }
+
+        if (!self && end > in) {
+            pb_puts(&b, "\n");
+            pb_put(&b, in, (size_t)(end - in));
+        } else {
+            b.n = 0;
+            pb_printf(&b, "%u\n", (unsigned)section);  /* nothing in it: none */
+        }
+    }
+
+    if (b.err) {
+        st = PD_ERR_NOMEM;
+    } else {
+        st = pd_doc_add_resource(d, PD_PPTX_TAIL_MIME, b.p, b.n, &r);
+    }
+
+    pb_free(&b);
+    return st;
+}
+
 /* a slide's kept tail (its transition and timing as read) by its section's key: the root's namespaces it needs
    (only those NS lacks) into ns, the XML into *xml and *xn; 0 when it has none */
 static int kept_tail(const pw* P, const char* key, pd_buf* ns, const char** xml, size_t* xn) {
-    size_t pos = 0;
-    pkept e;
+    size_t pos = 0, kl = strlen(key);
+    pkept e, set;
+    pd_res_id r;
+    const char* mime;
+    const void* rd;
+    size_t rl;
+    int have_set = 0;
 
-    while (kept_next(P, &pos, &e)) {
+    for (r = 1; P->d && pd_doc_resource(P->d, r, &mime, &rd, &rl) == PD_OK; r++) {   /* set since: the latest */
+        if (!strcmp(mime, PD_PPTX_TAIL_MIME) && rl > kl && !memcmp(rd, key, kl) && ((const char*)rd)[kl] == '\n') {
+            memset(&set, 0, sizeof(set));
+            set.src = "tail";
+            set.extra = key;
+            set.data = (const unsigned char*)rd + kl + 1;
+            set.len = rl - kl - 1;
+            have_set = 1;
+        }
+    }
+
+    while (have_set || kept_next(P, &pos, &e)) {
+        if (have_set) {
+            e = set;
+            have_set = 0;
+            pos = P->klen;      /* (nothing kept after it is looked at) */
+        }
+
         if (!strcmp(e.src, "tail") && !strcmp(e.extra, key)) {
             const char* p = (const char*)e.data, *nl = memchr(p, '\n', e.len), *q;
 
@@ -2396,15 +2550,21 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         layout[0] = '\0';
         pb_puts(&slide, DECL);
 
+        {   /* its transition and timing: kept as read, or set since */
+            char key[16];
+
+            snprintf(key, sizeof(key), "%u", (unsigned)sec);
+
+            if (!kept_tail(P, key, &tns, &txml, &txn)) {
+                txn = 0;
+            }
+        }
+
         if (P->kept) {  /* the layout it was on, and what it had of its own */
             char f[5][256], key[16];
 
             snprintf(key, sizeof(key), "%u", (unsigned)sec);
             f[4][0] = '\0';
-
-            if (!kept_tail(P, key, &tns, &txml, &txn)) {
-                txn = 0;
-            }
 
             if (kept_line(P, key, f, 5) >= 4 && f[0][0]) {
                 snprintf(layout, sizeof(layout), "%s", f[0]);
@@ -2426,7 +2586,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
 
             snprintf(prev_layout, sizeof(prev_layout), "%s", layout);
         } else {
-            pb_printf(&slide, "<p:sld %s%s>", NS, hidden_attr);
+            pb_printf(&slide, "<p:sld %s%s%s>", NS, tns.p ? tns.p : "", hidden_attr);
         }
 
         if (cv) {
