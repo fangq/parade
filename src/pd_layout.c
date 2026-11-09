@@ -859,6 +859,15 @@ static void border_band(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, p
     line_strokes(x, y, w, h, l, horiz, outer, stroke_rule, &c);
 }
 
+/* a table cell's box, kept with the page's rules (so a refill drops it with them) but never drawn: diag -1; for a
+   host's cell selection and its borders dragged (pd_layout_page_cells) */
+static void add_cellbox(pd_layout* L, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h, int32_t region,
+                        pd_block_id cell) {
+    if (add_rule(L, page, x, y, w, h, 0, region, cell) == 0) {
+        L->pages[page].rules[L->pages[page].nrules - 1].diag = -1;
+    }
+}
+
 /* the rules a page got from FROM on moved to AT, before those there (under what is drawn after them) */
 static void rules_to_front(pd_layout* L, int32_t page, int32_t from, int32_t at) {
     ppage* p = &L->pages[page];
@@ -3292,6 +3301,10 @@ static pd_sp place_table_box(pd_layout* L, const blk* t, pd_sp width, int32_t pa
 
             inner = inner < PD_PT(1) ? PD_PT(1) : inner;
 
+            if (!cell->st.cell.merge_up) {
+                add_cellbox(L, page, cx, ry, cw, rowh[r], region, cell->id);
+            }
+
             if (cell_fill(L->doc, cell)) {
                 add_rule(L, page, cx, ry, cw, rowh[r], cell_fill(L->doc, cell), region, cell->id);
             }
@@ -3465,6 +3478,10 @@ static void place_row(filler* F, const vitem* v, pd_sp x, pd_sp y) {
 
         ch = down > 1 && ch > 0 ? ch : v->h;
         inner = inner < PD_PT(1) ? PD_PT(1) : inner;
+
+        if (!cell->st.cell.merge_up) {
+            add_cellbox(F->L, F->page, cx, y, cw, v->part ? v->h : ch, 0, cell->id);
+        }
 
         if (v->part && !cell->st.cell.merge_up) {     /* a slice: the lines that start in it, from the top */
             if (cell_fill(F->L->doc, cell)) {
@@ -4909,6 +4926,10 @@ static pd_status paginate(pd_layout* L) {
             }
 
             for (i = 0; i < lp->nrules; i++) {
+                if (lp->rules[i].diag < 0) {
+                    continue;
+                }
+
                 notes |= lp->rules[i].region == 4;
                 bottom = lp->rules[i].region == 0 && lp->rules[i].y + lp->rules[i].h > bottom ?
                          lp->rules[i].y + lp->rules[i].h : bottom;
@@ -7620,8 +7641,8 @@ static void emit_rules(dlist_t* D, const ppage* pg, int32_t from, int32_t to, in
         const prule* r = &pg->rules[i];
         pd_draw a;
 
-        if ((only == 5 && r->region != 5) || (only == 0 && r->region == 5)) {
-            continue;
+        if ((only == 5 && r->region != 5) || (only == 0 && r->region == 5) || r->diag < 0) {
+            continue;   /* (diag -1: a cell's box, not drawn) */
         }
 
         if (r->diag) {
@@ -8527,6 +8548,43 @@ static int mark_cmp(const void* a, const void* b) {
     }
 
     return p->kind - q->kind;
+}
+
+pd_status pd_layout_page_cells(const pd_layout* L, int32_t page, pd_cell_box* buf, int32_t cap, int32_t* count) {
+    const ppage* pg;
+    int32_t i, n = 0;
+
+    if (!L || !count || cap < 0 || (cap > 0 && !buf)) {
+        return PD_ERR_ARG;
+    }
+
+    if (page < 0 || page >= L->npages) {
+        return PD_ERR_RANGE;
+    }
+
+    pg = &L->pages[page];
+
+    for (i = 0; i < pg->nrules; i++) {
+        const prule* r = &pg->rules[i];
+
+        if (r->diag >= 0) {
+            continue;
+        }
+
+        if (n < cap) {
+            buf[n].cell = r->block;
+            buf[n].region = r->region;
+            buf[n].x = r->x;
+            buf[n].y = r->y;
+            buf[n].w = r->w;
+            buf[n].h = r->h;
+        }
+
+        n++;
+    }
+
+    *count = n;
+    return PD_OK;
 }
 
 pd_status pd_layout_page_markup(const pd_layout* L, int32_t page, pd_markup_item* buf, int32_t cap, int32_t* count) {

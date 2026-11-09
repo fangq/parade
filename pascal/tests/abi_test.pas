@@ -38,6 +38,7 @@ var
   v_pd_draw: pd_draw;
   v_pd_path_style: pd_path_style;
   v_pd_markup_item: pd_markup_item;
+  v_pd_cell_box: pd_cell_box;
   v_pd_pdf_options: pd_pdf_options;
 begin
   WriteLn('pd_font_metrics ', SizeOf(pd_font_metrics));
@@ -526,6 +527,13 @@ begin
   WriteLn('pd_markup_item.top ', PtrUInt(@v_pd_markup_item.top) - PtrUInt(@v_pd_markup_item));
   WriteLn('pd_markup_item.bottom ', PtrUInt(@v_pd_markup_item.bottom) - PtrUInt(@v_pd_markup_item));
   WriteLn('pd_markup_item.color ', PtrUInt(@v_pd_markup_item.color) - PtrUInt(@v_pd_markup_item));
+  WriteLn('pd_cell_box ', SizeOf(pd_cell_box));
+  WriteLn('pd_cell_box.cell ', PtrUInt(@v_pd_cell_box.cell) - PtrUInt(@v_pd_cell_box));
+  WriteLn('pd_cell_box.region ', PtrUInt(@v_pd_cell_box.region) - PtrUInt(@v_pd_cell_box));
+  WriteLn('pd_cell_box.x ', PtrUInt(@v_pd_cell_box.x) - PtrUInt(@v_pd_cell_box));
+  WriteLn('pd_cell_box.y ', PtrUInt(@v_pd_cell_box.y) - PtrUInt(@v_pd_cell_box));
+  WriteLn('pd_cell_box.w ', PtrUInt(@v_pd_cell_box.w) - PtrUInt(@v_pd_cell_box));
+  WriteLn('pd_cell_box.h ', PtrUInt(@v_pd_cell_box.h) - PtrUInt(@v_pd_cell_box));
   WriteLn('pd_pdf_options ', SizeOf(pd_pdf_options));
   WriteLn('pd_pdf_options.compress ', PtrUInt(@v_pd_pdf_options.compress) - PtrUInt(@v_pd_pdf_options));
   WriteLn('pd_pdf_options.outlines ', PtrUInt(@v_pd_pdf_options.outlines) - PtrUInt(@v_pd_pdf_options));

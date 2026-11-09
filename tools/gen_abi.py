@@ -66,6 +66,7 @@ STRUCTS = {
                      "inner_blur inner_dx inner_dy glow_color glow_radius soft_edge refl_alpha0 refl_alpha1 refl_pos0 "
                      "refl_pos1 refl_blur refl_dist bevel_width bevel_light bevel_kind",
     "pd_markup_item": "kind id range x y top bottom color",
+    "pd_cell_box": "cell region x y w h",
     "pd_pdf_options": "compress outlines title author",
 }
 PASCAL_NAME = {"end": "finish", "label": "label_"}

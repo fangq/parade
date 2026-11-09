@@ -488,6 +488,13 @@ int main(void) {
     printf("pd_markup_item.top %zu\n", offsetof(pd_markup_item, top));
     printf("pd_markup_item.bottom %zu\n", offsetof(pd_markup_item, bottom));
     printf("pd_markup_item.color %zu\n", offsetof(pd_markup_item, color));
+    printf("pd_cell_box %zu\n", sizeof(pd_cell_box));
+    printf("pd_cell_box.cell %zu\n", offsetof(pd_cell_box, cell));
+    printf("pd_cell_box.region %zu\n", offsetof(pd_cell_box, region));
+    printf("pd_cell_box.x %zu\n", offsetof(pd_cell_box, x));
+    printf("pd_cell_box.y %zu\n", offsetof(pd_cell_box, y));
+    printf("pd_cell_box.w %zu\n", offsetof(pd_cell_box, w));
+    printf("pd_cell_box.h %zu\n", offsetof(pd_cell_box, h));
     printf("pd_pdf_options %zu\n", sizeof(pd_pdf_options));
     printf("pd_pdf_options.compress %zu\n", offsetof(pd_pdf_options, compress));
     printf("pd_pdf_options.outlines %zu\n", offsetof(pd_pdf_options, outlines));

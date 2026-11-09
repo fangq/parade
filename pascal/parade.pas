@@ -882,6 +882,13 @@ type
   end;
   Ppd_markup_item = ^pd_markup_item;
 
+  pd_cell_box = record
+    cell: pd_block_id;
+    region: Int32;
+    x, y, w, h: pd_sp;
+  end;
+  Ppd_cell_box = ^pd_cell_box;
+
   pd_pdf_options = record
     compress, outlines: Int32;
     title: array[0..255] of AnsiChar;
@@ -1103,6 +1110,8 @@ function pd_draw_render(items: Ppd_draw; n: Int32; x0, y0: pd_sp; scale: Int32; 
   stride: Int32): pd_status; cdecl; PDEXT;
 procedure pd_draw_bounds(item: Ppd_draw; out x0, y0, x1, y1: pd_sp); cdecl; PDEXT;
 function pd_layout_page_markup(layout: Ppd_layout; page: Int32; buf: Ppd_markup_item; cap: Int32;
+  out count: Int32): pd_status; cdecl; PDEXT;
+function pd_layout_page_cells(layout: Ppd_layout; page: Int32; buf: Ppd_cell_box; cap: Int32;
   out count: Int32): pd_status; cdecl; PDEXT;
 function pd_layout_hit_test(layout: Ppd_layout; page: Int32; x, y: pd_sp; out pos: pd_pos): pd_status; cdecl; PDEXT;
 function pd_layout_caret(layout: Ppd_layout; pos: pd_pos; out page: Int32; out x, baseline, ascent, descent: pd_sp): pd_status; cdecl; PDEXT;

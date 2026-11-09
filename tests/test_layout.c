@@ -2036,6 +2036,67 @@ static const char* short_text(int32_t r, int32_t c, char* buf) {
    vertical ones), a cell that takes its top rule away and one that draws
    a thick red bottom of its own; a row made taller than its text; the
    table indented and half the column wide. */
+/* the cells' boxes listed for a host: one per cell, tiling the grid, none of them drawn */
+static void test_cell_boxes(void) {
+    pd_block_id sec, t;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_cell_box cb[16];
+    pd_draw items[512];
+    int32_t n = 0, ni = 0, i, k, found = 0, drawn_box = 0;
+    pd_block_id want[4];
+    pd_cell_box got[4];
+
+    add_para(d, sec, "before");
+    t = add_table(d, sec, 2, 2, 0, cell_text);
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    CHECK(pd_layout_page_cells(L, 0, cb, 16, &n) == PD_OK && n == 4);
+    CHECK(pd_layout_page_cells(L, 0, NULL, 0, &k) == PD_OK && k == 4);
+
+    for (i = 0; i < 4; i++) {
+        want[i] = pd_doc_child(d, pd_doc_child(d, t, i / 2), i % 2);
+        memset(&got[i], 0, sizeof(got[i]));
+
+        for (k = 0; k < n; k++) {
+            if (cb[k].cell == want[i]) {
+                got[i] = cb[k];
+                found++;
+            }
+        }
+    }
+
+    CHECK(found == 4);
+    CHECK(got[0].w > 0 && got[0].h > 0 && got[0].x + got[0].w == got[1].x && got[0].y == got[1].y);
+    CHECK(got[0].y + got[0].h == got[2].y && got[2].x == got[0].x && got[3].x == got[1].x);
+
+    /* the caret in a cell is inside its box */
+    {
+        int32_t pg;
+        pd_sp x, y;
+
+        pd_layout_caret(L, at(cell_para(d, t, 1, 1), 0), &pg, &x, &y, NULL, NULL);
+        CHECK(x > got[3].x && x < got[3].x + got[3].w && y > got[3].y && y < got[3].y + got[3].h);
+    }
+
+    /* not drawn: no rule the size of a cell */
+    CHECK(pd_layout_page_items(L, 0, items, 512, &ni) == PD_OK);
+
+    for (i = 0; i < ni && i < 512; i++) {
+        for (k = 0; k < 4; k++) {   /* (a cell's own rules, its borders, have a colour) */
+            if ((items[i].kind == PD_DRAW_RULE || items[i].kind == PD_DRAW_PATH) && items[i].block == want[k] &&
+                    items[i].color == 0) {
+                drawn_box++;
+            }
+        }
+    }
+
+    CHECK(drawn_box == 0);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 static void test_table_edges(void) {
     pd_block_id sec, t, c10, c00;
     pd_doc* d = new_doc(&sec);
@@ -2379,6 +2440,7 @@ int main(void) {
     test_para_borders();
     printf("table edges\n");
     test_table_edges();
+    test_cell_boxes();
     printf("list label fonts\n");
     test_label_font();
     printf("line numbers\n");

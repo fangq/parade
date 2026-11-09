@@ -227,6 +227,21 @@ typedef struct {
 PD_API pd_status pd_layout_page_markup(const pd_layout* layout, int32_t page, pd_markup_item* buf, int32_t cap,
                                        int32_t* count);
 
+/** a table cell where it is on a page (a cell broken across pages: its part on each) */
+typedef struct {
+    pd_block_id cell;
+    int32_t region;             /**< as pd_draw's: 0 body, 3 float, 5 a text box in a drawing... */
+    pd_sp x, y, w, h;           /**< the cell's box, borders on its edges */
+} pd_cell_box;
+
+/**
+ * The table cells on a page, in the order they were placed; same size-query
+ * convention as pd_layout_page_items. A text box's tables are listed once
+ * the page's items have been (they are laid out with the drawing).
+ */
+PD_API pd_status pd_layout_page_cells(const pd_layout* layout, int32_t page, pd_cell_box* buf, int32_t cap,
+                                      int32_t* count);
+
 /** the document position nearest to a point on a page */
 PD_API pd_status pd_layout_hit_test(const pd_layout* layout, int32_t page, pd_sp x, pd_sp y, pd_pos* out);
 
