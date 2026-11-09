@@ -760,6 +760,8 @@ typedef struct {
     pd_block_id notes;          /**< a STORY: the speaker's notes of the slide the section is (0 = none); not laid out
                                      with the pages */
     int32_t hidden;             /**< 1: a hidden slide -- laid out and edited as the others, left out of a PDF */
+    pd_res_id timing;           /**< a slide's transition and animations as set since it was read
+                                     (pd_pptx_set_slide_timing): a resource; 0 = those it was read with */
 } pd_section_props;
 
 /* where notes are numbered from the start again */

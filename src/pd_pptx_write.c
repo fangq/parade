@@ -208,7 +208,7 @@ static void put_fill(pd_buf* o, uint32_t c) {
 /* ---- what the reader kept of the package ---- */
 
 #define PD_PPTX_KEEP_MIME "application/vnd.parade.pptx-kept-parts"
-#define PD_PPTX_TAIL_MIME "application/vnd.parade.pptx-tail"   /* a slide's tail set since: "<section>\n" and as kept */
+#define PD_PPTX_TAIL_MIME "application/vnd.parade.pptx-tail"   /* a slide's tail set since (as kept; empty: none) */
 
 typedef struct {
     const char* name, *ctype, *src, *extra;
@@ -408,7 +408,8 @@ pd_status pd_pptx_slide_timing(const pd_doc* d, pd_block_id section, char* buf, 
 
 pd_status pd_pptx_set_slide_timing(pd_doc* d, pd_block_id section, const char* xml, int32_t len) {
     pd_buf b;
-    pd_res_id r;
+    pd_res_id r = 0;
+    pd_section_props sp;
     pd_status st = PD_OK;
     const char* s = xml, *e = xml ? xml + (len > 0 ? len : 0) : NULL;
 
@@ -416,8 +417,11 @@ pd_status pd_pptx_set_slide_timing(pd_doc* d, pd_block_id section, const char* x
         return PD_ERR_ARG;
     }
 
+    if (pd_doc_section_props(d, section, &sp) != PD_OK) {
+        return PD_ERR_ARG;
+    }
+
     memset(&b, 0, sizeof(b));
-    pb_printf(&b, "%u\n", (unsigned)section);
 
     while (s && s < e && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) {
         s++;
@@ -521,15 +525,19 @@ pd_status pd_pptx_set_slide_timing(pd_doc* d, pd_block_id section, const char* x
             pb_puts(&b, "\n");
             pb_put(&b, in, (size_t)(end - in));
         } else {
-            b.n = 0;
-            pb_printf(&b, "%u\n", (unsigned)section);  /* nothing in it: none */
+            b.n = 0;    /* nothing in it: none */
         }
     }
 
     if (b.err) {
         st = PD_ERR_NOMEM;
     } else {
-        st = pd_doc_add_resource(d, PD_PPTX_TAIL_MIME, b.p, b.n, &r);
+        st = pd_doc_add_resource(d, PD_PPTX_TAIL_MIME, b.p ? b.p : "", b.n, &r);
+    }
+
+    if (st == PD_OK) {  /* the slide's from now: one step of undo */
+        sp.timing = r;
+        st = pd_doc_set_section_props(d, section, &sp);
     }
 
     pb_free(&b);
@@ -539,23 +547,22 @@ pd_status pd_pptx_set_slide_timing(pd_doc* d, pd_block_id section, const char* x
 /* a slide's kept tail (its transition and timing as read) by its section's key: the root's namespaces it needs
    (only those NS lacks) into ns, the XML into *xml and *xn; 0 when it has none */
 static int kept_tail(const pw* P, const char* key, pd_buf* ns, const char** xml, size_t* xn) {
-    size_t pos = 0, kl = strlen(key);
+    size_t pos = 0;
     pkept e, set;
-    pd_res_id r;
+    pd_section_props tsp;
     const char* mime;
     const void* rd;
     size_t rl;
     int have_set = 0;
 
-    for (r = 1; P->d && pd_doc_resource(P->d, r, &mime, &rd, &rl) == PD_OK; r++) {   /* set since: the latest */
-        if (!strcmp(mime, PD_PPTX_TAIL_MIME) && rl > kl && !memcmp(rd, key, kl) && ((const char*)rd)[kl] == '\n') {
-            memset(&set, 0, sizeof(set));
-            set.src = "tail";
-            set.extra = key;
-            set.data = (const unsigned char*)rd + kl + 1;
-            set.len = rl - kl - 1;
-            have_set = 1;
-        }
+    if (P->d && pd_doc_section_props(P->d, (pd_block_id)strtoul(key, NULL, 10), &tsp) == PD_OK && tsp.timing &&
+            pd_doc_resource(P->d, tsp.timing, &mime, &rd, &rl) == PD_OK && !strcmp(mime, PD_PPTX_TAIL_MIME)) {
+        memset(&set, 0, sizeof(set));   /* set since */
+        set.src = "tail";
+        set.extra = key;
+        set.data = (const unsigned char*)rd;
+        set.len = rl;
+        have_set = 1;
     }
 
     while (have_set || kept_next(P, &pos, &e)) {

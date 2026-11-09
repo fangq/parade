@@ -6291,6 +6291,27 @@ static void test_pptx_write_kept_masters(void) {
                   !strstr(tb, "<p:bldLst>") && strstr(tb, "</p:timing></pd:tail>"));
             CHECK(pd_pptx_set_slide_timing(d, s0s, "<pd:tail xmlns:pd=\"urn:parade\"/>", 33) == PD_OK);
             CHECK(pd_pptx_slide_timing(d, s0s, NULL, 0, &tl) == PD_ERR_ARG);
+            {   /* each set one step of undo: taken back, the timing read; again, the one set; saved and loaded with it */
+                pd_doc* j = NULL;
+                buf_t bj;
+                char t2[2048];
+                int32_t l2 = 0;
+
+                CHECK(pd_doc_undo(d) == PD_OK && pd_pptx_slide_timing(d, s0s, NULL, 0, &tl) == PD_OK && tl > 0);
+                CHECK(pd_doc_undo(d) == PD_OK && pd_pptx_slide_timing(d, s1s, tb, (int32_t)sizeof(tb) - 1, &tl) == PD_OK);
+                tb[tl > 0 && tl < (int32_t)sizeof(tb) ? tl : 0] = '\0';
+                CHECK(strstr(tb, "<p:spTgt spid=\"40\"/>") && !strstr(tb, "<p:wipe"));
+                CHECK(pd_doc_redo(d) == PD_OK && pd_doc_redo(d) == PD_OK &&
+                      pd_pptx_slide_timing(d, s0s, NULL, 0, &tl) == PD_ERR_ARG);
+                memset(&bj, 0, sizeof(bj));
+                CHECK(pd_doc_save(d, PD_JDATA_BINARY, to_buf, &bj) == PD_OK && pd_doc_load(bj.p, bj.n, PD_JDATA_AUTO, &j) ==
+                      PD_OK);
+                CHECK(j && pd_pptx_slide_timing(j, pd_doc_child(j, pd_doc_root(j), 1), t2, (int32_t)sizeof(t2) - 1, &l2) ==
+                      PD_OK && l2 > 0 && (t2[l2] = '\0', strstr(t2, "<p:wipe dir=\"u\"/>") != NULL) &&
+                      pd_pptx_slide_timing(j, pd_doc_child(j, pd_doc_root(j), 0), NULL, 0, &l2) == PD_ERR_ARG);
+                pd_doc_free(j);
+                free(bj.p);
+            }
             again = pptx_again(d, &b2);
             x1 = b2.p ? (char*)pd_zip_get((const unsigned char*)b2.p, b2.n, "ppt/slides/slide1.xml", &n2) : NULL;
             x2 = b2.p ? (char*)pd_zip_get((const unsigned char*)b2.p, b2.n, "ppt/slides/slide2.xml", &n2) : NULL;

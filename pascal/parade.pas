@@ -709,6 +709,7 @@ type
     text_flow: Int32;         { PD_CELLTEXT_* }
     notes: pd_block_id;       { a STORY: a slide's speaker notes, 0 none }
     hidden: Int32;            { 1: a hidden slide, left out of a PDF }
+    timing: pd_res_id;        { its transition and animations as set since it was read (a resource), 0 as read }
   end;
   Ppd_section_props = ^pd_section_props;
 

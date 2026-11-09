@@ -332,6 +332,7 @@ begin
   WriteLn('pd_section_props.text_flow ', PtrUInt(@v_pd_section_props.text_flow) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.notes ', PtrUInt(@v_pd_section_props.notes) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_section_props.hidden ', PtrUInt(@v_pd_section_props.hidden) - PtrUInt(@v_pd_section_props));
+  WriteLn('pd_section_props.timing ', PtrUInt(@v_pd_section_props.timing) - PtrUInt(@v_pd_section_props));
   WriteLn('pd_border_line ', SizeOf(pd_border_line));
   WriteLn('pd_border_line.style ', PtrUInt(@v_pd_border_line.style) - PtrUInt(@v_pd_border_line));
   WriteLn('pd_border_line.width ', PtrUInt(@v_pd_border_line.width) - PtrUInt(@v_pd_border_line));

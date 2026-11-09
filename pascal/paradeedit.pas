@@ -677,7 +677,7 @@ type
       Filter: TParadeItemFilter = nil);
     function SetSlideHidden(Index: Integer; Hidden: Boolean): Boolean;
     { a slide's transition and animations: pd_pptx_slide_timing's <pd:tail> XML, '' none; set (the same form, ''
-      none) as a change of the document but not a step of undo }
+      none) as one step of undo ("Animation") }
     function SlideTiming(Index: Integer): string;
     function SetSlideTiming(Index: Integer; const Xml: string): Boolean;
     { the shapes on a slide its animations can name (not the layout's or the master's), in their order }
@@ -9773,14 +9773,17 @@ var
 begin
   Sec := SlideSection(Index);
   S := RawByteString(Xml);
-  Result := not FReadOnly and (Sec <> 0) and (ParadeTailInner(SlideTiming(Index)) <> ParadeTailInner(Xml)) and
-    (pd_pptx_set_slide_timing(FDoc, Sec, PAnsiChar(S), Length(S)) = PD_OK);
-  if Result then
-  begin
-    FModified := True;
-    if Assigned(FOnChange) then
-      FOnChange(Self);
+  Result := not FReadOnly and (Sec <> 0) and (ParadeTailInner(SlideTiming(Index)) <> ParadeTailInner(Xml));
+  if not Result then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Animation');
+  try
+    Result := pd_pptx_set_slide_timing(FDoc, Sec, PAnsiChar(S), Length(S)) = PD_OK;
+  finally
+    pd_doc_end_group(FDoc);
   end;
+  if Result then
+    Changed;
 end;
 
 { the name of the shape whose id is Id in a drawing's kept XML (its cNvPr), '' none }
@@ -10000,6 +10003,8 @@ begin
     if pd_doc_insert_block(FDoc, pd_doc_root(FDoc), After + 1, PD_BLOCK_SECTION, Sec) <> PD_OK then
       Exit;
     Sp.notes := 0;      { its own notes, none yet (not the slide's it was copied from) }
+    if not Copy then
+      Sp.timing := 0;   { nor its animations, but for a copy }
     pd_doc_set_section_props(FDoc, Sec, Sp);
     Result := PutPageCanvas(Sec, R);
     if Result and (R <> 0) then

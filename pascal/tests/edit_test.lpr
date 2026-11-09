@@ -1579,6 +1579,14 @@ begin
       (ParadeTailInner(E.SlideTiming(0)) = ParadeTailInner(A.Save)) and (ParadeTailInner(A.Save) <> ''), 'set on the slide: read back, '
       + 'the document changed');
     Check(not E.SetSlideTiming(0, A.Save), 'set the same again: no change');
+    Saved := E.SlideTiming(0);
+    E.Undo;
+    B.Load(E.SlideTiming(0));
+    Check((Length(B.Effects) = 5) and (B.Effects[4].Cls = 'emph') and (StrPas(pd_doc_undo_label(E.Doc)) <> 'Animation'),
+      'undone: the spin back, the zoom out gone');
+    E.Redo;
+    Check(ParadeTailInner(E.SlideTiming(0)) = ParadeTailInner(Saved), 'redone: the zoom out again');
+    Check(StrPas(pd_doc_undo_label(E.Doc)) = 'Animation', 'Undo names it: ' + StrPas(pd_doc_undo_label(E.Doc)));
     S := TParadeShow.Create(E, 400, 300, 0);
     try
       T1 := S.TimingOf(0);
@@ -1587,6 +1595,7 @@ begin
     finally
       S.Free;
     end;
+    Check(E.NewSlide(0, False) and (E.SlideTiming(1) = '') and E.DeleteSlide(1), 'a new slide: none of its own');
     Check(E.NewSlide(0, True) and (E.SlideCount = 3) and (ParadeTailInner(E.SlideTiming(1)) = ParadeTailInner(E.SlideTiming(0))),
       'a slide duplicated: its animations with it');
     Tmp := GetTempDir + 'edit_anim_' + IntToStr(GetProcessID) + '.pptx';

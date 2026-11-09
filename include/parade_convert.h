@@ -92,7 +92,8 @@ PD_API pd_status pd_pptx_slide_timing(const pd_doc* doc, pd_block_id section, ch
  * Set a slide's transition and animations: XML in pd_pptx_slide_timing's form (a <pd:tail> declaring the
  * namespaces it uses, holding p:transition and/or p:timing); NULL/0, or an empty <pd:tail>, leaves it none. Read
  * back by pd_pptx_slide_timing and written by the PowerPoint export; spid="..." names shapes by the ids the slide
- * was read with (pd_draw.shape). A new resource of the document each time (the latest counts), not an undo step.
+ * was read with (pd_draw.shape). One step of undo: a new resource of the document, the section's timing
+ * (pd_section_props.timing) made it.
  */
 PD_API pd_status pd_pptx_set_slide_timing(pd_doc* doc, pd_block_id section, const char* xml, int32_t len);
 /** Office's preset shapes (DrawingML prstGeom): how many, and the name of each (NULL past the last) */

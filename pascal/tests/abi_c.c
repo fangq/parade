@@ -293,6 +293,7 @@ int main(void) {
     printf("pd_section_props.text_flow %zu\n", offsetof(pd_section_props, text_flow));
     printf("pd_section_props.notes %zu\n", offsetof(pd_section_props, notes));
     printf("pd_section_props.hidden %zu\n", offsetof(pd_section_props, hidden));
+    printf("pd_section_props.timing %zu\n", offsetof(pd_section_props, timing));
     printf("pd_border_line %zu\n", sizeof(pd_border_line));
     printf("pd_border_line.style %zu\n", offsetof(pd_border_line, style));
     printf("pd_border_line.width %zu\n", offsetof(pd_border_line, width));
