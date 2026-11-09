@@ -6146,10 +6146,13 @@ static void test_pptx_write_kept_masters(void) {
                     "ppt/slides/slide2.xml", "<p:sld " KNS " showMasterSp=\"0\"><p:cSld><p:bg><p:bgPr><a:solidFill>"
                     "<a:srgbClr val=\"FF0000\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr>"
                     "<p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>"
-                    KSP("2", "Two", "<p:ph type=\"title\"/>", "2540000") "</p:spTree></p:cSld><p:clrMapOvr>"
+                    KSP("40", "Two", "<p:ph type=\"title\"/>", "2540000") "</p:spTree></p:cSld><p:clrMapOvr>"
                     "<a:overrideClrMapping bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\" accent1=\"accent1\" "
                     "accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" "
-                    "hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr></p:sld>",
+                    "hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr><p:timing><p:tnLst><p:par><p:cTn id=\"1\" "
+                    "nodeType=\"tmRoot\"><p:childTnLst><p:set><p:cBhvr><p:cTn id=\"2\"/><p:tgtEl><p:spTgt spid=\"40\"/>"
+                    "</p:tgtEl></p:cBhvr></p:set></p:childTnLst></p:cTn></p:par></p:tnLst><p:bldLst><p:bldP spid=\"40\" "
+                    "grpId=\"0\"/></p:bldLst></p:timing></p:sld>",
                     "ppt/slides/_rels/slide2.xml.rels", "<Relationships>" KREL("rId1", "../slideLayouts/slideLayout2.xml")
                     "</Relationships>", NULL);
     pd_doc* back = NULL;
@@ -6179,6 +6182,23 @@ static void test_pptx_write_kept_masters(void) {
                        "p14:dur=\"2000\">") && strstr(s1, "<p:timing><p:tnLst>") && strstr(s1, "xmlns:p14=\"p14ns\"") &&
           strstr(s1, "mc:Ignorable=\"p14\""));
     CHECK(s2 && !strstr(s2, "<p:transition"));
+    {   /* the second slide's animation kept too (not the first's alone), naming its shape by the id it has now */
+        const char* nm = s2 ? strstr(s2, "\" name=\"Two\"") : NULL;
+        const char* id = nm;
+        char want[48], want2[48];
+        size_t tn = 0;
+
+        while (id && id > s2 && *(id - 1) != '"') {
+            id--;
+        }
+
+        snprintf(want, sizeof(want), "<p:spTgt spid=\"%.*s\"/>", nm && id ? (int)(nm - id) : 0, id ? id : "");
+        snprintf(want2, sizeof(want2), "<p:bldP spid=\"%.*s\"", nm && id ? (int)(nm - id) : 0, id ? id : "");
+        CHECK(s2 && strstr(s2, "<p:timing><p:tnLst>") && strstr(s2, want) && strstr(s2, want2));
+        CHECK(nm && id && nm - id < 6 && strncmp(id, "40", 2) != 0);    /* renumbered, so the remapping is seen */
+        CHECK(!pd_zip_get((const unsigned char*)b.p, b.n, "tail", &tn) &&
+              !pd_zip_get((const unsigned char*)b.p, b.n, "tail/3", &tn));
+    }
     {   /* the first slide's speaker notes: a story of its section, two paragraphs; written back as a notes slide on a
            notes master the presentation names, and read again */
         pd_section_props sp;

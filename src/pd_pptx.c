@@ -3474,10 +3474,11 @@ static void pkeep_read(pptx* P, pd_doc* d) {
 
         for (i = 0; i < P->nrec; i++) {     /* each slide's transition and timing, by its section */
             if (P->rec[i].tail) {
-                char key[16];
+                char key[16], name[32];
 
                 snprintf(key, sizeof(key), "%u", (unsigned)pd_doc_child(d, pd_doc_root(d), i));
-                pkeep_entry(&k, "tail", "", "tail", key, P->rec[i].tail, strlen(P->rec[i].tail));
+                snprintf(name, sizeof(name), "tail/%s", key);   /* one each: entries are kept once by name */
+                pkeep_entry(&k, name, "", "tail", key, P->rec[i].tail, strlen(P->rec[i].tail));
             }
         }
 

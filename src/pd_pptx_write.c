@@ -50,6 +50,9 @@ typedef struct {
     /* the kept XML being written */
     const xdoc* x;
     int* ids;                   /* each cNvPr's new id (by node), 0 none */
+    /* the slide's shapes' ids as read and as written, for what its kept animations name (spid) */
+    long long id_old[2048];
+    int id_new[2048], nidmap;
     const pj_node* krels;       /* the drawing's pictures: relationship id -> resource */
     pd_block_id st[256];        /* its text boxes' stories in the order of their w:txbxContent */
     int nst, next_st;
@@ -302,6 +305,44 @@ static int kept_line(const pw* P, const char* key, char f[][256], int nf) {
     }
 
     return 0;
+}
+
+/* a slide's kept transition and timing: the shapes its animations name (spid="...": their targets, builds,
+   sounds and ink) by the ids they are written with now; one not on the slide is left as it was */
+static void put_tail(const pw* P, pd_buf* o, const char* t, size_t n) {
+    static const char at[] = " spid=\"";
+    const size_t al = sizeof(at) - 1;
+    size_t i = 0, from = 0;
+
+    while (i + al < n) {
+        if (memcmp(t + i, at, al) == 0) {
+            size_t v = i + al, e = v;
+            long long old = 0;
+            int q;
+
+            while (e < n && t[e] >= '0' && t[e] <= '9') {
+                old = old * 10 + (t[e] - '0');
+                e++;
+            }
+
+            if (e < n && t[e] == '"' && e > v) {
+                for (q = 0; q < P->nidmap; q++) {
+                    if (P->id_old[q] == old) {
+                        pb_put(o, t + from, v - from);
+                        pb_printf(o, "%d", P->id_new[q]);
+                        from = e;
+                        break;
+                    }
+                }
+            }
+
+            i = e;
+        } else {
+            i++;
+        }
+    }
+
+    pb_put(o, t + from, n - from);
 }
 
 /* a slide's kept tail (its transition and timing as read) by its section's key: the root's namespaces it needs
@@ -1800,7 +1841,14 @@ static void put_canvas(pw* P, pd_res_id res) {
 
             for (k = 0; k < x.nv; k++) {    /* the shapes' ids, in their order */
                 if (!strcmp(x.v[k].name, "cNvPr")) {
+                    long long old = xd_int(&x, k, "id", -1);
+
                     P->ids[k] = P->next_id + ncnv++;
+
+                    if (old > 0 && P->nidmap < (int)(sizeof(P->id_old) / sizeof(P->id_old[0]))) {
+                        P->id_old[P->nidmap] = old;
+                        P->id_new[P->nidmap++] = P->ids[k];
+                    }
                 }
             }
 
@@ -2056,7 +2104,7 @@ static void put_kept_package(pw* P, void* z, pd_buf* ct, long long sw, long long
     while (kept_next(P, &pos, &e)) {
         size_t nl = strlen(e.name);
 
-        if (!strcmp(e.src, "map") || !strcmp(e.src, "pres")) {
+        if (!strcmp(e.src, "map") || !strcmp(e.src, "pres") || !strcmp(e.src, "tail")) {
             continue;
         }
 
@@ -2282,6 +2330,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         P->nsrel = 0;
         P->slide_no = s + 1;
         P->next_id = 2;
+        P->nidmap = 0;
         P->nfld = 0;
         P->clr_ovr[0] = '\0';
         P->own_bg = P->has_rec = 0;
@@ -2335,7 +2384,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
         }
 
         if (txn) {      /* its transition and timing, as they were */
-            pb_put(&slide, txml, txn);
+            put_tail(P, &slide, txml, txn);
         }
 
         pb_puts(&slide, "</p:sld>");
