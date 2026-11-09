@@ -1159,6 +1159,9 @@ function pd_preset_drag(name: PAnsiChar; w, h: Double; adj: PAnsiChar; handle: I
   cap: csize_t): csize_t; cdecl; PDEXT;
 function pd_docx_drawing_rebuild(doc: Ppd_doc; drawing: pd_res_id; xml: PAnsiChar; len: csize_t;
   out res: pd_res_id): pd_status; cdecl; PDEXT;
+{ a slide's kept transition and animations (p:transition, p:timing) in one <pd:tail> element; buf nil: len only }
+function pd_pptx_slide_timing(doc: Ppd_doc; section: pd_block_id; buf: PAnsiChar; cap: Int32; out len: Int32): pd_status;
+  cdecl; PDEXT;
 
 { helpers }
 function PT(v: Double): pd_sp; inline;

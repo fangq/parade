@@ -345,6 +345,65 @@ static void put_tail(const pw* P, pd_buf* o, const char* t, size_t n) {
     pb_put(o, t + from, n - from);
 }
 
+/* (forward: defined below) */
+static int kept_tail(const pw* P, const char* key, pd_buf* ns, const char** xml, size_t* xn);
+
+pd_status pd_pptx_slide_timing(const pd_doc* d, pd_block_id section, char* buf, int32_t cap, int32_t* len) {
+    pw* P;
+    const char* mime, *xml = NULL;
+    const void* data;
+    size_t dlen, xn = 0;
+    pd_res_id r;
+    pd_buf ns, out;
+    char key[16];
+    pd_status st = PD_ERR_ARG;
+
+    if (!d || !len) {
+        return PD_ERR_ARG;
+    }
+
+    *len = 0;
+
+    if ((P = (pw*)calloc(1, sizeof(pw))) == NULL) {
+        return PD_ERR_NOMEM;
+    }
+
+    for (r = 1; pd_doc_resource(d, r, &mime, &data, &dlen) == PD_OK; r++) {
+        if (!strcmp(mime, PD_PPTX_KEEP_MIME)) {     /* the latest */
+            P->kdata = (const unsigned char*)data;
+            P->klen = dlen;
+        }
+    }
+
+    memset(&ns, 0, sizeof(ns));
+    memset(&out, 0, sizeof(out));
+    snprintf(key, sizeof(key), "%u", (unsigned)section);
+
+    if (P->kdata && kept_tail(P, key, &ns, &xml, &xn) && xn > 0) {
+        pb_printf(&out, "<pd:tail xmlns:pd=\"urn:parade\" %s", NS);
+        pb_put(&out, ns.p ? ns.p : "", ns.n);
+        pb_puts(&out, ">");
+        pb_put(&out, xml, xn);
+        pb_puts(&out, "</pd:tail>");
+
+        if (out.err || out.n > INT32_MAX) {
+            st = PD_ERR_NOMEM;
+        } else {
+            *len = (int32_t)out.n;
+            st = !buf ? PD_OK : cap < *len ? PD_ERR_RANGE : PD_OK;
+
+            if (buf && st == PD_OK) {
+                memcpy(buf, out.p, out.n);
+            }
+        }
+    }
+
+    pb_free(&ns);
+    pb_free(&out);
+    free(P);
+    return st;
+}
+
 /* a slide's kept tail (its transition and timing as read) by its section's key: the root's namespaces it needs
    (only those NS lacks) into ns, the XML into *xml and *xn; 0 when it has none */
 static int kept_tail(const pw* P, const char* key, pd_buf* ns, const char** xml, size_t* xn) {

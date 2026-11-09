@@ -81,6 +81,13 @@ PD_API pd_status pd_doc_paste(pd_doc* doc, pd_pos at, const void* data, size_t l
  * which undo can take back).
  */
 PD_API pd_status pd_docx_drawing_rebuild(pd_doc* doc, pd_res_id drawing, const char* xml, size_t len, pd_res_id* out);
+/**
+ * A slide's transition and animations as its presentation had them, kept when it was read (and written back with
+ * it): the XML that followed its colour map -- p:transition (or mc:AlternateContent around one), p:timing -- in one
+ * <pd:tail> element that declares the namespaces it uses, UTF-8. section is the slide's section block. *len is its
+ * length; with buf NULL (or cap too small: PD_ERR_RANGE) only that. PD_ERR_ARG when the slide has none.
+ */
+PD_API pd_status pd_pptx_slide_timing(const pd_doc* doc, pd_block_id section, char* buf, int32_t cap, int32_t* len);
 /** Office's preset shapes (DrawingML prstGeom): how many, and the name of each (NULL past the last) */
 PD_API int pd_preset_count(void);
 PD_API const char* pd_preset_name(int i);

@@ -6233,6 +6233,28 @@ static void test_pptx_write_kept_masters(void) {
             }
         }
 
+        {   /* the slide's timing for a slide show: as read, its shapes by the ids they had, in one element */
+            int32_t tl = 0;
+            char* tb;
+
+            CHECK(pd_pptx_slide_timing(d, pd_doc_child(d, pd_doc_root(d), 1), NULL, 0, &tl) == PD_OK && tl > 0);
+            tb = (char*)calloc((size_t)tl + 1, 1);
+            CHECK(tb && pd_pptx_slide_timing(d, pd_doc_child(d, pd_doc_root(d), 1), tb, tl, &tl) == PD_OK &&
+                  !strncmp(tb, "<pd:tail ", 9) && strstr(tb, "<p:spTgt spid=\"40\"/>") &&
+                  strstr(tb, "</p:timing></pd:tail>"));
+            CHECK(tb && pd_pptx_slide_timing(d, pd_doc_child(d, pd_doc_root(d), 1), tb, tl - 1, &tl) == PD_ERR_RANGE);
+            CHECK(tb && strstr(tb, "xmlns:p=\"") && strstr(tb, "xmlns:a=\""));     /* its prefixes declared */
+            free(tb);
+        }
+        {
+            pd_doc* plain = NULL;
+            int32_t tl = 0;
+
+            pd_doc_new(&plain);
+            CHECK(plain && pd_pptx_slide_timing(plain, pd_doc_child(plain, pd_doc_root(plain), 0), NULL, 0, &tl) ==
+                  PD_ERR_ARG && tl == 0);
+            pd_doc_free(plain);
+        }
         CHECK(box40 >= 1 && text40 == 1 && !stray);
         CHECK(one3 == 1 && band == 1);
         pd_layout_free(L);
