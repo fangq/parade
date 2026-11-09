@@ -9531,6 +9531,20 @@ static const char* dw_memmem(const char* h, size_t n, const char* needle, size_t
     return NULL;
 }
 
+/* whether the tag Q..E declares the prefix P (N long) itself: an element of an extension that carries its own
+   namespace (PowerPoint's asvg:svgBlip), written back with it */
+static int dw_declares(const char* q, const char* e, const char* p, size_t n) {
+    const char* a;
+
+    for (a = q; a + 6 + n < e; a++) {
+        if (!memcmp(a, "xmlns:", 6) && !memcmp(a + 6, p, n) && a[6 + n] == '=') {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* Whether markup RAW0..RAW1 can be written back as it is: every prefix one a written document declares, and every
    reference (r:embed, r:id, r:link, o:relid) to a picture -- one read already (REL_ID), or, with LOAD, read now and
    added. */
@@ -9575,7 +9589,7 @@ static int dw_xml_writable(dxi* X, const char* raw0, const char* raw1, char (*re
                 continue;
             }
 
-            if (!dx_prefix_declared(b2, (size_t)(c - b2))) {
+            if (!dx_prefix_declared(b2, (size_t)(c - b2)) && !dw_declares(q, e, b2, (size_t)(c - b2))) {
                 ok = 0;
             } else if ((c - b2 == 1 && *b2 == 'r') || (c - b2 == 1 && *b2 == 'o' && !strncmp(c + 1, "relid=", 6))) {
                 const char* qv = memchr(c, '"', (size_t)(e - c));
@@ -9628,13 +9642,40 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
     static const char* const styled[] = { "w:pStyle w:val=\"", "w:rStyle w:val=\"", "w:tblStyle w:val=\"" };
     size_t rawn = (size_t)(raw1 - raw0), j;
     int ok = rel_ok && rawn > 0 && rawn < 16u * 1024 * 1024, fb_ok = fb0 && fb1 > fb0, k, first = 1;
+    pd_buf chk;
+
+    /* what is checked for its references and prefixes: the XML but the insides of its text boxes, which are written
+       from their stories as they are then (dx_kept_xml), never as they were read -- a link in one is no reason to
+       make the drawing again */
+    memset(&chk, 0, sizeof(chk));
+
+    if (ok) {
+        const char* at = raw0, *t;
+
+        while ((t = dw_memmem(at, (size_t)(raw1 - at), "<w:txbxContent", 14)) != NULL) {
+            const char* gt = memchr(t, '>', (size_t)(raw1 - t));
+            const char* cl = gt ? dw_memmem(gt, (size_t)(raw1 - gt), "</w:txbxContent>", 16) : NULL;
+
+            if (!gt || !cl || (t[14] != '>' && t[14] != ' ') || dw_memmem(gt, (size_t)(cl - gt), "<w:txbxContent", 14)) {
+                break;      /* (one in another: checked whole) */
+            }
+
+            pb_put(&chk, at, (size_t)(gt + 1 - at));
+            at = cl;
+        }
+
+        pb_put(&chk, at, (size_t)(raw1 - at));
+        ok = !chk.err && chk.n > 0;
+    }
 
     /* what the writer numbers afresh (lists, comments, notes) and so cannot keep pointing at: made, not kept */
-    for (j = 0; ok && j < sizeof(renumbered) / sizeof(renumbered[0]); j++) {
+    for (j = 0; ok && j < sizeof(renumbered) / sizeof(renumbered[0]); j++) {     /* (anywhere, text boxes too) */
         ok = dw_memmem(raw0, rawn, renumbered[j], strlen(renumbered[j])) == NULL;
     }
 
-    ok = ok && dw_xml_writable(X, raw0, raw1, rel_id, rel_res, &nrel, 0);
+    /* (its pictures loaded when they are not yet: an SVG beside its PNG) */
+    ok = ok && dw_xml_writable(X, chk.p, chk.p + chk.n, rel_id, rel_res, &nrel, 1);
+    pb_free(&chk);
 
     if (!ok) {
         return;

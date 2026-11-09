@@ -5244,6 +5244,30 @@ static void test_pptx_picture_bullet(void) {
 
 /* an embedded object (a worksheet, here) drawn as the picture its frame keeps of it, from whichever alternative has
    one, where the frame is */
+/* a slide whose text has a link, and whose picture has its SVG beside its PNG (PowerPoint's icons): its shapes kept as
+   they came all the same -- a slide, not a page of drawings made again (and so the deck a presentation) */
+static void test_pptx_kept_links(void) {
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("",
+                         PSP("2", "<a:p><a:r><a:rPr lang=\"en-US\"><a:hlinkClick r:id=\"rIdL\"/></a:rPr><a:t>a link"
+                             "</a:t></a:r></a:p>")
+                         "<p:pic><p:nvPicPr><p:cNvPr id=\"3\" name=\"Icon\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>"
+                         "<p:blipFill><a:blip r:embed=\"rIdI\"><a:extLst><a:ext uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\">"
+                         "<asvg:svgBlip xmlns=\"\" xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\" "
+                         "r:embed=\"rIdS\"/></a:ext></a:extLst></a:blip><a:stretch><a:fillRect/></a:stretch></p:blipFill>"
+                         "<p:spPr><a:xfrm><a:off x=\"4000000\" y=\"0\"/><a:ext cx=\"1000000\" cy=\"1000000\"/></a:xfrm>"
+                         "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"),
+                         "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rIdL\" "
+                         "Target=\"https://example.com/\" TargetMode=\"External\"/><Relationship Id=\"rIdI\" "
+                         "Target=\"../media/i.png\"/><Relationship Id=\"rIdS\" Target=\"../media/s.svg\"/></Relationships>",
+                         "ppt/media/i.png", "tests/data/rgba.png", "ppt/media/s.svg", "tests/data/icon.svg", NULL);
+    char* js = d ? slide_json(d, 0) : NULL;
+
+    CHECK(js && strstr(js, "\"kind\":\"wpc\"") && strstr(js, "\"xml\":\"<wpc:wpc"));
+    CHECK(js && strstr(js, "svgBlip") && strstr(js, "{\"img\":"));
+    free(js);
+    pd_doc_free(d);
+}
+
 static void test_pptx_ole(void) {
     pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("",
                          "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"60\" name=\"Ole\"/><p:cNvGraphicFramePr/><p:nvPr/>"
@@ -10954,6 +10978,7 @@ int main(void) {
     test_pptx_autonum();
     test_pptx_picture_bullet();
     test_pptx_ole();
+    test_pptx_kept_links();
     test_pptx_chart();
     test_pptx_ph_inherit();
     test_pptx_run_props();
