@@ -969,6 +969,10 @@ type
     property TabStop default True;
   end;
 
+{ B's masked properties over A's (and its mask bits added): what setting B on something that has A comes to }
+procedure MergeCharProps(var A: pd_char_props; const B: pd_char_props);
+procedure MergeParaProps(var A: pd_para_props; const B: pd_para_props);
+
 implementation
 
 uses
