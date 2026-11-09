@@ -50,6 +50,9 @@ type
   TParadeRanges = array of pd_range;
   { the nine levels of a list definition }
   TParadeListLevels = array[0..8] of pd_list_level;
+  { a page's display list; which of its items a picture of it shows (Index: its place in the list) }
+  TParadeDrawItems = array of pd_draw;
+  TParadeItemFilter = function(const Item: pd_draw; Index: Integer): Boolean of object;
 
   { a place a cross-reference can point at }
   TParadeRefTarget = record
@@ -247,6 +250,11 @@ type
     FRemote: array of TParadeRemoteCaret;
     FRemoteRev: Integer;
     FControlMenu: TPopupMenu;      { a drop-down control's choices }
+    { RenderSlide: the page alone, as a slide show shows it -- no frame, selection, marks or carets -- on this paper,
+      only the items the filter keeps }
+    FPresent: Boolean;
+    FPresentPaper: TColor;
+    FItemFilter: TParadeItemFilter;
     FMenuAt: pd_pos;
     procedure UseFallbackFonts;
     function DecodePicture(Res: pd_res_id): Boolean;
@@ -650,6 +658,17 @@ type
     { a slide hidden (laid out and edited as the others, left out of a PDF and of a slide show); set as one step of
       undo }
     function SlideHidden(Index: Integer): Boolean;
+    { a slide's page (-1 none) and its section block (0 none) }
+    function SlidePage(Index: Integer): Integer;
+    function SlideSection(Index: Integer): pd_block_id;
+    { a page's display list as laid out, and its size }
+    function PageDrawItems(Page: Integer): TParadeDrawItems;
+    function PageSizeSp(Page: Integer; out W, H: pd_sp): Boolean;
+    { A page drawn into Img (sized by the caller) from its corner, PxScale pixels a sp, as a slide show shows it:
+      on Paper, without the page's frame, the selection, marks or carets; only the items Filter keeps (nil: all).
+      Pictures are decoded before it returns. }
+    procedure RenderSlide(Img: TLazIntfImage; Page: Integer; PxScale: Double; Paper: TColor;
+      Filter: TParadeItemFilter = nil);
     function SetSlideHidden(Index: Integer; Hidden: Boolean): Boolean;
     function CurrentSlide: Integer;
     function GoToSlide(Index: Integer): Boolean;
@@ -9633,6 +9652,69 @@ begin
   Result := True;
 end;
 
+function TParadeEdit.SlideSection(Index: Integer): pd_block_id;
+begin
+  Result := 0;
+  if (Index >= 0) and (Index < SlideCount) then
+    Result := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
+end;
+
+function TParadeEdit.SlidePage(Index: Integer): Integer;
+var
+  P: pd_pos;
+  Pg: Int32;
+  X0, Y0, X1, Y1: Double;
+begin
+  Result := -1;
+  if (FLayout <> nil) and (Index >= 0) and (Index < SlideCount) and
+     SectionCanvas(FDoc, pd_doc_child(FDoc, pd_doc_root(FDoc), Index), P) and ShapePageBox(P, -1, Pg, X0, Y0, X1, Y1) then
+    Result := Pg;
+end;
+
+function TParadeEdit.PageDrawItems(Page: Integer): TParadeDrawItems;
+var
+  N: Int32;
+begin
+  Result := nil;
+  N := 0;
+  if (FLayout = nil) or (Page < 0) or (Page >= PageCount) or (pd_layout_page_items(FLayout, Page, nil, 0, N) <> PD_OK) or
+     (N <= 0) then
+    Exit;
+  SetLength(Result, N);
+  if pd_layout_page_items(FLayout, Page, @Result[0], N, N) <> PD_OK then
+    Result := nil;
+end;
+
+function TParadeEdit.PageSizeSp(Page: Integer; out W, H: pd_sp): Boolean;
+var
+  Info: pd_page_info;
+begin
+  W := 0;
+  H := 0;
+  Result := (FLayout <> nil) and (Page >= 0) and (Page < PageCount) and (pd_layout_page_info(FLayout, Page, Info) = PD_OK);
+  if Result then
+  begin
+    W := Info.width;
+    H := Info.height;
+  end;
+end;
+
+procedure TParadeEdit.RenderSlide(Img: TLazIntfImage; Page: Integer; PxScale: Double; Paper: TColor;
+  Filter: TParadeItemFilter);
+begin
+  if (FLayout = nil) or (Page < 0) or (Page >= PageCount) then
+    Exit;
+  FPresent := True;
+  FPresentPaper := Paper;
+  FItemFilter := Filter;
+  try
+    PaintPage(Img, Page, 0, 0, PxScale, False, False);
+  finally
+    FPresent := False;
+    FItemFilter := nil;
+  end;
+end;
+
 procedure TParadeEdit.ShowSlide(Index: Integer);
 var
   P: pd_pos;
@@ -14505,8 +14587,13 @@ begin
   pd_layout_page_info(FLayout, Page, Info);
   PW := Round(Info.width * PxScale);
   PH := Round(Info.height * PxScale);
-  FillRectImg(Img, OX - 1, OY - 1, OX + PW + 1, OY + PH + 1, $00909090, 255);   { frame }
-  FillRectImg(Img, OX, OY, OX + PW, OY + PH, TColorToRGB(FPaperColor), 255);
+  if FPresent then
+    FillRectImg(Img, OX, OY, OX + PW, OY + PH, TColorToRGB(FPresentPaper), 255)
+  else
+  begin
+    FillRectImg(Img, OX - 1, OY - 1, OX + PW + 1, OY + PH + 1, $00909090, 255);   { frame }
+    FillRectImg(Img, OX, OY, OX + PW, OY + PH, TColorToRGB(FPaperColor), 255);
+  end;
   if pd_layout_page_items(FLayout, Page, nil, 0, N) <> PD_OK then
     Exit;
   SetLength(Items, N + 1);
@@ -14544,6 +14631,8 @@ begin
       else
         Keep := (y < VBot) and (y + h > VTop);
       end;
+    if Keep and Assigned(FItemFilter) then
+      Keep := FItemFilter(Items[I], I);
     if Keep then
     begin
       if K <> I then
@@ -14647,6 +14736,8 @@ begin
           end;
       end;
 
+  if FPresent then
+    Exit;     { a slide show's picture: what the slide has, nothing of the editor's }
   HighlightAll;   { over what is drawn, see-through: a shaded cell's, a text box's or a slide's ground would cover
                     it from behind }
   if FShowMarks and not FCanvasPage then     { (the canvas page's paragraph under the canvas: not shown) }

@@ -7,7 +7,7 @@ program edit_test;
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, Math, ctypes, parade, paradeedit,
-  paradefonts;
+  paradefonts, paradeshow;
 
 type
   { the wheel, as the mouse turns it }
@@ -1449,6 +1449,193 @@ begin
   if (pd_doc_block_info(E.Doc, B3, Info) = PD_OK) and (Info.list = 0) then Inc(I);
   Check(I = 2, 'out of the list');
   Check(not E.CurrentListLevels(Got, Lvl), 'no list at the caret');
+end;
+
+{ the slide show (paradeshow): tests/data/anim.pptx's timing read, and what it plays seen in the frames -- the time
+  given, so each frame is the one wanted }
+procedure TestSlideShow(E: TParadeEdit);
+var
+  S: TParadeShow;
+  T: TShowTiming;
+  V: Double;
+  R0, R1, R4, R5, R8, RT, Sl: TRect;
+  D0, D1, Mid, Fin, Before: Int64;
+  Old, Frm: array of UInt32;
+  I, Same, Tried: Integer;
+  RL, BL: Int64;
+
+  function Px(X, Y: Integer): UInt32;
+  begin
+    Result := PUInt32(S.Frame.GetDataLineStart(Sl.Top + Y))[Sl.Left + X];
+  end;
+
+  { how much is drawn in R (in the slide): how far each pixel is from white }
+  function Ink(const R: TRect): Int64;
+  var
+    X, Y: Integer;
+    C: UInt32;
+  begin
+    Result := 0;
+    for Y := Max(0, R.Top) to Min(Sl.Bottom - Sl.Top, R.Bottom) - 1 do
+      for X := Max(0, R.Left) to Min(Sl.Right - Sl.Left, R.Right) - 1 do
+      begin
+        C := Px(X, Y);
+        Inc(Result, 765 - Integer(C and $FF) - Integer((C shr 8) and $FF) - Integer((C shr 16) and $FF));
+      end;
+  end;
+
+  { the red and the blue of the left quarter of R }
+  procedure LeftColour(const R: TRect; out Red, Blue: Int64);
+  var
+    X, Y: Integer;
+    C: UInt32;
+  begin
+    Red := 0;
+    Blue := 0;
+    for Y := R.Top + (R.Bottom - R.Top) div 3 to R.Bottom - (R.Bottom - R.Top) div 3 do
+      for X := R.Left + 2 to R.Left + (R.Right - R.Left) div 4 do
+      begin
+        C := Px(X, Y);
+        Inc(Red, (C shr 16) and $FF);
+        Inc(Blue, C and $FF);
+      end;
+  end;
+
+  function Shifted(const R: TRect; DY: Integer): TRect;
+  begin
+    Result := Rect(R.Left, R.Top + DY, R.Right, R.Bottom + DY);
+  end;
+
+  procedure Snap(var A: array of UInt32);
+  var
+    Y: Integer;
+  begin
+    for Y := 0 to Sl.Bottom - Sl.Top - 1 do
+      Move(PUInt32(S.Frame.GetDataLineStart(Sl.Top + Y))[Sl.Left], A[Y * (Sl.Right - Sl.Left)], (Sl.Right - Sl.Left) * 4);
+  end;
+
+begin
+  { the formulas of the keyframes }
+  Check(ShowEval('1+#ppt_h/2', 0.5, 0.25, 0.2, 0.4, 0, V) and SameValue(V, 1.2), 'a keyframe formula: 1+#ppt_h/2');
+  Check(ShowEval('#ppt_x-sin(pi/2)*$^2', 0.5, 0, 0, 0, 3, V) and SameValue(V, -8.5), 'functions, pi, $ and powers');
+  Check(ShowEval('max(1,3,2)-min(4,-1)', 0, 0, 0, 0, 0, V) and SameValue(V, 4), 'max and min of several');
+  Check(not ShowEval('2*(1+', 0, 0, 0, 0, 0, V) and not ShowEval('foo(1)', 0, 0, 0, 0, 0, V), 'a broken one is not');
+
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/anim.pptx');
+  Check(E.SlideCount = 2, 'the animated deck: two slides');
+  S := TParadeShow.Create(E, 800, 600, 0);
+  SetLength(Old, 800 * 450);
+  SetLength(Frm, 800 * 450);
+  try
+    Sl := S.SlideRect;
+    Check((Sl.Right - Sl.Left = 800) and (Sl.Bottom - Sl.Top = 450) and (Sl.Top = 75), 'the slide as large as it goes, '
+      + 'its shape kept: ' + IntToStr(Sl.Right - Sl.Left) + 'x' + IntToStr(Sl.Bottom - Sl.Top));
+    T := S.TimingOf(0);
+    Check((T <> nil) and (T.StepCount = 5) and (Length(T.Steps[0].Effects) = 0) and (Length(T.Steps[3].Effects) = 2) and
+      not T.Trans.Present, 'the first slide: four clicks, the third two effects, no transition');
+    T := S.TimingOf(1);
+    Check((T <> nil) and T.Trans.Present and (T.Trans.Kind = 'push') and (T.Trans.Dir = 'r') and (T.Trans.Dur = 1000) and
+      (T.StepCount = 1) and (Length(T.Steps[0].Effects) = 1), 'the second: pushed in, a second; an effect by itself');
+    S.Start(0);
+    R0 := S.TargetBox(3, 0);
+    R1 := S.TargetBox(3, 1);
+    R4 := S.TargetBox(4);
+    R5 := S.TargetBox(5);
+    R8 := S.TargetBox(8);
+    R4 := Rect(R4.Left + 4, R4.Top + 4, R4.Right - 4, R4.Bottom - 4);    { inside it: clear of its neighbours (the connector starts at its edge) }
+    R5 := Rect(R5.Left + 4, R5.Top + 4, R5.Right - 4, R5.Bottom - 4);
+    Check((R0.Right > R0.Left) and (R1.Top >= R0.Bottom - 2) and (R4.Right > R4.Left) and (R5.Right > R5.Left) and
+      (R8.Right > R8.Left), 'each animated shape and paragraph found on the slide, the second paragraph below the first');
+    Check((S.Phase = spIdle) and (S.StepsDone = 1), 'nothing by itself: waiting for the first click');
+    Check((Ink(R0) = 0) and (Ink(R1) = 0) and (Ink(R4) = 0), 'what comes in later is not there yet');
+    Before := Ink(R5);
+    Check(Before > 0, 'the oval, to go out later, is');
+    { click 1: the first paragraph appears }
+    S.Next(100);
+    S.Tick(102);
+    Check((Ink(R0) > 0) and (Ink(R1) = 0), 'click 1: the first point, not the second');
+    { click 2: the second fades in over half a second }
+    S.Next(200);
+    S.Tick(450);
+    Mid := Ink(R1);
+    S.Tick(800);
+    Fin := Ink(R1);
+    Check((Fin > 0) and (Mid > Fin div 4) and (Mid < Fin * 3 div 4), Format('click 2: half way, half faded in (%d of %d)',
+      [Mid, Fin]));
+    Check(S.StepsDone = 3, 'and done when its time is up');
+    { click 3: the box flies in from below as the oval fades out }
+    S.Next(1000);
+    S.Tick(1250);
+    D0 := Ink(R4);
+    D1 := Ink(Shifted(R4, Round(((1 + (R4.Bottom - R4.Top) / 2 / 450) - (R4.Top + R4.Bottom) / 2 / 450) * 450 / 2)));
+    Mid := Ink(R5);
+    S.Tick(1600);
+    Fin := Ink(R4);
+    Check((Fin > 0) and (D0 < Fin div 4) and (D1 > Fin div 2), Format('click 3: half way the box is half way up from the '
+      + 'bottom (%d where it ends, %d half way, of %d)', [D0, D1, Fin]));
+    Check((Mid > Before div 5) and (Mid < Before * 4 div 5) and (Ink(R5) = 0), Format('and the oval half gone, then '
+      + 'gone (%d of %d half way)', [Mid, Before]));
+    { click 4: the gradient box turns once in a second: half way, its left side is its right }
+    LeftColour(R8, RL, BL);
+    Check(RL > BL, 'the gradient: red on the left');
+    S.Next(2000);
+    S.Tick(2500);
+    LeftColour(R8, RL, BL);
+    Check(BL > RL, 'click 4: half a turn on, blue on the left');
+    S.Tick(3100);
+    LeftColour(R8, RL, BL);
+    Check(RL > BL, 'and red again once round');
+    Check((S.StepsDone = S.StepCount) and (S.CurrentSlide = 0), 'every step of the slide played');
+    { back a click: the slide as it was before it }
+    S.Prev(3150);
+    LeftColour(R8, RL, BL);
+    Check((S.StepsDone = 4) and (Ink(R4) > 0) and (RL > BL), 'back a step');
+    S.Next(3160);
+    S.Tick(4200);
+    { the next slide, pushed in from the left: half way, the old slide's left half on the right }
+    Snap(Old);
+    S.Next(5000);
+    Check((S.CurrentSlide = 1) and (S.Phase = spTrans), 'the next slide, through its transition');
+    S.Tick(5500);
+    Snap(Frm);
+    Same := 0;
+    Tried := 0;
+    I := 0;
+    while I < 400 * 450 do
+    begin
+      Inc(Tried);
+      if Frm[(I div 400) * 800 + 400 + I mod 400] = Old[(I div 400) * 800 + I mod 400] then
+        Inc(Same);
+      Inc(I, 37);
+    end;
+    Check(Same * 100 > Tried * 95, Format('half way, the old slide half pushed off to the right (%d of %d)', [Same, Tried]));
+    { then, by itself, the turned box wipes in from the bottom }
+    S.Tick(6000);
+    Check((S.Phase = spPlay) and (S.StepsDone = 0), 'the transition over, what plays by itself plays');
+    RT := S.TargetBox(4);
+    S.Tick(6250);
+    D0 := Ink(Rect(RT.Left, RT.Top, RT.Right, RT.Top + (RT.Bottom - RT.Top) div 3));
+    D1 := Ink(Rect(RT.Left, RT.Bottom - (RT.Bottom - RT.Top) div 3, RT.Right, RT.Bottom));
+    Check((D1 > 0) and (D0 * 10 < D1), Format('half way, the box wiped in from the bottom up (%d top, %d bottom)', [D0, D1]));
+    S.Tick(6600);
+    Check((S.Phase = spIdle) and (Ink(Rect(RT.Left, RT.Top, RT.Right, RT.Top + (RT.Bottom - RT.Top) div 3)) > 0),
+      'and all of it once it has');
+    S.Next(7000);
+    Check(S.Phase = spEnd, 'past the last slide: the end');
+    S.Next(7100);
+    Check(S.Finished, 'and a click there ends it');
+  finally
+    S.Free;
+  end;
+  { a hidden slide is left out }
+  E.SetSlideHidden(1, True);
+  S := TParadeShow.Create(E, 400, 300, 0);
+  try
+    Check(S.SlideCount = 1, 'a hidden slide not shown');
+  finally
+    S.Free;
+    E.SetSlideHidden(1, False);
+  end;
 end;
 
 procedure TestCommentEdit(E: TParadeEdit);
@@ -3079,6 +3266,8 @@ begin
   TestThemesAndStyles(E);
   Step('format properties and lists');
   TestFormatProps(E);
+  Step('slide show');
+  TestSlideShow(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;
