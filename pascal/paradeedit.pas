@@ -360,6 +360,7 @@ type
     procedure UseDocumentFonts;
     function BackSignature: string;
     function ScrollBack(DY: Integer): Boolean;
+    procedure SendToBack(Img: TLazIntfImage; X, Y, W, H, DY: Integer);
     function DrawingPlace(const P: pd_pos; out Page: Int32; out X, Y, W, H: Double; out JW, JH: Double): Boolean;
     function DrawingAt(Page: Integer; SX, SY: pd_sp; out P: pd_pos): Boolean;
     function PickShape(const P: pd_pos; Page: Integer; SX, SY: pd_sp): Integer;
@@ -975,6 +976,9 @@ type
     { for tests: the view as last painted (scrolled pixels and drawn strips)
       is what drawing all of it afresh gives, pixels and balloons alike }
     function ViewMatchesRedraw: Boolean;
+    { for tests: the pages kept on the display's side, read back from it,
+      are the pixels drawn here -- what was sent arrived whole and in its colours }
+    function DisplayMatchesView: Boolean;
     { what a new or imported document gets (a .pdoc or .jdoc keeps its own); default on }
     property HybridDefault: Boolean read FHybridDefault write FHybridDefault;
     { Undo/Redo go here when set (a shared document undoes one's own edits only) }
@@ -15056,11 +15060,10 @@ end;
    connection the whole window would be megabytes for every keystroke. }
 procedure TParadeEdit.RebuildBack;
 var
-  Img, Part: TLazIntfImage;
+  Img: TLazIntfImage;
   W, H, Page, PTop, Y, X, X0, X1, Y0, Y1, RowBytes: Integer;
   Info: pd_page_info;
   P, Q: PByte;
-  Bmp: TBitmap;
   Full: Boolean;
 begin
   W := ClientWidth - FScrollBar.Width;
@@ -15107,20 +15110,8 @@ begin
     FBack.PixelFormat := pf24bit;
     FBack.SetSize(W, H);
   end;
-  if Y1 >= Y0 then
-  begin   { just the changed rectangle (all of it, the first time) }
-    Part := NewImage(X1 - X0 + 1, Y1 - Y0 + 1, 0);
-    Bmp := TBitmap.Create;
-    try
-      for Y := Y0 to Y1 do
-        Move(PUInt32(Img.GetDataLineStart(Y))[X0], Part.GetDataLineStart(Y - Y0)^, (X1 - X0 + 1) * 4);
-      Bmp.LoadFromIntfImage(Part);
-      FBack.Canvas.Draw(X0, Y0, Bmp);
-    finally
-      Bmp.Free;
-      Part.Free;
-    end;
-  end;
+  if Y1 >= Y0 then   { just the changed rectangle (all of it, the first time) }
+    SendToBack(Img, X0, Y0, X1 - X0 + 1, Y1 - Y0 + 1, Y0);
   FBackImg.Free;
   FBackImg := Img;
 end;
@@ -15166,11 +15157,37 @@ begin
   end;
 end;
 
+{ The rectangle W by H at X, Y of Img to the pages kept on the display's
+  side, at X, DY there: sent once, as opaque pixels.  An image with alpha
+  (as NewImage's are) would be blended on this side instead -- under GTK2
+  the area is read back from the display, mixed, and sent again in tiles,
+  twice the pixels each way for what is all opaque anyway. }
+procedure TParadeEdit.SendToBack(Img: TLazIntfImage; X, Y, W, H, DY: Integer);
+var
+  Part: TLazIntfImage;
+  Desc: TRawImageDescription;
+  Bmp: TBitmap;
+  R: Integer;
+begin
+  Part := TLazIntfImage.Create(0, 0);
+  Bmp := TBitmap.Create;
+  try
+    Desc.Init_BPP32_B8G8R8_BIO_TTB(W, H);
+    Part.DataDescription := Desc;
+    for R := 0 to H - 1 do
+      Move(PUInt32(Img.GetDataLineStart(Y + R))[X], Part.GetDataLineStart(R)^, W * 4);
+    Bmp.LoadFromIntfImage(Part);
+    FBack.Canvas.Draw(X, DY, Bmp);
+  finally
+    Bmp.Free;
+    Part.Free;
+  end;
+end;
+
 function TParadeEdit.ScrollBack(DY: Integer): Boolean;
 var
   W, H, SY0, SH, Y: Integer;
   Strip, Dot: TLazIntfImage;
-  Bmp: TBitmap;
 begin
   Result := False;
   W := ClientWidth - FScrollBar.Width;
@@ -15216,13 +15233,7 @@ begin
 
     for Y := 0 to SH - 1 do
       Move(Strip.GetDataLineStart(Y)^, FBackImg.GetDataLineStart(SY0 + Y)^, W * 4);
-    Bmp := TBitmap.Create;
-    try
-      Bmp.LoadFromIntfImage(Strip);
-      FBack.Canvas.Draw(0, SY0, Bmp);
-    finally
-      Bmp.Free;
-    end;
+    SendToBack(Strip, 0, 0, W, SH, SY0);
   finally
     Strip.Free;
   end;
@@ -15260,6 +15271,33 @@ begin
     SetLength(FBalloons, Length(Kept));
     for I := 0 to High(Kept) do
       FBalloons[I] := Kept[I];
+  end;
+end;
+
+function TParadeEdit.DisplayMatchesView: Boolean;
+var
+  Img: TLazIntfImage;
+  X, Y: Integer;
+  A, B: TFPColor;
+begin
+  Result := False;
+  if (FBack = nil) or (FBackImg = nil) then
+    Exit;
+  Img := FBack.CreateIntfImage;
+  try
+    if (Img.Width <> FBackImg.Width) or (Img.Height <> FBackImg.Height) then
+      Exit;
+    for Y := 0 to Img.Height - 1 do
+      for X := 0 to Img.Width - 1 do
+      begin
+        A := Img.Colors[X, Y];
+        B := FBackImg.Colors[X, Y];
+        if (A.red shr 8 <> B.red shr 8) or (A.green shr 8 <> B.green shr 8) or (A.blue shr 8 <> B.blue shr 8) then
+          Exit;
+      end;
+    Result := True;
+  finally
+    Img.Free;
   end;
 end;
 

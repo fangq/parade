@@ -2640,6 +2640,14 @@ begin
     Same := Same and E.ViewMatchesRedraw;
   end;
   Check(Same, 'a scrolled view is what drawing it afresh gives');
+  Check(E.DisplayMatchesView, 'and the display holds those pixels, sent once, in their colours');
+  E.ProcessKey(VK_RETURN, []);
+  E.Repaint;
+  Application.ProcessMessages;
+  Check(E.ViewMatchesRedraw and E.DisplayMatchesView, 'an edit sends what it changed to the display as it was drawn');
+  E.Undo;
+  E.Repaint;
+  Application.ProcessMessages;
   E.SaveToFile(Dir + 'edit_test.pdoc');
   T := E.DocumentText;
   E.LoadFromFile(Dir + 'edit_test.pdoc');
