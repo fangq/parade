@@ -48,6 +48,8 @@ type
   TParadeCellBoxes = array of pd_cell_box;
   TParadeSpArray = array of pd_sp;
   TParadeRanges = array of pd_range;
+  { the nine levels of a list definition }
+  TParadeListLevels = array[0..8] of pd_list_level;
 
   { a place a cross-reference can point at }
   TParadeRefTarget = record
@@ -743,6 +745,16 @@ type
     procedure ToggleList(AFormat: Integer);
     { PD_NUM_* of the list the caret's paragraph is in, -1 when none }
     function CurrentListFormat: Integer;
+    { a new list's levels as ToggleList makes them: bullets, or 1. a. i. down the levels }
+    class function DefaultListLevels(AFormat: Integer): TParadeListLevels;
+    { the levels of the caret paragraph's list and its level in it; False (and the default bullets) when it is in none }
+    function CurrentListLevels(out Levels: TParadeListLevels; out Level: Integer): Boolean;
+    { the selected paragraphs in a list of these levels, each at the level it had (plain ones at the first); with
+      WholeList every paragraph of the lists they were in goes with them.  Not in a list and right after one of
+      the same levels, they number on from it.  One undo step. }
+    procedure ApplyListLevels(const Levels: TParadeListLevels; WholeList: Boolean);
+    { the selected paragraphs out of their lists }
+    procedure RemoveList;
     { the paragraph styles, and the caret's }
     procedure GetParagraphStyles(List: TStrings);
     function CurrentStyleName: string;
@@ -3445,6 +3457,25 @@ begin
   if B.mask and PD_CP_UNDERLINE <> 0 then A.underline := B.underline;
   if B.mask and PD_CP_STRIKE <> 0 then A.strike := B.strike;
   if B.mask and PD_CP_SHIFT <> 0 then A.shift := B.shift;
+  if B.mask and PD_CP_LETTERSPACE <> 0 then A.letter_space := B.letter_space;
+  if B.mask and PD_CP_KERNING <> 0 then A.kerning := B.kerning;
+  if B.mask and PD_CP_LANG <> 0 then A.lang := B.lang;
+  if B.mask and PD_CP_SMALLCAPS <> 0 then A.small_caps := B.small_caps;
+  if B.mask and PD_CP_LINK <> 0 then A.link_target := B.link_target;
+  if B.mask and PD_CP_CAPS <> 0 then A.caps := B.caps;
+  if B.mask and PD_CP_HIDDEN <> 0 then A.hidden := B.hidden;
+  if B.mask and PD_CP_POSITION <> 0 then A.position := B.position;
+  if B.mask and PD_CP_REVISION <> 0 then A.revision := B.revision;
+  if B.mask and PD_CP_FAMILY_EA <> 0 then A.family_ea := B.family_ea;
+  if B.mask and PD_CP_FAMILY_CS <> 0 then A.family_cs := B.family_cs;
+  if B.mask and PD_CP_SIZE_CS <> 0 then A.size_cs := B.size_cs;
+  if B.mask and PD_CP_WEIGHT_CS <> 0 then A.weight_cs := B.weight_cs;
+  if B.mask and PD_CP_ITALIC_CS <> 0 then A.italic_cs := B.italic_cs;
+  if B.mask and PD_CP_HSCALE <> 0 then A.hscale := B.hscale;
+  { each script's family says for itself whether it is the theme's }
+  if B.mask and PD_CP_FAMILY <> 0 then A.font_theme := (A.font_theme and not 3) or (B.font_theme and 3);
+  if B.mask and PD_CP_FAMILY_EA <> 0 then A.font_theme := (A.font_theme and not 12) or (B.font_theme and 12);
+  if B.mask and PD_CP_FAMILY_CS <> 0 then A.font_theme := (A.font_theme and not 48) or (B.font_theme and 48);
   A.mask := A.mask or B.mask;
 end;
 
@@ -3702,7 +3733,43 @@ begin
   if B.mask and PD_PP_INDENT_FIRST <> 0 then A.indent_first := B.indent_first;
   if B.mask and PD_PP_SPACE_BEFORE <> 0 then A.space_before := B.space_before;
   if B.mask and PD_PP_SPACE_AFTER <> 0 then A.space_after := B.space_after;
-  if B.mask and PD_PP_LINE_SPACING <> 0 then A.line_spacing := B.line_spacing;
+  if B.mask and PD_PP_LINE_SPACING <> 0 then
+  begin
+    A.line_spacing := B.line_spacing;
+    A.line_rule := B.line_rule;
+    A.line_height := B.line_height;
+  end;
+  if B.mask and PD_PP_KEEP_NEXT <> 0 then A.keep_with_next := B.keep_with_next;
+  if B.mask and PD_PP_KEEP_LINES <> 0 then A.keep_lines := B.keep_lines;
+  if B.mask and PD_PP_WIDOWS <> 0 then A.widows := B.widows;
+  if B.mask and PD_PP_ORPHANS <> 0 then A.orphans := B.orphans;
+  if B.mask and PD_PP_BREAK_BEFORE <> 0 then A.page_break_before := B.page_break_before;
+  if B.mask and PD_PP_HYPHENATE <> 0 then A.hyphenate := B.hyphenate;
+  if B.mask and PD_PP_BREAK_MODE <> 0 then A.break_mode := B.break_mode;
+  if B.mask and PD_PP_NEXT_STYLE <> 0 then A.next_style := B.next_style;
+  if B.mask and PD_PP_BORDER <> 0 then
+  begin
+    A.border_color := B.border_color;
+    A.border_width := B.border_width;
+    A.border_sides := B.border_sides;
+    A.border_space := B.border_space;
+    A.border_theme := B.border_theme;
+    A.border_line := B.border_line;
+  end;
+  if B.mask and PD_PP_SHADING <> 0 then
+  begin
+    A.shading := B.shading;
+    A.shading_theme := B.shading_theme;
+  end;
+  if B.mask and PD_PP_DIRECTION <> 0 then A.direction := B.direction;
+  if B.mask and PD_PP_TABS <> 0 then
+  begin
+    A.ntabs := B.ntabs;
+    A.tabs := B.tabs;
+    A.tab_interval := B.tab_interval;
+  end;
+  if B.mask and PD_PP_CONTEXTUAL <> 0 then A.contextual := B.contextual;
+  if B.mask and PD_PP_SNAP_GRID <> 0 then A.snap_grid := B.snap_grid;
   A.mask := A.mask or B.mask;
 end;
 
@@ -3862,13 +3929,39 @@ begin
   Result := ListFormatOf(CaretPos.block);
 end;
 
-procedure TParadeEdit.ToggleList(AFormat: Integer);
+class function TParadeEdit.DefaultListLevels(AFormat: Integer): TParadeListLevels;
 const
   BULLETS: array[0..2] of string = (#$E2#$80#$A2, #$E2#$97#$A6, #$E2#$96#$AA);   { bullet, white bullet, square }
 var
+  I: Integer;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  for I := 0 to 8 do
+  begin
+    Result[I].format := AFormat;
+    Result[I].start := 1;
+    Result[I].indent := (I + 1) * 36 * PD_SP_PER_PT;
+    Result[I].hanging := 18 * PD_SP_PER_PT;
+    if AFormat = PD_NUM_BULLET then
+      StrPLCopy(Result[I].text, BULLETS[I mod 3], High(Result[I].text))
+    else
+    begin
+      { 1. a. i. 1. a. i. ... down the levels of a numbered list, as word processors do }
+      if AFormat = PD_NUM_DECIMAL then
+        case I mod 3 of
+          1: Result[I].format := PD_NUM_LOWER_ALPHA;
+          2: Result[I].format := PD_NUM_LOWER_ROMAN;
+        end;
+      StrPLCopy(Result[I].text, '%' + IntToStr(I + 1) + '.', High(Result[I].text));
+    end;
+  end;
+end;
+
+procedure TParadeEdit.ToggleList(AFormat: Integer);
+var
   Paras: TParadeBlockArray;
   Info: pd_block_info;
-  Levels: array[0..8] of pd_list_level;
+  Levels: TParadeListLevels;
   List: pd_list_id;
   I: Integer;
   AllThat: Boolean;
@@ -3896,32 +3989,136 @@ begin
       List := Info.list;
     if List = 0 then
     begin
-      FillChar(Levels, SizeOf(Levels), 0);
-      for I := 0 to 8 do
-      begin
-        Levels[I].format := AFormat;
-        Levels[I].start := 1;
-        Levels[I].indent := (I + 1) * 36 * PD_SP_PER_PT;
-        Levels[I].hanging := 18 * PD_SP_PER_PT;
-        if AFormat = PD_NUM_BULLET then
-          StrPLCopy(Levels[I].text, BULLETS[I mod 3], High(Levels[I].text))
-        else
-        begin
-          { 1. a. i. 1. a. i. ... down the levels of a numbered list, as word processors do }
-          if AFormat = PD_NUM_DECIMAL then
-            case I mod 3 of
-              1: Levels[I].format := PD_NUM_LOWER_ALPHA;
-              2: Levels[I].format := PD_NUM_LOWER_ROMAN;
-            end;
-          StrPLCopy(Levels[I].text, '%' + IntToStr(I + 1) + '.', High(Levels[I].text));
-        end;
-      end;
+      Levels := DefaultListLevels(AFormat);
       pd_doc_list_define(FDoc, 9, @Levels[0], List);
     end;
     for I := 0 to High(Paras) do
       if ListFormatOf(Paras[I]) <> AFormat then
         pd_doc_set_list(FDoc, Paras[I], List, 0);
   end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+function TParadeEdit.CurrentListLevels(out Levels: TParadeListLevels; out Level: Integer): Boolean;
+var
+  Info: pd_block_info;
+  N: Int32;
+begin
+  Levels := DefaultListLevels(PD_NUM_BULLET);
+  Level := 0;
+  Result := False;
+  if (pd_doc_block_info(FDoc, CaretPos.block, Info) <> PD_OK) or (Info.list = 0) then
+    Exit;
+  N := 0;
+  FillChar(Levels, SizeOf(Levels), 0);
+  if (pd_doc_list_info(FDoc, Info.list, @N, @Levels[0]) <> PD_OK) or (N <= 0) then
+  begin
+    Levels := DefaultListLevels(PD_NUM_BULLET);
+    Exit;
+  end;
+  while N < 9 do
+  begin   { a list of fewer levels: the ones below as its last }
+    Levels[N] := Levels[N - 1];
+    Levels[N].indent := Levels[N - 1].indent + 36 * PD_SP_PER_PT;
+    Inc(N);
+  end;
+  Level := Info.list_level;
+  Result := True;
+end;
+
+procedure TParadeEdit.ApplyListLevels(const Levels: TParadeListLevels; WholeList: Boolean);
+var
+  Paras: TParadeBlockArray;
+  Old: array of pd_list_id;
+  Info: pd_block_info;
+  Have: TParadeListLevels;
+  N: Int32;
+  List: pd_list_id;
+  B, Prev: pd_block_id;
+  I, K: Integer;
+  InAny: Boolean;
+
+  function WasIn(L: pd_list_id): Boolean;
+  var
+    J: Integer;
+  begin
+    Result := False;
+    if L <> 0 then
+      for J := 0 to High(Old) do
+        if Old[J] = L then
+          Exit(True);
+  end;
+
+begin
+  if FReadOnly then
+    Exit;
+  Paras := SelectedParagraphs;
+  if Paras = nil then
+    Exit;
+  Old := nil;
+  InAny := False;
+  for I := 0 to High(Paras) do
+    if (pd_doc_block_info(FDoc, Paras[I], Info) = PD_OK) and (Info.list <> 0) then
+    begin
+      InAny := True;
+      if not WasIn(Info.list) then
+      begin
+        SetLength(Old, Length(Old) + 1);
+        Old[High(Old)] := Info.list;
+      end;
+    end;
+  List := 0;
+  if not InAny then
+  begin   { right after a list that looks the same: its next items }
+    Prev := pd_doc_prev_paragraph(FDoc, Paras[0]);
+    if (Prev <> 0) and (pd_doc_block_info(FDoc, Prev, Info) = PD_OK) and (Info.list <> 0) then
+    begin
+      N := 0;
+      FillChar(Have, SizeOf(Have), 0);
+      if (pd_doc_list_info(FDoc, Info.list, @N, @Have[0]) = PD_OK) and (N = 9) and
+        CompareMem(@Have[0], @Levels[0], SizeOf(Have)) then
+        List := Info.list;
+    end;
+  end;
+  pd_doc_begin_group(FDoc, 'Bullets and numbering');
+  if List = 0 then
+    pd_doc_list_define(FDoc, 9, @Levels[0], List);
+  for I := 0 to High(Paras) do
+    if pd_doc_block_info(FDoc, Paras[I], Info) = PD_OK then
+      if Info.list <> 0 then
+        pd_doc_set_list(FDoc, Paras[I], List, Info.list_level)
+      else
+        pd_doc_set_list(FDoc, Paras[I], List, 0);
+  if WholeList and (Old <> nil) then
+  begin   { the rest of each list, wherever it is }
+    B := FirstPara;
+    K := 0;
+    while (B <> 0) and (K < 10000000) do
+    begin
+      if (pd_doc_block_info(FDoc, B, Info) = PD_OK) and WasIn(Info.list) then
+        pd_doc_set_list(FDoc, B, List, Info.list_level);
+      B := pd_doc_next_paragraph(FDoc, B);
+      Inc(K);
+    end;
+  end;
+  pd_doc_end_group(FDoc);
+  Changed;
+end;
+
+procedure TParadeEdit.RemoveList;
+var
+  Paras: TParadeBlockArray;
+  I: Integer;
+begin
+  if FReadOnly then
+    Exit;
+  Paras := SelectedParagraphs;
+  if Paras = nil then
+    Exit;
+  pd_doc_begin_group(FDoc, 'List');
+  for I := 0 to High(Paras) do
+    pd_doc_set_list(FDoc, Paras[I], 0, 0);
   pd_doc_end_group(FDoc);
   Changed;
 end;

@@ -1312,6 +1312,145 @@ begin
   Got := Id;
 end;
 
+{ what the Font, Paragraph and Bullets and numbering dialogs set reaches the paragraphs: every property, not
+  only the toolbar's; and a list's levels as given }
+procedure TestFormatProps(E: TParadeEdit);
+var
+  Pp: pd_para_props;
+  Cp: pd_char_props;
+  Lv, Got: TParadeListLevels;
+  Lvl, I: Integer;
+  Lbl: array[0..63] of AnsiChar;
+  B1, B2, B3, B4: pd_block_id;
+  Info: pd_block_info;
+
+  { the caret at the start of the paragraph N down, the selection to the end of the one K further when K >= 0 }
+  procedure Go(N: Integer; K: Integer = -1);
+  var
+    J, C: Integer;
+    B: pd_block_id;
+  begin
+    E.ProcessKey(VK_HOME, [ssCtrl]);
+    B := pd_doc_next_paragraph(E.Doc, 0);
+    for J := 1 to N do
+    begin
+      for C := 0 to Length(E.ParaText(B)) do
+        E.ProcessKey(VK_RIGHT, []);
+      B := pd_doc_next_paragraph(E.Doc, B);
+    end;
+    if K >= 0 then
+      for J := 0 to K do
+      begin
+        for C := 1 to Length(E.ParaText(B)) + Ord(J < K) do
+          E.ProcessKey(VK_RIGHT, [ssShift]);
+        B := pd_doc_next_paragraph(E.Doc, B);
+      end;
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertText('One');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Two');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Three');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Four');
+  B1 := pd_doc_next_paragraph(E.Doc, 0);
+  B2 := pd_doc_next_paragraph(E.Doc, B1);
+  B3 := pd_doc_next_paragraph(E.Doc, B2);
+  B4 := pd_doc_next_paragraph(E.Doc, B3);
+  { paragraph: the properties past the toolbar's }
+  Go(0);
+  FillChar(Pp, SizeOf(Pp), 0);
+  Pp.mask := PD_PP_KEEP_NEXT or PD_PP_KEEP_LINES or PD_PP_BREAK_BEFORE or PD_PP_WIDOWS or PD_PP_LINE_SPACING or
+    PD_PP_CONTEXTUAL or PD_PP_INDENT_RIGHT;
+  Pp.keep_with_next := 1;
+  Pp.keep_lines := 1;
+  Pp.page_break_before := 1;
+  Pp.widows := 2;
+  Pp.line_spacing := 1000;
+  Pp.line_rule := PD_LINE_EXACT;
+  Pp.line_height := 20 * PD_SP_PER_PT;
+  Pp.contextual := 1;
+  Pp.indent_right := 30 * PD_SP_PER_PT;
+  E.ApplyParaProps(Pp);
+  FillChar(Pp, SizeOf(Pp), 0);
+  pd_doc_para_props(E.Doc, B1, Pp);
+  Check((Pp.keep_with_next = 1) and (Pp.keep_lines = 1) and (Pp.page_break_before = 1) and (Pp.widows = 2),
+    'keep with next, keep lines, break before and widows reach the paragraph');
+  Check((Pp.line_rule = PD_LINE_EXACT) and (Pp.line_height = 20 * PD_SP_PER_PT), 'exact line spacing of 20pt');
+  Check((Pp.contextual = 1) and (Pp.indent_right = 30 * PD_SP_PER_PT), 'contextual spacing and the right indent');
+  Pp := E.CurrentParaProps;
+  Check((Pp.keep_with_next = 1) and (Pp.line_rule = PD_LINE_EXACT), 'and read back at the caret');
+  { a change of one keeps the others }
+  FillChar(Pp, SizeOf(Pp), 0);
+  Pp.mask := PD_PP_SPACE_AFTER;
+  Pp.space_after := 9 * PD_SP_PER_PT;
+  E.ApplyParaProps(Pp);
+  FillChar(Pp, SizeOf(Pp), 0);
+  pd_doc_para_props(E.Doc, B1, Pp);
+  Check((Pp.keep_with_next = 1) and (Pp.line_height = 20 * PD_SP_PER_PT) and (Pp.space_after = 9 * PD_SP_PER_PT),
+    'space after set, the rest kept');
+  { characters, nothing selected: kept for the text typed next, every property }
+  Go(3);
+  E.ProcessKey(VK_END, []);
+  FillChar(Cp, SizeOf(Cp), 0);
+  Cp.mask := PD_CP_LETTERSPACE or PD_CP_CAPS or PD_CP_SMALLCAPS or PD_CP_HSCALE or PD_CP_POSITION;
+  Cp.letter_space := 2 * PD_SP_PER_PT;
+  Cp.caps := 1;
+  Cp.small_caps := 1;
+  Cp.hscale := 1500;
+  Cp.position := 3 * PD_SP_PER_PT;
+  E.ApplyCharProps(Cp);
+  E.InsertText('x');
+  Cp := E.PropsAt(PdPos(B4, 4));
+  Check((Cp.letter_space = 2 * PD_SP_PER_PT) and (Cp.caps = 1) and (Cp.small_caps = 1) and (Cp.hscale = 1500) and
+    (Cp.position = 3 * PD_SP_PER_PT), 'spacing, caps, scale and position typed at the caret');
+  { lists: levels of one's own }
+  Lv := TParadeEdit.DefaultListLevels(PD_NUM_DECIMAL);
+  Lv[0].format := PD_NUM_UPPER_ROMAN;
+  StrPLCopy(Lv[0].text, '(%1)', High(Lv[0].text));
+  Lv[0].start := 4;
+  Lv[0].indent := 50 * PD_SP_PER_PT;
+  Go(0, 1);
+  E.ApplyListLevels(Lv, False);
+  pd_doc_list_label(E.Doc, B1, @Lbl[0], 64);
+  Check(string(Lbl) = '(IV)', 'roman from IV in brackets: ' + Lbl);
+  pd_doc_list_label(E.Doc, B2, @Lbl[0], 64);
+  Check(string(Lbl) = '(V)', 'then (V): ' + Lbl);
+  Go(1);
+  Check(E.CurrentListLevels(Got, Lvl) and (Lvl = 0) and (Got[0].start = 4) and (Got[0].indent = 50 * PD_SP_PER_PT),
+    'the levels read back at the caret');
+  { the next paragraph given the same levels numbers on }
+  Go(2);
+  E.ApplyListLevels(Lv, False);
+  pd_doc_list_label(E.Doc, B3, @Lbl[0], 64);
+  Check(string(Lbl) = '(VI)', 'the same levels right after: numbered on, (VI): ' + Lbl);
+  { the whole list changed from one of its items, levels kept }
+  Go(1);
+  E.ChangeIndent(True);
+  Lv := TParadeEdit.DefaultListLevels(PD_NUM_BULLET);
+  StrPLCopy(Lv[0].text, '*', High(Lv[0].text));
+  StrPLCopy(Lv[1].text, '-', High(Lv[1].text));
+  Go(0, 1);     { the first two: the second keeps its level }
+  E.ApplyListLevels(Lv, True);
+  pd_doc_list_label(E.Doc, B3, @Lbl[0], 64);
+  Check(string(Lbl) = '*', 'the whole list: the third, not selected, a star too: ' + Lbl);
+  pd_doc_list_label(E.Doc, B2, @Lbl[0], 64);
+  Check(string(Lbl) = '-', 'and the second still a level down: ' + Lbl);
+  E.Undo;
+  pd_doc_list_label(E.Doc, B3, @Lbl[0], 64);
+  Check(string(Lbl) = '(V)', 'one undo: numbered again, (V) under the indented second: ' + Lbl);
+  Go(0, 2);
+  E.RemoveList;
+  I := 0;
+  if (pd_doc_block_info(E.Doc, B1, Info) = PD_OK) and (Info.list = 0) then Inc(I);
+  if (pd_doc_block_info(E.Doc, B3, Info) = PD_OK) and (Info.list = 0) then Inc(I);
+  Check(I = 2, 'out of the list');
+  Check(not E.CurrentListLevels(Got, Lvl), 'no list at the caret');
+end;
+
 procedure TestCommentEdit(E: TParadeEdit);
 var
   Img: TLazIntfImage;
@@ -2938,6 +3077,8 @@ begin
   TestTurnedText(E);
   TestRightToLeft(E);
   TestThemesAndStyles(E);
+  Step('format properties and lists');
+  TestFormatProps(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;
