@@ -1586,10 +1586,193 @@ static void test_table_styles(void) {
     free(ts);
 }
 
+int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);
+#ifndef _WIN32
+int setenv(const char* name, const char* value, int overwrite);
+int unsetenv(const char* name);
+#endif
+int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen);
+
+/* The deflate (mimamo's, with zlibmt): whatever goes in inflates back, empty too; text of ten letters takes near its
+   3.4 bits a letter, as zlib does (dynamic codes: the fixed ones need 8), random bytes barely more than themselves (stored); an
+   input of several zlibmt blocks is one stream that inflates back, the same bytes on one thread as on four. */
+static void test_deflate(void) {
+    unsigned s = 7;
+    int t, ok = 1;
+    size_t i, zn, rn, n;
+    unsigned char* b, *z, *r, *z1;
+    size_t z1n;
+
+    for (t = 0; t < 120; t++) {
+        n = (size_t)(t * 613 % 90000) + (t % 7 == 0 ? 0 : 1);
+        b = (unsigned char*)malloc(n + 1);
+
+        for (i = 0; i < n; i++) {
+            s = s * 1103515245u + 12345u;
+            b[i] = t % 4 == 0 ? (unsigned char)(s >> 16) : t % 4 == 1 ? (unsigned char)(i % 7) :
+                   t % 4 == 2 ? (unsigned char)((s >> 16) % 3 + i / 1000) : (unsigned char)(i * i >> 9);
+        }
+
+        z = r = NULL;
+
+        if (pd_deflate(b, n, t % 2, &z, &zn) || pd_inflate(z, zn, t % 2, 0, &r, &rn) || rn != n ||
+                (n && memcmp(r, b, n))) {
+            ok = 0;
+        }
+
+        free(b);
+        free(z);
+        free(r);
+    }
+
+    CHECK(ok);
+    n = 200000;
+    b = (unsigned char*)malloc(n);
+
+    for (i = 0; i < n; i++) {
+        s = s * 1103515245u + 12345u;
+        b[i] = (unsigned char)"0123456789"[(s >> 16) % 10];
+    }
+
+    CHECK(pd_deflate(b, n, 1, &z, &zn) == 0 && zn < n * 55 / 100);   /* zlib's level 6: 48% */
+    free(z);
+
+    for (i = 0; i < n; i++) {
+        s = s * 1103515245u + 12345u;
+        b[i] = (unsigned char)(s >> 16);
+    }
+
+    CHECK(pd_deflate(b, n, 1, &z, &zn) == 0 && zn <= n + n / 1000 + 64);
+    free(z);
+    free(b);
+
+    n = (size_t)10 << 20;   /* three zlibmt blocks */
+    b = (unsigned char*)malloc(n);
+
+    for (i = 0; i < n; i++) {
+        s = s * 1103515245u + 12345u;
+        b[i] = (unsigned char)"abcdefgh ,."[(s >> 16) % 11];
+    }
+
+#ifndef _WIN32
+    setenv("PD_ZLIB_THREADS", "1", 1);
+    CHECK(pd_deflate(b, n, 1, &z1, &z1n) == 0);
+    setenv("PD_ZLIB_THREADS", "4", 1);
+    CHECK(pd_deflate(b, n, 1, &z, &zn) == 0);
+    unsetenv("PD_ZLIB_THREADS");
+    CHECK(zn == z1n && !memcmp(z, z1, zn));
+    free(z1);
+#else
+    CHECK(pd_deflate(b, n, 1, &z, &zn) == 0);
+#endif
+    r = NULL;
+    CHECK(pd_inflate(z, zn, 1, 0, &r, &rn) == 0 && rn == n && !memcmp(r, b, n));
+    CHECK(zn < n * 50 / 100);
+    free(r);
+    free(z);
+    free(b);
+}
+
+/* Large resources saved compressed, as MATLAB's jsonlab saves large arrays (a uint8 array, "_ArrayZipType_" zlib):
+   much smaller, and loaded back byte for byte; pictures compressed already, and small resources, kept as they
+   are. A resource jsonlab wrote -- zlib, gzip, or not compressed -- read. */
+static void test_resource_zip(void) {
+    pd_doc* d, *e;
+    unsigned char* big = (unsigned char*)malloc(100000), png[4096], small[100];
+    pd_res_id rb, rp, rs;
+    const char* mime;
+    const void* data;
+    size_t len, i;
+    int f;
+
+    for (i = 0; i < 100000; i++) {  /* metafile-like: records of numbers, repeating with variations */
+        big[i] = (unsigned char)("RECT 120,340 560,780; "[i % 22] + (i / 2200) % 3);
+    }
+
+    for (i = 0; i < sizeof(png); i++) {
+        png[i] = (unsigned char)(i % 7);
+    }
+
+    memcpy(png, "\x89PNG\r\n\x1a\n", 8);
+    memset(small, 'a', sizeof(small));
+    CHECK(pd_doc_new(&d) == PD_OK);
+    CHECK(pd_doc_add_resource(d, "image/x-emf", big, 100000, &rb) == PD_OK);
+    CHECK(pd_doc_add_resource(d, "image/png", png, sizeof(png), &rp) == PD_OK);
+    CHECK(pd_doc_add_resource(d, "text/plain", small, sizeof(small), &rs) == PD_OK);
+
+    for (f = 0; f < 2; f++) {
+        buf_t b = save(d, f ? PD_JDATA_BINARY : PD_JDATA_TEXT), c;
+
+        CHECK(contains(b, "_ArrayZipType_", 14) && contains(b, "zlib", 4));
+        CHECK(b.n < 30000);     /* 100 kB that compresses: far smaller */
+        CHECK(!f || contains(b, (const char*)png + 8, 64));     /* the PNG as it is */
+        CHECK(!f || contains(b, (const char*)small, sizeof(small)));
+        CHECK(pd_doc_load(b.p, b.n, PD_JDATA_AUTO, &e) == PD_OK);
+
+        if (e) {
+            CHECK(pd_doc_resource(e, rb, &mime, &data, &len) == PD_OK && len == 100000 && !memcmp(data, big, len) &&
+                  !strcmp(mime, "image/x-emf"));
+            CHECK(pd_doc_resource(e, rp, &mime, &data, &len) == PD_OK && len == sizeof(png) && !memcmp(data, png, len));
+            CHECK(pd_doc_resource(e, rs, &mime, &data, &len) == PD_OK && len == sizeof(small) &&
+                  !memcmp(data, small, len));
+            c = save(e, f ? PD_JDATA_BINARY : PD_JDATA_TEXT);
+            CHECK(same(b, c));  /* and saved again the same */
+            free(c.p);
+            pd_doc_free(e);
+        }
+
+        free(b.p);
+    }
+
+    {   /* jsonlab's forms of "hello world" in place of the small resource's bytes */
+        static const char* const forms[3] = {
+            "{\"_ArrayType_\":\"uint8\",\"_ArraySize_\":[1,11],\"_ArrayZipType_\":\"zlib\",\"_ArrayZipSize_\":[1,11],"
+            "\"_ArrayZipData_\":\"eJzLSM3JyVcozy/KSQEAGgsEXQ==\"}",
+            "{\"_ArrayType_\":\"uint8\",\"_ArraySize_\":[1,11],\"_ArrayZipType_\":\"gzip\",\"_ArrayZipSize_\":[1,11],"
+            "\"_ArrayZipData_\":\"H4sIAAAAAAAC/8tIzcnJVyjPL8pJAQCFEUoNCwAAAA==\"}",
+            "{\"_ArrayType_\":\"uint8\",\"_ArraySize_\":[1,11],\"_ArrayData_\":[104,101,108,108,111,32,119,111,114,108,"
+            "100]}"
+        };
+        pd_doc* h;
+        buf_t b;
+        char* at;
+        int k;
+
+        pd_doc_new(&h);
+        pd_doc_add_resource(h, "text/plain", "hello world", 11, &rs);
+        b = save(h, PD_JDATA_TEXT);
+        pd_doc_free(h);
+        at = strstr((char*)b.p, "\"aGVsbG8gd29ybGQ=\"");
+        CHECK(at != NULL);
+
+        for (k = 0; k < 3 && at; k++) {
+            size_t pre = (size_t)(at - (char*)b.p), post = b.n - pre - 18, fl = strlen(forms[k]);
+            char* t = (char*)malloc(pre + fl + post + 1);
+
+            memcpy(t, b.p, pre);
+            memcpy(t + pre, forms[k], fl);
+            memcpy(t + pre + fl, at + 18, post);
+            t[pre + fl + post] = '\0';
+            e = NULL;
+            CHECK(pd_doc_load(t, pre + fl + post, PD_JDATA_TEXT, &e) == PD_OK);
+            CHECK(e && pd_doc_resource(e, rs, &mime, &data, &len) == PD_OK && len == 11 && !memcmp(data, "hello world", 11));
+            pd_doc_free(e);
+            free(t);
+        }
+
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+    free(big);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);   /* progress stays in order with sanitizer reports */
     printf("basics\n");
     test_basics();
+    test_resource_zip();
+    test_deflate();
     printf("format, split, merge, markers\n");
     test_format_split_merge();
     printf("structure, floats, stories\n");

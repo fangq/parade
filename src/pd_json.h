@@ -54,6 +54,7 @@ void pj_str(pj_writer* w, const char* s, size_t len);
 void pj_cstr(pj_writer* w, const char* s);
 /* a byte stream: base64 string in JSON, raw `H` payload in BJData */
 void pj_bytes(pj_writer* w, const void* data, size_t len);
+void pj_byte_array(pj_writer* w, const void* data, size_t len);
 /* a rows x cols integer matrix: nested arrays in JSON, one optimized N-D array in BJData */
 void pj_int_matrix(pj_writer* w, const int64_t* data, int64_t rows, int32_t cols);
 /* flush; returns 0 on success */

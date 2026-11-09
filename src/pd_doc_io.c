@@ -90,6 +90,57 @@ static void put_str(pj_writer* w, const char* k, const char* v) {
     pj_cstr(w, v);
 }
 
+/* A resource's bytes: as they are, or -- when it is large and not compressed already, and zlib makes it much
+   smaller -- as a JData uint8 array compressed with zlib, as MATLAB's jsonlab writes large arrays
+   ({"_ArrayType_": "uint8", "_ArraySize_": [1, n], "_ArrayZipType_": "zlib", "_ArrayZipSize_": [1, n],
+   "_ArrayZipData_": ...}). Pictures in PNG, JPEG and the like are kept as they are. */
+#define ZIP_AT_LEAST 1024
+
+static int mime_compressed(const char* m) {
+    static const char* const done[] = { "image/png", "image/jpeg", "image/gif", "image/webp", "font/woff",
+                                        "font/woff2", "application/zip", "application/gzip", "video/", "audio/"
+                                      };
+    size_t k;
+
+    for (k = 0; k < sizeof(done) / sizeof(done[0]); k++) {
+        if (!strncmp(m, done[k], strlen(done[k]))) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void put_stream_data(pj_writer* w, const dres* r) {
+    unsigned char* z = NULL;
+    size_t zn = 0;
+
+    if (r->len >= ZIP_AT_LEAST && !mime_compressed(r->mime) && pd_deflate(r->data, r->len, 1, &z, &zn) == 0 &&
+            zn < r->len - r->len / 8) {
+        pj_obj_begin(w);
+        put_str(w, "_ArrayType_", "uint8");
+        pj_key(w, "_ArraySize_");
+        pj_arr_begin(w);
+        pj_int(w, 1);
+        pj_int(w, (int64_t)r->len);
+        pj_arr_end(w);
+        put_str(w, "_ArrayZipType_", "zlib");
+        pj_key(w, "_ArrayZipSize_");
+        pj_arr_begin(w);
+        pj_int(w, 1);
+        pj_int(w, (int64_t)r->len);
+        pj_arr_end(w);
+        pj_key(w, "_ArrayZipData_");
+        pj_byte_array(w, z, zn);
+        pj_obj_end(w);
+    } else {
+        pj_bytes(w, r->data, r->len);
+    }
+
+    free(z);
+}
+
+
 static void put_bool(pj_writer* w, const char* k, int v) {
     pj_key(w, k);
     pj_bool(w, v != 0);
@@ -1445,7 +1496,7 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
         put_int(&w, "ByteLength", (int64_t)d->res[i].len);
         pj_obj_end(&w);
         pj_key(&w, "Data");
-        pj_bytes(&w, d->res[i].data, d->res[i].len);
+        put_stream_data(&w, &d->res[i]);
         pj_obj_end(&w);
         pj_obj_end(&w);
     }

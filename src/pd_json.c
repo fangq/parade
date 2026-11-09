@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 #include "pd_json.h"
+#include "pd_internal.h"
 
 /* ------------------------------------------------------------------ */
 /* base64                                                             */
@@ -438,6 +439,22 @@ void pj_bytes(pj_writer* w, const void* data, size_t n) {
 
         pj_str(w, t, len);
         free(t);
+    }
+}
+
+/* bytes as a JData array's payload (_ArrayData_, _ArrayZipData_): a typed uint8 array in BJData ([$U#n, what
+   MATLAB's jsonlab writes and reads), base64 in text */
+void pj_byte_array(pj_writer* w, const void* data, size_t n) {
+    if (w->binary) {
+        prefix(w);
+        emit_c(w, '[');
+        emit_c(w, '$');
+        emit_c(w, 'U');
+        emit_c(w, '#');
+        put_size(w, n);
+        emit(w, data, n);
+    } else {
+        pj_bytes(w, data, n);
     }
 }
 
@@ -1377,6 +1394,14 @@ static pj_node* bj_container(parser* ps, int is_obj) {
             return nested;
         }
 
+        if (type == 'U') {  /* a vector of bytes (a JData payload): kept as bytes, not a node each */
+            x->type = PJ_BYTES;
+            x->s = copy_bytes(ps, ps->p + ps->i, (size_t)count);
+            x->len = (size_t)count;
+            ps->i += (size_t)count;
+            return x->s || !count ? x : NULL;
+        }
+
         for (k = 0; k < count; k++) {
             pj_node* v = node(ps, PJ_NULL);
 
@@ -1638,8 +1663,100 @@ int pj_stream_bytes(const pj_node* n, unsigned char** out, size_t* len) {
         return -1;
     }
 
+    if (n->type == PJ_OBJ && (pj_get(n, "_ArrayZipData_") || pj_get(n, "_ArrayData_"))) {
+        /* a JData uint8 array, as jsonlab writes one: its data, zlib or gzip compressed or as it is */
+        const pj_node* ty = pj_get(n, "_ArrayType_"), *sz = pj_get(n, "_ArraySize_"), *zt = pj_get(n, "_ArrayZipType_"), *c;
+        unsigned char* raw;
+        size_t rn, want = 1;
+        int zip = 0, rc;
+
+        if (ty && (ty->type != PJ_STR || ty->len != 5 || memcmp(ty->s, "uint8", 5))) {
+            return -1;
+        }
+
+        for (c = sz && sz->type == PJ_ARR ? sz->child : NULL; c; c = c->next) {
+            if (c->type != PJ_INT || c->i < 0 || (c->i && want > ((size_t)1 << 40) / (size_t)c->i)) {
+                return -1;
+            }
+
+            want *= (size_t)c->i;
+        }
+
+        if (sz && sz->type == PJ_INT && sz->i >= 0) {
+            want = (size_t)sz->i;
+        }
+
+        if (!sz) {
+            want = 0;   /* no size given: as long as it inflates to (within pd_inflate's cap) */
+        }
+
+        if (zt) {
+            if (zt->type == PJ_STR && zt->len == 4 && !memcmp(zt->s, "zlib", 4)) {
+                zip = 1;
+            } else if (zt->type == PJ_STR && zt->len == 4 && !memcmp(zt->s, "gzip", 4)) {
+                zip = 2;
+            } else {
+                return -1;  /* lzma, lz4, blosc2 ...: not read here */
+            }
+        }
+
+        if (pj_stream_bytes(pj_get(n, zip ? "_ArrayZipData_" : "_ArrayData_"), &raw, &rn)) {
+            return -1;
+        }
+
+        if (!zip) {
+            *out = raw;
+            *len = rn;
+            return sz && rn != want ? (free(raw), *out = NULL, *len = 0, -1) : 0;
+        }
+
+        if (zip == 2) {     /* a gzip member: its header (no optional fields) and trailer around raw deflate */
+            rc = rn >= 18 && raw[0] == 0x1F && raw[1] == 0x8B && raw[3] == 0 ?
+                 pd_inflate(raw + 10, rn - 18, 0, want, out, len) : -1;
+        } else {
+            rc = pd_inflate(raw, rn, 1, want, out, len);
+        }
+
+        free(raw);
+
+        if (rc || (sz && *len != want)) {
+            free(*out);
+            *out = NULL;
+            *len = 0;
+            return -1;
+        }
+
+        return 0;
+    }
+
     if (n->type == PJ_OBJ) {    /* {"_DataInfo_": {...}, "Data": ...} */
         return pj_stream_bytes(pj_get(n, "Data"), out, len);
+    }
+
+    if (n->type == PJ_ARR) {    /* bytes as numbers, one each */
+        const pj_node* c;
+        size_t k = 0;
+
+        for (c = n->child; c; c = c->next) {
+            k++;
+        }
+
+        if ((*out = (unsigned char*)malloc(k ? k : 1)) == NULL) {
+            return -1;
+        }
+
+        for (c = n->child, k = 0; c; c = c->next) {
+            if (c->type != PJ_INT || c->i < 0 || c->i > 255) {
+                free(*out);
+                *out = NULL;
+                return -1;
+            }
+
+            (*out)[k++] = (unsigned char)c->i;
+        }
+
+        *len = k;
+        return 0;
     }
 
     if (n->type == PJ_BYTES) {

@@ -149,8 +149,11 @@ static int xref_ok(const buf_t* b) {
     return ok;
 }
 
+int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen);
+
 /* a picture in a format the PDF writer decodes itself (BMP, TIFF uncompressed, PackBits, LZW, Deflate, with a
-   palette): its pixels, exactly, in the uncompressed PDF's image */
+   palette): its pixels, exactly, in the PDF's image -- as they are, or in its stream inflated (an image stream is
+   deflated whenever that makes it smaller) */
 static void check_decoded(const char* path, const char* mime, const unsigned char* px, size_t npx, int w, int h) {
     pd_doc* d;
     pd_layout* L = NULL;
@@ -172,9 +175,29 @@ static void check_decoded(const char* path, const char* mime, const unsigned cha
     {
         size_t i;
         int found = 0;
+        const char* at = NULL;
 
         for (i = 0; i + npx <= u.n && !found; i++) {
             found = memcmp(u.p + i, px, npx) == 0;
+        }
+
+        for (i = 0; i + strlen(dict) <= u.n && !at; i++) {     /* or in the image's stream, deflated */
+            if (!memcmp(u.p + i, dict, strlen(dict))) {
+                at = (const char*)u.p + i;
+            }
+        }
+
+        if (!found && at) {
+            const char* len = strstr(at, "/Length "), *st = strstr(at, "stream\n"), *fl = strstr(at, "/FlateDecode");
+            unsigned char* raw = NULL;
+            size_t rn = 0, zn = len ? strtoul(len + 8, NULL, 10) : 0;
+
+            if (len && st && fl && fl < st && (size_t)(st + 7 - (const char*)u.p) + zn <= u.n &&
+                    pd_inflate(st + 7, zn, 1, 0, &raw, &rn) == 0) {
+                found = rn == npx && memcmp(raw, px, npx) == 0;
+            }
+
+            free(raw);
         }
 
         if (!found) {
