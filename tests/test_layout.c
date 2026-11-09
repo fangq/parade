@@ -2386,6 +2386,62 @@ static void test_drawing(void) {
     pd_doc_free(d);
 }
 
+/* A drawing's label turned ("rot", a quarter turn clockwise): its glyphs turned so, down from its point one under
+   another, as a chart's axis title on its side is drawn; the same label not turned runs across. */
+static void test_drawing_label_turned(void) {
+    static const char js[] =
+        "{\"w\":13107200,\"h\":6553600,\"items\":["          /* 200pt x 100pt */
+        "{\"label\":\"abc\",\"x\":3276800,\"y\":1638400,\"sz\":655360,\"w\":400,\"i\":0,\"c\":4278190080,\"ha\":0,"
+        "\"rot\":5400000},"
+        "{\"label\":\"xyz\",\"x\":6553600,\"y\":4915200,\"sz\":655360,\"w\":400,\"i\":0,\"c\":4278190080,\"ha\":0}]}";
+    pd_block_id sec, p;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_layout_info info;
+    pd_inline o;
+    pd_draw* it;
+    int32_t n, k, turned = 0, flat = 0;
+    pd_sp tx[3], ty[3], fx[3], fy[3];
+
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_IMAGE;
+    o.width = PD_PT(200);
+    o.height = PD_PT(100);
+    CHECK(pd_doc_add_resource(d, "application/vnd.parade.drawing+json", js, strlen(js), &o.resource) == PD_OK);
+    p = pd_doc_child(d, sec, 0);
+    pd_doc_insert_inline(d, at(p, 0), &o, NULL);
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, &info) == PD_OK);
+    it = items(L, 0, &n);
+
+    for (k = 0; k < n; k++) {
+        if (it[k].kind != PD_DRAW_GLYPH) {
+            continue;
+        }
+
+        if (it[k].rotation == 5400000 && turned < 3) {
+            tx[turned] = it[k].x;
+            ty[turned++] = it[k].y;
+        } else if (it[k].rotation == 0 && flat < 3) {
+            fx[flat] = it[k].x;
+            fy[flat++] = it[k].y;
+        }
+    }
+
+    CHECK(turned == 3 && flat == 3);
+
+    if (turned == 3 && flat == 3) {
+        /* turned: one x, going down from the point; flat: one y, going across */
+        CHECK(tx[0] == tx[2] && ty[0] < ty[1] && ty[1] < ty[2]);
+        CHECK(fy[0] == fy[2] && fx[0] < fx[1] && fx[1] < fx[2]);
+        CHECK(labs(ty[2] - ty[0] - (fx[2] - fx[0])) < PD_PT(1));    /* as far down as the other goes across */
+    }
+
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -2449,6 +2505,7 @@ int main(void) {
     test_header_room();
     printf("drawings\n");
     test_drawing();
+    test_drawing_label_turned();
     pd_font_free(font);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

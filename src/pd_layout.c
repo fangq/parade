@@ -6195,7 +6195,10 @@ static void emit_textbox(const pd_layout* L, dlist_t* D, const pj_node* it, pd_s
     free(M.d);
 }
 
-/* a single line of text of a drawing at its baseline point: left, centred or right (ha 0, 1, 2) of it */
+static void turn_pt(int32_t rot, pd_sp rx, pd_sp ry, pd_sp* x, pd_sp* y);
+
+/* a single line of text of a drawing at its baseline point: left, centred or right (ha 0, 1, 2) of it; turned
+   about the point ("rot", 60000ths of a degree clockwise) */
 static void emit_label(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp x, pd_sp y, double sc,
                        pd_block_id block, uint32_t off, int32_t region) {
     const pj_node* tn = pj_get(it, "label"), *fn = pj_get(it, "f");
@@ -6205,6 +6208,8 @@ static void emit_label(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp 
     pd_glyph g[256];
     pd_line ln;
     int32_t n = 0, i, ha = (int32_t)pj_int_or(pj_get(it, "ha"), 0);
+    int32_t rot = (int32_t)(pj_int_or(pj_get(it, "rot"), 0) % 21600000);
+    pd_sp ax = x, ay = y;
 
     if (!tn || tn->type != PJ_STR || tn->len == 0) {
         return;
@@ -6261,6 +6266,12 @@ static void emit_label(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp 
         a.block = block;
         a.offset = off;
         a.region = region;
+
+        if (rot) {
+            turn_pt(rot < 0 ? rot + 21600000 : rot, ax, ay, &a.x, &a.y);
+            a.rotation = rot < 0 ? rot + 21600000 : rot;
+        }
+
         emit(D, &a);
     }
 }

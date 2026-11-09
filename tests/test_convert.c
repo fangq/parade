@@ -6666,6 +6666,260 @@ static void test_emf_shapes(void) {
     pd_doc_free(d);
 }
 
+static void le_f(buf_t* b, float f) {
+    uint32_t v;
+
+    memcpy(&v, &f, 4);
+    le32(b, v);
+}
+
+/* an EMF+ record: type, flags, sizes, then its data */
+static void plus_rec(buf_t* b, uint16_t type, uint16_t flags, const buf_t* data) {
+    le(b, type, 2);
+    le(b, flags, 2);
+    le32(b, 12 + (uint32_t)data->n);
+    le32(b, (uint32_t)data->n);
+    to_buf(b, data->p, data->n);
+}
+
+/* EMF+ records into a comment of an EMF */
+static void emr_plus(buf_t* e, buf_t* recs) {
+    while (recs->n & 3) {
+        le(recs, 0, 1);
+    }
+
+    le32(e, 70);
+    le32(e, 16 + (uint32_t)recs->n);
+    le32(e, 4 + (uint32_t)recs->n);
+    le32(e, 0x2B464D45u);
+    to_buf(e, recs->p, recs->n);
+    free(recs->p);
+    recs->p = NULL;
+    recs->n = 0;
+}
+
+/* an EMF header: a 100 by 100 device of 4 pixels a millimetre, the frame all of it (25 mm) */
+static void emf_head(buf_t* e) {
+    uint32_t hdr[20];
+
+    memset(hdr, 0, sizeof(hdr));
+    hdr[2] = 99; hdr[3] = 99;
+    hdr[6] = 2500; hdr[7] = 2500;
+    hdr[8] = 0x464D4520u;
+    hdr[9] = 0x10000; hdr[12] = 4;
+    hdr[16] = 100; hdr[17] = 100;
+    hdr[18] = 25; hdr[19] = 25;
+    emr(e, 1, hdr, 20);
+}
+
+static void plus_head(buf_t* r) {
+    buf_t d = { NULL, 0 };
+
+    le32(&d, 0xDBC01002u);
+    le32(&d, 1);
+    le32(&d, 96);
+    le32(&d, 96);
+    plus_rec(r, 0x4001, 1, &d);
+    free(d.p);
+}
+
+/* a rectangle filled with a colour of its own (EMF+ FillRects, floats) */
+static void plus_fill_rect(buf_t* r, uint32_t argb, float x, float y, float w, float h) {
+    buf_t d = { NULL, 0 };
+
+    le32(&d, argb);
+    le32(&d, 1);
+    le_f(&d, x);
+    le_f(&d, y);
+    le_f(&d, w);
+    le_f(&d, h);
+    plus_rec(r, 0x400A, 0x8000, &d);
+    free(d.p);
+}
+
+static void gdi_rect(buf_t* e, uint32_t bgr, uint32_t slot, int l, int t, int rr, int bb) {
+    uint32_t brush[4] = { slot, 0, bgr, 0 }, sel[1] = { slot }, box[4] = { (uint32_t)l, (uint32_t)t, (uint32_t)rr,
+                                                                          (uint32_t)bb };
+
+    emr(e, 39, brush, 4);
+    emr(e, 37, sel, 1);
+    emr(e, 43, box, 4);
+}
+
+/* GDI text, "Up", at (x, y), under a world transform turning it a quarter turn clockwise about (50, 50) */
+static void gdi_turned_text(buf_t* e) {
+    float xf[6] = { 0, 1, -1, 0, 50, 50 };
+    uint32_t w[6], t[18];
+
+    memcpy(w, xf, sizeof(xf));
+    emr(e, 35, w, 6);
+    memset(t, 0, sizeof(t));
+    t[4] = 1;
+    t[7] = 0;
+    t[8] = 0;
+    t[9] = 2;
+    t[10] = 76;
+    t[17] = 'U' | ('p' << 16);
+    emr(e, 84, t, 18);
+}
+
+static char* emf_json(buf_t* e, pd_doc** dp) {
+    pd_res_id src, r;
+
+    pd_doc_new(dp);
+    pd_doc_add_resource(*dp, "image/x-emf", e->p, e->n, &src);
+    r = pd_metafile_drawing(*dp, (const unsigned char*)e->p, e->n, src);
+    return r ? drawing_json(*dp, r) : NULL;
+}
+
+/* A metafile GDI+ wrote (MATLAB's, Office's): its EMF+ records drawn, not the plain records beside them but for those
+   after a GetDC; a metafile drawn inside it (an EMF+ object, sent in two pieces) drawn where DrawImagePoints puts
+   it; a string turned by the world transform turned; a linear gradient's stops; a pen's own dashes. A metafile
+   with an EMF+ record not played here drawn from its plain records, as before. */
+static void test_emf_plus(void) {
+    buf_t e = { NULL, 0 }, r = { NULL, 0 }, d = { NULL, 0 }, in = { NULL, 0 }, ir = { NULL, 0 };
+    pd_doc* doc;
+    char* js, item[8192], want[96];
+    double W = 25 / 25.4 * 72 * 65536, U = W / 100;    /* the drawing's units a device pixel */
+    size_t half;
+
+    /* the metafile drawn inside: EMF+ only, green over all of it */
+    emf_head(&in);
+    plus_head(&ir);
+    plus_fill_rect(&ir, 0xFF00FF00u, 0, 0, 100, 100);
+    emr_plus(&in, &ir);
+    emr(&in, 14, (const uint32_t*)"\0\0\0\0\0\0\0\0\0\0\0\0", 3);
+
+    emf_head(&e);
+    plus_head(&r);
+    plus_fill_rect(&r, 0xFFFF0000u, 10, 10, 20, 20);   /* red: drawn */
+    emr_plus(&e, &r);
+    gdi_rect(&e, 0x00FF0000u, 1, 60, 60, 90, 90);      /* blue, plain, beside the EMF+ records: not */
+    plus_rec(&r, 0x4004, 0, &d);                        /* GetDC */
+    emr_plus(&e, &r);
+    gdi_rect(&e, 0x0000FFFFu, 2, 0, 0, 5, 5);          /* yellow, plain, after the GetDC: drawn */
+    {   /* "Hi" under a world transform turning it a quarter turn */
+        static const float xf[6] = { 0, 1, -1, 0, 50, 50 };
+        int k;
+
+        for (k = 0; k < 6; k++) {
+            le_f(&d, xf[k]);
+        }
+
+        plus_rec(&r, 0x402A, 0, &d);
+        free(d.p); d.p = NULL; d.n = 0;
+        le32(&d, 0xDBC01002u); le_f(&d, 10); le32(&d, 2); le32(&d, 0); le32(&d, 0); le32(&d, 2);
+        le(&d, 'H', 2); le(&d, 'i', 2);
+        plus_rec(&r, 0x4008, 0x0600, &d);               /* font 0 */
+        free(d.p); d.p = NULL; d.n = 0;
+        le32(&d, 0xFF000000u); le32(&d, 63); le32(&d, 2);
+        le_f(&d, 0); le_f(&d, 0); le_f(&d, 0); le_f(&d, 0);
+        le(&d, 'H', 2); le(&d, 'i', 2);
+        plus_rec(&r, 0x401C, 0x8000, &d);
+        free(d.p); d.p = NULL; d.n = 0;
+        plus_rec(&r, 0x402B, 0, &d);
+    }
+    {   /* a linear gradient, red to blue left to right, filling a square */
+        le32(&d, 0xDBC01002u); le32(&d, 4); le32(&d, 0); le32(&d, 0);
+        le_f(&d, 0); le_f(&d, 0); le_f(&d, 10); le_f(&d, 0);
+        le32(&d, 0xFFFF0000u); le32(&d, 0xFF0000FFu); le32(&d, 0); le32(&d, 0);
+        plus_rec(&r, 0x4008, 0x0101, &d);               /* brush 1 */
+        free(d.p); d.p = NULL; d.n = 0;
+        le32(&d, 1); le32(&d, 1); le_f(&d, 40); le_f(&d, 10); le_f(&d, 20); le_f(&d, 20);
+        plus_rec(&r, 0x400A, 0, &d);
+        free(d.p); d.p = NULL; d.n = 0;
+    }
+    {   /* a pen with dashes of its own (3 on, 1 off) and no dash style, drawing a path across */
+        le32(&d, 0xDBC01002u); le32(&d, 0); le32(&d, 0x100); le32(&d, 2); le_f(&d, 2);
+        le32(&d, 2); le_f(&d, 3); le_f(&d, 1);
+        le32(&d, 0xDBC01002u); le32(&d, 0); le32(&d, 0xFF000000u);
+        plus_rec(&r, 0x4008, 0x0202, &d);               /* pen 2 */
+        free(d.p); d.p = NULL; d.n = 0;
+        le32(&d, 0xDBC01002u); le32(&d, 2); le32(&d, 0);
+        le_f(&d, 10); le_f(&d, 80); le_f(&d, 90); le_f(&d, 80);
+        le(&d, 0, 1); le(&d, 1, 1); le(&d, 0, 2);
+        plus_rec(&r, 0x4008, 0x0303, &d);               /* path 3 */
+        free(d.p); d.p = NULL; d.n = 0;
+        le32(&d, 2);
+        plus_rec(&r, 0x4015, 3, &d);
+        free(d.p); d.p = NULL; d.n = 0;
+    }
+    {   /* the metafile inside as image 4, in two pieces, drawn into (50, 50)-(70, 70) */
+        buf_t obj = { NULL, 0 };
+
+        le32(&obj, 0xDBC01002u); le32(&obj, 2); le32(&obj, 4); le32(&obj, (uint32_t)in.n);
+        to_buf(&obj, in.p, in.n);
+        half = obj.n / 2;
+        le32(&d, (uint32_t)obj.n);
+        to_buf(&d, obj.p, half);
+        plus_rec(&r, 0x4008, 0x8504, &d);
+        free(d.p); d.p = NULL; d.n = 0;
+        le32(&d, (uint32_t)obj.n);
+        to_buf(&d, obj.p + half, obj.n - half);
+        plus_rec(&r, 0x4008, 0x8504, &d);
+        free(d.p); d.p = NULL; d.n = 0;
+        free(obj.p);
+        le32(&d, 0xFFFFFFFFu); le32(&d, 2); le_f(&d, 0); le_f(&d, 0); le_f(&d, 100); le_f(&d, 100);
+        le32(&d, 3); le_f(&d, 50); le_f(&d, 50); le_f(&d, 70); le_f(&d, 50); le_f(&d, 50); le_f(&d, 70);
+        plus_rec(&r, 0x401B, 4, &d);
+        free(d.p); d.p = NULL; d.n = 0;
+    }
+    plus_rec(&r, 0x4002, 0, &d);
+    emr_plus(&e, &r);
+    emr(&e, 14, (const uint32_t*)"\0\0\0\0\0\0\0\0\0\0\0\0", 3);
+
+    js = emf_json(&e, &doc);
+    CHECK(js != NULL);
+
+    if (js) {
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(10 * U), (int)(10 * U));
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"fill\":4294901760"));     /* red */
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(60 * U), (int)(60 * U));
+        CHECK(!item_with(js, want, item, sizeof(item)));                                        /* no blue box */
+        CHECK(strstr(js, "\"fill\":4294967040") != NULL);                                       /* yellow, after GetDC */
+        CHECK(strstr(js, "{\"label\":\"Hi\"") != NULL && strstr(strstr(js, "{\"label\":\"Hi\""), "\"rot\":5400000"));
+        CHECK(strstr(js, "\"gk\":1,\"f2\":4278190335,\"ga\":0,\"gs\":[0,4294901760,100000,4278190335]") != NULL);
+        CHECK(strstr(js, "\"dash\":[300000,100000]") != NULL);
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(50 * U), (int)(50 * U));
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"fill\":4278255360") &&
+              item_has_pt(item, (long)(70 * U), (long)(70 * U)));                              /* green, inside */
+        free(js);
+    }
+
+    pd_doc_free(doc);
+    free(e.p);
+    e.p = NULL;
+    e.n = 0;
+
+    /* an EMF+ record not played here (DrawDriverString): the plain records, as before */
+    emf_head(&e);
+    plus_head(&r);
+    le32(&d, 0);
+    plus_rec(&r, 0x4036, 0, &d);
+    free(d.p); d.p = NULL; d.n = 0;
+    plus_fill_rect(&r, 0xFFFF0000u, 10, 10, 20, 20);
+    emr_plus(&e, &r);
+    gdi_rect(&e, 0x00FF0000u, 1, 60, 60, 90, 90);
+    gdi_turned_text(&e);
+    emr(&e, 14, (const uint32_t*)"\0\0\0\0\0\0\0\0\0\0\0\0", 3);
+    js = emf_json(&e, &doc);
+    CHECK(js != NULL);
+
+    if (js) {
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(60 * U), (int)(60 * U));
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"fill\":4278190335"));     /* blue */
+        CHECK(strstr(js, "\"fill\":4294901760") == NULL);                                       /* no red */
+        /* GDI text turned by its world transform: turned */
+        CHECK(strstr(js, "{\"label\":\"Up\"") != NULL && strstr(strstr(js, "{\"label\":\"Up\""), "\"rot\":5400000"));
+        free(js);
+    }
+
+    pd_doc_free(doc);
+    free(e.p);
+    free(in.p);
+    free(d.p);
+}
+
 /* A metafile that clips (as MATLAB's do, to the axes): a rectangle clip from 20 to 80; a green square from 0 to 100
    filled only inside it; a line across from 0 to 100 drawn only from 20 to 80; a clip narrowed inside SaveDC and
    given back by RestoreDC; a label outside the clip left out */
@@ -11056,6 +11310,7 @@ int main(void) {
     test_emf();
     test_emf_clip();
     test_emf_shapes();
+    test_emf_plus();
     printf("docx equations\n");
     test_docx_omml();
     printf("docx fields and references\n");
