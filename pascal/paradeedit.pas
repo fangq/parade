@@ -60,6 +60,7 @@ type
 
   { an undo or redo done elsewhere (a collaboration binding's own-edits undo); True when it did one }
   TParadeUndoEvent = function(Sender: TObject; Redo: Boolean): Boolean of object;
+  TParadeCommentEvent = procedure(Sender: TObject; Id: pd_comment_id) of object;
 
   { someone else's caret and selection in a shared document }
   TParadeRemoteCaret = record
@@ -194,6 +195,8 @@ type
     FFileName: string;
     FOnChange: TNotifyEvent;
     FOnSelectionChange: TNotifyEvent;
+    FOnCommentDblClick: TParadeCommentEvent;
+    FDownAt: TPoint;                 { the last press, for the double click that follows it }
     FSelSig: string;               { caret, anchor and document revision when the toolbar was last told }
     FSelQueued: Boolean;
     FPending: pd_char_props;       { formatting chosen with nothing selected: for what is typed next, here }
@@ -856,6 +859,16 @@ type
     { the others' carets and selections, drawn in their colours with their names }
     procedure SetRemoteCarets(const Carets: array of TParadeRemoteCaret);
     procedure ResolveComment(Id: pd_comment_id; Resolved: Boolean = True);
+    { the view as the control shows it (pages, balloons, the selection) drawn into Img, sized to the control's text
+      area; Img's description is set here }
+    procedure RenderView(Img: TLazIntfImage);
+    { a comment's (or a reply's) text, '' for none }
+    function CommentText(Id: pd_comment_id): string;
+    { a comment's or a reply's text replaced -- anyone's, as Word lets any reviewer: its author and date stay; one
+      undo step. False when read-only, the id is gone, or the text is empty }
+    function EditComment(Id: pd_comment_id; const AText: string): Boolean;
+    { the comment or reply whose balloon lines are under a point of the control, 0 if none }
+    function CommentAtPoint(X, Y: Integer): pd_comment_id;
 
     property Doc: Ppd_doc read FDoc;
     property Layout: Ppd_layout read FLayout;
@@ -890,6 +903,8 @@ type
     property OnChange: TNotifyEvent read FOnChange write FOnChange;
     { the caret moved, the selection changed or the document did: for a toolbar showing what is here }
     property OnSelectionChange: TNotifyEvent read FOnSelectionChange write FOnSelectionChange;
+    { a comment's balloon double-clicked (a reply's lines: the reply), to edit it }
+    property OnCommentDblClick: TParadeCommentEvent read FOnCommentDblClick write FOnCommentDblClick;
     { the control's size changed: for a zoom that follows the width }
     property OnResize;
     { formatting marks: a pilcrow at each paragraph's end }
@@ -1396,6 +1411,38 @@ begin
   SetLength(R, 1);
   R[0] := P;
   FillRingsImg(Img, R, Col);
+end;
+
+{ a rectangle with rounded corners of radius R, as a ring: a balloon's outline }
+function RoundRectPts(X0, Y0, X1, Y1, R: Double): TPtDArray;
+const
+  SEG = 6;
+var
+  C, I, K: Integer;
+  CX, CY, A: Double;
+begin
+  if R > (X1 - X0) / 2 then R := (X1 - X0) / 2;
+  if R > (Y1 - Y0) / 2 then R := (Y1 - Y0) / 2;
+  if R < 0 then R := 0;
+  SetLength(Result, 4 * (SEG + 1));
+  K := 0;
+  for C := 0 to 3 do
+  begin
+    case C of
+      0: begin CX := X1 - R; CY := Y0 + R; end;    { top right, from the top edge round to the right }
+      1: begin CX := X1 - R; CY := Y1 - R; end;
+      2: begin CX := X0 + R; CY := Y1 - R; end;
+    else
+      begin CX := X0 + R; CY := Y0 + R; end;
+    end;
+    for I := 0 to SEG do
+    begin
+      A := (C - 1 + I / SEG) * Pi / 2;
+      Result[K].X := CX + R * Cos(A);
+      Result[K].Y := CY + R * Sin(A);
+      Inc(K);
+    end;
+  end;
 end;
 
 { a polyline stroked at a width: a filled quad along each segment }
@@ -13061,6 +13108,7 @@ var
 begin
   inherited MouseDown(Button, Shift, X, Y);
   SetFocus;
+  FDownAt := Point(X, Y);
   if Button = mbLeft then
     for I := 0 to High(FBalloons) do
       if PtInRect(FBalloons[I].R, Point(X, Y)) then
@@ -13315,6 +13363,13 @@ var
 begin
   inherited DblClick;
   FDragging := False;
+  A := CommentAtPoint(FDownAt.X, FDownAt.Y);   { where the double click's second press was }
+  if A <> 0 then
+  begin   { a balloon: its comment to edit }
+    if Assigned(FOnCommentDblClick) then
+      FOnCommentDblClick(Self, A);
+    Exit;
+  end;
   if ((FDrawKind = 'freeform') or (FDrawKind = 'curve')) and (Length(FDrawPts) >= 4) then
   begin   { the last corner: the double click's second press put it in twice }
     if (Length(FDrawPts) >= 6) and (Abs(FDrawPts[High(FDrawPts) - 1] - FDrawPts[High(FDrawPts) - 3]) < PD_SP_PER_PT) and
@@ -14324,6 +14379,51 @@ begin
     Changed;
 end;
 
+procedure TParadeEdit.RenderView(Img: TLazIntfImage);
+var
+  Desc: TRawImageDescription;
+begin
+  Desc.Init_BPP32_B8G8R8A8_BIO_TTB(Max(1, ClientWidth - FScrollBar.Width), Max(1, ClientHeight));
+  Img.DataDescription := Desc;
+  FillRectImg(Img, 0, 0, Img.Width, Img.Height, TColorToRGB(Color), 255);
+  DrawView(Img, 0, Img.Height, True);
+end;
+
+function TParadeEdit.CommentText(Id: pd_comment_id): string;
+var
+  C: pd_comment;
+begin
+  Result := '';
+  if pd_doc_comment_get(FDoc, Id, C) = PD_OK then
+    SetString(Result, C.text, C.text_len);
+end;
+
+function TParadeEdit.EditComment(Id: pd_comment_id; const AText: string): Boolean;
+var
+  C: pd_comment;
+begin
+  Result := False;
+  if FReadOnly or (AText = '') or (pd_doc_comment_get(FDoc, Id, C) <> PD_OK) then
+    Exit;
+  if CommentText(Id) = AText then
+    Exit(True);
+  C.text := PAnsiChar(AText);
+  C.text_len := Length(AText);
+  Result := pd_doc_comment_set(FDoc, Id, C) = PD_OK;
+  if Result then
+    Changed;
+end;
+
+function TParadeEdit.CommentAtPoint(X, Y: Integer): pd_comment_id;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := High(FBalloons) downto 0 do    { a reply's lines are listed after its balloon }
+    if (FBalloons[I].Kind = PD_MARK_COMMENT) and PtInRect(FBalloons[I].R, Point(X, Y)) then
+      Exit(FBalloons[I].Id);
+end;
+
 { Lay out a balloon's text -- runs alternating: a heading in the author's
   colour, bold, then plain text -- in W pixels; draw it at X, Y when Draw is
   given. Returns its height in pixels, padding included. }
@@ -14418,6 +14518,11 @@ var
   Col: UInt32;
   Line: TPtDArray;
   Info0: pd_page_info;
+  Rad: Double;
+  Reps: array of record
+    Id: pd_comment_id;
+    Segs: Integer;      { the balloon's runs before it }
+  end;
 
   procedure Add(const T: string);
   begin
@@ -14470,9 +14575,13 @@ begin
         else
           Add(PAnsiChar(@C.author[0]) + ': ');
         Add(S);
+        SetLength(Reps, 0);
         for CI := 1 to pd_doc_comment_count(FDoc) do
           if (pd_doc_comment_get(FDoc, CI, R) = PD_OK) and (R.parent = id) then
           begin
+            SetLength(Reps, Length(Reps) + 1);
+            Reps[High(Reps)].Id := CI;
+            Reps[High(Reps)].Segs := Length(Segs);
             SetString(S, R.text, R.text_len);
             Add(#10 + PAnsiChar(@R.author[0]) + ': ');
             Add(S);
@@ -14487,13 +14596,11 @@ begin
       if Y < NextY then
         Y := NextY;
       H := BalloonHeight(Segs, BW, PxScale, nil, 0, 0, Col);
-      { the balloon: white, tinted, framed, with a bar of the colour down its left }
-      FillRectImg(Img, BX, Y, BX + BW, Y + H, $00FFFFFF, 255);
-      FillRectImg(Img, BX, Y, BX + BW, Y + H, Col, 28);
-      FillRectImg(Img, BX, Y, BX + BW, Y + 1, Col, 255);
-      FillRectImg(Img, BX, Y + H - 1, BX + BW, Y + H, Col, 255);
-      FillRectImg(Img, BX + BW - 1, Y, BX + BW, Y + H, Col, 255);
-      FillRectImg(Img, BX, Y, BX + 3, Y + H, Col, 255);
+      { the balloon: rounded, framed in the colour, white tinted with it inside }
+      Rad := 6 * FZoom;
+      FillPolygonImg(Img, RoundRectPts(BX, Y, BX + BW, Y + H, Rad), Col);
+      FillPolygonImg(Img, RoundRectPts(BX + 1.2, Y + 1.2, BX + BW - 1.2, Y + H - 1.2, Rad - 1.2), $00FFFFFF);
+      FillPolygonImg(Img, RoundRectPts(BX + 1.2, Y + 1.2, BX + BW - 1.2, Y + H - 1.2, Rad - 1.2), Col or (28 shl 24));
       BalloonHeight(Segs, BW, PxScale, Img, BX + 2, Y, Col);
       { its place: a dotted line under the line, on to the page's edge, then to the balloon }
       J := AX;
@@ -14513,6 +14620,18 @@ begin
       FBalloons[High(FBalloons)].Range := range;
       FBalloons[High(FBalloons)].Kind := kind;
       FBalloons[High(FBalloons)].Id := id;
+      if kind = PD_MARK_COMMENT then
+        for J := 0 to High(Reps) do
+        begin   { each reply: where its lines are in the balloon, for a click on it alone (CommentAtPoint) }
+          SetLength(FBalloons, Length(FBalloons) + 1);
+          FBalloons[High(FBalloons)] := FBalloons[High(FBalloons) - 1 - J];
+          FBalloons[High(FBalloons)].R.Top := Y + BalloonHeight(Copy(Segs, 0, Reps[J].Segs), BW, PxScale, nil, 0, 0,
+            Col) - Round(5 * FZoom);
+          if J > 0 then
+            FBalloons[High(FBalloons) - 1].R.Bottom := FBalloons[High(FBalloons)].R.Top;
+          FBalloons[High(FBalloons)].Id := Reps[J].Id;
+        end;
+      SetLength(Reps, 0);
       NextY := Y + H + Round(6 * FZoom);
     end;
 end;

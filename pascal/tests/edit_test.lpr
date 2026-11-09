@@ -1299,6 +1299,84 @@ begin
   Check(E.CanvasPage and (E.PageCount = 2), 'saved as a Parade document: still its slides');
 end;
 
+{ comments edited -- anyone's, from its balloon: a double click on a reply's lines names the reply; the text
+  changed, its author kept, undone in one step; the balloons rounded }
+type
+  TCommentCatch = class
+    Got: pd_comment_id;
+    procedure Hit(Sender: TObject; Id: pd_comment_id);
+  end;
+
+procedure TCommentCatch.Hit(Sender: TObject; Id: pd_comment_id);
+begin
+  Got := Id;
+end;
+
+procedure TestCommentEdit(E: TParadeEdit);
+var
+  Img: TLazIntfImage;
+  X, Y, X0, Y0, X1, Y1, RX, RY: Integer;
+  Id: pd_comment_id;
+  Catch: TCommentCatch;
+  Cm: pd_comment;
+  Edge, Corner: TFPColor;
+begin
+  Img := TLazIntfImage.Create(0, 0);
+  Catch := TCommentCatch.Create;
+  try
+    E.RenderView(Img);
+    X0 := MaxInt; Y0 := MaxInt; X1 := -1; Y1 := -1; RX := -1; RY := -1;
+    for Y := 0 to Img.Height - 1 do
+      for X := 0 to Img.Width - 1 do
+      begin
+        Id := E.CommentAtPoint(X, Y);
+        if Id <> 0 then
+        begin
+          if X < X0 then X0 := X;
+          if Y < Y0 then Y0 := Y;
+          if X > X1 then X1 := X;
+          if Y > Y1 then Y1 := Y;
+        end;
+        if (Id = 2) and (RX < 0) then
+        begin
+          RX := X + 10;
+          RY := Y + 4;
+        end;
+      end;
+    Check((X1 > X0) and (E.CommentAtPoint(X0 + 10, Y0 + 4) = 1) and (RY > Y0 + 8),
+      Format('a balloon for the comment, the reply''s lines below its own (%d,%d-%d,%d reply at %d)', [X0, Y0, X1, Y1, RY]));
+    if X1 > X0 then
+    begin
+      Edge := Img.Colors[(X0 + X1) div 2, Y0];
+      Corner := Img.Colors[X0, Y0];
+      Check((Edge.red <> Corner.red) or (Edge.green <> Corner.green) or (Edge.blue <> Corner.blue),
+        'the balloon''s corner rounded: not drawn as its top edge is');
+    end;
+    E.OnCommentDblClick := @Catch.Hit;
+    if RX >= 0 then
+    begin
+      TParadeWheel(E).MouseDown(mbLeft, [], RX, RY);
+      TParadeWheel(E).MouseUp(mbLeft, [], RX, RY);
+      TParadeWheel(E).MouseDown(mbLeft, [ssDouble], RX, RY);
+      TParadeWheel(E).DblClick;
+      TParadeWheel(E).MouseUp(mbLeft, [], RX, RY);
+    end;
+    Check(Catch.Got = 2, 'a double click on the reply''s lines: the reply to edit (' + IntToStr(Catch.Got) + ')');
+    E.OnCommentDblClick := nil;
+    E.Author := 'Bob';
+    Check(E.EditComment(1, 'Which fox, the red?') and (E.CommentText(1) = 'Which fox, the red?') and
+      (pd_doc_comment_get(E.Doc, 1, Cm) = PD_OK) and (PAnsiChar(@Cm.author[0]) = 'Ann'),
+      'Ann''s comment edited by Bob: the text new, still Ann''s');
+    Check(not E.EditComment(1, ''), 'not to nothing');
+    E.Undo;
+    Check(E.CommentText(1) = 'Which fox?', 'undone: ' + E.CommentText(1));
+    E.Author := 'Ann';
+  finally
+    Catch.Free;
+    Img.Free;
+  end;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -2501,6 +2579,7 @@ begin
   Check(E.ReplyToComment(1, 'The red one.') = 2, 'reply added');
   Check(E.CommentAt(PdPos(E.CaretPos.block, 17)) = 1, 'comment at a position');
   Check((pd_layout_page_markup(E.Layout, 0, nil, 0, N) = PD_OK) and (N = 3), 'two changes and a comment');
+  TestCommentEdit(E);
   E.SaveToFile(Dir + 'edit_review.docx');
   E.LoadFromFile(Dir + 'edit_review.docx');
   Check(E.DocumentText = 'The quick brown fox', 'review docx round trip: ' + E.DocumentText);
