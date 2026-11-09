@@ -162,6 +162,13 @@ type
     FCornerPage: Integer;          { the page whose corner is dragged }
     FTblDrag: Integer;             { a table's border dragged: 0 none, 1 a column's edge, 2 a row's foot }
     FKeepView: Boolean;            { the next Changed leaves the view where it is, not taken to the caret }
+    FMarkCache: array of record    { each page's changes and comments as last listed, for its balloons: listing them
+                                     walks every run and places each, too slow for every strip a scroll draws }
+      Epoch: Int64;
+      Rev: UInt64;
+      Mode: Int32;
+      Items: array of pd_markup_item;
+    end;
     FTblTable, FTblRow: pd_block_id;
     FTblEdge, FTblPage: Integer;   { which of FTblEdges, on which page }
     FTblEdges: TParadeSpArray;     { the table's column edges across, on the page }
@@ -200,6 +207,9 @@ type
     FPicDoc: Ppd_doc;              { the document they are of }
     FPrefetch: TTimer;             { decoding the pictures while the reader is not doing anything }
     FPrefetchRes: pd_res_id;
+    FDecoder: TObject;             { the thread decoding pictures off the screen's thread (TPicDecoder) }
+    FPicGen: Integer;              { counts ClearPictures: a picture decoded for a document since gone is dropped }
+    FPicWait: array of Byte;       { per resource: 0 not asked, 1 with the decoder, 2 not a picture it reads }
     FOrder: array of Int32;        { block id -> reading-order index, -1 = not in the main flow }
     FOrderRev: UInt64;
     FDragging: Boolean;
@@ -263,7 +273,11 @@ type
     procedure ScrollBarChange(Sender: TObject);
     procedure ClearGlyphCache;
     procedure ClearPictures;
-    function GetPicture(Res: pd_res_id; W, H: Integer): TLazIntfImage;
+    { a picture at W x H; Wait false (the screen): one not decoded yet is asked for and nil comes back (its frame
+      drawn), the page drawn again when it is ready }
+    function GetPicture(Res: pd_res_id; W, H: Integer; Wait: Boolean = True): TLazIntfImage;
+    procedure QueuePicture(Res: pd_res_id; Front: Boolean);
+    function TakeDecoded: Boolean;
     function GetGlyphBmp(AFont: Ppd_font; GlyphId: UInt32; PxPerEm: pd_sp; Sub: Integer): PGlyphBmp;
     function PxPerSp: Double;
     function PageTop(Page: Integer): Integer;
@@ -944,6 +958,231 @@ type
   end;
 
 implementation
+
+uses
+  FPReadPNG, FPReadJPEG, FPReadGIF, FPReadBMP, FPReadTiff;
+
+{ ---------------- pictures decoded off the screen's thread ---------------- }
+
+{ The LCL's own readers make widget handles, which only the main thread may; fcl-image's read straight into a
+  TLazIntfImage, which is plain memory. A large JPEG or PNG takes a few hundred milliseconds that way, and on the
+  main thread that was a scroll stopped for as long. }
+type
+  TPicJob = record
+    Res: pd_res_id;
+    Gen: Integer;
+    Mime: string;
+    Data: TBytes;
+  end;
+
+  TPicDone = record
+    Res: pd_res_id;
+    Gen: Integer;
+    Img: TLazIntfImage;   { nil: not a picture it could read }
+  end;
+
+  TPicDecoder = class(TThread)
+  private
+    FLock: TRTLCriticalSection;
+    FWake: PRTLEvent;
+    FJobs: array of TPicJob;
+    FDone: array of TPicDone;
+    FWorking: Boolean;
+    function Decode(const J: TPicJob): TLazIntfImage;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure Add(const J: TPicJob; Front: Boolean);
+    procedure Bump(Res: pd_res_id);
+    procedure DropJobs;
+    function TakeDone(out D: TPicDone): Boolean;
+    function Idle: Boolean;
+  end;
+
+function PictureMimeOk(const M: string): Boolean;
+begin
+  Result := (Pos('image/png', M) = 1) or (Pos('image/jpeg', M) = 1) or (Pos('image/gif', M) = 1) or
+    (Pos('image/bmp', M) = 1) or (Pos('image/tiff', M) = 1);
+end;
+
+constructor TPicDecoder.Create;
+begin
+  InitCriticalSection(FLock);
+  FWake := RTLEventCreate;
+  inherited Create(False);
+end;
+
+destructor TPicDecoder.Destroy;
+var
+  I: Integer;
+begin
+  Terminate;
+  RTLEventSetEvent(FWake);
+  WaitFor;
+  for I := 0 to High(FDone) do
+    FDone[I].Img.Free;
+  RTLEventDestroy(FWake);
+  DoneCriticalSection(FLock);
+  inherited Destroy;
+end;
+
+procedure TPicDecoder.Add(const J: TPicJob; Front: Boolean);
+var
+  I: Integer;
+begin
+  EnterCriticalSection(FLock);
+  try
+    SetLength(FJobs, Length(FJobs) + 1);
+    if Front then
+    begin
+      for I := High(FJobs) downto 1 do
+        FJobs[I] := FJobs[I - 1];
+      FJobs[0] := J;
+    end
+    else
+      FJobs[High(FJobs)] := J;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+  RTLEventSetEvent(FWake);
+end;
+
+{ one now on the screen: decoded next }
+procedure TPicDecoder.Bump(Res: pd_res_id);
+var
+  I, K: Integer;
+  J: TPicJob;
+begin
+  EnterCriticalSection(FLock);
+  try
+    for I := 1 to High(FJobs) do
+      if FJobs[I].Res = Res then
+      begin
+        J := FJobs[I];
+        for K := I downto 1 do
+          FJobs[K] := FJobs[K - 1];
+        FJobs[0] := J;
+        Break;
+      end;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+procedure TPicDecoder.DropJobs;
+begin
+  EnterCriticalSection(FLock);
+  try
+    FJobs := nil;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+function TPicDecoder.TakeDone(out D: TPicDone): Boolean;
+var
+  I: Integer;
+begin
+  EnterCriticalSection(FLock);
+  try
+    Result := Length(FDone) > 0;
+    if Result then
+    begin
+      D := FDone[0];
+      for I := 1 to High(FDone) do
+        FDone[I - 1] := FDone[I];
+      SetLength(FDone, Length(FDone) - 1);
+    end;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+function TPicDecoder.Idle: Boolean;
+begin
+  EnterCriticalSection(FLock);
+  try
+    Result := (Length(FJobs) = 0) and (Length(FDone) = 0) and not FWorking;
+  finally
+    LeaveCriticalSection(FLock);
+  end;
+end;
+
+function TPicDecoder.Decode(const J: TPicJob): TLazIntfImage;
+var
+  Reader: TFPCustomImageReader;
+  Ms: TMemoryStream;
+  Desc: TRawImageDescription;
+begin
+  Result := nil;
+  if Pos('image/png', J.Mime) = 1 then Reader := TFPReaderPNG.Create
+  else if Pos('image/jpeg', J.Mime) = 1 then Reader := TFPReaderJPEG.Create
+  else if Pos('image/gif', J.Mime) = 1 then Reader := TFPReaderGif.Create
+  else if Pos('image/bmp', J.Mime) = 1 then Reader := TFPReaderBMP.Create
+  else if Pos('image/tiff', J.Mime) = 1 then Reader := TFPReaderTiff.Create
+  else
+    Exit;
+  Ms := TMemoryStream.Create;
+  try
+    try
+      if Length(J.Data) > 0 then
+        Ms.WriteBuffer(J.Data[0], Length(J.Data));
+      Ms.Position := 0;
+      Result := TLazIntfImage.Create(0, 0);
+      Desc.Init_BPP32_B8G8R8A8_BIO_TTB(0, 0);   { the page's own pixel layout: scaled from memory as it is }
+      Result.DataDescription := Desc;
+      Result.LoadFromStream(Ms, Reader);
+      if (Result.Width <= 0) or (Result.Height <= 0) then
+        FreeAndNil(Result);
+    except
+      FreeAndNil(Result);
+    end;
+  finally
+    Ms.Free;
+    Reader.Free;
+  end;
+end;
+
+procedure TPicDecoder.Execute;
+var
+  J: TPicJob;
+  Got: Boolean;
+  D: TPicDone;
+begin
+  while not Terminated do
+  begin
+    EnterCriticalSection(FLock);
+    try
+      Got := Length(FJobs) > 0;
+      if Got then
+      begin
+        J := FJobs[0];
+        Delete(FJobs, 0, 1);
+        FWorking := True;
+      end;
+    finally
+      LeaveCriticalSection(FLock);
+    end;
+    if not Got then
+    begin
+      RTLEventWaitFor(FWake, 200);
+      Continue;
+    end;
+    D.Res := J.Res;
+    D.Gen := J.Gen;
+    D.Img := Decode(J);
+    EnterCriticalSection(FLock);
+    try
+      SetLength(FDone, Length(FDone) + 1);
+      FDone[High(FDone)] := D;
+      FWorking := False;
+    finally
+      LeaveCriticalSection(FLock);
+    end;
+  end;
+end;
 
 { ---------------- pixels ---------------- }
 
@@ -1841,6 +2080,7 @@ var
   I: Integer;
 begin
   Application.RemoveAsyncCalls(Self);
+  FreeAndNil(FDecoder);    { the thread stopped before anything it might be given goes }
   if FLayout <> nil then
     pd_layout_free(FLayout);
   if FDoc <> nil then
@@ -2156,24 +2396,22 @@ var
   Mime: PAnsiChar;
   Data: Pointer;
   Len: csize_t;
-  M: string;
 begin
   FPrefetch.Interval := 30;
+  if TakeDecoded then
+  begin   { pictures come in: the pages drawn again with them }
+    FBackSig := '';
+    Invalidate;
+  end;
+  { the rest of the document's pictures to the thread, after those on the screen }
   while (FDoc <> nil) and (pd_doc_resource(FDoc, FPrefetchRes, @Mime, @Data, @Len) = PD_OK) do
   begin
-    M := StrPas(Mime);
     Inc(FPrefetchRes);
-    if (Pos('image/png', M) = 1) or (Pos('image/jpeg', M) = 1) or (Pos('image/gif', M) = 1) or
-      (Pos('image/bmp', M) = 1) or (Pos('image/tiff', M) = 1) then
-    begin
-      if (Integer(FPrefetchRes) - 1 > Length(FPics)) or (FPics[FPrefetchRes - 2] = nil) then
-      begin
-        DecodePicture(FPrefetchRes - 1);
-        Exit;   { one a tick: a key pressed meanwhile waits for one picture at most }
-      end;
-    end;
+    if PictureMimeOk(StrPas(Mime)) then
+      QueuePicture(FPrefetchRes - 1, False);
   end;
-  FPrefetch.Enabled := False;
+  if (FDecoder = nil) or TPicDecoder(FDecoder).Idle then
+    FPrefetch.Enabled := False;
 end;
 
 procedure TParadeEdit.SaveToFile(const FileName: string);
@@ -2412,6 +2650,87 @@ begin
   FPics := nil;
   FPicSized := nil;
   FPicDoc := nil;
+  FPicWait := nil;
+  Inc(FPicGen);
+  if FDecoder <> nil then
+    TPicDecoder(FDecoder).DropJobs;
+end;
+
+{ a picture of the document to the decoding thread (Front: wanted on the screen now, before the others) }
+procedure TParadeEdit.QueuePicture(Res: pd_res_id; Front: Boolean);
+var
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  I: Integer;
+  J: TPicJob;
+begin
+  if (Res = 0) or (FDoc = nil) then
+    Exit;
+  if FPicDoc <> FDoc then
+  begin
+    ClearPictures;
+    FPicDoc := FDoc;
+  end;
+  I := Integer(Res) - 1;
+  if I >= Length(FPics) then
+  begin
+    SetLength(FPics, I + 1);
+    SetLength(FPicSized, I + 1);
+  end;
+  if I >= Length(FPicWait) then
+    SetLength(FPicWait, I + 1);
+  if FPics[I] <> nil then
+    Exit;
+  if FPicWait[I] = 1 then
+  begin
+    if Front then
+      TPicDecoder(FDecoder).Bump(Res);
+    Exit;
+  end;
+  if FPicWait[I] = 2 then
+    Exit;
+  if (pd_doc_resource(FDoc, Res, @Mime, @Data, @Len) <> PD_OK) or not PictureMimeOk(StrPas(Mime)) then
+  begin
+    FPicWait[I] := 2;
+    Exit;
+  end;
+  J.Res := Res;
+  J.Gen := FPicGen;
+  J.Mime := StrPas(Mime);
+  SetLength(J.Data, Len);
+  if Len > 0 then
+    Move(Data^, J.Data[0], Len);
+  if FDecoder = nil then
+    FDecoder := TPicDecoder.Create;
+  TPicDecoder(FDecoder).Add(J, Front);
+  FPicWait[I] := 1;
+  FPrefetch.Interval := 30;    { the results looked for }
+  FPrefetch.Enabled := True;
+end;
+
+{ the pictures the thread has decoded taken in; True when any was, and the view is to be drawn again }
+function TParadeEdit.TakeDecoded: Boolean;
+var
+  D: TPicDone;
+  I: Integer;
+begin
+  Result := False;
+  if FDecoder = nil then
+    Exit;
+  while TPicDecoder(FDecoder).TakeDone(D) do
+  begin
+    I := Integer(D.Res) - 1;
+    if (D.Gen = FPicGen) and (FPicDoc = FDoc) and (I < Length(FPics)) and (FPics[I] = nil) then
+    begin
+      FPics[I] := D.Img;
+      if I < Length(FPicWait) then
+        FPicWait[I] := IfThen(D.Img = nil, 2, 0);
+      Result := Result or (D.Img <> nil);
+    end
+    else
+      D.Img.Free;
+  end;
 end;
 
 { Src (the page's pixel layout) at W x H: each pixel the mean of the source pixels it covers, alpha-weighted, when
@@ -2559,12 +2878,24 @@ begin
 end;
 
 { a resource of the document as a picture W x H pixels, nil if it is not one the LCL reads }
-function TParadeEdit.GetPicture(Res: pd_res_id; W, H: Integer): TLazIntfImage;
+function TParadeEdit.GetPicture(Res: pd_res_id; W, H: Integer; Wait: Boolean): TLazIntfImage;
 var
   I: Integer;
 begin
   Result := nil;
-  if (Res = 0) or (W <= 0) or (H <= 0) or (W > 8000) or (H > 8000) or not DecodePicture(Res) then
+  if (Res = 0) or (W <= 0) or (H <= 0) or (W > 8000) or (H > 8000) then
+    Exit;
+  if not Wait then
+  begin   { the screen: never kept waiting for a decode }
+    TakeDecoded;
+    I := Integer(Res) - 1;
+    if (FPicDoc <> FDoc) or (I >= Length(FPics)) or (FPics[I] = nil) then
+    begin
+      QueuePicture(Res, True);
+      Exit;
+    end;
+  end
+  else if not DecodePicture(Res) then
     Exit;
   I := Integer(Res) - 1;
   { scaled once per size, the page being redrawn far more often than it is zoomed: smaller by the mean of the
@@ -14031,7 +14362,8 @@ begin
           begin
             IX := OX + Round(x * PxScale);
             IY := OY + Round(y * PxScale);
-            Pic := GetPicture(resource, OX + Round((x + w) * PxScale) - IX, OY + Round((y + h) * PxScale) - IY);
+            Pic := GetPicture(resource, OX + Round((x + w) * PxScale) - IX, OY + Round((y + h) * PxScale) - IY,
+              not OnScreen);
             if (Pic <> nil) and ((rotation <> 0) or (flip <> 0) or (clip_npoints >= 3)) then
             begin   { turned, flipped, cut to its shape: a pixel at a time }
               SetLength(Poly, Max(0, clip_npoints));
@@ -14924,10 +15256,25 @@ var
   end;
 
 begin
-  if (pd_layout_page_markup(FLayout, Page, nil, 0, N) <> PD_OK) or (N = 0) then
-    Exit;
-  SetLength(Items, N);
-  if pd_layout_page_markup(FLayout, Page, @Items[0], N, N) <> PD_OK then
+  if Page >= Length(FMarkCache) then
+    SetLength(FMarkCache, Page + 1);
+  with FMarkCache[Page] do
+    if (Epoch <> FLayoutEpoch) or (Rev <> pd_doc_revision(FDoc)) or (Mode <> pd_doc_markup(FDoc)) then
+    begin
+      Epoch := FLayoutEpoch;
+      Rev := pd_doc_revision(FDoc);
+      Mode := pd_doc_markup(FDoc);
+      Items := nil;
+      if (pd_layout_page_markup(FLayout, Page, nil, 0, N) = PD_OK) and (N > 0) then
+      begin
+        SetLength(Items, N);
+        if pd_layout_page_markup(FLayout, Page, @Items[0], N, N) <> PD_OK then
+          Items := nil;
+      end;
+    end;
+  Items := FMarkCache[Page].Items;
+  N := Length(Items);
+  if N = 0 then
     Exit;
   pd_layout_page_info(FLayout, Page, Info0);
   PW := Round(Info0.width * PxScale);

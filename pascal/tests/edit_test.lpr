@@ -6,7 +6,7 @@ program edit_test;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, ctypes, parade, paradeedit,
+  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, Math, ctypes, parade, paradeedit,
   paradefonts;
 
 type
@@ -1580,6 +1580,53 @@ begin
     [B.Y, A.Y]));
 end;
 
+{ pictures decoded off the screen's thread: the first paint shows a picture's frame and does not wait for it; the
+  picture comes in when the thread has it }
+procedure TestPictureDecode(E: TParadeEdit);
+var
+  Img: TLazIntfImage;
+  Items: array[0..255] of pd_draw;
+  N: Int32;
+  I, Tries: Integer;
+  Pt: TPoint;
+  First, Last: TFPColor;
+  Dir: string;
+begin
+  Dir := ExtractFilePath(ParamStr(0));
+  E.NewDocument;
+  Check(E.InsertPicture('tests/data/photo.jpg'), 'a photo to decode');
+  E.SaveToFile(Dir + 'edit_decode.pdoc');
+  E.LoadFromFile(Dir + 'edit_decode.pdoc');
+  Pt := Point(-1, -1);
+  if pd_layout_page_items(E.Layout, 0, @Items[0], 256, N) = PD_OK then
+    for I := 0 to Min(N, 256) - 1 do
+      if Items[I].kind = PD_DRAW_IMAGE then
+        Pt := E.PageToClient(0, (Items[I].x + Items[I].w div 2) / PD_SP_PER_PT,
+          (Items[I].y + Items[I].h div 2) / PD_SP_PER_PT);
+  Check(Pt.X >= 0, 'the photo on the page');
+  Img := TLazIntfImage.Create(0, 0);
+  try
+    E.RenderView(Img);
+    First := Img.Colors[Pt.X, Pt.Y];
+    Check((First.red shr 8 = $DF) and (First.green shr 8 = $E9) and (First.blue shr 8 = $F5),
+      Format('the first paint: the frame in its place, not a wait for the decode (%.2x%.2x%.2x)',
+      [First.red shr 8, First.green shr 8, First.blue shr 8]));
+    Tries := 0;
+    repeat
+      Sleep(20);
+      Application.ProcessMessages;
+      E.RenderView(Img);
+      Last := Img.Colors[Pt.X, Pt.Y];
+      Inc(Tries);
+    until ((Last.red shr 8 <> $DF) or (Last.green shr 8 <> $E9) or (Last.blue shr 8 <> $F5)) or (Tries > 250);
+    Check((Last.red shr 8 <> $DF) or (Last.green shr 8 <> $E9) or (Last.blue shr 8 <> $F5),
+      Format('then the photo itself, decoded by the thread (%.2x%.2x%.2x after %d)',
+      [Last.red shr 8, Last.green shr 8, Last.blue shr 8, Tries]));
+  finally
+    Img.Free;
+  end;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -2505,6 +2552,8 @@ begin
   Check(E.PageCount = 2, 'two pages back from .docx');
   Check(E.HeaderFooterText(True) = 'Page {page} of {pages}', 'the footer back from .docx: ' + E.HeaderFooterText(True));
 
+  Step('pictures decoded aside');
+  TestPictureDecode(E);
   Step('table by the mouse');
   TestTableMouse(E);
   { 8e. the Table tab }
