@@ -5262,7 +5262,8 @@ static void test_pptx_ole(void) {
                          "ppt/media/i.png", "tests/data/rgba.png", NULL);
     char* js = d ? slide_json(d, 0) : NULL;
 
-    CHECK(js && strstr(js, "\"x\":1310720,\"y\":2621440,\"w\":6553600,\"h\":3276800}"));  /* 20, 40; 100 by 50 */
+    CHECK(js && strstr(js, "\"x\":1310720,\"y\":2621440,\"w\":6553600,\"h\":3276800,\"nv\":60}"));  /* 20, 40; 100 by 50;
+                                                                                         the frame's id */
     free(js);
     pd_doc_free(d);
 }
@@ -6198,6 +6199,43 @@ static void test_pptx_write_kept_masters(void) {
         CHECK(nm && id && nm - id < 6 && strncmp(id, "40", 2) != 0);    /* renumbered, so the remapping is seen */
         CHECK(!pd_zip_get((const unsigned char*)b.p, b.n, "tail", &tn) &&
               !pd_zip_get((const unsigned char*)b.p, b.n, "tail/3", &tn));
+    }
+    {   /* what is drawn says which shape it is drawn for, by the id the animations name it by: its box and its text;
+           the master's shape behind a slide's by its own */
+        pd_layout* L = NULL;
+        int32_t pg, k, cnt;
+        int box40 = 0, text40 = 0, one3 = 0, band = 0, stray = 0;
+
+        pd_doc_set_font_resolver(d, layout_resolver, NULL);
+
+        if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK) {
+            for (pg = 0; pg < 2 && pg < pd_layout_page_count(L); pg++) {
+                pd_draw* it;
+
+                cnt = 0;
+                pd_layout_page_items(L, pg, NULL, 0, &cnt);
+                it = (pd_draw*)malloc(((size_t)cnt + 1) * sizeof(pd_draw));
+
+                if (it && pd_layout_page_items(L, pg, it, cnt, &cnt) == PD_OK) {
+                    for (k = 0; k < cnt; k++) {
+                        box40 += pg == 1 && it[k].shape == 40 && it[k].kind != PD_DRAW_GLYPH &&
+                                 (it[k].fill & 0xFFFFFF) == 0x70AD47;
+                        box40 += pg == 1 && it[k].shape == 40 && it[k].kind == PD_DRAW_RULE &&
+                                 (it[k].color & 0xFFFFFF) == 0x70AD47;
+                        text40 += pg == 1 && it[k].shape == 40 && it[k].kind == PD_DRAW_GLYPH && it[k].text == 'T';
+                        one3 += pg == 0 && it[k].shape == 3 && it[k].kind == PD_DRAW_GLYPH && it[k].text == 'O';
+                        band += pg == 0 && it[k].shape >= 2000000 && it[k].kind == PD_DRAW_GLYPH && it[k].text == 'B';
+                        stray += pg == 1 && it[k].kind == PD_DRAW_GLYPH && it[k].text == 'T' && it[k].shape != 40;
+                    }
+                }
+
+                free(it);
+            }
+        }
+
+        CHECK(box40 >= 1 && text40 == 1 && !stray);
+        CHECK(one3 == 1 && band == 1);
+        pd_layout_free(L);
     }
     {   /* the first slide's speaker notes: a story of its section, two paragraphs; written back as a notes slide on a
            notes master the presentation names, and read again */

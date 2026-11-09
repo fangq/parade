@@ -193,6 +193,8 @@ typedef struct {
                                      output that draws curves; NULL: points is all there is. points stays the path
                                      made of short chords, for hit testing and hosts that draw polygons */
     int32_t ncurve;             /**< paths: pairs in curve */
+    int32_t shape;              /**< the top-level shape of a drawing it was drawn for (its text too): the shape's
+                                     DrawingML id (cNvPr), as a slide's animations name it; 0 none or not known */
 } pd_draw;
 
 #define PD_FLIP_H 1             /**< mirrored left to right */

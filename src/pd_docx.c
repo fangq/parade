@@ -9941,6 +9941,31 @@ static int dw_has_curve(const pd_preset_cmd* c, int n) {
     return 0;
 }
 
+/* where an item of a drawing starts in its JSON, and the id of the shape it is drawn for */
+static void dw_nv_mark(size_t** at, long long** id, int* n, int* cap, size_t pos, long long nv) {
+    if (*n >= *cap) {
+        int nc = *cap ? *cap * 2 : 64;
+        size_t* a = (size_t*)realloc(*at, sizeof(size_t) * (size_t)nc);
+        long long* b;
+
+        if (!a) {
+            return;
+        }
+
+        *at = a;
+
+        if ((b = (long long*)realloc(*id, sizeof(long long) * (size_t)nc)) == NULL) {
+            return;
+        }
+
+        *id = b;
+        *cap = nc;
+    }
+
+    (*at)[*n] = pos;
+    (*id)[(*n)++] = nv;
+}
+
 /* A Word drawing canvas (wpc) or group (wpg) as one picture: its pictures,
    shapes and text boxes where the group's coordinates put them, written as
    a drawing resource (application/vnd.parade.drawing+json) the layout draws.
@@ -9973,6 +9998,12 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     int nrel = 0, rel_ok = 1;
     const char* tx_a = NULL, *tx_b = NULL;              /* a text box's w:txbxContent: its inside, read into a story */
     int tx_depth = 0;
+    /* each item's top-level shape (the canvas's child it is drawn for): its DrawingML id, written into the item as
+       "nv" -- what a slide's animations name it by. Where each item starts in o, and the id */
+    long long top_nv = 0;
+    int top_need = 0, top_done = 0, nnv = 0, capnv = 0;
+    size_t* nv_at = NULL;
+    long long* nv_id = NULL;
     int sid = -1;                                       /* the shape being read: its place among the group's shapes */
     double cg_xy[4096];             /* a polygon's points (its own space), NAN pairs between rings */
     long long cg_w = 0, cg_h = 0;
@@ -10051,10 +10082,16 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     mu_init(&g, m->s + m->pos, m->n - m->pos, 0);
 
 #define FR (&fr[nfr - 1])
-#define ITEM_SEP() do { if (!first_item) pb_putc(&o, ','); first_item = 0; } while (0)
+#define ITEM_SEP() do { if (!first_item) pb_putc(&o, ','); first_item = 0; dw_nv_mark(&nv_at, &nv_id, &nnv, &capnv, \
+                                                                                         o.n, top_nv); } while (0)
     while (depth > 0 && mu_next(&g) != MT_END) {
         const char* t = mu_local(g.name);
         int open = g.type == MT_OPEN || g.type == MT_EMPTY;
+
+        if (top_done) {     /* the top-level shape before has been written: what follows is not its */
+            top_nv = 0;
+            top_done = 0;
+        }
 
         if (g.type == MT_OPEN) {
             depth++;
@@ -10064,6 +10101,20 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
         if (depth == 0) {
             break;
+        }
+
+        if (g.type == MT_OPEN && depth == 2 && canvas) {    /* a child of the canvas: a shape, a picture, a group */
+            top_nv = 0;
+            top_need = 1;
+        } else if (g.type == MT_CLOSE && depth == 1) {
+            top_done = 1;
+        }
+
+        if (top_need && open && !strcmp(t, "cNvPr")) {      /* its id, the first in it */
+            char idv[24];
+
+            top_nv = mu_attr(&g, "id", idv, sizeof(idv)) ? atoll(idv) : 0;
+            top_need = 0;
         }
 
         if (g.type == MT_TEXT) {
@@ -11674,6 +11725,59 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
         dw_keep_xml(X, &o, raw0, m->s + m->pos, fb0, fb1, canvas, rel_ok, rel_id, rel_res, nrel);
     }
     pb_putc(&o, '}');
+
+    if (nnv && !o.err) {    /* each item that is a shape's: its id, last in it (readers know items by their first) */
+        pd_buf t;
+        size_t from = 0;
+        int q;
+
+        memset(&t, 0, sizeof(t));
+
+        for (q = 0; q < nnv; q++) {
+            size_t e = nv_at[q], lev = 0;
+            int str = 0;
+
+            if (nv_id[q] <= 0 || e >= o.n || o.p[e] != '{' || e < from) {
+                continue;
+            }
+
+            for (; e < o.n; e++) {  /* to the brace that closes it, past strings and what is inside */
+                char c = o.p[e];
+
+                if (str) {
+                    if (c == '\\') {
+                        e++;
+                    } else if (c == '"') {
+                        str = 0;
+                    }
+                } else if (c == '"') {
+                    str = 1;
+                } else if (c == '{' || c == '[') {
+                    lev++;
+                } else if ((c == '}' || c == ']') && --lev == 0) {
+                    break;
+                }
+            }
+
+            if (e < o.n && o.p[e] == '}') {
+                pb_put(&t, o.p + from, e - from);
+                pb_printf(&t, ",\"nv\":%lld", nv_id[q]);
+                from = e;
+            }
+        }
+
+        pb_put(&t, o.p + from, o.n - from);
+
+        if (!t.err) {
+            pb_free(&o);
+            o = t;
+        } else {
+            pb_free(&t);
+        }
+    }
+
+    free(nv_at);
+    free(nv_id);
 
     if (!o.err && pd_doc_add_resource(X->b->d, "application/vnd.parade.drawing+json", o.p, o.n, &w->drawing_res) != PD_OK) {
         w->drawing_res = 0;

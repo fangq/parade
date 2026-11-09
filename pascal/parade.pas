@@ -870,6 +870,7 @@ type
     style: Ppd_path_style;   { paths: dashes, caps, joins; nil for none }
     curve: Ppd_sp;           { paths: the rings with their curves (PD_PATH_CUBIC before a cubic's 3 points) }
     ncurve: Int32;
+    shape: Int32;            { the drawing's top-level shape it was drawn for: its DrawingML id (cNvPr), 0 none }
   end;
   Ppd_draw = ^pd_draw;
 

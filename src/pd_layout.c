@@ -119,6 +119,7 @@ typedef struct {                /* a line (or a whole paragraph region) on a pag
     pd_sp wx0, wy0, wx1, wy1;   /* (the text's extent) */
     pd_sp bx0, by0, bx1, by1;   /* (the box) */
     int upright;                /* vertical text: East Asian characters not turned, set in the middle of the line */
+    int32_t shape;              /* a drawing's text box's line: the shape's id (pd_draw.shape), 0 none */
 } pline;
 
 typedef struct {
@@ -249,6 +250,7 @@ struct pd_layout {
     int32_t dtext_scale;        /* shrunk to fit, 65536 = not, about (dtext_sx, dtext_sy) */
     pd_sp dtext_sx, dtext_sy;
     int32_t dtext_ea;           /* East Asian vertical */
+    int32_t dtext_shape;        /* the text box's shape's id (pd_draw.shape) */
 };
 
 /* WordArt's warps (prstTxWarp): most drawn as envelopes, the text's extent stretched between a top and a bottom curve
@@ -1113,6 +1115,7 @@ static int add_line(pd_layout* L, int32_t page, pcache* pc, int32_t line, pd_sp 
     l->sy = L->dtext_sy;
     l->warp = 0;
     l->ea = (int16_t)(region == 5 && L->dtext_depth > 0 ? L->dtext_ea : 0);
+    l->shape = region == 5 && L->dtext_depth > 0 ? L->dtext_shape : 0;
 
     if (!l->rot && L->turn_rot) {
         l->rot = L->turn_rot;
@@ -1258,9 +1261,11 @@ static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int
                 L->dtext_sx = bx + il;
                 L->dtext_sy = top;
                 L->dtext_ea = (int32_t)pj_int_or(pj_get(it, "ea"), 0);
+                L->dtext_shape = (int32_t)pj_int_or(pj_get(it, "nv"), 0);
                 L->dtext_depth++;
                 place_stack(L, story, colw, page, bx + il, top, 5);
                 L->dtext_depth--;
+                L->dtext_shape = 0;
                 L->dtext_scale = 65536;
                 L->dtext_ea = 0;
 
@@ -6942,6 +6947,15 @@ static int item_styled(const pj_node* it) {
 
 /* A drawing resource in the box (x, y, w, h): its pictures, its shapes'
    fills and straight edges, its text boxes. Returns 0 if res is no drawing. */
+/* the items drawn from n0 on: drawn for the shape of that id (0: left as they are) */
+static void tag_shape(dlist_t* D, int32_t n0, int32_t nv) {
+    int32_t j;
+
+    for (j = n0; nv && j < D->n; j++) {
+        D->d[j].shape = D->d[j].shape ? D->d[j].shape : nv;
+    }
+}
+
 static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
                            pd_block_id block, uint32_t off, int32_t region, int depth) {
     const char* mime = NULL;
@@ -6950,6 +6964,7 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
     pj_doc* doc;
     const pj_node* root, *items, *it;
     double sx, sy;
+    int32_t tag_n0 = D->n, tag_nv = 0;
 
     if (pd_doc_resource(L->doc, res, &mime, &data, &len) != PD_OK || !mime || strcmp(mime, DRAWING_MIME) != 0) {
         return 0;
@@ -6967,6 +6982,12 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
     for (it = items ? items->child : NULL; it; it = it->next) {
         pd_sp ix = x + (pd_sp)(jsp(it, "x") * sx), iy = y + (pd_sp)(jsp(it, "y") * sy);
         pd_sp iw = (pd_sp)(jsp(it, "w") * sx), ih = (pd_sp)(jsp(it, "h") * sy);
+
+        if (depth == 0) {   /* what the item before drew: its shape's (its id, as the slide's animations name it) */
+            tag_shape(D, tag_n0, tag_nv);
+            tag_n0 = D->n;
+            tag_nv = (int32_t)pj_int_or(pj_get(it, "nv"), 0);
+        }
 
         if (pj_get(it, "img")) {
             pd_draw a;
@@ -7106,6 +7127,10 @@ static int emit_drawing_at(const pd_layout* L, dlist_t* D, pd_res_id res, pd_sp 
                 free(xy);
             }
         }
+    }
+
+    if (depth == 0) {
+        tag_shape(D, tag_n0, tag_nv);
     }
 
     pj_free(doc);
@@ -8246,6 +8271,14 @@ pd_status pd_layout_page_items(const pd_layout* L, int32_t page, pd_draw* buf, i
                 int32_t n0 = D.n;
 
                 emit_line(L, &D, pg, &pg->lines[i]);
+
+                if (pg->lines[i].shape) {   /* a text box's line: drawn for its shape */
+                    int32_t j;
+
+                    for (j = n0; j < D.n; j++) {
+                        D.d[j].shape = D.d[j].shape ? D.d[j].shape : pg->lines[i].shape;
+                    }
+                }
 
                 if (pg->lines[i].fscale != 65536 || pg->lines[i].warp) {
                     shape_items(&D, n0, &pg->lines[i]);
