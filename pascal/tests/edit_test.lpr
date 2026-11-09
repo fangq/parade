@@ -6,7 +6,7 @@ program edit_test;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, Math, ctypes, parade, paradeedit,
+  Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, Math, Clipbrd, ctypes, parade, paradeedit,
   paradefonts, paradeshow, paradeanim;
 
 type
@@ -1887,6 +1887,10 @@ var
   Note: string;
   Catch: TCommentCatch;
   Para: pd_block_id;
+  Img0, Img1: TLazIntfImage;
+  T: string;
+  Y: Integer;
+  Got: Boolean;
 
   function Balloon: TRect;
   var
@@ -1910,6 +1914,22 @@ var
     if (pd_doc_comment_get(E.Doc, 1, Cm) = PD_OK) and
        (pd_layout_caret(E.Layout, Cm.range.start, Pg, CX, Base, Asc, Desc) = PD_OK) then
       Result := E.PageToClient(Pg, CX / PD_SP_PER_PT, Base / PD_SP_PER_PT);
+  end;
+
+  function Differ(P, Q: TLazIntfImage; R: TRect): Integer;
+  var
+    X, Y: Integer;
+    C, D: TFPColor;
+  begin
+    Result := 0;
+    for Y := Max(0, R.Top) to Min(P.Height, R.Bottom) - 1 do
+      for X := Max(0, R.Left) to Min(P.Width, R.Right) - 1 do
+      begin
+        C := P.Colors[X, Y];
+        D := Q.Colors[X, Y];
+        if (C.red <> D.red) or (C.green <> D.green) or (C.blue <> D.blue) then
+          Inc(Result);
+      end;
   end;
 
   procedure Show;
@@ -1987,6 +2007,79 @@ begin
       E.OnCommentDblClick := nil;
       Catch.Free;
     end;
+  end;
+
+  { the balloon clicked drawn bold, a little triangle at its place; the same text selected otherwise is not }
+  E.GoToPos(PdPos(Para, 0));
+  E.ProcessKey(VK_END, [ssShift]);
+  Show;
+  A := Anchor;
+  B := Balloon;
+  Img0 := TLazIntfImage.Create(0, 0);
+  Img1 := TLazIntfImage.Create(0, 0);
+  try
+    E.RenderView(Img0);
+    TParadeWheel(E).MouseDown(mbLeft, [], B.Left + 10, B.Top + 6);
+    TParadeWheel(E).MouseUp(mbLeft, [], B.Left + 10, B.Top + 6);
+    Show;
+    E.RenderView(Img1);
+    Check(E.SelectedText = 'Line 25 of the text', 'the balloon clicked: its text selected');
+    Check(Differ(Img0, Img1, Rect(B.Left - 3, B.Top + 8, B.Left + 6, B.Bottom - 8)) >= (B.Bottom - B.Top - 16) div 2,
+      Format('its frame bold (%d pixels changed)', [Differ(Img0, Img1, Rect(B.Left - 3, B.Top + 8, B.Left + 6, B.Bottom - 8))]));
+    Check(Differ(Img0, Img1, Rect(A.X - 5, A.Y - 3, A.X + 6, A.Y + 2)) >= 10,
+      Format('a triangle at its place (%d pixels changed)', [Differ(Img0, Img1, Rect(A.X - 5, A.Y - 3, A.X + 6, A.Y + 2))]));
+    Check(Differ(Img0, Img1, Rect(A.X + 20, A.Y + 1, A.X + 120, A.Y + 6)) >= 20,
+      Format('the dotted line under its text bold (%d pixels changed)', [Differ(Img0, Img1, Rect(A.X + 20, A.Y + 1, A.X + 120, A.Y + 6))]));
+    Check(Differ(Img0, Img1, Rect(B.Left - 9, Min(A.Y, B.Top + 8) - 4, B.Left - 2, Max(A.Y, B.Top + 8) + 6)) >= 7,
+      Format('the line on to the balloon bold (%d pixels changed)',
+      [Differ(Img0, Img1, Rect(B.Left - 9, Min(A.Y, B.Top + 8) - 4, B.Left - 2, Max(A.Y, B.Top + 8) + 6))]));
+    E.ProcessKey(VK_LEFT, []);
+    Show;
+    E.RenderView(Img1);
+    Check(Differ(Img0, Img1, Rect(B.Left - 3, B.Top + 8, B.Left + 6, B.Bottom - 8)) = 0,
+      'the caret moved on: no longer bold');
+
+    { a change's balloon: its text selected and copied, not edited }
+    E.TrackChanges := True;
+    Para := pd_doc_next_paragraph(E.Doc, 0);
+    for I := 1 to 99 do
+      Para := pd_doc_next_paragraph(E.Doc, Para);
+    E.GoToPos(PdPos(Para, 9));
+    for I := 1 to 6 do
+      E.ProcessKey(VK_RIGHT, [ssShift]);
+    Check(E.SelectedText = 'of the', 'on line 100: ' + E.SelectedText);
+    E.ProcessKey(VK_DELETE, []);
+    E.TrackChanges := False;
+    E.ProcessKey(VK_HOME, []);
+    Show;
+    T := E.DocumentText;
+    Got := False;
+    for Y := 0 to E.ClientHeight - 1 do
+      if not Got and (E.CommentAtPoint(B.Left + 10, Y) = 0) then
+      begin
+        TParadeWheel(E).MouseDown(mbLeft, [], B.Left + 10, Y);
+        TParadeWheel(E).MouseUp(mbLeft, [], B.Left + 10, Y);
+        Got := E.SelectedText = 'of the';
+      end;
+    Check(Got, 'the deletion''s balloon clicked: the deleted text selected');
+    if Got then
+    begin
+      Clipboard.AsText := '';
+      E.CopyToClipboard;
+      Check(Clipboard.AsText = 'of the', 'and copied: ' + Clipboard.AsText);
+      E.InsertText('X');
+      E.ProcessKey(VK_DELETE, []);
+      E.ProcessKey(VK_BACK, []);
+      E.ProcessKey(VK_RETURN, []);
+      Check((E.DocumentText = T) and (E.SelectedText = 'of the'), 'but not typed over, deleted or split');
+      E.ProcessKey(VK_RIGHT, []);
+      E.InsertText('X');
+      Check(E.DocumentText <> T, 'the caret moved on: typing again');
+      E.Undo;
+    end;
+  finally
+    Img0.Free;
+    Img1.Free;
   end;
 end;
 

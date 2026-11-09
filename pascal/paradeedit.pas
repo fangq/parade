@@ -253,6 +253,7 @@ type
     FOnReplacing: TNotifyEvent;
     FHybridDefault: Boolean;
     FReadOnly: Boolean;
+    FHeld: TBalloonHit;            { the balloon clicked (Kind 0: none): held while the selection is its text }
     FRemote: array of TParadeRemoteCaret;
     FRemoteRev: Integer;
     FControlMenu: TPopupMenu;      { a drop-down control's choices }
@@ -384,6 +385,10 @@ type
     procedure EnsureCanvas;
     { the canvas page's text is not to be typed in: the caret out of any text box }
     function TextLocked: Boolean;
+    { the balloon clicked, while the selection is still its text }
+    function BalloonHeld: Boolean;
+    { no edits: read-only, or a change's balloon held (its text to select and copy, not to edit) }
+    function EditBlocked: Boolean;
     function DetectCanvasPage: Boolean;
     { the canvas page's corner, where a drag makes it (and its canvas) bigger or smaller: near (X, Y) }
     function OnPageCorner(X, Y: Integer): Boolean;
@@ -3397,7 +3402,7 @@ var
   Grouped: Boolean;
   Fmt: pd_format_id;
 begin
-  if FReadOnly or TextLocked then
+  if EditBlocked or TextLocked then
     Exit;
   if S = '' then
     Exit;
@@ -3581,7 +3586,7 @@ var
   Rs: TParadeRanges;
   I: Integer;
 begin
-  if FReadOnly or (Props.mask = 0) then
+  if EditBlocked or (Props.mask = 0) then
     Exit;
   if HasSelection then
   begin
@@ -3710,7 +3715,7 @@ var
 begin
   if RGB < 0 then
   begin   { back to the style's colour }
-    if HasSelection and not FReadOnly then
+    if HasSelection and not EditBlocked then
     begin
       Rs := SelRanges;
       pd_doc_begin_group(FDoc, 'Format');
@@ -3744,7 +3749,7 @@ var
   I: Integer;
 begin
   FPending.mask := 0;
-  if FReadOnly or not HasSelection then
+  if EditBlocked or not HasSelection then
     Exit;
   Rs := SelRanges;
   pd_doc_begin_group(FDoc, 'Clear formatting');
@@ -3827,7 +3832,7 @@ var
   Cur: pd_para_props;
   I: Integer;
 begin
-  if FReadOnly or (Props.mask = 0) then
+  if EditBlocked or (Props.mask = 0) then
     Exit;
   Paras := SelectedParagraphs;
   pd_doc_begin_group(FDoc, 'Paragraph');
@@ -3889,7 +3894,7 @@ var
   I, Lvl: Integer;
   NewLeft: pd_sp;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   Paras := SelectedParagraphs;
   pd_doc_begin_group(FDoc, 'Indent');
@@ -4015,7 +4020,7 @@ var
   AllThat: Boolean;
   Prev: pd_block_id;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   Paras := SelectedParagraphs;
   if Paras = nil then
@@ -4099,7 +4104,7 @@ var
   end;
 
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   Paras := SelectedParagraphs;
   if Paras = nil then
@@ -4159,7 +4164,7 @@ var
   Paras: TParadeBlockArray;
   I: Integer;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   Paras := SelectedParagraphs;
   if Paras = nil then
@@ -4179,7 +4184,7 @@ end;
 
 procedure TParadeEdit.SetTheme(const Theme: pd_theme);
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if pd_doc_set_theme(FDoc, @Theme) = PD_OK then
     Changed;
@@ -4192,7 +4197,7 @@ var
   Fmt: Int32;
 begin
   Result := False;
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   T := nil;
   Ms := TMemoryStream.Create;
@@ -4235,7 +4240,7 @@ var
   Par: pd_style_id;
 begin
   Result := False;
-  if FReadOnly or (StyleName = '') then
+  if EditBlocked or (StyleName = '') then
     Exit;
   Par := 0;
   if BasedOn <> '' then
@@ -4251,7 +4256,7 @@ var
   Tp: pd_table_props;
   St: pd_style_id;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) then
     Exit;
   St := 0;
   if StyleName <> '' then
@@ -4289,7 +4294,7 @@ var
   C, R, T: pd_block_id;
   Tp: pd_table_props;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) then
     Exit;
   pd_doc_table_props(FDoc, T, Tp);
   Tp.look := Look and 63;
@@ -4306,7 +4311,7 @@ var
   St: pd_style_id;
   C, R, T: pd_block_id;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) then
     Exit;
   New(Ts);
   try
@@ -4448,7 +4453,7 @@ var
   W, H, Room: pd_sp;
 begin
   Result := False;
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   case LowerCase(ExtractFileExt(FileName)) of
     '.png': Mime := 'image/png';
@@ -4505,7 +4510,7 @@ var
   T: string;
   P: pd_char_props;
 begin
-  if FReadOnly or (URL = '') then
+  if EditBlocked or (URL = '') then
     Exit;
   pd_doc_begin_group(FDoc, 'Insert link');
   if not HasSelection then
@@ -4550,7 +4555,7 @@ var
   Par, Br: pd_block_id;
   Index: Integer;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   pd_doc_begin_group(FDoc, 'Insert break');
   if BlockSlot(Par, Index) and (pd_doc_insert_block(FDoc, Par, Index, PD_BLOCK_BREAK, Br) = PD_OK) then
@@ -4566,7 +4571,7 @@ var
   Tp: pd_table_props;
   Room: pd_sp;
 begin
-  if FReadOnly or (Rows < 1) or (Cols < 1) then
+  if EditBlocked or (Rows < 1) or (Cols < 1) then
     Exit;
   if Cols > PD_TABLE_MAX_COLS then
     Cols := PD_TABLE_MAX_COLS;
@@ -4613,7 +4618,7 @@ var
   O: pd_inline;
   After: pd_pos;
 begin
-  if FReadOnly or (Source = '') then
+  if EditBlocked or (Source = '') then
     Exit;
   pd_doc_begin_group(FDoc, 'Insert equation');
   DeleteSelection;
@@ -4651,7 +4656,7 @@ var
   Story, Para: pd_block_id;
   O: pd_inline;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   pd_doc_begin_group(FDoc, 'Insert note');
   if pd_doc_insert_block(FDoc, 0, -1, PD_BLOCK_STORY, Story) = PD_OK then
@@ -4673,7 +4678,7 @@ procedure TParadeEdit.InsertField(Kind: Integer);
 var
   O: pd_inline;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   FillChar(O, SizeOf(O), 0);
   O.kind := PD_INLINE_FIELD;
@@ -4739,7 +4744,7 @@ var
   C, After: pd_pos;
   Fmt: pd_format_id;
 begin
-  if FReadOnly or (pd_doc_inline_at(FDoc, AStart, O) <> PD_OK) then
+  if EditBlocked or (pd_doc_inline_at(FDoc, AStart, O) <> PD_OK) then
     Exit;
   Move(O.name, Kind, SizeOf(Kind));
   C := PdPos(AStart.block, AStart.offset + 3);
@@ -4773,7 +4778,7 @@ var
   J: TJSONObject;
   On: Boolean;
 begin
-  Result := ControlAt(P, Kind, Spec, A, B) and (Kind = 'checkbox') and not FReadOnly;
+  Result := ControlAt(P, Kind, Spec, A, B) and (Kind = 'checkbox') and not EditBlocked;
   if not Result then
     Exit;
   J := ControlJson(Spec);
@@ -4915,7 +4920,7 @@ var
   I: Integer;
   P, After: pd_pos;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   J := TJSONObject.Create;
   try
@@ -4989,7 +4994,7 @@ var
   Pt: TPoint;
 begin
   Result := False;
-  if FReadOnly or not ControlAt(P, Kind, Spec, A, B) then
+  if EditBlocked or not ControlAt(P, Kind, Spec, A, B) then
     Exit;
   if Kind = 'checkbox' then
     Exit(ToggleCheckBox(P));
@@ -5062,7 +5067,7 @@ var
   S: pd_block_id;
 begin
   S := CurrentSection;
-  if FReadOnly or (S = 0) then
+  if EditBlocked or (S = 0) then
     Exit;
   pd_doc_begin_group(FDoc, 'Page setup');
   pd_doc_set_section_props(FDoc, S, Props);
@@ -5137,7 +5142,7 @@ var
   P: pd_section_props;
 begin
   Sec := CurrentSection;
-  if FReadOnly or (Sec = 0) then
+  if EditBlocked or (Sec = 0) then
     Exit;
   P := CurrentSectionProps;
   pd_doc_begin_group(FDoc, 'Section break');
@@ -5211,7 +5216,7 @@ var
   Pp: pd_para_props;
 begin
   Sec := CurrentSection;
-  if FReadOnly or (Sec = 0) then
+  if EditBlocked or (Sec = 0) then
     Exit;
   P := CurrentSectionProps;
   pd_doc_begin_group(FDoc, 'Header and footer');
@@ -5436,7 +5441,7 @@ var
   I: Integer;
   Cp: pd_cell_props;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, R, Info) <> PD_OK) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, R, Info) <> PD_OK) then
     Exit;
   pd_doc_begin_group(FDoc, 'Insert row');
   if pd_doc_insert_block(FDoc, T, Info.index + Ord(Below), PD_BLOCK_ROW, NewRow) = PD_OK then
@@ -5470,7 +5475,7 @@ var
   Cp: pd_cell_props;
   Done: Boolean;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
     Exit;
   Col := GridColumn(R, Info.index);
   if Right then
@@ -5517,7 +5522,7 @@ var
   Info, Ri: pd_block_info;
   Next: pd_block_id;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) then
     Exit;
   pd_doc_block_info(FDoc, T, Info);
   if Info.child_count <= 1 then
@@ -5545,7 +5550,7 @@ var
   Cp: pd_cell_props;
   Empty: Boolean;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
     Exit;
   Col := GridColumn(R, Info.index);
   { the last column: the table goes }
@@ -5603,7 +5608,7 @@ var
   Info: pd_block_info;
   After: pd_pos;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, T, Info) <> PD_OK) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, T, Info) <> PD_OK) then
     Exit;
   pd_doc_begin_group(FDoc, 'Delete table');
   { the caret to the paragraph after the table, or before it; one is made when there is neither }
@@ -5660,7 +5665,7 @@ var
   Cp: pd_cell_props;
   Span: Integer;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
     Exit;
   pd_doc_block_info(FDoc, R, Ri);
   if Info.index + 1 >= Ri.child_count then
@@ -5685,7 +5690,7 @@ var
   Cp: pd_cell_props;
   Col, K, I: Integer;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
     Exit;
   Col := GridColumn(R, Info.index);
   pd_doc_block_info(FDoc, R, Ri);
@@ -5722,7 +5727,7 @@ var
   Cp: pd_cell_props;
   I, K, Col: Integer;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) or (pd_doc_block_info(FDoc, C, Info) <> PD_OK) then
     Exit;
   pd_doc_begin_group(FDoc, 'Split cell');
   pd_doc_cell_props(FDoc, C, Cp);
@@ -5955,7 +5960,7 @@ var
   N, I: Integer;
   D, Lo, Hi, Sum, NewH: pd_sp;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if FTblDrag = 1 then
   begin   { a column's edge: the column before it wider or narrower, the one after it the other way (the table's
@@ -6063,7 +6068,7 @@ var
   Cp: pd_cell_props;
   I: Integer;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   Cells := SelectedCells;
   if Cells = nil then
@@ -6088,7 +6093,7 @@ var
   C, R, T: pd_block_id;
   Tp: pd_table_props;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) then
     Exit;
   pd_doc_table_props(FDoc, T, Tp);
   Tp.border := Round(Points * PD_SP_PER_PT);
@@ -6107,7 +6112,7 @@ var
   C, R, T: pd_block_id;
   Tp: pd_table_props;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) then
     Exit;
   pd_doc_table_props(FDoc, T, Tp);
   Tp.header_rows := Ord(Repeated);
@@ -6125,7 +6130,7 @@ var
   Total: Int64;
   I, N: Integer;
 begin
-  if FReadOnly or not CellAt(CaretPos, C, R, T) then
+  if EditBlocked or not CellAt(CaretPos, C, R, T) then
     Exit;
   pd_doc_table_props(FDoc, T, Tp);
   { the grid's columns: the widest row's }
@@ -6289,7 +6294,7 @@ var
   Par: pd_block_id;
   Index, N: Integer;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   pd_doc_begin_group(FDoc, 'Table of contents');
   if BlockSlot(Par, Index) then
@@ -6310,7 +6315,7 @@ var
   S: string;
 begin
   Result := False;
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   { the first paragraph of a table of contents, and the run of them it starts }
   B := pd_doc_next_paragraph(FDoc, 0);
@@ -6346,7 +6351,7 @@ var
   O: pd_inline;
   S: string;
 begin
-  if FReadOnly or (Seq = '') or (pd_doc_block_info(FDoc, CaretPos.block, Info) <> PD_OK) then
+  if EditBlocked or (Seq = '') or (pd_doc_block_info(FDoc, CaretPos.block, Info) <> PD_OK) then
     Exit;
   pd_doc_begin_group(FDoc, 'Caption');
   if pd_doc_insert_block(FDoc, Info.parent, Info.index + 1, PD_BLOCK_PARAGRAPH, B) = PD_OK then
@@ -6442,7 +6447,7 @@ var
   After: pd_pos;
   K: Integer;
 begin
-  if FReadOnly or (Target.Block = 0) then
+  if EditBlocked or (Target.Block = 0) then
     Exit;
   pd_doc_begin_group(FDoc, 'Cross-reference');
   DeleteSelection;
@@ -6492,7 +6497,7 @@ procedure TParadeEdit.InsertBookmark(const AName: string);
 var
   O: pd_inline;
 begin
-  if FReadOnly or (AName = '') then
+  if EditBlocked or (AName = '') then
     Exit;
   FillChar(O, SizeOf(O), 0);
   O.kind := PD_INLINE_BOOKMARK;
@@ -6557,6 +6562,7 @@ var
   Page: Int32;
   X, Base, Asc, Desc: pd_sp;
 begin
+  FHeld.Kind := 0;
   FHasDesiredX := False;
   SetCaret(P, False);
   { the place near the top of the view, as following a link or a heading does, not at the edge }
@@ -6662,7 +6668,7 @@ var
   B: pd_block_id;
   Level: Integer;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   St := pd_doc_style_find(FDoc, PAnsiChar(StyleName));
   if St = 0 then
@@ -6693,7 +6699,7 @@ var
   Done, Matched: Boolean;
   S: TParadeShapeStep;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   L := StrPas(pd_doc_undo_label(FDoc));
   if pd_doc_can_redo(FDoc) = 0 then
@@ -6728,7 +6734,7 @@ var
   Done: Boolean;
   S, B: TParadeShapeStep;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if Assigned(FOnUndo) then
     Done := FOnUndo(Self, True)
@@ -6870,7 +6876,7 @@ end;
 
 procedure TParadeEdit.CutToClipboard;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if TextLocked and not (FShapeOn and (FShapeSid >= 0)) then
     Exit;
@@ -6891,7 +6897,7 @@ procedure TParadeEdit.PasteData(Data: Pointer; Len: Integer; Format: Int32);
 var
   After: pd_pos;
 begin
-  if FReadOnly or TextLocked then
+  if EditBlocked or TextLocked then
     Exit;
   if Len <= 0 then
     Exit;
@@ -7126,6 +7132,8 @@ var
   Boxes: TParadeShapeBoxes;
   K, J: Integer;
 begin
+  if Key in [VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_ESCAPE] then
+    FHeld.Kind := 0;     { a balloon let go of, though the caret comes back to its text }
   if TextLocked and FShapeOn and (FShapeSid < 0) and not (ssCtrl in Shift) and (FDrawKind = '') and
      (Length(FDrawPts) = 0) then
     Exit;     { the canvas page itself: not moved off, deleted or typed over }
@@ -7289,7 +7297,7 @@ begin
     VK_PRIOR: begin FScrollY := FScrollY - ClientHeight; if FScrollY < 0 then FScrollY := 0; UpdateScrollBar; Invalidate; end;
     VK_NEXT: begin FScrollY := FScrollY + ClientHeight; UpdateScrollBar; Invalidate; end;
     VK_RETURN:
-      if not FReadOnly then
+      if not EditBlocked then
       begin
         pd_doc_begin_group(FDoc, 'New paragraph');
         DeleteSelection;
@@ -7303,7 +7311,7 @@ begin
         Changed;
       end;
     VK_BACK, VK_DELETE:
-      if not FReadOnly then
+      if not EditBlocked then
       begin
         if not DeleteSelection then
         begin
@@ -8183,7 +8191,7 @@ function TParadeEdit.ReplaceDrawing(const P: pd_pos; const Json: string; const L
 var
   R: pd_res_id;
 begin
-  Result := not FReadOnly and
+  Result := not EditBlocked and
     (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(Json), Length(Json), R) = PD_OK) and
     ReplaceDrawingRes(P, R, Lbl);
 end;
@@ -8196,7 +8204,7 @@ var
   Old: TParadeBlockArray;
 begin
   Result := False;
-  if FReadOnly or (R = 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
+  if EditBlocked or (R = 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
     Exit;
   KeepInlineText(O, Keep);
   PushShapeStep(Lbl, P);
@@ -8427,7 +8435,7 @@ begin
   X := Xml;
   RouteConnectors(X);   { the connectors on the shapes they join, wherever those are now }
   Result := False;
-  if FReadOnly or not FShapeOn or (pd_doc_inline_at(FDoc, FShapeAt, O) <> PD_OK) then
+  if EditBlocked or not FShapeOn or (pd_doc_inline_at(FDoc, FShapeAt, O) <> PD_OK) then
     Exit;
   N := Length(FSelUndo);
   PushShapeStep(Lbl, FShapeAt);
@@ -8669,7 +8677,7 @@ begin
   OnlyShape;
   Result := False;
   Sids := SelectedShapes;
-  if FReadOnly or (Length(Sids) = 0) or not KeptXml(Xml) then
+  if EditBlocked or (Length(Sids) = 0) or not KeptXml(Xml) then
     Exit;
   for I := 0 to High(Sids) do
   begin   { each in the XML as it is now: the XML before it is no longer where it was }
@@ -8766,7 +8774,7 @@ begin
   OnlyShape;
   Result := False;
   Sids := SelectedShapes;
-  if FReadOnly or (Length(Sids) = 0) or not KeptXml(Xml) then
+  if EditBlocked or (Length(Sids) = 0) or not KeptXml(Xml) then
     Exit;
   Did := False;
   for I := 0 to High(Sids) do
@@ -9353,6 +9361,26 @@ begin
   Invalidate;
 end;
 
+function TParadeEdit.BalloonHeld: Boolean;
+var
+  A, B: pd_pos;
+begin
+  Result := False;
+  if FHeld.Kind = 0 then
+    Exit;
+  A := SelStart;
+  B := SelEnd;
+  Result := (A.block = FHeld.Range.start.block) and (A.offset = FHeld.Range.start.offset) and
+            (B.block = FHeld.Range.finish.block) and (B.offset = FHeld.Range.finish.offset);
+  if not Result then
+    FHeld.Kind := 0;     { the selection moved on: let go }
+end;
+
+function TParadeEdit.EditBlocked: Boolean;
+begin
+  Result := FReadOnly or (BalloonHeld and (FHeld.Kind <> PD_MARK_COMMENT));
+end;
+
 function TParadeEdit.TextLocked: Boolean;
 begin
   Result := FCanvasPage and (StoryTopOf(CaretPos.block) = 0);
@@ -9364,7 +9392,7 @@ var
   CX, CY, Pg: Integer;
 begin
   Result := False;
-  if not FCanvasPage or FReadOnly then
+  if not FCanvasPage or EditBlocked then
     Exit;
   for Pg := 0 to PageCount - 1 do
   begin
@@ -9385,7 +9413,7 @@ var
   Info: pd_page_info;
   CX, CY, Pg: Integer;
 begin
-  if not FCanvasPage or FReadOnly then
+  if not FCanvasPage or EditBlocked then
     Exit;
   for Pg := 0 to PageCount - 1 do
   begin
@@ -9430,7 +9458,7 @@ begin
   Result := False;
   W := Max(W, Round(144 * PD_SP_PER_PT));     { two inches at least }
   H := Max(H, Round(144 * PD_SP_PER_PT));
-  if FReadOnly or not CanvasPagePos(P) then
+  if EditBlocked or not CanvasPagePos(P) then
     Exit;
   PushShapeStep('Page size', P);
   pd_doc_begin_group(FDoc, 'Page size');
@@ -9525,7 +9553,7 @@ end;
 function TParadeEdit.StartCanvasPage: Boolean;
 begin
   Result := False;
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   SetOrientation(True);
   SetMargins(0, 0, 0, 0);
@@ -9582,7 +9610,7 @@ var
   I: Integer;
 begin
   Result := False;
-  if FReadOnly or (Index < 0) or (Index >= ChildCount(pd_doc_root(FDoc))) then
+  if EditBlocked or (Index < 0) or (Index >= ChildCount(pd_doc_root(FDoc))) then
     Exit;
   Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
   if pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK then
@@ -9630,7 +9658,7 @@ var
   Sp: pd_section_props;
 begin
   Result := False;
-  if FReadOnly or (Index < 0) or (Index >= ChildCount(pd_doc_root(FDoc))) then
+  if EditBlocked or (Index < 0) or (Index >= ChildCount(pd_doc_root(FDoc))) then
     Exit;
   Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
   if pd_doc_section_props(FDoc, Sec, Sp) <> PD_OK then
@@ -9779,7 +9807,7 @@ var
 begin
   Sec := SlideSection(Index);
   S := RawByteString(Xml);
-  Result := not FReadOnly and (Sec <> 0) and (ParadeTailInner(SlideTiming(Index)) <> ParadeTailInner(Xml));
+  Result := not EditBlocked and (Sec <> 0) and (ParadeTailInner(SlideTiming(Index)) <> ParadeTailInner(Xml));
   if not Result then
     Exit;
   pd_doc_begin_group(FDoc, 'Animation');
@@ -9981,7 +10009,7 @@ var
   I: Integer;
 begin
   Result := False;
-  if FReadOnly or not FCanvasPage or (After < -1) or (After >= SlideCount) then
+  if EditBlocked or not FCanvasPage or (After < -1) or (After >= SlideCount) then
     Exit;
   Src := pd_doc_child(FDoc, pd_doc_root(FDoc), Max(0, After));
   if pd_doc_section_props(FDoc, Src, Sp) <> PD_OK then
@@ -10037,7 +10065,7 @@ var
   P: pd_pos;
 begin
   Result := False;
-  if FReadOnly or (SlideCount < 2) or (Index < 0) or (Index >= SlideCount) then
+  if EditBlocked or (SlideCount < 2) or (Index < 0) or (Index >= SlideCount) then
     Exit;
   Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
   ClearShapeSelection;
@@ -10061,7 +10089,7 @@ var
   Sec: pd_block_id;
 begin
   Result := False;
-  if FReadOnly or (Index < 0) or (Index >= SlideCount) or (ToIndex < 0) or (ToIndex >= SlideCount) or
+  if EditBlocked or (Index < 0) or (Index >= SlideCount) or (ToIndex < 0) or (ToIndex >= SlideCount) or
      (Index = ToIndex) then
     Exit;
   Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), Index);
@@ -10102,7 +10130,7 @@ var
 begin
   Result := False;
   P := FShapeAt;
-  if FReadOnly or not PictureCrop(OL, OT, OR_, OB) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
+  if EditBlocked or not PictureCrop(OL, OT, OR_, OB) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
     Exit;
   L := EnsureRange(L, 0, 99); T := EnsureRange(T, 0, 99); R := EnsureRange(R, 0, 99); B := EnsureRange(B, 0, 99);
   if (L + R >= 99) or (T + B >= 99) then
@@ -10137,7 +10165,7 @@ var
 begin
   Result := False;
   P := FShapeAt;
-  if FReadOnly or not FShapeOn or (W <= 0) or (H <= 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
+  if EditBlocked or not FShapeOn or (W <= 0) or (H <= 0) or (pd_doc_inline_at(FDoc, P, O) <> PD_OK) then
     Exit;
   KeepInlineText(O, Keep);
   R := 0;
@@ -10866,7 +10894,7 @@ var
   O: pd_inline;
 begin
   Result := False;
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   try
     D := GetJSON(S);
@@ -11010,7 +11038,7 @@ var
   I: Integer;
 begin
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) then
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) then
     Exit;
   if not KeptXml(Xml) then
   begin
@@ -11144,7 +11172,7 @@ end;
 
 function TParadeEdit.CutShapes: Boolean;
 begin
-  Result := not FReadOnly and CopyShapes and RemoveShapes(False, 'Cut');
+  Result := not EditBlocked and CopyShapes and RemoveShapes(False, 'Cut');
 end;
 
 function TParadeEdit.PasteShapes: Boolean;
@@ -11180,7 +11208,7 @@ var
   P: pd_pos;
 begin
   Result := False;
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if WPt > 0 then
     W := Round(WPt * PD_SP_PER_PT)
@@ -11240,7 +11268,7 @@ var
   X, Y, W, H, JW, JH: Double;
 begin
   Result := False;
-  if FReadOnly or (Kind = '') then
+  if EditBlocked or (Kind = '') then
     Exit;
   EnsureCanvas;
   if FShapeOn and (FShapeSid >= 0) then
@@ -11850,7 +11878,7 @@ var
   Rid: string;
 begin
   Result := False;
-  if FReadOnly or not FShapeOn or not CanvasSelected or (W <= 0) or (H <= 0) or
+  if EditBlocked or not FShapeOn or not CanvasSelected or (W <= 0) or (H <= 0) or
      not DrawingPlace(FShapeAt, Pg, PX, PY, DW, DH, JW, JH) then
     Exit;
   K := Min(1, Min(JW * 0.9 / W, JH * 0.9 / H));
@@ -11965,7 +11993,7 @@ var
   SIdx, EIdx: Integer;
 begin
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
     Exit;
   Els := XmlElements(Xml);
   E := SidElement(Els, FShapeSid);
@@ -12844,7 +12872,7 @@ var
 begin
   OnlyShape;
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
     Exit;
   Els := XmlElements(Xml);
   E := SidElement(Els, FShapeSid);
@@ -12889,7 +12917,7 @@ var
 begin
   OnlyShape;
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) or (W < 1) or (H < 1) or not SelectedShapeGeom(G) or
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) or (W < 1) or (H < 1) or not SelectedShapeGeom(G) or
      (G.W <= 0) or (G.H <= 0) or not KeptXml(Xml) or not Find then
     Exit;
   OX := StrToInt64Def(AttrOf(Xml, Els[Off].A, 'x'), 0);
@@ -12927,7 +12955,7 @@ var
 begin
   OnlyShape;
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) or not KeptXml(Xml) then
     Exit;
   Els := XmlElements(Xml);
   E := SidElement(Els, FShapeSid);
@@ -13019,7 +13047,7 @@ var
   Xml: string;
 begin
   OnlyShape;
-  Result := not FReadOnly and FShapeOn and (FShapeSid >= 0) and KeptXml(Xml) and
+  Result := not EditBlocked and FShapeOn and (FShapeSid >= 0) and KeptXml(Xml) and
     PutAdjXml(Xml, FShapeSid, AName, Value) and ApplyKeptXml(Xml, 'Adjust', FShapeSid);
 end;
 
@@ -13034,7 +13062,7 @@ var
 begin
   OnlyShape;
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not ShapeGeom(FShapeSid, G) or not KeptXml(Xml) then
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) or not ShapeGeom(FShapeSid, G) or not KeptXml(Xml) then
     Exit;
   Moved := False;
   Parts := Adj.Split([' ', ',']);
@@ -13062,7 +13090,7 @@ var
 begin
   OnlyShape;
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) or (Length(FShapeMore) > 0) or not ShapeGeom(FShapeSid, G) or
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) or (Length(FShapeMore) > 0) or not ShapeGeom(FShapeSid, G) or
      G.Pic or G.TextBox or not KeptXml(Xml) then
     Exit;
   Els := XmlElements(Xml);
@@ -13112,7 +13140,7 @@ var
 
 begin
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) or not ShapeGeom(FShapeSid, G) or not KeptXml(Xml) then
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) or not ShapeGeom(FShapeSid, G) or not KeptXml(Xml) then
     Exit;
   Els := XmlElements(Xml);
   E := SidElement(Els, FShapeSid);
@@ -13325,7 +13353,7 @@ var
 begin
   OnlyShape;
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) or (Length(FShapeMore) > 0) then
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) or (Length(FShapeMore) > 0) then
     Exit;
   Sid := FShapeSid;
   if EnterTextBox(Sid, CaretPos, False, True) then
@@ -13377,7 +13405,7 @@ function TParadeEdit.SetShapeStyle(AFill, ALine: TColor): Boolean;
 begin
   OnlyShape;
   Result := False;
-  if FReadOnly or not FShapeOn or (FShapeSid < 0) then
+  if EditBlocked or not FShapeOn or (FShapeSid < 0) then
     Exit;
   PushShapeStep('Shape style', FShapeAt);
   Inc(FStepDepth);
@@ -13820,7 +13848,7 @@ var
   Sid: Integer;
 begin
   Result := False;
-  if FReadOnly or not FShapeOn or (Wrap < -1) or (Wrap > PD_WRAP_BEHIND) or
+  if EditBlocked or not FShapeOn or (Wrap < -1) or (Wrap > PD_WRAP_BEHIND) or
      (pd_doc_inline_at(FDoc, FShapeAt, O) <> PD_OK) or (Wrap = ObjectWrap) then
     Exit;
   At := FShapeAt;
@@ -13902,7 +13930,7 @@ var
   R: TRect;
 begin
   Result := False;
-  if not FShapeOn or (FShapeSid >= 0) or (FDrawKind <> '') or FReadOnly or FCanvasPage or
+  if not FShapeOn or (FShapeSid >= 0) or (FDrawKind <> '') or EditBlocked or FCanvasPage or
      not DrawingPlace(FShapeAt, Pg, PX, PY, W, H, JW, JH) then
     Exit;
   R := Rect(PageLeft(Pg) + Round(PX * PxPerSp), PageTop(Pg) + Round(PY * PxPerSp),
@@ -13922,7 +13950,7 @@ var
 begin
   Result := False;
   At := FShapeAt;
-  if FReadOnly or not FShapeOn or (SelectedFloat <> 0) or (pd_doc_inline_at(FDoc, At, O) <> PD_OK) then
+  if EditBlocked or not FShapeOn or (SelectedFloat <> 0) or (pd_doc_inline_at(FDoc, At, O) <> PD_OK) then
     Exit;
   if (P.block = At.block) and (P.offset >= At.offset) and (P.offset <= At.offset + 3) then
     Exit;     { where it is }
@@ -13976,7 +14004,7 @@ var
 begin
   Result := False;
   Fl := SelectedFloat;
-  if FReadOnly or (Fl = 0) or (pd_doc_block_info(FDoc, Fl, FI) <> PD_OK) or
+  if EditBlocked or (Fl = 0) or (pd_doc_block_info(FDoc, Fl, FI) <> PD_OK) or
      (pd_doc_float_props(FDoc, Fl, Fp) <> PD_OK) or not DrawingPlace(FShapeAt, Pg, X, Y, W, H, JW, JH) then
     Exit;
   Sec := FI.parent;
@@ -14079,7 +14107,7 @@ var
 begin
   Result := False;
   Sids := SelectedShapes;
-  if FReadOnly or (Length(Sids) = 0) then
+  if EditBlocked or (Length(Sids) = 0) then
     Exit;
   PushShapeStep('Move shapes', FShapeAt);
   Inc(FStepDepth);
@@ -14105,7 +14133,7 @@ var
   I: Integer;
 begin
   Result := False;
-  if FReadOnly or (Length(Sids) = 0) then
+  if EditBlocked or (Length(Sids) = 0) then
     Exit;
   PushShapeStep(Lbl, FShapeAt);
   Inc(FStepDepth);
@@ -14276,6 +14304,7 @@ begin
   inherited MouseDown(Button, Shift, X, Y);
   SetFocus;
   FDownAt := Point(X, Y);
+  FHeld.Kind := 0;
   if Button = mbLeft then
     for I := 0 to High(FBalloons) do
       if PtInRect(FBalloons[I].R, Point(X, Y)) then
@@ -14284,6 +14313,7 @@ begin
         pd_doc_marker_set(FDoc, FAnchor, FBalloons[I].Range.start);
         pd_doc_marker_set(FDoc, FCaret, FBalloons[I].Range.finish);
         FHasDesiredX := False;
+        FHeld := FBalloons[I];   { the first listed for a balloon is the balloon itself, a reply's lines after it }
         Invalidate;
         Exit;
       end;
@@ -15059,6 +15089,8 @@ begin
     B := SelEnd;
     Result := Result + Format(' %d:%d-%d:%d', [A.block, A.offset, B.block, B.offset]);
   end;
+  if BalloonHeld then
+    Result := Result + Format(' held %d:%d', [FHeld.Kind, FHeld.Id]);
 end;
 
 { Draw the pages in view again and send the display only what changed: the
@@ -15513,7 +15545,7 @@ procedure TParadeEdit.ResolveChange(Accept: Boolean);
 var
   R: pd_range;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if HasSelection then
     R := PdRange(SelStart, SelEnd)
@@ -15541,7 +15573,7 @@ end;
 
 procedure TParadeEdit.AcceptAllChanges;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if pd_doc_revision_resolve(FDoc, PdRange(PdPos(FirstPara, 0), LastPos), 1) = PD_OK then
     Changed;
@@ -15549,7 +15581,7 @@ end;
 
 procedure TParadeEdit.RejectAllChanges;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if pd_doc_revision_resolve(FDoc, PdRange(PdPos(FirstPara, 0), LastPos), 0) = PD_OK then
     Changed;
@@ -15592,7 +15624,7 @@ var
   S: string;
   A, B: UInt32;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit(0);
   Result := 0;
   FillChar(C, SizeOf(C), 0);
@@ -15623,7 +15655,7 @@ function TParadeEdit.ReplyToComment(Id: pd_comment_id; const AText: string): pd_
 var
   C: pd_comment;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit(0);
   Result := 0;
   FillChar(C, SizeOf(C), 0);
@@ -15657,7 +15689,7 @@ end;
 
 procedure TParadeEdit.DeleteComment(Id: pd_comment_id);
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if pd_doc_comment_remove(FDoc, Id) = PD_OK then
     Changed;
@@ -15667,7 +15699,7 @@ procedure TParadeEdit.ResolveComment(Id: pd_comment_id; Resolved: Boolean);
 var
   C: pd_comment;
 begin
-  if FReadOnly then
+  if EditBlocked then
     Exit;
   if pd_doc_comment_get(FDoc, Id, C) <> PD_OK then
     Exit;
@@ -15700,7 +15732,7 @@ var
   C: pd_comment;
 begin
   Result := False;
-  if FReadOnly or (AText = '') or (pd_doc_comment_get(FDoc, Id, C) <> PD_OK) then
+  if EditBlocked or (AText = '') or (pd_doc_comment_get(FDoc, Id, C) <> PD_OK) then
     Exit;
   if CommentText(Id) = AText then
     Exit(True);
@@ -15816,7 +15848,8 @@ var
   Col: UInt32;
   Line: TPtDArray;
   Info0: pd_page_info;
-  Rad: Double;
+  Rad, Frame, Tri: Double;
+  Held, HeldAny: Boolean;
   Reps: array of record
     Id: pd_comment_id;
     Segs: Integer;      { the balloon's runs before it }
@@ -15856,6 +15889,7 @@ begin
   BW := MarkupWidth - 2 * Gap;
   BarX := OX + Round(PD_SP_PER_PT * 24 * PxScale);
   NextY := OY + Gap;
+  HeldAny := BalloonHeld;
   for I := 0 to N - 1 do
     begin
       It := Items[I];   { a copy: the cached items stay as the layout gave them }
@@ -15910,16 +15944,22 @@ begin
         Y := NextY;
       H := BalloonHeight(Segs, BW, PxScale, nil, 0, 0, Col);
       { the balloon: rounded, framed in the colour, white tinted with it inside }
+      { the one clicked: its frame and the line to its place drawn bold, a little triangle pointing down at the place }
+      Held := HeldAny and (FHeld.Kind = It.kind) and (FHeld.Id = It.id);
+      Frame := 1.2;
+      if Held then
+        Frame := 2.6;
       Rad := 4 * FZoom;
       FillPolygonImg(Img, RoundRectPts(BX, Y, BX + BW, Y + H, Rad), Col);
-      FillPolygonImg(Img, RoundRectPts(BX + 1.2, Y + 1.2, BX + BW - 1.2, Y + H - 1.2, Rad - 1.2), $00FFFFFF);
-      FillPolygonImg(Img, RoundRectPts(BX + 1.2, Y + 1.2, BX + BW - 1.2, Y + H - 1.2, Rad - 1.2), Col or (28 shl 24));
+      FillPolygonImg(Img, RoundRectPts(BX + Frame, Y + Frame, BX + BW - Frame, Y + H - Frame, Rad - Frame), $00FFFFFF);
+      FillPolygonImg(Img, RoundRectPts(BX + Frame, Y + Frame, BX + BW - Frame, Y + H - Frame, Rad - Frame),
+        Col or (28 shl 24));
       BalloonHeight(Segs, BW, PxScale, Img, BX + 2, Y, Col);
       { its place: a dotted line under the line, on to the page's edge, then to the balloon }
       J := AX;
       while J < OX + PW do
       begin
-        FillRectImg(Img, J, AY + 2, J + 2, AY + 3, Col, 130);
+        FillRectImg(Img, J, AY + 2, J + 2, AY + 3 + Ord(Held), Col, 130 + 125 * Ord(Held));
         Inc(J, 4);
       end;
       SetLength(Line, 2);
@@ -15927,7 +15967,19 @@ begin
       Line[0].Y := AY + 2.5;
       Line[1].X := BX;
       Line[1].Y := Y + Round(8 * FZoom);
-      StrokePolylineImg(Img, Line, False, 1, Col);
+      StrokePolylineImg(Img, Line, False, 1 + Ord(Held) * 1.5, Col);
+      if Held then
+      begin
+        Tri := Max(3, 3.5 * FZoom);
+        SetLength(Line, 3);
+        Line[0].X := AX - Tri;
+        Line[0].Y := AY + 3 - 1.6 * Tri;
+        Line[1].X := AX + Tri;
+        Line[1].Y := Line[0].Y;
+        Line[2].X := AX;
+        Line[2].Y := AY + 3;
+        FillPolygonImg(Img, Line, Col);
+      end;
       SetLength(FBalloons, Length(FBalloons) + 1);
       FBalloons[High(FBalloons)].R := Rect(BX, Y, BX + BW, Y + H);
       FBalloons[High(FBalloons)].Range := It.range;
