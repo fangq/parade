@@ -2238,24 +2238,24 @@ begin
       FFinished := True;
     spTrans:
       BeginSteps(Now);
-    spPlay:
-      begin   { what plays, played out }
-        Inc(FDone);
-        FPhase := spIdle;
-        FIdleSince := Now;
-        Compose(FPos, FDone, -1, FCur);
-        ToFrame(FCur);
-      end;
-    spIdle:
-      if (T <> nil) and (FDone < T.StepCount) then
+    spPlay, spIdle:
       begin
-        FPhase := spPlay;
-        FStart := Now;
-        Compose(FPos, FDone, 0, FCur);
-        ToFrame(FCur);
-      end
-      else
-        Enter(FPos + 1, Now, True);
+        if FPhase = spPlay then
+        begin   { what plays, played out; the click is the next one's, as in PowerPoint }
+          Inc(FDone);
+          FPhase := spIdle;
+          FIdleSince := Now;
+        end;
+        if (T <> nil) and (FDone < T.StepCount) then
+        begin
+          FPhase := spPlay;
+          FStart := Now;
+          Compose(FPos, FDone, 0, FCur);
+          ToFrame(FCur);
+        end
+        else
+          Enter(FPos + 1, Now, True);
+      end;
   end;
 end;
 
@@ -2346,8 +2346,8 @@ end;
 procedure TParadeShowForm.Resize;
 begin
   inherited Resize;
-  if (ClientWidth < 16) or (ClientHeight < 16) then
-    Exit;
+  if (FEdit = nil) or (FTimer = nil) or (FBmp = nil) or (ClientWidth < 16) or (ClientHeight < 16) then
+    Exit;     { (resized while it is being made) }
   if FShow = nil then
   begin
     FShow := TParadeShow.Create(FEdit, ClientWidth, ClientHeight, FFromSlide);
@@ -2364,6 +2364,8 @@ end;
 
 procedure TParadeShowForm.Refresh;
 begin
+  if FBmp = nil then
+    Exit;
   if FShow <> nil then
     FBmp.LoadFromIntfImage(FShow.Frame);
   Invalidate;
