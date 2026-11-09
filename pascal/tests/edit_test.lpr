@@ -1872,6 +1872,124 @@ begin
   end;
 end;
 
+{ a comment's balloon by its text however often the view is drawn again (the
+  balloons' marks are kept between drawings and must come back as they were
+  listed); a click on the balloon selects its text and leaves the view where it
+  is, so the second press of a double click finds the balloon to edit it }
+procedure TestBalloonPlace(E: TParadeEdit);
+var
+  I: Integer;
+  Cm: pd_comment;
+  Pg: Int32;
+  CX, Base, Asc, Desc: pd_sp;
+  A: TPoint;
+  B0, B: TRect;
+  Note: string;
+  Catch: TCommentCatch;
+  Para: pd_block_id;
+
+  function Balloon: TRect;
+  var
+    X, Y: Integer;
+  begin
+    Result := Rect(MaxInt, MaxInt, -1, -1);
+    for Y := 0 to E.ClientHeight - 1 do
+      for X := 0 to (E.ClientWidth - 1) div 3 do
+        if E.CommentAtPoint(X * 3, Y) = 1 then
+        begin
+          if X * 3 < Result.Left then Result.Left := X * 3;
+          if Y < Result.Top then Result.Top := Y;
+          if X * 3 > Result.Right then Result.Right := X * 3;
+          if Y > Result.Bottom then Result.Bottom := Y;
+        end;
+  end;
+
+  function Anchor: TPoint;
+  begin
+    Result := Point(-1, -1);
+    if (pd_doc_comment_get(E.Doc, 1, Cm) = PD_OK) and
+       (pd_layout_caret(E.Layout, Cm.range.start, Pg, CX, Base, Asc, Desc) = PD_OK) then
+      Result := E.PageToClient(Pg, CX / PD_SP_PER_PT, Base / PD_SP_PER_PT);
+  end;
+
+  procedure Show;
+  begin
+    E.Repaint;
+    Application.ProcessMessages;
+  end;
+
+begin
+  E.NewDocument;
+  E.MarkupMode := PD_MARKUP_BALLOONS;
+  for I := 1 to 200 do
+  begin
+    E.InsertText('Line ' + IntToStr(I) + ' of the text');
+    if I < 200 then
+      E.ProcessKey(VK_RETURN, []);
+  end;
+  Para := pd_doc_next_paragraph(E.Doc, 0);
+  for I := 1 to 24 do
+    Para := pd_doc_next_paragraph(E.Doc, Para);
+  E.GoToPos(PdPos(Para, 0));
+  E.ProcessKey(VK_END, [ssShift]);
+  Check(E.SelectedText = 'Line 25 of the text', 'line 25 selected: ' + E.SelectedText);
+  Note := 'A long note';
+  for I := 1 to 30 do
+    Note := Note + #10 + 'line ' + IntToStr(I) + ' of it';
+  Check(E.AddComment(Note) = 1, 'a long comment on line 25');
+  Show;
+  A := Anchor;
+  B0 := Balloon;
+  Check((B0.Right > B0.Left) and (B0.Top <= A.Y) and (B0.Top >= A.Y - Round(24 * E.Zoom)),
+    Format('its balloon by its line (balloon top %d, the text''s baseline %d)', [B0.Top, A.Y]));
+  for I := 1 to 2 do
+  begin
+    TParadeWheel(E).DoMouseWheel([], -120, Point(50, 50));
+    Show;
+  end;
+  for I := 1 to 2 do
+  begin
+    TParadeWheel(E).DoMouseWheel([], 120, Point(50, 50));
+    Show;
+  end;
+  E.Invalidate;
+  Show;
+  B := Balloon;
+  Check((B.Left = B0.Left) and (B.Top - Anchor.Y = B0.Top - A.Y),
+    Format('drawn again and again, still by its line (%d from it, was %d)', [B.Top - Anchor.Y, B0.Top - A.Y]));
+
+  { the text scrolled out of view above, the balloon's foot still in it }
+  I := 0;
+  while (Anchor.Y >= 0) and (I < 100) do
+  begin
+    TParadeWheel(E).DoMouseWheel([], -120, Point(50, 50));
+    Show;
+    Inc(I);
+  end;
+  B := Balloon;
+  Check((Anchor.Y < 0) and (B.Bottom > B.Top + 10), Format('the text above the view, the balloon in it (%d-%d)', [B.Top, B.Bottom]));
+  if B.Bottom > B.Top + 10 then
+  begin
+    I := E.ViewTop;
+    Catch := TCommentCatch.Create;
+    try
+      E.OnCommentDblClick := @Catch.Hit;
+      TParadeWheel(E).MouseDown(mbLeft, [], B.Left + 10, B.Bottom - 4);
+      TParadeWheel(E).MouseUp(mbLeft, [], B.Left + 10, B.Bottom - 4);
+      Check((E.ViewTop = I) and (E.SelectedText = 'Line 25 of the text'),
+        Format('a click on it selects its text and the view stays (%d, was %d: %s)', [E.ViewTop, I, E.SelectedText]));
+      Show;
+      TParadeWheel(E).MouseDown(mbLeft, [ssDouble], B.Left + 10, B.Bottom - 4);
+      TParadeWheel(E).DblClick;
+      TParadeWheel(E).MouseUp(mbLeft, [], B.Left + 10, B.Bottom - 4);
+      Check(Catch.Got = 1, 'and a double click there: the comment to edit');
+    finally
+      E.OnCommentDblClick := nil;
+      Catch.Free;
+    end;
+  end;
+end;
+
 { a table by the mouse: a drag from cell to cell selects the rectangle of cells (painted and formatted so); a
   selection in a shaded cell shows; a border shows the sizing cursor, and dragged sizes its column or row }
 procedure TestTableMouse(E: TParadeEdit);
@@ -3447,6 +3565,8 @@ begin
   TestSlideShow(E);
   Step('animations edited');
   TestAnimEdit(E);
+  Step('balloons in place');
+  TestBalloonPlace(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

@@ -991,6 +991,8 @@ type
     property Align;
     property Anchors;
     property Zoom: Double read FZoom write SetZoom;
+    { how far down the document the view is scrolled, in pixels }
+    property ViewTop: Integer read FScrollY;
     property OnChange: TNotifyEvent read FOnChange write FOnChange;
     { the caret moved, the selection changed or the document did: for a toolbar showing what is here }
     property OnSelectionChange: TNotifyEvent read FOnSelectionChange write FOnSelectionChange;
@@ -14277,8 +14279,12 @@ begin
   if Button = mbLeft then
     for I := 0 to High(FBalloons) do
       if PtInRect(FBalloons[I].R, Point(X, Y)) then
-      begin
-        SelectRange(FBalloons[I].Range);
+      begin   { its text selected where it is, and the view left as it is: the balloon stays under the
+                pointer, for the second press of a double click that edits its comment }
+        pd_doc_marker_set(FDoc, FAnchor, FBalloons[I].Range.start);
+        pd_doc_marker_set(FDoc, FCaret, FBalloons[I].Range.finish);
+        FHasDesiredX := False;
+        Invalidate;
         Exit;
       end;
   if (Button = mbLeft) and OnPageCorner(X, Y) then
@@ -15800,6 +15806,7 @@ end;
 procedure TParadeEdit.PaintMarkup(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double);
 var
   Items: array of pd_markup_item;
+  It: pd_markup_item;
   N, CI: Int32;
   I, J, PW, BX, BW, Y, NextY, AX, AY, H, BarX, Gap: Integer;
   Segs: array of string;
@@ -15850,27 +15857,27 @@ begin
   BarX := OX + Round(PD_SP_PER_PT * 24 * PxScale);
   NextY := OY + Gap;
   for I := 0 to N - 1 do
-    with Items[I] do
     begin
-      Col := color and $FFFFFF;
-      if kind <> PD_MARK_COMMENT then
-        FillRectImg(Img, BarX, OY + Round(top * PxScale), BarX + 2, OY + Round(bottom * PxScale), Col, 255);
-      if (kind = PD_MARK_INSERTION) or ((kind = PD_MARK_DELETION) and (pd_doc_markup(FDoc) <> PD_MARKUP_BALLOONS)) then
+      It := Items[I];   { a copy: the cached items stay as the layout gave them }
+      Col := It.color and $FFFFFF;
+      if It.kind <> PD_MARK_COMMENT then
+        FillRectImg(Img, BarX, OY + Round(It.top * PxScale), BarX + 2, OY + Round(It.bottom * PxScale), Col, 255);
+      if (It.kind = PD_MARK_INSERTION) or ((It.kind = PD_MARK_DELETION) and (pd_doc_markup(FDoc) <> PD_MARKUP_BALLOONS)) then
         Continue;
       SetLength(Segs, 0);
-      if kind = PD_MARK_DELETION then
+      if It.kind = PD_MARK_DELETION then
       begin
-        S := Copy(ParaText(range.start.block), range.start.offset + 1, range.finish.offset - range.start.offset);
+        S := Copy(ParaText(It.range.start.block), It.range.start.offset + 1, It.range.finish.offset - It.range.start.offset);
         S := StringReplace(S, #$EF#$BF#$BC, '', [rfReplaceAll]);
         if Length(S) > 400 then
           S := Copy(S, 1, 400) + '...';
-        if pd_doc_revision_get(FDoc, id, Rv) = PD_OK then
+        if pd_doc_revision_get(FDoc, It.id, Rv) = PD_OK then
           Add(PAnsiChar(@Rv.author[0]) + ' deleted: ')
         else
           Add('Deleted: ');
         Add(S);
       end
-      else if pd_doc_comment_get(FDoc, id, C) = PD_OK then
+      else if pd_doc_comment_get(FDoc, It.id, C) = PD_OK then
       begin
         SetString(S, C.text, C.text_len);
         if C.resolved <> 0 then
@@ -15883,7 +15890,7 @@ begin
         Add(S);
         SetLength(Reps, 0);
         for CI := 1 to pd_doc_comment_count(FDoc) do
-          if (pd_doc_comment_get(FDoc, CI, R) = PD_OK) and (R.parent = id) then
+          if (pd_doc_comment_get(FDoc, CI, R) = PD_OK) and (R.parent = It.id) then
           begin
             SetLength(Reps, Length(Reps) + 1);
             Reps[High(Reps)].Id := CI;
@@ -15896,8 +15903,8 @@ begin
       else
         Continue;
 
-      AX := OX + Round(x * PxScale);
-      AY := OY + Round(y * PxScale);
+      AX := OX + Round(It.x * PxScale);
+      AY := OY + Round(It.y * PxScale);
       Y := AY - Round(12 * FZoom);
       if Y < NextY then
         Y := NextY;
@@ -15923,10 +15930,10 @@ begin
       StrokePolylineImg(Img, Line, False, 1, Col);
       SetLength(FBalloons, Length(FBalloons) + 1);
       FBalloons[High(FBalloons)].R := Rect(BX, Y, BX + BW, Y + H);
-      FBalloons[High(FBalloons)].Range := range;
-      FBalloons[High(FBalloons)].Kind := kind;
-      FBalloons[High(FBalloons)].Id := id;
-      if kind = PD_MARK_COMMENT then
+      FBalloons[High(FBalloons)].Range := It.range;
+      FBalloons[High(FBalloons)].Kind := It.kind;
+      FBalloons[High(FBalloons)].Id := It.id;
+      if It.kind = PD_MARK_COMMENT then
         for J := 0 to High(Reps) do
         begin   { each reply: where its lines are in the balloon, for a click on it alone (CommentAtPoint) }
           SetLength(FBalloons, Length(FBalloons) + 1);
