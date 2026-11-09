@@ -95,6 +95,8 @@ typedef struct {
     char mime[64];
     unsigned char* data;
     size_t len;
+    /* a drawing made from a metafile: saved as where it comes from, made again on load (pd_doc_res_derived) */
+    pd_res_id made_from, pic_lo, pic_hi;
 } dres;
 
 typedef struct {
@@ -160,6 +162,7 @@ struct pd_doc {
     int32_t nlists, caplists;
     dres* res;
     int32_t nres, capres;
+    pd_res_id replay_lo, replay_hi;    /* a drawing made again: the pictures it made before, to give back (not add) */
     char* meta;                 /* pd_doc_set_metadata */
     size_t meta_len;
     dmarker* markers;

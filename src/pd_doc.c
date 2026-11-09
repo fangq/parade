@@ -2191,6 +2191,17 @@ pd_status pd_doc_add_resource(pd_doc* d, const char* mime, const void* data, siz
         return PD_ERR_ARG;
     }
 
+    if (d->replay_lo && d->replay_lo <= d->replay_hi) {    /* a drawing made again: the picture it made before */
+        const dres* q = &d->res[d->replay_lo - 1];
+
+        if (!strcmp(q->mime, mime) && q->len == len && (!len || !memcmp(q->data, data, len))) {
+            *out = d->replay_lo++;
+            return PD_OK;
+        }
+
+        d->replay_lo = 0;   /* not what it made before: what follows is new */
+    }
+
     if (grow((void**)&d->res, &d->capres, (int64_t)d->nres + 1, sizeof(dres))) {
         return PD_ERR_NOMEM;
     }
@@ -2212,6 +2223,51 @@ pd_status pd_doc_add_resource(pd_doc* d, const char* mime, const void* data, siz
     d->nres++;
     *out = (pd_res_id)d->nres;
     return PD_OK;
+}
+
+int32_t pd_doc_res_count(const pd_doc* d) {
+    return d ? d->nres : 0;
+}
+
+void pd_doc_res_derived(pd_doc* d, pd_res_id r, pd_res_id src, pd_res_id lo, pd_res_id hi) {
+    if (d && r >= 1 && (int32_t)r <= d->nres && src >= 1 && src < r) {
+        d->res[r - 1].made_from = src;
+        d->res[r - 1].pic_lo = lo >= 1 && lo <= hi && hi < r ? lo : 0;
+        d->res[r - 1].pic_hi = lo >= 1 && lo <= hi && hi < r ? hi : 0;
+    }
+}
+
+int pd_doc_res_origin(const pd_doc* d, pd_res_id r, pd_res_id* src, pd_res_id* lo, pd_res_id* hi) {
+    if (!d || r < 1 || (int32_t)r > d->nres || !d->res[r - 1].made_from) {
+        return 0;
+    }
+
+    *src = d->res[r - 1].made_from;
+    *lo = d->res[r - 1].pic_lo;
+    *hi = d->res[r - 1].pic_hi;
+    return 1;
+}
+
+void pd_doc_res_replay(pd_doc* d, pd_res_id lo, pd_res_id hi) {
+    d->replay_lo = lo;
+    d->replay_hi = hi;
+}
+
+int pd_doc_res_fill(pd_doc* d, pd_res_id r, const void* data, size_t len) {
+    unsigned char* q;
+
+    if (!d || r < 1 || (int32_t)r > d->nres || (q = (unsigned char*)malloc(len ? len : 1)) == NULL) {
+        return -1;
+    }
+
+    if (len) {
+        memcpy(q, data, len);
+    }
+
+    free(d->res[r - 1].data);
+    d->res[r - 1].data = q;
+    d->res[r - 1].len = len;
+    return 0;
 }
 
 pd_status pd_doc_resource(const pd_doc* d, pd_res_id id, const char** mime, const void** data, size_t* len) {

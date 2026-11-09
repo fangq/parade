@@ -6920,6 +6920,112 @@ static void test_emf_plus(void) {
     free(d.p);
 }
 
+static int bytes_in(const char* p, size_t n, const char* q, size_t k) {
+    size_t i;
+
+    for (i = 0; i + k <= n; i++) {
+        if (!memcmp(p + i, q, k)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* A drawing a metafile makes is saved as where it comes from -- the metafile, the pictures it made -- not its own
+   bytes, and made again on load: the same bytes, its picture the one saved (not a new resource), a second save the
+   same as the first. A placeholder naming what is no metafile loads as an empty drawing. */
+static void test_emf_drawing_saved_as_source(void) {
+    buf_t e = { NULL, 0 }, s1 = { NULL, 0 }, s2 = { NULL, 0 };
+    pd_doc* d, *x = NULL;
+    pd_res_id src, dr, other, k;
+    const char* m1, *m2;
+    const void* d1, *d2;
+    size_t l1, l2;
+    int f;
+
+    emf_head(&e);
+    gdi_rect(&e, 0x0000FF00u, 1, 10, 10, 50, 50);
+    {   /* a 2 by 2 picture, 24 bits, stretched over (60, 60)-(90, 90) */
+        static const uint32_t w[] = { 0, 0, 99, 99, 60, 60, 0, 0, 2, 2, 80, 40, 120, 16, 0, 0x00CC0020u, 30, 30,
+                                      40, 2, 2, 0x00180001u, 0, 16, 0, 0, 0, 0,
+                                      0x00FF0000u, 0x0000FF00u, 0x00FF0000u, 0x0000FF00u
+                                    };
+
+        emr(&e, 81, w, (int)(sizeof(w) / sizeof(w[0])));
+    }
+    emr(&e, 14, (const uint32_t*)"\0\0\0\0\0\0\0\0\0\0\0\0", 3);
+
+    pd_doc_new(&d);
+    CHECK(pd_doc_add_resource(d, "image/x-emf", e.p, e.n, &src) == PD_OK);
+    dr = pd_metafile_drawing(d, (const unsigned char*)e.p, e.n, src);
+    CHECK(dr == src + 2);   /* the picture it made, then the drawing */
+    CHECK(pd_doc_resource(d, src + 1, &m1, &d1, &l1) == PD_OK && !strcmp(m1, "image/png"));
+    CHECK(pd_doc_add_resource(d, "text/plain", "after", 5, &other) == PD_OK);
+    CHECK(pd_doc_resource(d, dr, &m1, &d1, &l1) == PD_OK && strstr((const char*)d1, "\"img\":") != NULL);
+
+    for (f = 0; f < 2; f++) {
+        s1.n = s2.n = 0;
+        free(s1.p);
+        free(s2.p);
+        s1.p = s2.p = NULL;
+        CHECK(pd_doc_save(d, f ? PD_JDATA_BINARY : PD_JDATA_TEXT, to_buf, &s1) == PD_OK);
+        CHECK(bytes_in(s1.p, s1.n, "MadeFrom", 8));
+        CHECK(pd_doc_resource(d, dr, &m1, &d1, &l1) == PD_OK && (!f || !bytes_in(s1.p, s1.n, (const char*)d1, l1)));
+        /* the drawing's own bytes not saved */
+        CHECK(pd_doc_load(s1.p, s1.n, PD_JDATA_AUTO, &x) == PD_OK);
+
+        if (x) {
+            for (k = 1; k <= other; k++) {
+                CHECK(pd_doc_resource(d, k, &m1, &d1, &l1) == PD_OK && pd_doc_resource(x, k, &m2, &d2, &l2) == PD_OK &&
+                      !strcmp(m1, m2) && l1 == l2 && !memcmp(d1, d2, l1));
+            }
+
+            CHECK(pd_doc_resource(x, other + 1, &m2, &d2, &l2) != PD_OK);  /* its picture not made a second time */
+            CHECK(pd_doc_save(x, f ? PD_JDATA_BINARY : PD_JDATA_TEXT, to_buf, &s2) == PD_OK);
+            CHECK(s1.n == s2.n && !memcmp(s1.p, s2.p, s1.n));
+            pd_doc_free(x);
+            x = NULL;
+        }
+    }
+
+    {   /* a placeholder made to name the text resource: an empty drawing, the rest as it was */
+        char* t, *at;
+
+        s1.n = 0;
+        free(s1.p);
+        s1.p = NULL;
+        pd_doc_save(d, PD_JDATA_TEXT, to_buf, &s1);
+        t = (char*)malloc(s1.n + 1);
+        memcpy(t, s1.p, s1.n);
+        t[s1.n] = '\0';
+        at = strstr(t, "\"MadeFrom\": 1");
+
+        if (!at) {
+            at = strstr(t, "\"MadeFrom\":1");
+        }
+
+        CHECK(at != NULL);
+
+        if (at) {
+            char* one = strchr(at, '1');
+
+            *one = '2';     /* the picture, not a metafile */
+            CHECK(pd_doc_load(t, s1.n, PD_JDATA_TEXT, &x) == PD_OK);
+            CHECK(x && pd_doc_resource(x, dr, &m2, &d2, &l2) == PD_OK && strstr((const char*)d2, "\"items\":[]"));
+            CHECK(x && pd_doc_resource(x, other, &m2, &d2, &l2) == PD_OK && l2 == 5);
+            pd_doc_free(x);
+        }
+
+        free(t);
+    }
+
+    free(s1.p);
+    free(s2.p);
+    free(e.p);
+    pd_doc_free(d);
+}
+
 /* A metafile that clips (as MATLAB's do, to the axes): a rectangle clip from 20 to 80; a green square from 0 to 100
    filled only inside it; a line across from 0 to 100 drawn only from 20 to 80; a clip narrowed inside SaveDC and
    given back by RestoreDC; a label outside the clip left out */
@@ -11311,6 +11417,7 @@ int main(void) {
     test_emf_clip();
     test_emf_shapes();
     test_emf_plus();
+    test_emf_drawing_saved_as_source();
     printf("docx equations\n");
     test_docx_omml();
     printf("docx fields and references\n");

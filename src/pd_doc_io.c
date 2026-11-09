@@ -26,7 +26,7 @@
 #include "pd_doc_internal.h"
 #include "pd_json.h"
 
-#define FORMAT_VERSION 1
+#define FORMAT_VERSION 2     /* 2: resources compressed, drawings saved as what they are made from */
 
 static const char* const kind_names[] = { "root", "section", "paragraph", "float", "table", "row", "cell", "break",
                                           "story"
@@ -1494,9 +1494,26 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
         pj_obj_begin(&w);
         put_str(&w, "MediaType", d->res[i].mime);
         put_int(&w, "ByteLength", (int64_t)d->res[i].len);
+
+        if (d->res[i].made_from) {  /* a drawing a metafile makes: where it comes from, not its bytes */
+            put_int(&w, "MadeFrom", d->res[i].made_from);
+
+            if (d->res[i].pic_lo) {
+                pj_key(&w, "Pictures");
+                pj_arr_begin(&w);
+                pj_int(&w, d->res[i].pic_lo);
+                pj_int(&w, d->res[i].pic_hi);
+                pj_arr_end(&w);
+            }
+        }
+
         pj_obj_end(&w);
-        pj_key(&w, "Data");
-        put_stream_data(&w, &d->res[i]);
+
+        if (!d->res[i].made_from) {
+            pj_key(&w, "Data");
+            put_stream_data(&w, &d->res[i]);
+        }
+
         pj_obj_end(&w);
         pj_obj_end(&w);
     }
@@ -2600,7 +2617,23 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
         pd_res_id rid;
         char mime[64] = "application/octet-stream";
 
-        copy_name(pj_get(pj_get(bs, "_DataInfo_"), "MediaType"), mime, sizeof(mime), L);
+        const pj_node* info = pj_get(bs, "_DataInfo_"), *from = pj_get(info, "MadeFrom");
+
+        copy_name(pj_get(info, "MediaType"), mime, sizeof(mime), L);
+
+        if (!L->bad && from && !pj_get(bs, "Data")) {   /* made again below, when all it comes from is here */
+            const pj_node* pics = pj_get(info, "Pictures");
+
+            if (pd_doc_add_resource(d, mime, "", 0, &rid) != PD_OK || from->type != PJ_INT || from->i < 1 ||
+                    from->i >= (int64_t)rid) {
+                L->bad = 1;
+                break;
+            }
+
+            pd_doc_res_derived(d, rid, (pd_res_id)from->i, (pd_res_id)pj_int_or(pj_at(pics, 0), 0),
+                               (pd_res_id)pj_int_or(pj_at(pics, 1), 0));
+            continue;
+        }
 
         if (L->bad || pj_stream_bytes(bs, &data, &len)) {
             L->bad = 1;
@@ -2611,7 +2644,20 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
             L->bad = 1;
         }
 
+        if (from && from->type == PJ_INT && from->i >= 1 && from->i < (int64_t)rid) {
+            pd_doc_res_derived(d, rid, (pd_res_id)from->i, (pd_res_id)pj_int_or(pj_at(pj_get(info, "Pictures"), 0), 0),
+                               (pd_res_id)pj_int_or(pj_at(pj_get(info, "Pictures"), 1), 0));
+        }
+
         free(data);
+    }
+
+    for (i = 0; i < d->nres && !L->bad; i++) {  /* the drawings saved as what they are made from, made again */
+        if (d->res[i].made_from && d->res[i].len == 0 && pd_metafile_remake(d, (pd_res_id)(i + 1)) != 0) {
+            static const char none[] = "{\"w\":0,\"h\":0,\"items\":[]}";
+
+            pd_doc_res_fill(d, (pd_res_id)(i + 1), none, sizeof(none) - 1);     /* not a metafile: nothing drawn */
+        }
     }
 
     if ((x = pj_get(r, "Metadata")) != NULL) {

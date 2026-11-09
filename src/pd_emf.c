@@ -3483,10 +3483,12 @@ int pd_metafile_kind(const unsigned char* p, size_t n) {
     return 0;
 }
 
-pd_res_id pd_metafile_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src) {
+/* a metafile's drawing description into o (its pictures added to the document as they come); 1 when it draws
+   something */
+static int metafile_json(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src, pd_buf* out) {
     mf* M;
     pd_buf o;
-    pd_res_id res = 0;
+    int ok = 0;
     int kind = pd_metafile_kind(p, n);
     double wsp, hsp;
 
@@ -3565,14 +3567,65 @@ pd_res_id pd_metafile_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_re
         }
 
         pb_puts(&o, "]}");
+        ok = !o.err && !M->first;
+    }
 
-        if (!o.err && !M->first && pd_doc_add_resource(d, "application/vnd.parade.drawing+json", o.p, o.n, &res) != PD_OK) {
-            res = 0;
-        }
+    free(M->pp);
+    free(M);
+
+    if (ok) {
+        *out = o;
+    } else {
+        pb_free(&o);
+    }
+
+    return ok;
+}
+
+#define DRAWING_MIME "application/vnd.parade.drawing+json"
+
+pd_res_id pd_metafile_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src) {
+    pd_buf o;
+    pd_res_id res = 0;
+    int32_t n0 = pd_doc_res_count(d);
+
+    memset(&o, 0, sizeof(o));
+
+    if (metafile_json(d, p, n, src, &o) && pd_doc_add_resource(d, DRAWING_MIME, o.p, o.n, &res) == PD_OK) {
+        /* saved as where it comes from: made again from the metafile on load */
+        pd_doc_res_derived(d, res, src, (pd_res_id)n0 + 1, res - 1);
+    } else {
+        res = 0;
     }
 
     pb_free(&o);
-    free(M->pp);
-    free(M);
     return res;
+}
+
+int pd_metafile_remake(pd_doc* d, pd_res_id r) {
+    const char* mime = NULL;
+    const void* data = NULL;
+    size_t len = 0;
+    pd_res_id src, lo, hi;
+    pd_buf o;
+    int rc = -1;
+
+    if (!d || r < 1 || (int32_t)r > pd_doc_res_count(d)) {
+        return -1;
+    }
+
+    if (!pd_doc_res_origin(d, r, &src, &lo, &hi) || pd_doc_resource(d, src, &mime, &data, &len) != PD_OK) {
+        return -1;
+    }
+
+    memset(&o, 0, sizeof(o));
+    pd_doc_res_replay(d, lo, hi);
+
+    if (metafile_json(d, (const unsigned char*)data, len, src, &o)) {
+        rc = pd_doc_res_fill(d, r, o.p, o.n);
+    }
+
+    pd_doc_res_replay(d, 0, 0);
+    pb_free(&o);
+    return rc;
 }

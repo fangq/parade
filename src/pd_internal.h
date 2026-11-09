@@ -215,6 +215,19 @@ int     pd_bidi_para_rtl(const char* utf8, size_t len);
 int32_t pd_bidi_line(const uint32_t* cp, const uint8_t* levels, int32_t from, int32_t to, int para, uint8_t* lev,
                      int32_t* order);
 
+#include "parade_doc.h"
+
+/* Resources made from others (pd_doc.c): a drawing a metafile's records make, with the pictures they made (ids lo to
+   hi), is saved as where it comes from and made again when loaded. While a replay is set, a picture added that is
+   the next of those, byte for byte, is that one again rather than a new resource. */
+int32_t pd_doc_res_count(const pd_doc* d);
+void pd_doc_res_derived(pd_doc* d, pd_res_id r, pd_res_id src, pd_res_id lo, pd_res_id hi);
+void pd_doc_res_replay(pd_doc* d, pd_res_id lo, pd_res_id hi);
+int pd_doc_res_origin(const pd_doc* d, pd_res_id r, pd_res_id* src, pd_res_id* lo, pd_res_id* hi);
+int pd_doc_res_fill(pd_doc* d, pd_res_id r, const void* data, size_t len);
+/* the drawing of resource r made again from the metafile it was made from (pd_emf.c); 0 when it is */
+int pd_metafile_remake(pd_doc* d, pd_res_id r);
+
 /* zlib streams (pd_zlib.c): 0 on success, *out malloc'ed */
 int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);
 int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen);
