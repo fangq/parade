@@ -13440,6 +13440,7 @@ var
   VTop, VBot, PY0, PY1: Double;
   Keep: Boolean;
   J: Integer;
+  Over: Boolean;
 
   { a range behind the text: one band per line, the line's full height, from
     the first character in it to the last -- the spaces between them too --
@@ -13451,7 +13452,8 @@ var
     NB := 0;
     SetLength(Bands, 0);
     for I := 0 to N - 1 do
-      if ((Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE)) and (Items[I].region in [0, 3, 4, 5]) then
+      if ((Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE)) and
+         ((not Over and (Items[I].region in [0, 4])) or (Over and (Items[I].region in [3, 5]))) then
       begin
         { the band of this line: the last one, or a new one }
         K := NB - 1;
@@ -13502,6 +13504,29 @@ var
           FillRectImg(Img, OX + Floor0(X0 * PxScale), OY + Round((Y - CAsc) * PxScale), OX + Round(X1 * PxScale),
             OY + Round((Y + CDesc) * PxScale), Col, Alpha);
         end;
+  end;
+
+  { comments' ranges, lightly in their authors' colours; the selection over them; the others' selections }
+  procedure HighlightAll(AOver: Boolean);
+  var
+    C: Int32;
+    Cm: pd_comment;
+  begin
+    Over := AOver;
+    if pd_doc_comment_count(FDoc) > 0 then
+      for C := 1 to pd_doc_comment_count(FDoc) do
+        if (pd_doc_comment_get(FDoc, C, Cm) = PD_OK) and (Cm.parent = 0) and (Cm.resolved = 0) and
+           (Compare(Cm.range.start, Cm.range.finish) < 0) then
+          Highlight(Cm.range.start, Cm.range.finish, pd_doc_author_color(FDoc, Cm.author) and $FFFFFF, 40, False);
+    if HasSelection then
+      Highlight(SelStart, SelEnd, $003390FF, 80, True);
+    for C := 0 to High(FRemote) do   { the others' selections, faintly in their colours }
+      with FRemote[C] do
+        if (Pos.block <> Anchor.block) or (Pos.offset <> Anchor.offset) then
+          if Compare(Anchor, Pos) < 0 then
+            Highlight(Anchor, Pos, Color, 50, False)
+          else
+            Highlight(Pos, Anchor, Color, 50, False);
   end;
 
 begin
@@ -13558,22 +13583,7 @@ begin
   end;
   N := K;
 
-  { comments' ranges, lightly in their authors' colours; the selection over them }
-  if pd_doc_comment_count(FDoc) > 0 then
-    for CI := 1 to pd_doc_comment_count(FDoc) do
-      if (pd_doc_comment_get(FDoc, CI, Cm) = PD_OK) and (Cm.parent = 0) and (Cm.resolved = 0) and
-         (Compare(Cm.range.start, Cm.range.finish) < 0) then
-        Highlight(Cm.range.start, Cm.range.finish, pd_doc_author_color(FDoc, Cm.author) and $FFFFFF, 40, False);
-  if HasSelection then
-    Highlight(SelStart, SelEnd, $003390FF, 80, True);
-  for CI := 0 to High(FRemote) do   { the others' selections, faintly in their colours }
-    with FRemote[CI] do
-      if (Pos.block <> Anchor.block) or (Pos.offset <> Anchor.offset) then
-        if Compare(Anchor, Pos) < 0 then
-          Highlight(Anchor, Pos, Color, 50, False)
-        else
-          Highlight(Pos, Anchor, Color, 50, False);
-
+  HighlightAll(False);   { the body's text: behind it }
   for I := 0 to N - 1 do
     with Items[I] do
       case kind of
@@ -13667,6 +13677,8 @@ begin
           end;
       end;
 
+  HighlightAll(True);    { a text box's, a float's: over it, since its shape's fill (a slide's ground) is drawn over
+                           anything put behind }
   if FShowMarks and not FCanvasPage then     { (the canvas page's paragraph under the canvas: not shown) }
     PaintMarks(Img, Page, OX, OY, PxScale);
 

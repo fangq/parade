@@ -225,6 +225,7 @@ var
   Xml: string;
   W0: Double;
   N0: Integer;
+  TB: pd_block_id;
 
   function At(XPt, YPt: Double): TPoint;
   begin
@@ -313,6 +314,26 @@ begin
     'a text box drawn: the caret in it');
   E.InsertText('Typed');
   Check(E.ParaText(E.CaretPos.block) = 'Typed', 'typed in at once');
+  { in the text box, as in any text: a double click a word, a third the paragraph }
+  E.InsertText(' more words');
+  TB := E.CaretPos.block;
+  if pd_layout_caret(E.Layout, PdPos(TB, 8), CPage, CX, Base, Asc, Desc) = PD_OK then
+  begin
+    P2 := E.PageToClient(CPage, CX / PD_SP_PER_PT, (Base - Asc / 2) / PD_SP_PER_PT);
+    TParadeWheel(E).MouseDown(mbLeft, [], P2.X, P2.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], P2.X, P2.Y);
+    TParadeWheel(E).MouseDown(mbLeft, [ssDouble], P2.X, P2.Y);
+    TParadeWheel(E).DblClick;
+    TParadeWheel(E).MouseUp(mbLeft, [], P2.X, P2.Y);
+    Check(E.SelectedText = 'more', 'a double click in a text box: the word, ' + E.SelectedText);
+    TParadeWheel(E).TripleClick;
+    TParadeWheel(E).MouseDown(mbLeft, [ssTriple], P2.X, P2.Y);
+    TParadeWheel(E).MouseMove([ssLeft], P2.X + 1, P2.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], P2.X, P2.Y);
+    Check(E.SelectedText = 'Typed more words', 'a triple click in a text box: the paragraph, ' + E.SelectedText);
+  end
+  else
+    Check(False, 'the text box''s caret placed');
   { the canvas again: drawn by hand, and Word's other shapes }
   Pt := At(20, 20);
   TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
@@ -1193,13 +1214,55 @@ var
   Info: pd_page_info;
   A, B: TPoint;
   Sp: pd_section_props;
-  Dir, Xml: string;
+  Dir, Xml, W: string;
+  WB: pd_block_id;
+  I: Integer;
+  Bm: TBitmap;
+  Px0, Px1: TColor;
+  CPage: Int32;
+  CX, Base, Asc, Desc: pd_sp;
 begin
   Dir := ExtractFilePath(ParamStr(0));
   E.LoadFromFile(Dir + '../../tests/data/slides.pptx');
   Check(E.CanvasPage and (E.PageCount = 2), 'a presentation opened: its slides canvas pages');
   Check(E.SelectedShape(D, Sid) and (Sid = -1) and E.CanvasPagePos(C) and (C.block = D.block),
     'the first slide''s canvas, ready to draw in');
+  { a slide's text box, as it opens (the canvas selected): a double click a word, a third the paragraph }
+  WB := 0;
+  for I := 0 to pd_doc_story_count(E.Doc) - 1 do
+    if WB = 0 then
+    begin
+      WB := pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0);
+      W := E.ParaText(WB);
+      if (Pos(' ', W) < 3) or (pd_layout_caret(E.Layout, PdPos(WB, 1), CPage, CX, Base, Asc, Desc) <> PD_OK) or
+         (CPage <> 0) then
+        WB := 0;
+    end;
+  Check(WB <> 0, 'a slide''s text box with words');
+  if WB <> 0 then
+  begin
+    A := E.PageToClient(CPage, CX / K, (Base - Asc / 2) / K);
+    Bm := TBitmap.Create;
+    E.RenderPage(0, Bm, 1.0 / K);
+    Px0 := Bm.Canvas.Pixels[Round(CX / K) + 1, Round((Base - Asc / 4) / K) + 1];
+    TParadeWheel(E).MouseDown(mbLeft, [], A.X, A.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], A.X, A.Y);
+    TParadeWheel(E).MouseDown(mbLeft, [ssDouble], A.X, A.Y);
+    TParadeWheel(E).DblClick;
+    TParadeWheel(E).MouseUp(mbLeft, [], A.X, A.Y);
+    Check(E.SelectedText = Copy(W, 1, Pos(' ', W) - 1), 'a double click in a slide''s text: the word, [' +
+      E.SelectedText + '] of ' + W);
+    E.RenderPage(0, Bm, 1.0 / K);
+    Px1 := Bm.Canvas.Pixels[Round(CX / K) + 1, Round((Base - Asc / 4) / K) + 1];
+    Bm.Free;
+    Check(Px1 <> Px0, Format('and painted selected (%.6x, was %.6x)', [Px1, Px0]));
+    TParadeWheel(E).TripleClick;
+    TParadeWheel(E).MouseDown(mbLeft, [ssTriple], A.X, A.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], A.X, A.Y);
+    Check(E.SelectedText = W, 'a triple click in a slide''s text: the paragraph, [' + E.SelectedText + ']');
+    E.LoadFromFile(Dir + '../../tests/data/slides.pptx');
+    E.SelectedShape(D, Sid);
+  end;
   N0 := Length(E.DrawingShapes(D));
   Check(N0 >= 6, Format('its shapes, the master''s too (%d)', [N0]));
   Check(E.AddShape('star5', 100 * K, 250 * K, 160 * K, 300 * K) and (Length(E.DrawingShapes(D)) = N0 + 1),
