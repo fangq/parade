@@ -491,6 +491,31 @@ static void test_special_chars(const pd_font* f) {
     CHECK(L.ascent > 0);    /* the empty line still has height */
     pd_para_free(p);
 
+    /* spaces after a forced break are the line's indentation, as code in a <pre> has it, and stay; after a break
+       the breaker chose they vanish, as ever */
+    {
+        pd_sp x0 = -1, x1 = -1, xw = -1;
+
+        p = make_para(f, "first\n    second", PD_PT(10));
+        CHECK(pd_para_break(p, &prm, &info) == PD_OK && info.lines == 2);
+        pd_para_get_glyphs(p, 0, g, 256, &n);
+        if (n > 0) x0 = g[0].x;
+        pd_para_get_glyphs(p, 1, g, 256, &n);
+        for (i = 0; i < n && x1 < 0; i++)
+            if (g[i].cluster >= 10) x1 = g[i].x;    /* the 's' of "second" */
+        CHECK(x1 > x0 + PD_PT(5));                 /* four spaces in (2.5pt each here): past where the first starts */
+        pd_para_free(p);
+
+        p = make_para(f, "aaaa bbbb", PD_PT(10));
+        prm.width = PD_PT(30);
+        CHECK(pd_para_break(p, &prm, &info) == PD_OK && info.lines == 2);
+        pd_para_get_glyphs(p, 1, g, 256, &n);
+        if (n > 0) xw = g[0].x;
+        CHECK(xw == x0);                           /* a wrapped line starts at the margin, its space gone */
+        pd_para_free(p);
+        pd_params_init(&prm);
+    }
+
     /* a no-break space never breaks: narrow column, two words glued */
     p = make_para(f, "aaaa\xC2\xA0" "bbbb cccc", PD_PT(10));
     prm.width = PD_PT(30);

@@ -957,6 +957,14 @@ pd_status pd_break_lines(pd_para* p, const pd_params* prm, pd_break_info* info) 
     for (i = 1; i < p->n_bp; i++) {     /* glue and penalties after a break vanish, fil glue stays */
         int32_t s = p->bp_item[i] + 1;
 
+        /* but not after a forced one: a line break typed, or a line of a <pre>, keeps the spaces it starts with --
+           they are its indentation, as Word keeps them after Shift+Enter; only a break the breaker chose eats the
+           space it was made at */
+        if (is_forced(p, prm, p->bp_item[i])) {
+            c.bp_start[i] = s;
+            continue;
+        }
+
         while (s < n && p->items[s].type != PD_ITEM_BOX && !is_forced(p, prm, s) &&
                 !(p->items[s].type == PD_ITEM_GLUE && p->items[s].stretch_order == 1)) {
             s++;
