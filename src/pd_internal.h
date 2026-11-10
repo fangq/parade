@@ -221,6 +221,11 @@ int32_t pd_bidi_line(const uint32_t* cp, const uint8_t* levels, int32_t from, in
    hi), is saved as where it comes from and made again when loaded. While a replay is set, a picture added that is
    the next of those, byte for byte, is that one again rather than a new resource. */
 int32_t pd_doc_res_count(const pd_doc* d);
+/* a resource added at the end whatever it is -- where ids are positions that must come out as they were (a file
+   loaded, a peer's changes): pd_doc_add_resource gives back one the same instead */
+pd_status pd_doc_append_resource(pd_doc* d, const char* mime, const void* data, size_t len, pd_res_id* out);
+/* the earlier resource with the same type and bytes as resource r, or 0 */
+pd_res_id pd_doc_res_same(const pd_doc* d, pd_res_id r);
 void pd_doc_res_derived(pd_doc* d, pd_res_id r, pd_res_id src, pd_res_id lo, pd_res_id hi);
 void pd_doc_res_replay(pd_doc* d, pd_res_id lo, pd_res_id hi);
 int pd_doc_res_origin(const pd_doc* d, pd_res_id r, pd_res_id* src, pd_res_id* lo, pd_res_id* hi);

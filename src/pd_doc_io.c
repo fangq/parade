@@ -1487,6 +1487,8 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
     pj_arr_begin(&w);
 
     for (i = 0; i < d->nres; i++) {
+        pd_res_id same;
+
         pj_obj_begin(&w);
         pj_key(&w, "_ByteStream_");
         pj_obj_begin(&w);
@@ -1494,6 +1496,12 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
         pj_obj_begin(&w);
         put_str(&w, "MediaType", d->res[i].mime);
         put_int(&w, "ByteLength", (int64_t)d->res[i].len);
+
+        same = d->res[i].made_from ? 0 : pd_doc_res_same(d, (pd_res_id)(i + 1));
+
+        if (same) {     /* the same type and bytes as one before it: that one, not its bytes again */
+            put_int(&w, "SameAs", same);
+        }
 
         if (d->res[i].made_from) {  /* a drawing a metafile makes: where it comes from, not its bytes */
             put_int(&w, "MadeFrom", d->res[i].made_from);
@@ -1509,7 +1517,7 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
 
         pj_obj_end(&w);
 
-        if (!d->res[i].made_from) {
+        if (!d->res[i].made_from && !same) {
             pj_key(&w, "Data");
             put_stream_data(&w, &d->res[i]);
         }
@@ -2621,10 +2629,26 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
 
         copy_name(pj_get(info, "MediaType"), mime, sizeof(mime), L);
 
+        if (!L->bad && !from && pj_get(info, "SameAs") && !pj_get(bs, "Data")) {   /* a copy of one before it */
+            const pj_node* same = pj_get(info, "SameAs");
+            const char* m2;
+            const void* d2;
+            size_t l2;
+
+            if (same->type != PJ_INT || same->i < 1 || same->i > pd_doc_res_count(d) ||
+                    pd_doc_resource(d, (pd_res_id)same->i, &m2, &d2, &l2) != PD_OK ||
+                    pd_doc_append_resource(d, mime, d2, l2, &rid) != PD_OK) {
+                L->bad = 1;
+                break;
+            }
+
+            continue;
+        }
+
         if (!L->bad && from && !pj_get(bs, "Data")) {   /* made again below, when all it comes from is here */
             const pj_node* pics = pj_get(info, "Pictures");
 
-            if (pd_doc_add_resource(d, mime, "", 0, &rid) != PD_OK || from->type != PJ_INT || from->i < 1 ||
+            if (pd_doc_append_resource(d, mime, "", 0, &rid) != PD_OK || from->type != PJ_INT || from->i < 1 ||
                     from->i >= (int64_t)rid) {
                 L->bad = 1;
                 break;
@@ -2640,7 +2664,7 @@ static pd_doc* load_doc(const pj_node* r, loader* L) {
             break;
         }
 
-        if (pd_doc_add_resource(d, mime, data, len, &rid) != PD_OK) {
+        if (pd_doc_append_resource(d, mime, data, len, &rid) != PD_OK) {
             L->bad = 1;
         }
 
@@ -3378,7 +3402,7 @@ pd_status pd_doc_apply_delta(pd_doc* d, const char* json, size_t len) {
                 FAIL(PD_ERR_FORMAT);
             }
 
-            st = pd_doc_add_resource(d, mime, data, n, &rid);
+            st = pd_doc_append_resource(d, mime, data, n, &rid);
             free(data);
 
             if (st != PD_OK) {

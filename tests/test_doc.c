@@ -1770,6 +1770,75 @@ static void test_deflate(void) {
     free(b);
 }
 
+/* Resources the same -- type and bytes -- are one: added again, the one there; a different type, or none (a drawing
+   still to be made is empty), another. A file holding two copies keeps both places, the second saved as "SameAs"
+   the first, not its bytes again, and loaded back as they were. */
+static void test_resource_dedup(void) {
+    pd_doc* d, *e = NULL;
+    pd_res_id a, b, c, z1, z2;
+    unsigned char big[5000];
+    const char* m;
+    const void* p1, *p2;
+    size_t l1, l2, i;
+    buf_t s1, s2;
+    char* t;
+    char* at;
+
+    for (i = 0; i < sizeof(big); i++) {
+        big[i] = (unsigned char)(i * 7 + i / 300);
+    }
+
+    pd_doc_new(&d);
+    CHECK(pd_doc_add_resource(d, "image/png", big, sizeof(big), &a) == PD_OK);
+    CHECK(pd_doc_add_resource(d, "image/png", big, sizeof(big), &b) == PD_OK && b == a);
+    CHECK(pd_doc_add_resource(d, "image/x-test", big, sizeof(big), &c) == PD_OK && c != a);
+    CHECK(pd_doc_add_resource(d, "image/png", "", 0, &z1) == PD_OK && pd_doc_add_resource(d, "image/png", "", 0, &z2) ==
+          PD_OK && z1 != z2);
+    pd_doc_free(d);
+
+    /* a file with the same picture twice (as one made before saved them) */
+    pd_doc_new(&d);
+    pd_doc_add_resource(d, "image/png", big, sizeof(big), &a);
+    pd_doc_add_resource(d, "image/x-test", big, sizeof(big), &c);   /* the other type, to stand in the second place */
+    s1 = save(d, PD_JDATA_TEXT);
+    pd_doc_free(d);
+    t = (char*)malloc(s1.n + 1);
+    memcpy(t, s1.p, s1.n);
+    t[s1.n] = '\0';
+    at = strstr(t, "image/x-test");
+    CHECK(at != NULL);
+
+    if (at) {
+        memcpy(at, "image/png\"   ", 13);     /* now the same type too: two copies, as an older save has them */
+        CHECK(pd_doc_load(t, s1.n, PD_JDATA_TEXT, &e) == PD_OK);
+    }
+
+    if (e) {
+        CHECK(pd_doc_resource(e, 1, &m, &p1, &l1) == PD_OK && pd_doc_resource(e, 2, &m, &p2, &l2) == PD_OK &&
+              l1 == sizeof(big) && l2 == sizeof(big) && !memcmp(p1, p2, l1));      /* both places kept */
+        s2 = save(e, PD_JDATA_BINARY);
+        CHECK(contains(s2, "SameAs", 6) && s2.n < s1.n);                          /* the second as the first */
+        pd_doc_free(e);
+        e = NULL;
+        CHECK(pd_doc_load(s2.p, s2.n, PD_JDATA_AUTO, &e) == PD_OK);
+
+        if (e) {
+            buf_t s3 = save(e, PD_JDATA_BINARY);
+
+            CHECK(pd_doc_resource(e, 2, &m, &p2, &l2) == PD_OK && l2 == sizeof(big) && !memcmp(p2, big, l2) &&
+                  !strcmp(m, "image/png"));
+            CHECK(same(s2, s3));    /* saved again the same */
+            free(s3.p);
+            pd_doc_free(e);
+        }
+
+        free(s2.p);
+    }
+
+    free(t);
+    free(s1.p);
+}
+
 /* Large resources saved compressed, as MATLAB's jsonlab saves large arrays (a uint8 array, "_ArrayZipType_" zlib):
    much smaller, and loaded back byte for byte; pictures compressed already, and small resources, kept as they
    are. A resource jsonlab wrote -- zlib, gzip, or not compressed -- read. */
@@ -1869,6 +1938,7 @@ int main(void) {
     printf("basics\n");
     test_basics();
     test_resource_zip();
+    test_resource_dedup();
     test_deflate();
     printf("format, split, merge, markers\n");
     test_format_split_merge();

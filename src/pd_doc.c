@@ -2184,7 +2184,19 @@ pd_status pd_doc_inline_at(const pd_doc* d, pd_pos pos, pd_inline* out) {
     return PD_OK;
 }
 
-pd_status pd_doc_add_resource(pd_doc* d, const char* mime, const void* data, size_t len, pd_res_id* out) {
+static uint64_t res_hash(const void* data, size_t len) {
+    const unsigned char* p = (const unsigned char*)data;
+    uint64_t h = 1469598103934665603ULL;
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        h = (h ^ p[i]) * 1099511628211ULL;
+    }
+
+    return h;
+}
+
+pd_status pd_doc_append_resource(pd_doc* d, const char* mime, const void* data, size_t len, pd_res_id* out) {
     dres* r;
 
     if (!d || !mime || (!data && len) || !out) {
@@ -2220,9 +2232,58 @@ pd_status pd_doc_add_resource(pd_doc* d, const char* mime, const void* data, siz
     }
 
     r->len = len;
+    r->hash = res_hash(data, len);
     d->nres++;
     *out = (pd_res_id)d->nres;
     return PD_OK;
+}
+
+/* A resource the same as one there already -- the same type and bytes: a .docx that keeps one picture as two files,
+   a picture pasted twice -- is that one, not a second copy. (Not an empty one: a drawing to be made again is
+   empty until it is.) */
+pd_status pd_doc_add_resource(pd_doc* d, const char* mime, const void* data, size_t len, pd_res_id* out) {
+    int32_t i;
+    uint64_t h;
+
+    if (!d || !mime || (!data && len) || !out) {
+        return PD_ERR_ARG;
+    }
+
+    if (len && !(d->replay_lo && d->replay_lo <= d->replay_hi)) {
+        h = res_hash(data, len);
+
+        for (i = 0; i < d->nres; i++) {
+            const dres* q = &d->res[i];
+
+            if (q->hash == h && q->len == len && !strcmp(q->mime, mime) && !memcmp(q->data, data, len)) {
+                *out = (pd_res_id)(i + 1);
+                return PD_OK;
+            }
+        }
+    }
+
+    return pd_doc_append_resource(d, mime, data, len, out);
+}
+
+pd_res_id pd_doc_res_same(const pd_doc* d, pd_res_id r) {
+    const dres* p;
+    int32_t i;
+
+    if (!d || r < 1 || (int32_t)r > d->nres || !d->res[r - 1].len) {
+        return 0;
+    }
+
+    p = &d->res[r - 1];
+
+    for (i = 0; i < (int32_t)r - 1; i++) {
+        const dres* q = &d->res[i];
+
+        if (q->hash == p->hash && q->len == p->len && !strcmp(q->mime, p->mime) && !memcmp(q->data, p->data, p->len)) {
+            return (pd_res_id)(i + 1);
+        }
+    }
+
+    return 0;
 }
 
 int32_t pd_doc_res_count(const pd_doc* d) {
@@ -2267,6 +2328,7 @@ int pd_doc_res_fill(pd_doc* d, pd_res_id r, const void* data, size_t len) {
     free(d->res[r - 1].data);
     d->res[r - 1].data = q;
     d->res[r - 1].len = len;
+    d->res[r - 1].hash = res_hash(data, len);
     return 0;
 }
 

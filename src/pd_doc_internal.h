@@ -97,6 +97,8 @@ typedef struct {
     size_t len;
     /* a drawing made from a metafile: saved as where it comes from, made again on load (pd_doc_res_derived) */
     pd_res_id made_from, pic_lo, pic_hi;
+    uint64_t hash;              /* of its bytes (FNV-1a), to find one the same */
+    pd_res_id same_as;          /* loaded as a copy of that one (saved as "SameAs") */
 } dres;
 
 typedef struct {

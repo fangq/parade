@@ -1482,6 +1482,55 @@ static void test_docx_tables(void) {
     "<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic>" \
     "</a:graphicData></a:graphic></wp:" kind "></w:drawing></w:r>"
 
+/* One picture kept by a .docx as two media files (Word does this): one resource, both pictures showing it, a
+   different picture another; a resource from a file loaded keeps the place it had */
+static void test_docx_duplicate_media(void) {
+#define PIC(rid) "<w:r><w:drawing><wp:inline><wp:extent cx=\"1270000\" cy=\"635000\"/><a:graphic><a:graphicData>" \
+    "<pic:pic><pic:blipFill><a:blip r:embed=\"" rid "\"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>" \
+    "</wp:inline></w:drawing></w:r>"
+    pd_doc* d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "<Relationship Id=\"rId6\" Type=\"t/image\" Target=\"media/image2.png\"/>"
+        "<Relationship Id=\"rId7\" Type=\"t/image\" Target=\"media/image3.jpg\"/></Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/media/image2.png", "tests/data/rgba.png",
+        "word/media/image3.jpg", "tests/data/photo.jpg",
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body>"
+        "<w:p>" PIC("rId5") "</w:p><w:p>" PIC("rId6") "</w:p><w:p>" PIC("rId7") "</w:p></w:body></w:document>",
+        NULL);
+#undef PIC
+    pd_res_id ids[3] = { 0, 0, 0 };
+    pd_block_id b;
+    int k = 0, pngs = 0, r;
+    const char* m;
+    const void* data;
+    size_t len;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    for (b = pd_doc_next_paragraph(d, 0); b && k < 3; b = pd_doc_next_paragraph(d, b)) {
+        pd_inline o;
+
+        if (pd_doc_inline_at(d, (pd_pos){ b, 0 }, &o) == PD_OK && o.kind == PD_INLINE_IMAGE) {
+            ids[k++] = o.resource;
+        }
+    }
+
+    for (r = 1; pd_doc_resource(d, (pd_res_id)r, &m, &data, &len) == PD_OK; r++) {
+        pngs += !strcmp(m, "image/png");
+    }
+
+    CHECK(k == 3 && ids[0] != 0 && ids[0] == ids[1] && ids[2] != ids[0]);  /* the same picture: one resource */
+    CHECK(pngs == 1);
+    pd_doc_free(d);
+}
+
 /* Floating pictures: beside the text on the side Word put them when text
    wraps round them, across the column when it goes above and below; before
    the paragraph they are anchored at its start, after it otherwise. */
@@ -11467,6 +11516,7 @@ int main(void) {
     test_vertical_section();
     printf("docx floats\n");
     test_docx_floats();
+    test_docx_duplicate_media();
     printf("docx writer\n");
     test_docx_writer();
     printf("docx character effects\n");
