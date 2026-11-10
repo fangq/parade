@@ -2105,6 +2105,7 @@ var
   Diff, X, Y: Integer;
   C0, C1: TFPColor;
   PP: pd_para_props;
+  Use: TParadeUseArray;
   Fl, FPara: pd_block_id;
   Fp: pd_float_props;
 
@@ -2209,6 +2210,21 @@ begin
     Img0.Free;
     Img1.Free;
   end;
+
+  { what the pages show: the picture (twice), the drawing; not the text that is no image of them }
+  Use := E.ResourcesInUse;
+  Check((Length(Use) > Integer(RX)) and Use[R] and Use[RD] and not Use[RX], 'in use: the picture and the drawing');
+  E.ShowResource(RD);
+  E.ProcessKey(VK_DELETE, []);
+  Use := E.ResourcesInUse;
+  Check(not Use[RD] and Use[R], 'the drawing deleted: not in use; the picture still, in its float');
+  E.ShowResource(R);
+  E.ProcessKey(VK_DELETE, []);
+  Use := E.ResourcesInUse;
+  Check(not Use[R], 'the picture deleted too: not in use, though kept');
+  E.Undo;
+  Use := E.ResourcesInUse;
+  Check(Use[R] and not Use[RD], 'undone: the picture in use again');
 end;
 
 { a table by the mouse: a drag from cell to cell selects the rectangle of cells (painted and formatted so); a

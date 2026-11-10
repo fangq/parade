@@ -49,6 +49,7 @@ type
   TParadeSpArray = array of pd_sp;
   TParadeRanges = array of pd_range;
   TParadePosArray = array of pd_pos;
+  TParadeUseArray = array of Boolean;
   { the nine levels of a list definition }
   TParadeListLevels = array[0..8] of pd_list_level;
   { a page's display list; which of its items a picture of it shows (Index: its place in the list) }
@@ -927,6 +928,10 @@ type
     { the view taken to the Nth place resource R is shown (counting round), that object selected as a click selects
       it; how many places there are (0: shown nowhere, nothing done) }
     function ShowResource(R: pd_res_id; N: Integer = 0): Integer;
+    { which resources the document shows now (index: the id; 0 unused), anywhere -- its text, its tables and floats,
+      its headers, footers and text boxes -- as images, and through them: the metafile a drawing is made from, a
+      picture a drawing draws or fills with. A picture deleted is not, though kept (Undo brings it back) }
+    function ResourcesInUse: TParadeUseArray;
     { the selection's two ends, in document order; False when there is none (only the caret) }
     function SelectionRange(out A, B: pd_pos): Boolean;
     function SelectedText: string;
@@ -6605,6 +6610,96 @@ begin
       I := PosEx(#$EF#$BF#$BC, T, I + 3);
     end;
     B := pd_doc_next_paragraph(FDoc, B);
+  end;
+end;
+
+function TParadeEdit.ResourcesInUse: TParadeUseArray;
+var
+  NRes, I: Integer;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  Todo: array of pd_res_id;
+
+  procedure Use(R: pd_res_id);
+  begin
+    if (R >= 1) and (Integer(R) <= NRes) and not Result[R] then
+    begin
+      Result[R] := True;
+      SetLength(Todo, Length(Todo) + 1);
+      Todo[High(Todo)] := R;
+    end;
+  end;
+
+  procedure Walk(B: pd_block_id);
+  var
+    Info: pd_block_info;
+    T: string;
+    J, K: Integer;
+    O: pd_inline;
+  begin
+    if pd_doc_block_info(FDoc, B, Info) <> PD_OK then
+      Exit;
+    if Info.kind = PD_BLOCK_PARAGRAPH then
+    begin
+      T := ParaText(B);
+      J := Pos(#$EF#$BF#$BC, T);
+      while J > 0 do
+      begin
+        if (pd_doc_inline_at(FDoc, PdPos(B, J - 1), O) = PD_OK) and (O.kind = PD_INLINE_IMAGE) then
+          Use(O.resource);
+        J := PosEx(#$EF#$BF#$BC, T, J + 3);
+      end;
+    end;
+    for K := 0 to Integer(Info.child_count) - 1 do
+      Walk(pd_doc_child(FDoc, B, K));
+  end;
+
+  { the resources a drawing names: "img", "bimg" and "src", each followed by a number }
+  procedure Follow(R: pd_res_id);
+  var
+    S: string;
+    P, E, K: Integer;
+    Keys: array[0..2] of string = ('"img":', '"bimg":', '"src":');
+  begin
+    if (pd_doc_resource(FDoc, R, @Mime, @Data, @Len) <> PD_OK) or
+       (StrComp(Mime, 'application/vnd.parade.drawing+json') <> 0) then
+      Exit;
+    SetString(S, PAnsiChar(Data), Len);
+    for K := 0 to High(Keys) do
+    begin
+      P := Pos(Keys[K], S);
+      while P > 0 do
+      begin
+        P := P + Length(Keys[K]);
+        E := P;
+        while (E <= Length(S)) and (S[E] in ['0'..'9']) do
+          Inc(E);
+        if E > P then
+          Use(StrToIntDef(Copy(S, P, E - P), 0));
+        P := PosEx(Keys[K], S, P);
+      end;
+    end;
+  end;
+
+begin
+  NRes := 0;
+  while pd_doc_resource(FDoc, NRes + 1, @Mime, @Data, @Len) = PD_OK do
+    Inc(NRes);
+  SetLength(Result, NRes + 1);
+  for I := 0 to NRes do
+    Result[I] := False;
+  Todo := nil;
+  if FDoc = nil then
+    Exit;
+  Walk(pd_doc_root(FDoc));
+  for I := 0 to pd_doc_story_count(FDoc) - 1 do
+    Walk(pd_doc_story_at(FDoc, I));
+  I := 0;
+  while I < Length(Todo) do     { and what those drawings name, and theirs }
+  begin
+    Follow(Todo[I]);
+    Inc(I);
   end;
 end;
 
