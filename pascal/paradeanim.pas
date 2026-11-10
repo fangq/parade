@@ -348,6 +348,7 @@ begin
   Add('entr', 53, 16, 'Zoom');
   Add('emph', 8, 0, 'Spin');
   Add('emph', 6, 0, 'Grow/Shrink');
+  Add('emph', 32, 0, 'Teeter');
   Add('exit', 1, 0, 'Disappear');
   Add('exit', 10, 0, 'Fade');
   Add('exit', 2, 4, 'Fly Out');
@@ -392,6 +393,7 @@ begin
       6: Result := 'Grow/Shrink';
       8: Result := 'Spin';
       9: Result := 'Transparency';
+      32: Result := 'Teeter';
     end
   else if Cls = 'path' then
     Result := 'Motion Path';
@@ -513,6 +515,14 @@ var
     Result := Result + '</p:cBhvr>';
   end;
 
+  { a turn by By (60000ths of a degree), At ms into the effect for Len ms }
+  function Rot(By, At, Len: Integer): string;
+  begin
+    Result := '<p:animRot by="' + IntToStr(By) + '"><p:cBhvr><p:cTn id="0" dur="' + IntToStr(Max(1, Len)) +
+      '" fill="hold"><p:stCondLst><p:cond delay="' + IntToStr(At) + '"/></p:stCondLst></p:cTn>' + Tgt +
+      '<p:attrNameLst><p:attrName>r</p:attrName></p:attrNameLst></p:cBhvr></p:animRot>';
+  end;
+
   function SetVis(const Val: string; At: Integer): string;
   begin
     Result := '<p:set><p:cBhvr><p:cTn id="0" dur="1" fill="hold"><p:stCondLst><p:cond delay="' + IntToStr(At) +
@@ -570,6 +580,11 @@ begin
   begin
     if Preset = 6 then
       Result := '<p:animScale>' + Bhvr(' dur="' + D + '" fill="hold"', '') + '<p:by x="150000" y="150000"/></p:animScale>'
+    else if Preset = 32 then
+      { Teeter, as PowerPoint writes it: 2 degrees one way, 4 back, 4, 4 back, 2 -- where it was; its times a tenth
+        and fifths of the effect's }
+      Result := Rot(120000, 0, Dur div 10) + Rot(-240000, Dur div 5, Dur div 5) + Rot(240000, Dur * 2 div 5, Dur div 5) +
+        Rot(-240000, Dur * 3 div 5, Dur div 5) + Rot(120000, Dur * 4 div 5, Dur div 5)
     else
       Result := '<p:animRot by="21600000">' + Bhvr(' dur="' + D + '" fill="hold"', 'r') + '</p:animRot>';
     Exit;
@@ -1061,6 +1076,8 @@ begin
     E.Dur := 500;
   if Preset = 1 then
     E.Dur := 1;
+  if (Cls = 'emph') and (Preset = 32) and ((E.Cls <> Cls) or (E.Preset <> Preset)) then
+    E.Dur := 1000;    { (a Teeter's second, as PowerPoint's) }
   E.Cls := Cls;
   E.Preset := Preset;
   E.Subtype := Subtype;

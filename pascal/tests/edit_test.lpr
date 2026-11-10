@@ -1637,6 +1637,8 @@ var
   Parts: TRectArray;
   Area: Int64;
   J: Integer;
+  A: TParadeAnim;
+  LT0, RT0, LT1, RT1, LT2, RT2: Integer;
 
   function Px(X, Y: Integer): UInt32;
   begin
@@ -1673,6 +1675,20 @@ var
         Inc(Red, (C shr 16) and $FF);
         Inc(Blue, C and $FF);
       end;
+  end;
+
+  { the first row drawn in column X, from a little above R }
+  function TopAt(X: Integer; const R: TRect): Integer;
+  var
+    C: UInt32;
+  begin
+    for Result := Max(0, R.Top - 12) to R.Bottom do
+    begin
+      C := Px(X, Result);
+      if 765 - Integer(C and $FF) - Integer((C shr 8) and $FF) - Integer((C shr 16) and $FF) > 120 then
+        Exit;
+    end;
+    Result := -1;
   end;
 
   function Shifted(const R: TRect; DY: Integer): TRect;
@@ -1869,6 +1885,52 @@ begin
       + 'transition, as it was drawn when not made ready before');
   finally
     S.Free;
+  end;
+  { a Teeter added to the gradient box (as the pane adds it): tilted one way, then the other, then where it was }
+  A := TParadeAnim.Create;
+  try
+    A.Load(E.SlideTiming(0));
+    A.Add(8, 'emph', 32, 0, asClick, 1000, -1);
+    Check(AnimPresetName('emph', 32) = 'Teeter', 'Teeter by its name');
+    E.SetSlideTiming(0, A.Save);
+  finally
+    A.Free;
+  end;
+  S := TParadeShow.Create(E, 800, 600, 0);
+  try
+    Sl := S.SlideRect;
+    T := S.TimingOf(0);
+    Check((T.StepCount = 6) and (Length(T.Steps[5].Effects) = 1) and (Length(T.Steps[5].Effects[0].Behs) = 5) and
+      SameValue(T.Steps[5].Effects[0].Behs[0].RotBy + T.Steps[5].Effects[0].Behs[1].RotBy + T.Steps[5].Effects[0].Behs[2].RotBy
+      + T.Steps[5].Effects[0].Behs[3].RotBy + T.Steps[5].Effects[0].Behs[4].RotBy, 0) and
+      SameValue(T.Steps[5].Effects[0].Behs[1].RotBy, -4) and (T.Steps[5].Effects[0].Behs[4].Start = 800), 'the Teeter: '
+      + 'five turns, 2 degrees, 4 back, 4, 4 back, 2, the last at 0.8 s');
+    S.Start(0);
+    S.Next(100);
+    S.Next(200);
+    S.Next(1000);
+    S.Next(2000);
+    S.Tick(3100);
+    R8 := S.TargetBox(8);
+    SetLength(Old, Length(Frm));
+    Snap(Old);
+    LT0 := TopAt(R8.Left + (R8.Right - R8.Left) div 6, R8);
+    RT0 := TopAt(R8.Right - (R8.Right - R8.Left) div 6, R8);
+    S.Next(4000);
+    S.Tick(4150);
+    LT1 := TopAt(R8.Left + (R8.Right - R8.Left) div 6, R8);
+    RT1 := TopAt(R8.Right - (R8.Right - R8.Left) div 6, R8);
+    S.Tick(4400);
+    LT2 := TopAt(R8.Left + (R8.Right - R8.Left) div 6, R8);
+    RT2 := TopAt(R8.Right - (R8.Right - R8.Left) div 6, R8);
+    Check((Abs(LT0 - RT0) <= 1) and (LT1 < RT1 - 1) and (LT2 > RT2 + 1), Format('tilted clockwise, then the other '
+      + 'way (its top edge, left and right: %d %d, %d %d, %d %d)', [LT0, RT0, LT1, RT1, LT2, RT2]));
+    S.Tick(5100);
+    Snap(Frm);
+    Check((S.StepsDone = 6) and (CompareDWord(Old[0], Frm[0], Length(Frm)) = 0), 'and where it was once it is done');
+  finally
+    S.Free;
+    E.Undo;
   end;
   { a hidden slide is left out }
   E.SetSlideHidden(1, True);
