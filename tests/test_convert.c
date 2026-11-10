@@ -6932,6 +6932,105 @@ static int bytes_in(const char* p, size_t n, const char* q, size_t k) {
     return 0;
 }
 
+/* Curves kept as curves: an EMF ellipse and a poly-Bezier come out as drawing items with their cubics ("cv") beside
+   the points they flatten to, and laid out as paths with a curve of cubics (what PDF and SVG draw); a figure the
+   clip cuts has its flattened points alone. */
+static void test_emf_curves(void) {
+    buf_t e = { NULL, 0 };
+    pd_doc* d;
+    pd_res_id src, dr;
+    char* js, item[16384], want[64];
+    double U = 25 / 25.4 * 72 * 65536 / 100;
+
+    emf_head(&e);
+    {
+        uint32_t brush[4] = { 1, 0, 0x0000FF00u, 0 }, sel[1] = { 1 }, ell[4] = { 10, 10, 40, 30 };
+        uint32_t bez[5 + 4] = { 0, 0, 99, 99, 7, 50 | (50u << 16), 60 | (40u << 16), 70 | (60u << 16),
+                                80 | (50u << 16)
+                              };
+        uint32_t clip[4] = { 0, 0, 60, 99 }, ell2[4] = { 50, 70, 90, 90 };
+
+        emr(&e, 39, brush, 4);
+        emr(&e, 37, sel, 1);
+        emr(&e, 42, ell, 4);    /* ELLIPSE */
+        bez[4] = 4;
+        emr(&e, 85, bez, 9);    /* POLYBEZIER16: a start and one cubic */
+        emr(&e, 30, clip, 4);   /* INTERSECTCLIPRECT to x = 60 */
+        emr(&e, 42, ell2, 4);   /* an ellipse across the clip's edge */
+    }
+    emr(&e, 14, (const uint32_t*)"\0\0\0\0\0\0\0\0\0\0\0\0", 3);
+    pd_doc_new(&d);
+    pd_doc_add_resource(d, "image/x-emf", e.p, e.n, &src);
+    dr = pd_metafile_drawing(d, (const unsigned char*)e.p, e.n, src);
+    js = drawing_json(d, dr);
+    CHECK(js != NULL);
+
+    if (js) {
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(40 * U), (int)(20 * U));     /* the ellipse, from its right */
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"cv\":[") &&
+              strstr(strstr(item, "\"cv\":["), "-2147483647,0"));
+        snprintf(want, sizeof(want), "[%d,%d,", (int)(50 * U), (int)(50 * U));     /* the Bezier */
+        CHECK(item_with(js, want, item, sizeof(item)) && strstr(item, "\"cv\":[") &&
+              strstr(item, "\"closed\":0"));
+        {   /* its one cubic: start, marker, the two control points and the end as they are */
+            char cvw[160];
+
+            snprintf(cvw, sizeof(cvw), "\"cv\":[%d,%d,-2147483647,0,%d,%d,%d,%d,%d,%d]", (int)(50 * U), (int)(50 * U),
+                     (int)(60 * U), (int)(40 * U), (int)(70 * U), (int)(60 * U), (int)(80 * U), (int)(50 * U));
+            CHECK(strstr(item, cvw) != NULL);
+        }
+        {   /* the ellipse, the Bezier, and the cut ellipse's fill and outline: those two without curves */
+            int paths = 0, curves = 0;
+            const char* q;
+
+            for (q = js; (q = strstr(q, "\"path\":")) != NULL; q++) {
+                paths++;
+            }
+
+            for (q = js; (q = strstr(q, "\"cv\":")) != NULL; q++) {
+                curves++;
+            }
+
+            CHECK(paths == 4 && curves == 2);   /* the cut one's fill and outline apart, flattened */
+        }
+        free(js);
+    }
+
+    if (have_layout_font()) {   /* laid out: paths with cubics in their curves */
+        pd_inline o;
+        pd_layout* L = NULL;
+        pd_draw* it;
+        int32_t n = 0, k, cubics = 0;
+        pd_block_id sec = pd_doc_child(d, pd_doc_root(d), 0), p0 = sec ? pd_doc_child(d, sec, 0) : 0;
+
+        memset(&o, 0, sizeof(o));
+        o.kind = PD_INLINE_IMAGE;
+        o.resource = dr;
+        o.width = o.height = PD_PT(71);
+        CHECK(p0 != 0 && pd_doc_insert_inline(d, (pd_pos){ p0, 0 }, &o, NULL) == PD_OK);
+        pd_doc_set_font_resolver(d, layout_resolver, NULL);
+        CHECK(pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK);
+        pd_layout_page_items(L, 0, NULL, 0, &n);
+        it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+        pd_layout_page_items(L, 0, it, n, &n);
+
+        for (k = 0; k < n; k++) {
+            int32_t q;
+
+            for (q = 0; it[k].kind == PD_DRAW_PATH && it[k].curve && q < it[k].ncurve; q++) {
+                cubics += it[k].curve[2 * q] == PD_PATH_CUBIC;
+            }
+        }
+
+        CHECK(cubics == 4 + 1);    /* the ellipse's four quarters and the Bezier; the cut ellipse none */
+        free(it);
+        pd_layout_free(L);
+    }
+
+    free(e.p);
+    pd_doc_free(d);
+}
+
 /* A drawing a metafile makes is saved as where it comes from -- the metafile, the pictures it made -- not its own
    bytes, and made again on load: the same bytes, its picture the one saved (not a new resource), a second save the
    same as the first. A placeholder naming what is no metafile loads as an empty drawing. */
@@ -11418,6 +11517,7 @@ int main(void) {
     test_emf_shapes();
     test_emf_plus();
     test_emf_drawing_saved_as_source();
+    test_emf_curves();
     printf("docx equations\n");
     test_docx_omml();
     printf("docx fields and references\n");

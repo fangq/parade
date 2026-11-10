@@ -78,6 +78,12 @@ typedef struct {
     const char* grad_sp;        /* non-NULL: the fill's gradient, JSON members to add to the next filled path */
     int depth_mf;               /* metafiles drawn inside metafiles, this deep */
     int getdc;                  /* an EMF+ GetDC last: the plain records after it are drawn */
+    /* curves kept as curves beside the points they are flattened to ("cv"): drawing units; (INFINITY, 0) before
+       each cubic's three points, (NAN, NAN) between rings */
+    double* pcv;                /* the GDI path being built's */
+    int npcv, cappcv, pcv_cubic;
+    const double* cur_cv;       /* the figure being written's, when it has a cubic */
+    int cur_ncv;
 } mf;
 
 static uint32_t u32(const unsigned char* p) {
@@ -187,6 +193,24 @@ static void out_path_raw(mf* M, const double* xy, int n, int closed, int fill, i
 
     if (fc && M->grad_sp) {
         pb_puts(M->o, M->grad_sp);
+    }
+
+    if (M->cur_cv && M->cur_ncv >= 2) {     /* its curves as curves, for output that draws them */
+        pb_puts(M->o, ",\"cv\":[");
+
+        for (i = 0; i < M->cur_ncv; i++) {
+            const double* c = M->cur_cv + 2 * i;
+
+            if (isnan(c[0])) {
+                pb_printf(M->o, "%s%d,%d", i ? "," : "", (int)INT32_MIN, (int)INT32_MIN);
+            } else if (isinf(c[0])) {
+                pb_printf(M->o, "%s%d,0", i ? "," : "", (int)INT32_MIN + 1);
+            } else {
+                pb_printf(M->o, "%s%d,%d", i ? "," : "", (int)c[0], (int)c[1]);
+            }
+        }
+
+        pb_putc(M->o, ']');
     }
 
     if (lc) {   /* the pen's dashes (as GDI's, in line widths), ends and corners */
@@ -314,6 +338,22 @@ static void out_path(mf* M, const double* xy, int n, int closed, int fill, int s
         return;
     }
 
+    {   /* all of it inside the clip: as it is, curves and all */
+        int inside = 1;
+
+        for (i = 0; i < n && inside; i++) {
+            inside = isnan(xy[2 * i]) || (xy[2 * i] >= g->clip_x0 && xy[2 * i] <= g->clip_x1 &&
+                                          xy[2 * i + 1] >= g->clip_y0 && xy[2 * i + 1] <= g->clip_y1);
+        }
+
+        if (inside) {
+            out_path_raw(M, xy, n, closed, fill, stroke);
+            return;
+        }
+    }
+
+    M->cur_cv = NULL;   /* cut: its flattened points alone */
+
     if (!(out = (double*)malloc((size_t)(3 * n + 16) * 2 * sizeof(double)))) {
         return;
     }
@@ -440,8 +480,23 @@ static void clip_to(mf* M, double x0, double y0, double x1, double y1, int copy)
     g->clip_y1 = y1 > y0 ? y1 : y0;
 }
 
-/* the path being built, or straight out: points in logical units */
-static void figure(mf* M, const double* lxy, int n, int closed, int fill, int stroke) {
+/* a curve's pairs (logical units, the cv encoding) mapped to the drawing's: markers as they are */
+static void map_cv(const mf* M, const double* l, int n, double* out) {
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (isnan(l[2 * i]) || isinf(l[2 * i])) {
+            out[2 * i] = l[2 * i];
+            out[2 * i + 1] = l[2 * i + 1];
+        } else {
+            map_pt(M, l[2 * i], l[2 * i + 1], &out[2 * i], &out[2 * i + 1]);
+        }
+    }
+}
+
+/* the path being built, or straight out: points in logical units; lcv, when given, the same figure with its curves
+   as curves (ncv pairs, the cv encoding, logical units) -- else the points are its curve */
+static void figure_cv(mf* M, const double* lxy, int n, int closed, int fill, int stroke, const double* lcv, int ncv) {
     double* xy;
     int i;
 
@@ -449,8 +504,16 @@ static void figure(mf* M, const double* lxy, int n, int closed, int fill, int st
         return;
     }
 
+    if (!lcv) {
+        lcv = lxy;
+        ncv = n;
+    }
+
     if (M->in_path) {
-        if (pd_grow((void**)&M->pp, &M->cappp, (int64_t)M->npp + 2 * n + 2, sizeof(double))) {
+        int cont = M->npp > 0 && M->fig_open;
+
+        if (pd_grow((void**)&M->pp, &M->cappp, (int64_t)M->npp + 2 * n + 2, sizeof(double)) ||
+                pd_grow((void**)&M->pcv, &M->cappcv, (int64_t)M->npcv + 2 * ncv + 2, sizeof(double))) {
             return;
         }
 
@@ -459,16 +522,28 @@ static void figure(mf* M, const double* lxy, int n, int closed, int fill, int st
             M->pp[M->npp++] = NAN;
         }
 
+        if (M->npcv > 0 && !cont) {
+            M->pcv[M->npcv++] = NAN;
+            M->pcv[M->npcv++] = NAN;
+        }
+
         for (i = 0; i < n; i++) {
             map_pt(M, lxy[2 * i], lxy[2 * i + 1], &M->pp[M->npp], &M->pp[M->npp + 1]);
             M->npp += 2;
+        }
+
+        map_cv(M, lcv, ncv, M->pcv + M->npcv);
+        M->npcv += 2 * ncv;
+
+        for (i = 0; i < ncv; i++) {
+            M->pcv_cubic |= isinf(lcv[2 * i]) != 0;
         }
 
         M->fig_open = !closed;
         return;
     }
 
-    if ((xy = (double*)malloc((size_t)n * 2 * sizeof(double))) == NULL) {
+    if ((xy = (double*)malloc(((size_t)n + (size_t)ncv) * 2 * sizeof(double))) == NULL) {
         return;
     }
 
@@ -476,8 +551,19 @@ static void figure(mf* M, const double* lxy, int n, int closed, int fill, int st
         map_pt(M, lxy[2 * i], lxy[2 * i + 1], &xy[2 * i], &xy[2 * i + 1]);
     }
 
+    if (lcv != lxy) {
+        map_cv(M, lcv, ncv, xy + 2 * n);
+        M->cur_cv = xy + 2 * n;
+        M->cur_ncv = ncv;
+    }
+
     out_path(M, xy, n, closed, fill, stroke);
+    M->cur_cv = NULL;
     free(xy);
+}
+
+static void figure(mf* M, const double* lxy, int n, int closed, int fill, int stroke) {
+    figure_cv(M, lxy, n, closed, fill, stroke, NULL, 0);
 }
 
 /* a cubic Bezier from p0 through p1, p2 to p3 as 16 straight pieces (p0 not included) */
@@ -495,9 +581,42 @@ static int bezier(double* out, const double* p) {
 }
 
 /* an ellipse in the box, logical units, as 64 points */
+/* an elliptic arc (centre, radii; from angle a0 to a1, either way) as cubics, the cv encoding: its start (when
+   start), then (INFINITY, 0) and three points for each piece of a quarter turn or less; the pairs written */
+static int arc_cv(double cx, double cy, double rx, double ry, double a0, double a1, int start, double* out) {
+    int pieces = (int)ceil(fabs(a1 - a0) / 1.5707963267948966 - 1e-9), k, n = 0;
+    double step;
+
+    pieces = pieces < 1 ? 1 : pieces > 4 ? 4 : pieces;
+    step = (a1 - a0) / pieces;
+
+    if (start) {
+        out[n++] = cx + rx * cos(a0);
+        out[n++] = cy + ry * sin(a0);
+    }
+
+    for (k = 0; k < pieces; k++) {
+        double b0 = a0 + step * k, b1 = b0 + step, kk = 4.0 / 3 * tan((b1 - b0) / 4);
+
+        out[n++] = INFINITY;
+        out[n++] = 0;
+        out[n++] = cx + rx * (cos(b0) - kk * sin(b0));
+        out[n++] = cy + ry * (sin(b0) + kk * cos(b0));
+        out[n++] = cx + rx * (cos(b1) + kk * sin(b1));
+        out[n++] = cy + ry * (sin(b1) - kk * cos(b1));
+        out[n++] = cx + rx * cos(b1);
+        out[n++] = cy + ry * sin(b1);
+    }
+
+    return n / 2;
+}
+
 static void ellipse(mf* M, double l, double t, double r, double b) {
     double xy[128];
     int k;
+
+    double cv[2 * 17];
+    int nc;
 
     for (k = 0; k < 64; k++) {
         double a = k * 6.283185307179586 / 64;
@@ -506,7 +625,8 @@ static void ellipse(mf* M, double l, double t, double r, double b) {
         xy[2 * k + 1] = (t + b) / 2 + (b - t) / 2 * sin(a);
     }
 
-    figure(M, xy, 64, 1, 1, 1);
+    nc = arc_cv((l + r) / 2, (t + b) / 2, (r - l) / 2, (b - t) / 2, 0, 6.283185307179586, 1, cv);
+    figure_cv(M, xy, 64, 1, 1, 1, cv, nc);
 }
 
 /* GDI's arcs: on the ellipse in (l, t, r, b), anticlockwise on the device from the radial through (xs, ys) to the
@@ -539,10 +659,27 @@ static void arc(mf* M, double l, double t, double r, double b, double xs, double
         xy[n++] = cy;
     }
 
-    if (how == 3 && M->in_path && M->fig_open) {    /* goes on from where the figure is */
-        figure(M, xy + 2, n / 2 - 1, 0, 0, 1);
-    } else {
-        figure(M, xy, n / 2, how == 1 || how == 2, how == 1 || how == 2, 1);
+    {   /* and as curves: the line to it (ArcTo), the arc, the line through the centre (a pie) */
+        double cv[2 * 24];
+        int nc = 0;
+
+        if (how == 3) {
+            cv[nc++] = M->g.cx;
+            cv[nc++] = M->g.cy;
+        }
+
+        nc += 2 * arc_cv(cx, cy, rx, ry, a0, a1, 1, cv + nc);
+
+        if (how == 2) {
+            cv[nc++] = cx;
+            cv[nc++] = cy;
+        }
+
+        if (how == 3 && M->in_path && M->fig_open) {    /* goes on from where the figure is */
+            figure_cv(M, xy + 2, n / 2 - 1, 0, 0, 1, cv + 2, nc / 2 - 1);
+        } else {
+            figure_cv(M, xy, n / 2, how == 1 || how == 2, how == 1 || how == 2, 1, cv, nc / 2);
+        }
     }
 
     if (how == 3) {
@@ -993,8 +1130,16 @@ static void select_obj(mf* M, uint32_t ih) {
 
 /* the path built so far, drawn */
 static void path_out(mf* M, int fill, int stroke) {
+    if (M->pcv_cubic && M->npcv >= 4) {
+        M->cur_cv = M->pcv;
+        M->cur_ncv = M->npcv / 2;
+    }
+
     out_path(M, M->pp, M->npp / 2, 1, fill, stroke);
+    M->cur_cv = NULL;
     M->npp = 0;
+    M->npcv = 0;
+    M->pcv_cubic = 0;
     M->fig_open = 0;
 }
 
@@ -1118,6 +1263,7 @@ typedef struct pctx_s {
 } pctx;
 
 static void emf_play(mf* M, const unsigned char* p, size_t n);
+static double* bez_cv(const double* pts, uint32_t n, double sx, double sy, int to);
 
 static double f32(const unsigned char* p) {
     float f;
@@ -1784,7 +1930,8 @@ static void plus_clip(mf* M, pctx* P, double x0, double y0, double x1, double y1
 }
 
 /* a figure (world points; NAN pairs between rings) filled with a colour and/or outlined with a pen */
-static void plus_figure(mf* M, pctx* P, const double* wxy, int n, int closed, uint32_t fill, const pobj* pen) {
+static void plus_figure_cv(mf* M, pctx* P, const double* wxy, int n, int closed, uint32_t fill, const pobj* pen,
+                           const double* wcv, int ncv) {
     double m[6], *xy;
     gobj kb = M->g.brush, kp = M->g.pen;
     char dash[200], grad[600];
@@ -1794,7 +1941,7 @@ static void plus_figure(mf* M, pctx* P, const double* wxy, int n, int closed, ui
         return;
     }
 
-    if ((xy = (double*)malloc((size_t)n * 2 * sizeof(double))) == NULL) {
+    if ((xy = (double*)malloc(((size_t)n + (size_t)(wcv ? ncv : 0)) * 2 * sizeof(double))) == NULL) {
         return;
     }
 
@@ -1806,6 +1953,22 @@ static void plus_figure(mf* M, pctx* P, const double* wxy, int n, int closed, ui
         } else {
             aff_pt(m, wxy[2 * i], wxy[2 * i + 1], &xy[2 * i], &xy[2 * i + 1]);
         }
+    }
+
+    if (wcv && ncv >= 2) {  /* its curves as curves, through the same transforms */
+        double* c = xy + 2 * n;
+
+        for (i = 0; i < ncv; i++) {
+            if (isnan(wcv[2 * i]) || isinf(wcv[2 * i])) {
+                c[2 * i] = wcv[2 * i];
+                c[2 * i + 1] = wcv[2 * i + 1];
+            } else {
+                aff_pt(m, wcv[2 * i], wcv[2 * i + 1], &c[2 * i], &c[2 * i + 1]);
+            }
+        }
+
+        M->cur_cv = c;
+        M->cur_ncv = ncv;
     }
 
     memset(&M->g.brush, 0, sizeof(gobj));
@@ -1865,6 +2028,7 @@ static void plus_figure(mf* M, pctx* P, const double* wxy, int n, int closed, ui
 
     M->mute = 0;
     out_path(M, xy, n, closed, fill != 0, pen != NULL);
+    M->cur_cv = NULL;
     M->grad_sp = NULL;
     M->mute = 1;
     M->g.brush = kb;
@@ -1874,13 +2038,25 @@ static void plus_figure(mf* M, pctx* P, const double* wxy, int n, int closed, ui
     free(xy);
 }
 
+static void plus_figure(mf* M, pctx* P, const double* wxy, int n, int closed, uint32_t fill, const pobj* pen) {
+    plus_figure_cv(M, P, wxy, n, closed, fill, pen, NULL, 0);
+}
+
 /* a path object drawn: filled (its figures together, each closed) and/or outlined (each as it is) */
 static void plus_path(mf* M, pctx* P, const pobj* path, uint32_t fill, const pobj* pen) {
-    double* xy, cur[2] = { 0, 0 };
-    int i, k = 0, start = 0, closed = 0;
+    double* xy, *cv, cur[2] = { 0, 0 };
+    int i, k = 0, start = 0, closed = 0, c = 0, cstart = 0, cubic = 0;
 
-    if (!path || path->kind != 3 || path->npts <= 0 ||
-            (xy = (double*)malloc(((size_t)path->npts * 17 + 2) * 2 * sizeof(double))) == NULL) {
+    if (!path || path->kind != 3 || path->npts <= 0) {
+        return;
+    }
+
+    xy = (double*)malloc(((size_t)path->npts * 17 + 2) * 2 * sizeof(double));
+    cv = (double*)malloc(((size_t)path->npts * 2 + 2) * 2 * sizeof(double));
+
+    if (!xy || !cv) {
+        free(xy);
+        free(cv);
         return;
     }
 
@@ -1890,17 +2066,22 @@ static void plus_path(mf* M, pctx* P, const pobj* path, uint32_t fill, const pob
 
         if (t == 0 && i > 0) {  /* a new figure */
             if (pen) {
-                plus_figure(M, P, xy + 2 * start, k - start, closed, 0, pen);
+                plus_figure_cv(M, P, xy + 2 * start, k - start, closed, 0, pen, cubic ? cv + 2 * cstart : NULL,
+                               c - cstart);
             }
 
             if (fill) {
                 xy[2 * k] = xy[2 * k + 1] = NAN;
                 k++;
+                cv[2 * c] = cv[2 * c + 1] = NAN;
+                c++;
             } else {
                 k = 0;
+                c = 0;
             }
 
             start = k;
+            cstart = c;
             closed = 0;
         }
 
@@ -1908,6 +2089,11 @@ static void plus_path(mf* M, pctx* P, const pobj* path, uint32_t fill, const pob
             double b[8] = { cur[0], cur[1], q[0], q[1], q[2], q[3], q[4], q[5] };
 
             k += bezier(xy + 2 * k, b);
+            cv[2 * c] = INFINITY;
+            cv[2 * c + 1] = 0;
+            memcpy(cv + 2 * c + 2, q, 6 * sizeof(double));
+            c += 4;
+            cubic = 1;
             cur[0] = q[4];
             cur[1] = q[5];
             closed |= (path->types[i + 2] & 0x80) != 0;
@@ -1916,6 +2102,9 @@ static void plus_path(mf* M, pctx* P, const pobj* path, uint32_t fill, const pob
             xy[2 * k] = q[0];
             xy[2 * k + 1] = q[1];
             k++;
+            cv[2 * c] = q[0];
+            cv[2 * c + 1] = q[1];
+            c++;
             cur[0] = q[0];
             cur[1] = q[1];
             closed |= (path->types[i] & 0x80) != 0;
@@ -1923,14 +2112,15 @@ static void plus_path(mf* M, pctx* P, const pobj* path, uint32_t fill, const pob
     }
 
     if (pen) {
-        plus_figure(M, P, xy + 2 * start, k - start, closed, 0, pen);
+        plus_figure_cv(M, P, xy + 2 * start, k - start, closed, 0, pen, cubic ? cv + 2 * cstart : NULL, c - cstart);
     }
 
     if (fill) {
-        plus_figure(M, P, xy, k, 1, fill, NULL);
+        plus_figure_cv(M, P, xy, k, 1, fill, NULL, cubic ? cv : NULL, c);
     }
 
     free(xy);
+    free(cv);
 }
 
 static void plus_rect(mf* M, pctx* P, double x, double y, double w, double h, uint32_t fill, const pobj* pen) {
@@ -1943,6 +2133,9 @@ static void plus_ellipse(mf* M, pctx* P, double x, double y, double w, double h,
     double xy[128];
     int k;
 
+    double cv[2 * 17];
+    int nc;
+
     for (k = 0; k < 64; k++) {
         double a = k * 2 * 3.14159265358979323846 / 64;
 
@@ -1950,7 +2143,8 @@ static void plus_ellipse(mf* M, pctx* P, double x, double y, double w, double h,
         xy[2 * k + 1] = y + h / 2 + h / 2 * sin(a);
     }
 
-    plus_figure(M, P, xy, 64, 1, fill, pen);
+    nc = arc_cv(x + w / 2, y + h / 2, w / 2, h / 2, 0, 2 * 3.14159265358979323846, 1, cv);
+    plus_figure_cv(M, P, xy, 64, 1, fill, pen, cv, nc);
 }
 
 /* a string in a layout rectangle (world units), in a font and colour, placed as its format says; turned as the
@@ -2088,6 +2282,7 @@ static void plus_image(mf* M, pctx* P, const pobj* img, double sx, double sy, do
         plus_play(C, Q, img->data, img->ndata);
         M->first = C->first;
         free(C->pp);
+        free(C->pcv);
         free(C);
         free(Q);
     }
@@ -2193,10 +2388,14 @@ static void plus_records(mf* M, pctx* P, const unsigned char* p, size_t n) {
                         int nf = 0;
                         double* f = flatten(xy, cnt, 0, 0, 0, &nf);
 
+                        double* bc = bez_cv(xy, cnt, 0, 0, 0);
+
                         if (f) {
-                            plus_figure(M, P, f, nf, 0, 0, pen);
+                            plus_figure_cv(M, P, f, nf, 0, 0, pen, bc, 1 + 4 * (int)((cnt - 1) / 3));
                             free(f);
                         }
+
+                        free(bc);
                     } else if (pen) {
                         plus_figure(M, P, xy, (int)cnt, (fl & 0x2000) != 0, 0, pen);
                     }
@@ -2533,6 +2732,31 @@ static void plus_play(mf* M, pctx* P, const unsigned char* p, size_t n) {
 
     free(P->cont);
     P->cont = NULL;
+}
+
+/* poly-Bezier points as the cv encoding: the start, then (INFINITY, 0) and three points a cubic */
+static double* bez_cv(const double* pts, uint32_t n, double sx, double sy, int to) {
+    uint32_t segs = to ? n / 3 : (n - 1) / 3, i;
+    double* cv = (double*)malloc(((size_t)segs * 4 + 1) * 2 * sizeof(double));
+    int k = 0;
+
+    if (!cv) {
+        return NULL;
+    }
+
+    cv[k++] = to ? sx : pts[0];
+    cv[k++] = to ? sy : pts[1];
+
+    for (i = 0; i < segs; i++) {
+        const double* q = pts + (to ? 6 * i : 2 + 6 * i);
+
+        cv[k++] = INFINITY;
+        cv[k++] = 0;
+        memcpy(cv + k, q, 6 * sizeof(double));
+        k += 6;
+    }
+
+    return cv;
 }
 
 static void emf_play(mf* M, const unsigned char* p, size_t n) {
@@ -2892,11 +3116,16 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
                     double* pts = read_pts(r + 28, size - 28, cnt, small), *xy;
 
                     if (pts && (xy = flatten(pts, cnt, M->g.cx, M->g.cy, to, &k)) != NULL) {
+                        double* cv = bez_cv(pts, cnt, M->g.cx, M->g.cy, to);
+                        int nc = to ? 1 + 4 * (int)(cnt / 3) : 1 + 4 * (int)((cnt - 1) / 3);
+
                         if (to && M->in_path && M->fig_open) {
-                            figure(M, xy + 2, k - 1, 0, 0, 1);
+                            figure_cv(M, xy + 2, k - 1, 0, 0, 1, cv ? cv + 2 : NULL, nc - 1);
                         } else {
-                            figure(M, xy, k, 0, 0, 1);
+                            figure_cv(M, xy, k, 0, 0, 1, cv, nc);
                         }
+
+                        free(cv);
 
                         M->g.cx = xy[2 * k - 2];
                         M->g.cy = xy[2 * k - 1];
@@ -3571,6 +3800,7 @@ static int metafile_json(pd_doc* d, const unsigned char* p, size_t n, pd_res_id 
     }
 
     free(M->pp);
+    free(M->pcv);
     free(M);
 
     if (ok) {
