@@ -2815,6 +2815,56 @@ static void test_docx_preset_adjust(void) {
     }
 }
 
+/* A canvas Word wrote with its VML fallback beside it: the fallback kept for readers without DrawingML (Word 2007),
+   but not the o:gfxdata on its shapes -- the DrawingML of the whole drawing again, pictures and all, in base64,
+   for Word 2007 to carry through a save, never shown. Written back without it, the VML otherwise as it was. */
+static void test_docx_fallback_gfxdata(void) {
+    static const char doc[] =
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\" xmlns:wpc=\"wpc\" "
+        "xmlns:wps=\"wps\" xmlns:mc=\"mc\" xmlns:v=\"v\" xmlns:o=\"o\"><w:body><w:p><w:r><mc:AlternateContent>"
+        "<mc:Choice Requires=\"wpc\"><w:drawing><wp:inline><wp:extent cx=\"2540000\" cy=\"1270000\"/><a:graphic>"
+        "<a:graphicData><wpc:wpc><wpc:bg/><wpc:whole/><wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/>"
+        "<a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm><a:prstGeom prst=\"ellipse\"/><a:solidFill><a:srgbClr "
+        "val=\"FF0000\"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp></wpc:wpc></a:graphicData></a:graphic>"
+        "</wp:inline></w:drawing></mc:Choice><mc:Fallback><w:pict><v:group id=\"Canvas 1\" o:spid=\"_x0000_s1\" "
+        "editas=\"canvas\" style=\"width:200pt;height:100pt\" coordsize=\"20000,10000\" "
+        "o:gfxdata=\"UEsDBBQABgAIAAAAIQBTHEGFILLERPICTURESBASE64&#xA;MOREBASE64==\"><v:oval id=\"Oval 2\" "
+        "style=\"position:absolute;left:0;top:0;width:5000;height:5000\" fillcolor=\"#FF0000\" "
+        "o:gfxdata=\"UEsDBBQSMALLONE==\"/></v:group></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>"
+        "</w:body></w:document>";
+    pd_doc* d = docx_doc("word/document.xml", doc, NULL);
+    pd_inline o;
+    char* js;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    CHECK(pd_doc_inline_at(d, at(pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0), 0), &o) == PD_OK);
+    js = drawing_json(d, o.resource);
+    CHECK(js && strstr(js, "\"fallback\":\"<mc:Fallback><w:pict><v:group id=\\\"Canvas 1\\\"") != NULL);
+    CHECK(js && strstr(js, "gfxdata") == NULL && strstr(js, "PICTURESBASE64") == NULL);    /* not kept */
+    CHECK(js && strstr(js, "coordsize=\\\"20000,10000\\\"><v:oval id=\\\"Oval 2\\\"") != NULL);  /* the rest as it was */
+    CHECK(js && strstr(js, "fillcolor=\\\"#FF0000\\\"/></v:group>") != NULL);
+    free(js);
+
+    {   /* written back: the fallback, without it */
+        buf_t b = { NULL, 0 };
+        size_t n = 0;
+        char* x;
+
+        CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        x = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "word/document.xml", &n) : NULL;
+        CHECK(x && has_mem(x, n, "<mc:Fallback>") && has_mem(x, n, "Oval 2") && !has_mem(x, n, "gfxdata"));
+        free(x);
+        free(b.p);
+    }
+
+    pd_doc_free(d);
+}
+
 static void test_docx_canvas_fallback(void) {
     static const char canvas[] = "<wpc:wpc><wpc:bg/><wpc:whole/>"
                                  "<pic:pic><pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/>"
@@ -11624,6 +11674,7 @@ int main(void) {
     test_docx_tracked_objects();
     test_docx_drawing_rebuild();
     test_docx_canvas_fallback();
+    test_docx_fallback_gfxdata();
     test_docx_preset_adjust();
     test_preset_eval();
     printf("docx embedded fonts\n");

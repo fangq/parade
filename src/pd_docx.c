@@ -9789,8 +9789,33 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
     json_str(o, raw0, rawn);
 
     if (fb_ok) {
+        pd_buf fb;
+        const char* q = fb0, *g;
+
+        /* Kept without o:gfxdata: on its VML shapes Word keeps the DrawingML of the whole drawing again, pictures and
+           all, as a zip in base64 -- for Word 2007 to carry through a save and back, never shown, and mostly the
+           pictures a second time (1.3 MB of a figure's 1.4 MB). Word 2007 still shows the VML without it. */
+        memset(&fb, 0, sizeof(fb));
+
+        while ((g = dw_memmem(q, (size_t)(fb1 - q), " o:gfxdata=\"", 12)) != NULL) {
+            const char* e = g + 12;
+
+            while (e < fb1 && *e != '"') {
+                e++;
+            }
+
+            if (e >= fb1) {
+                break;
+            }
+
+            pb_put(&fb, q, (size_t)(g - q));
+            q = e + 1;
+        }
+
+        pb_put(&fb, q, (size_t)(fb1 - q));
         pb_puts(o, ",\"fallback\":");
-        json_str(o, fb0, (size_t)(fb1 - fb0));
+        json_str(o, fb.p ? fb.p : "", fb.n);
+        pb_free(&fb);
     }
 }
 
