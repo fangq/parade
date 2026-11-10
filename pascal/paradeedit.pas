@@ -973,6 +973,10 @@ type
     { a comment's or a reply's text replaced -- anyone's, as Word lets any reviewer: its author and date stay; one
       undo step. False when read-only, the id is gone, or the text is empty }
     function EditComment(Id: pd_comment_id; const AText: string): Boolean;
+    { the balloons as last drawn, for a check: where each is, and whether a change's (PD_MARK_*) }
+    function BalloonCount: Integer;
+    function BalloonRect(AIndex: Integer): TRect;
+    function BalloonKind(AIndex: Integer): Int32;
     { the comment or reply whose balloon lines are under a point of the control, 0 if none }
     function CommentAtPoint(X, Y: Integer): pd_comment_id;
 
@@ -9594,6 +9598,21 @@ begin
     FHeld.Kind := 0;     { the selection moved on: let go }
 end;
 
+function TParadeEdit.BalloonCount: Integer;
+begin
+  Result := Length(FBalloons);
+end;
+
+function TParadeEdit.BalloonRect(AIndex: Integer): TRect;
+begin
+  Result := FBalloons[AIndex].R;
+end;
+
+function TParadeEdit.BalloonKind(AIndex: Integer): Int32;
+begin
+  Result := FBalloons[AIndex].Kind;
+end;
+
 function TParadeEdit.EditBlocked: Boolean;
 begin
   Result := FReadOnly or (BalloonHeld and (FHeld.Kind <> PD_MARK_COMMENT));
@@ -16167,7 +16186,12 @@ begin
       H := BalloonHeight(Segs, BW, PxScale, nil, 0, 0, Col);
       { the balloon: rounded, framed in the colour, white tinted with it inside }
       { the one clicked: its frame and the line to its place drawn bold, a little triangle pointing down at the place }
-      Held := HeldAny and (FHeld.Kind = It.kind) and (FHeld.Id = It.id);
+      { told by where it is as well as by what it is: the deletions of one session of tracking are one
+        revision, and every one of them was drawn bold }
+      Held := HeldAny and (FHeld.Kind = It.kind) and (FHeld.Id = It.id) and
+        ((It.kind = PD_MARK_COMMENT) or
+         ((FHeld.Range.start.block = It.range.start.block) and (FHeld.Range.start.offset = It.range.start.offset) and
+          (FHeld.Range.finish.block = It.range.finish.block) and (FHeld.Range.finish.offset = It.range.finish.offset)));
       Frame := 1.2;
       if Held then
         Frame := 2.6;

@@ -2543,7 +2543,7 @@ var
   Para: pd_block_id;
   Img0, Img1: TLazIntfImage;
   T: string;
-  Y: Integer;
+  Y, D1, D2: Integer;
   Got: Boolean;
 
   function Balloon: TRect;
@@ -2730,6 +2730,53 @@ begin
       E.InsertText('X');
       Check(E.DocumentText <> T, 'the caret moved on: typing again');
       E.Undo;
+    end;
+
+    { Two deletions by one author are one revision, and the balloon clicked was told from the others by its
+      revision alone: a click on one drew every deletion of that revision bold (reported on a resubmission's
+      tracked changes).  Two deletions in one session of tracking, on lines 102 and 104; the first one's
+      balloon clicked; the second's left as it was. }
+    E.TrackChanges := True;
+    Para := pd_doc_next_paragraph(E.Doc, 0);
+    for I := 1 to 101 do
+      Para := pd_doc_next_paragraph(E.Doc, Para);
+    E.GoToPos(PdPos(Para, 0));
+    for I := 1 to 4 do
+      E.ProcessKey(VK_RIGHT, [ssShift]);
+    E.ProcessKey(VK_DELETE, []);
+    Para := pd_doc_next_paragraph(E.Doc, pd_doc_next_paragraph(E.Doc, Para));
+    E.GoToPos(PdPos(Para, 0));
+    for I := 1 to 4 do
+      E.ProcessKey(VK_RIGHT, [ssShift]);
+    E.ProcessKey(VK_DELETE, []);
+    E.TrackChanges := False;
+    E.ProcessKey(VK_HOME, []);
+    Show;
+    D1 := -1;
+    D2 := -1;
+    for I := 0 to E.BalloonCount - 1 do    { the last two: the first deletion, of its own session, is before them }
+      if E.BalloonKind(I) = PD_MARK_DELETION then
+      begin
+        D1 := D2;
+        D2 := I;
+      end;
+    Check((D1 >= 0) and (D2 >= 0), Format('two deletions, two balloons (%d, %d)', [D1, D2]));
+    if (D1 >= 0) and (D2 >= 0) then
+    begin
+      B := E.BalloonRect(D1);
+      B0 := E.BalloonRect(D2);
+      E.RenderView(Img0);
+      TParadeWheel(E).MouseDown(mbLeft, [], B.Left + 10, B.Top + 6);
+      TParadeWheel(E).MouseUp(mbLeft, [], B.Left + 10, B.Top + 6);
+      Show;
+      E.RenderView(Img1);
+      Check(E.SelectedText = 'Line', 'the first of the two balloons clicked: its text: ' + E.SelectedText);
+      Check(Differ(Img0, Img1, Rect(B.Left - 3, B.Top + 4, B.Left + 6, B.Bottom - 4)) > 0,
+        'its frame bold');
+      Check(Differ(Img0, Img1, Rect(B0.Left - 3, B0.Top, B0.Right + 3, B0.Bottom + 1)) = 0,
+        Format('the other deletion''s balloon, of the same revision, left as it was (%d pixels changed)',
+        [Differ(Img0, Img1, Rect(B0.Left - 3, B0.Top, B0.Right + 3, B0.Bottom + 1))]));
+      E.ProcessKey(VK_RIGHT, []);
     end;
   finally
     Img0.Free;
