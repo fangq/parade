@@ -2379,6 +2379,32 @@ begin
   end;
   Check((NGrp >= 1) and (NGrp <= 3) and (NForm >= 12), Format('a group only for a shape seen fading: %d of %d forms',
     [NGrp, NForm]));
+  { a script plays the frames where /Dur is not kept (Chrome): each page's time, 0 for one that waits for a click }
+  P := Pos('/OpenAction << /S /JavaScript /JS (var pdD=[', Txt);
+  Check(P > 0, 'a script that plays the frames');
+  if P > 0 then
+  begin
+    Stat := Copy(Txt, P + Length('/OpenAction << /S /JavaScript /JS (var pdD=['), MaxInt);
+    Stat := Copy(Stat, 1, Pos(']', Stat) - 1);
+    Raw := TStringList.Create;
+    try
+      Raw.StrictDelimiter := True;
+      Raw.CommaText := Stat;
+      NGrp := 0;
+      NForm := 0;
+      for P := 0 to Raw.Count - 1 do
+        if StrToIntDef(Raw[P], -1) = 0 then
+          Inc(NGrp)
+        else if StrToIntDef(Raw[P], -1) = 50 then
+          Inc(NForm);
+      Check((Raw.Count = ShowPdfPages) and (NGrp = ShowPdfStill) and (NForm >= NDur div 2),
+        Format('the script has each page''s time: %d of %d, %d waiting, %d a frame''s 50 ms', [Raw.Count,
+        ShowPdfPages, NGrp, NForm]));
+    finally
+      Raw.Free;
+    end;
+    Check(Pos('pdDoc.pageNum=q;', Txt) > 0, 'the script goes on to the frame due');
+  end;
   if FileExists('/usr/bin/gs') then
   begin
     Ppm := GetTempDir + 'edit_showpdf_' + IntToStr(GetProcessID);

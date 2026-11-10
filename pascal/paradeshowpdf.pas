@@ -28,6 +28,7 @@ type
     Fps: Integer;           { frames a second while an effect plays }
     FullScreen: Boolean;    { the document opens in full-screen mode }
     JpegQuality: Integer;   { 0: the slides' pictures as they are; 1..100: photographs as JPEGs of this quality }
+    Script: Boolean;        { a script that plays the frames, for a viewer that runs one but keeps no /Dur: Chrome }
   end;
 
 function ShowPdfDefaults: TShowPdfOptions;
@@ -35,6 +36,9 @@ function ShowPdfDefaults: TShowPdfOptions;
 { AEdit's slide show to FileName; False, Err why, when it could not be }
 function ParadeShowToPdf(AEdit: TParadeEdit; const FileName: string; const Opt: TShowPdfOptions;
   out Err: string): Boolean;
+
+{ the document's script that plays the frames: Durs, a page's seconds, 0 for one that waits; for a test }
+function ShowPdfScript(const Durs: array of Double): string;
 
 { a place's filter as the clip that cuts it, in the slide's px: Dest the frame's own (else as the run is drawn, before
   its matrix); '' none; for a test }
@@ -55,6 +59,46 @@ begin
   Result.Fps := 20;
   Result.FullScreen := True;
   Result.JpegQuality := 85;
+  Result.Script := True;
+end;
+
+{ Chrome (PDFium) runs a document's JavaScript but shows every page until a key goes on; so the script, a tick every
+  20 ms, goes on from a frame once it has been shown its time, and a click (a key) plays the effect through.  In
+  full-screen mode Acrobat keeps /Dur itself: the script there does nothing, or the frames would go twice as fast }
+function ShowPdfScript(const Durs: array of Double): string;
+var
+  I: Integer;
+  D: string;
+begin
+  D := '';
+  for I := 0 to High(Durs) do
+  begin
+    if I > 0 then
+      D := D + ',';
+    D := D + IntToStr(Round(1000 * Max(0, Durs[I])));
+  end;
+  { a run of frames timed from its first: a frame drawn late, the next ones skipped, so an effect takes its time;
+    a page turned to by a key (not by the script, Chrome a tick behind) times a run from there }
+  Result := 'var pdD=[' + D + '];var pdDoc=this;var pdLast=-1;var pdBase=0;var pdT0=0;var pdSet=0;' +
+    'function pdTick(){try{if(typeof app.fs!="undefined"&&app.fs.isFullScreen)return;}catch(e){}' +
+    'var p=pdDoc.pageNum;var n=new Date().getTime();' +
+    'if(p!=pdLast){if(n-pdSet<300&&p<pdLast&&p>=pdBase)return;pdLast=p;pdBase=p;pdT0=n;return;}' +
+    'var q=pdBase;var a=0;while(q<pdD.length&&pdD[q]>0&&q+1<pdDoc.numPages&&a+pdD[q]<=n-pdT0){a+=pdD[q];q++;}' +
+    'if(q>p){pdDoc.pageNum=q;pdLast=q;pdSet=n;}}' +
+    'app.setInterval("pdTick()",20);';
+end;
+
+{ S as a PDF string's text: \, ( and ) escaped }
+function PdfText(const S: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to Length(S) do
+    if S[I] in ['\', '(', ')'] then
+      Result := Result + '\' + S[I]
+    else
+      Result := Result + S[I];
 end;
 
 { V with up to D decimals, '.' the point, no zeros after it }
@@ -442,6 +486,7 @@ var
   CShow: pd_pdf_show;
   POpt: pd_pdf_options;
   Catalog: AnsiString;
+  Durs: array of Double;
   Fs: TFileStream;
   St: pd_status;
 
@@ -643,6 +688,13 @@ begin
     CPages[I].extra := PAnsiChar(Pages[I].Extra);
   end;
   Catalog := IfThen(Opt.FullScreen, '/PageMode /FullScreen', '');
+  if Opt.Script then
+  begin
+    SetLength(Durs, Length(Pages));
+    for I := 0 to High(Pages) do
+      Durs[I] := Pages[I].Dur;
+    Catalog := Catalog + ' /OpenAction << /S /JavaScript /JS (' + PdfText(ShowPdfScript(Durs)) + ') >>';
+  end;
   FillChar(CShow, SizeOf(CShow), 0);
   if Length(CParts) > 0 then
     CShow.parts := @CParts[0];

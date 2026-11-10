@@ -2266,7 +2266,8 @@ static pd_status write_pdf(const pd_layout* L, const pd_pdf_options* opt, const 
     }
 
     if (show && show->catalog) {
-        w_fmt(&w, " %s", show->catalog);
+        w_str(&w, " ");
+        w_str(&w, show->catalog); /* any length: a script */
     }
 
     w_str(&w, " >>");
@@ -2640,7 +2641,8 @@ path_done:
               (int)pages_obj, W, H, (int)res_obj, (int)sp_obj[2 * pg + 1]);
 
         if (show->pages[pg].extra) {
-            w_fmt(&w, " %s", show->pages[pg].extra);
+            w_str(&w, " ");
+            w_str(&w, show->pages[pg].extra);
         }
 
         w_str(&w, " >>");

@@ -468,6 +468,31 @@ int main(void) {
         CHECK(has(&v, "/PageMode /FullScreen") && !has(&v, "/Outlines"));
         CHECK(has(&v, "/P0 Do q /GO128 gs 1 0 0 1 10 0 cm /P1 Do Q"));
         CHECK(has(&v, "/FontFile2") && has(&v, "/DCTDecode"));   /* what the parts draw, as the pages have it */
+        /* the catalog's script and a page's entries as long as they are: a document's JavaScript runs to kilobytes */
+        {
+            static char cat[4096], ext[2048];
+            size_t c;
+
+            strcpy(cat, "/OpenAction << /S /JavaScript /JS (var a=[");
+            for (c = 0; c < 1500; c++) {
+                strcat(cat, "0,");
+            }
+            strcat(cat, "7];) >>");
+            strcpy(ext, "/Dur 0.05 /PieceInfo << /X << /D [");
+            for (c = 0; c < 400; c++) {
+                strcat(ext, "1 ");
+            }
+            strcat(ext, "9] >> >>");
+            show.catalog = cat;
+            pages[1].extra = ext;
+            free(v.p);
+            v.p = NULL;
+            v.n = 0;
+            CHECK(pd_layout_write_pdf_show(L, &opt, &show, sink, &v) == PD_OK);
+            CHECK(xref_ok(&v) && has(&v, ",0,7];) >>") && has(&v, "1 9] >> >>"));
+            show.catalog = "/PageMode /FullScreen";
+            pages[1].extra = "/Dur 0.05";
+        }
         pages[1].page = 5;
         CHECK(pd_layout_write_pdf_show(L, &opt, &show, sink, &v) == PD_ERR_ARG);
         pages[1].page = 0;
