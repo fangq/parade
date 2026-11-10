@@ -24,6 +24,10 @@ uses
 {$ELSE}
   {$LINKLIB parade}
   {$LINKLIB m}
+  {$IFDEF LINUX}
+  {$LINKLIB pthread}   { zlibmt's threads, and the system zlib opened at run time }
+  {$LINKLIB dl}
+  {$ENDIF}
   {$LINKLIB c}
   {$DEFINE PDEXT := external}
 {$ENDIF}

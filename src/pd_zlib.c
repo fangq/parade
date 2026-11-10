@@ -24,9 +24,11 @@
 #include "pd_internal.h"
 #include "pd_paint.h"
 
+#include <stdio.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <dlfcn.h>
 #include <pthread.h>
 #include <unistd.h>
 #endif
@@ -799,6 +801,204 @@ static uint32_t adler32_combine(uint32_t adler1, uint32_t adler2, uint64_t len2)
 }
 
 /* ------------------------------------------------------------------ */
+/* the system zlib, opened at run time                                */
+/* ------------------------------------------------------------------ */
+
+/* As mimamo does: when libz.so.1 (libz.dylib, zlib1.dll) can be opened at run time it does zlibmt's per-block
+   deflate and the inflating; nothing links against it, and PD_NO_LIBZ=1 in the environment forces the code here.
+   The plain deflate of an input of one zlibmt block or less is always this file's, so what most saves write does
+   not depend on what is installed. */
+
+typedef struct {
+    const unsigned char* next_in;
+    unsigned avail_in;
+    unsigned long total_in;
+    unsigned char* next_out;
+    unsigned avail_out;
+    unsigned long total_out;
+    const char* msg;
+    void* state;
+    void* zalloc;
+    void* zfree;
+    void* opaque;
+    int data_type;
+    unsigned long adler;
+    unsigned long reserved;
+} zstream;     /* zlib's z_stream: its layout is part of zlib's ABI */
+
+#define Z_NO_FLUSH 0
+#define Z_FULL_FLUSH 3
+#define Z_BLOCK 5
+#define Z_OK 0
+#define Z_STREAM_END 1
+#define Z_BUF_ERROR (-5)
+
+static struct {
+    int ok;
+    char version[32];
+    const char* (*zlibVersion)(void);
+    int (*deflateInit2_)(zstream*, int, int, int, int, int, const char*, int);
+    int (*deflate)(zstream*, int);
+    int (*deflateEnd)(zstream*);
+    int (*deflateReset)(zstream*);
+    unsigned long (*deflateBound)(zstream*, unsigned long);
+    int (*inflateInit2_)(zstream*, int, const char*, int);
+    int (*inflate)(zstream*, int);
+    int (*inflateEnd)(zstream*);
+    int (*inflateSetDictionary)(zstream*, const unsigned char*, unsigned);
+    int (*inflatePrime)(zstream*, int, int);
+} Z;
+
+static void* zsym(void* lib, const char* name) {
+#ifdef _WIN32
+    return (void*)GetProcAddress((HMODULE)lib, name);
+#else
+    return dlsym(lib, name);
+#endif
+}
+
+/* open the system zlib and resolve what is used here (once) */
+static void libz_open(void) {
+    static const char* const names[] = {
+#if defined(_WIN32)
+        "zlib1.dll", "zlib.dll",
+#elif defined(__APPLE__)
+        "libz.1.dylib", "libz.dylib",
+#else
+        "libz.so.1", "libz.so",
+#endif
+        NULL
+    };
+    void* lib = NULL;
+    const char* v;
+    int i;
+
+    for (i = 0; names[i] && !lib; i++) {
+#ifdef _WIN32
+        lib = (void*)LoadLibraryA(names[i]);
+#else
+        lib = dlopen(names[i], RTLD_LAZY | RTLD_LOCAL);
+#endif
+    }
+
+    if (!lib) {
+        return;
+    }
+
+    /* a function pointer from a data pointer, as POSIX allows dlsym's to be used */
+#define ZLOAD(f) do { void* s_ = zsym(lib, #f); memcpy(&Z.f, &s_, sizeof(s_)); if (!s_) return; } while (0)
+    ZLOAD(zlibVersion);
+    ZLOAD(deflateInit2_);
+    ZLOAD(deflate);
+    ZLOAD(deflateEnd);
+    ZLOAD(deflateReset);
+    ZLOAD(deflateBound);
+    ZLOAD(inflateInit2_);
+    ZLOAD(inflate);
+    ZLOAD(inflateEnd);
+    ZLOAD(inflateSetDictionary);
+    ZLOAD(inflatePrime);
+#undef ZLOAD
+    v = Z.zlibVersion();
+
+    if (!v || v[0] != '1') {    /* deflateInit2_ refuses another major version anyway */
+        return;
+    }
+
+    strncpy(Z.version, v, sizeof(Z.version) - 1);
+    Z.ok = 1;
+}
+
+#ifdef _WIN32
+static INIT_ONCE libz_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK libz_once_fn(PINIT_ONCE o, PVOID p, PVOID* c) {
+    (void)o;
+    (void)p;
+    (void)c;
+    libz_open();
+    return TRUE;
+}
+#else
+static pthread_once_t libz_once = PTHREAD_ONCE_INIT;
+#endif
+
+/* 1 when the system zlib is loaded and not refused (PD_NO_LIBZ) */
+static int libz_use(void) {
+    const char* e = getenv("PD_NO_LIBZ");
+
+    if (e && *e && strcmp(e, "0") != 0) {
+        return 0;
+    }
+
+#ifdef _WIN32
+    InitOnceExecuteOnce(&libz_once, libz_once_fn, NULL, NULL);
+#else
+    pthread_once(&libz_once, libz_open);
+#endif
+    return Z.ok;
+}
+
+const char* pd_zlib_engine(void) {
+    static char what[48];
+
+    if (!libz_use()) {
+        return "built-in";
+    }
+
+    snprintf(what, sizeof(what), "system zlib %s", Z.version);
+    return what;
+}
+
+/* the system zlib's raw deflate of one zlibmt block: p[0, n), then a full flush, appended to w (the input in
+   with Z_NO_FLUSH, the flush on its own, as pyjdata's zlibmt does it, so that the two give the same bytes) */
+static int libz_block(zstream* z, const unsigned char* p, size_t n, bitw* w) {
+    size_t at = 0;
+    int flush = Z_NO_FLUSH;
+
+    if (Z.deflateReset(z) != Z_OK) {
+        return -1;
+    }
+
+    for (;;) {
+        unsigned char* q;
+        size_t room;
+        int r;
+
+        if (z->avail_in == 0 && at < n && flush == Z_NO_FLUSH) {
+            size_t k = n - at < ((size_t)1 << 30) ? n - at : (size_t)1 << 30;
+
+            z->next_in = p + at;
+            z->avail_in = (unsigned)k;
+            at += k;
+        }
+
+        if (z->avail_in == 0 && at >= n) {
+            flush = Z_FULL_FLUSH;
+        }
+
+        room = 65536 + (flush == Z_NO_FLUSH ? z->avail_in / 2 : 0);
+
+        if ((q = bw_grow(w, room)) == NULL) {
+            return -1;
+        }
+
+        z->next_out = q;
+        z->avail_out = (unsigned)room;
+        r = Z.deflate(z, flush);
+        w->n -= z->avail_out;   /* what it did not use */
+
+        if (r != Z_OK && r != Z_BUF_ERROR) {
+            return -1;
+        }
+
+        if (flush == Z_FULL_FLUSH && z->avail_out != 0) {
+            return 0;   /* the flush is out whole */
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* zlibmt                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -811,6 +1011,7 @@ typedef struct {
     uint32_t* sum;
     size_t next;                /* the next block to take */
     int err;
+    int sys;                    /* the system zlib deflates the blocks */
 #ifdef _WIN32
     CRITICAL_SECTION lock;
 #else
@@ -837,9 +1038,13 @@ static size_t mt_take(mtjob* J) {
 
 static void mt_work(mtjob* J) {
     dfl D;
+    zstream z;
     size_t i;
 
-    if (dfl_init(&D)) {
+    memset(&D, 0, sizeof(D));
+    memset(&z, 0, sizeof(z));
+
+    if (J->sys ? Z.deflateInit2_(&z, 6, 8, -15, 8, 0, Z.version, (int)sizeof(zstream)) != Z_OK : dfl_init(&D) != 0) {
         J->err = 1;
         dfl_free(&D);
         return;
@@ -849,11 +1054,22 @@ static void mt_work(mtjob* J) {
         size_t off = i * MT_BLOCK, len = J->n - off < MT_BLOCK ? J->n - off : MT_BLOCK;
 
         J->sum[i] = adler32_part(1, J->in + off, len);
-        dfl_run(&D, J->in + off, len, &J->seg[i], 0);
+
+        if (J->sys) {
+            if (libz_block(&z, J->in + off, len, &J->seg[i])) {
+                J->err = 1;
+            }
+        } else {
+            dfl_run(&D, J->in + off, len, &J->seg[i], 0);
+        }
 
         if (J->seg[i].err) {
             J->err = 1;
         }
+    }
+
+    if (J->sys) {
+        Z.deflateEnd(&z);
     }
 
     dfl_free(&D);
@@ -893,7 +1109,7 @@ static int cpu_count(void) {
 }
 
 /* the blocks of an input past one zlibmt block, deflated on threads and joined behind the header already out */
-static int deflate_mt(const unsigned char* in, size_t n, bitw* w, uint32_t* adler) {
+static int deflate_mt(const unsigned char* in, size_t n, bitw* w, uint32_t* adler, int sys) {
     mtjob J;
     int threads, t, started = 0;
     size_t i;
@@ -907,6 +1123,7 @@ static int deflate_mt(const unsigned char* in, size_t n, bitw* w, uint32_t* adle
     J.in = in;
     J.n = n;
     J.nb = (n + MT_BLOCK - 1) / MT_BLOCK;
+    J.sys = sys;
     J.seg = (bitw*)calloc(J.nb, sizeof(bitw));
     J.sum = (uint32_t*)calloc(J.nb, sizeof(uint32_t));
 
@@ -999,7 +1216,10 @@ int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t
     }
 
     if (n > MT_BLOCK) {
-        if (deflate_mt(in, n, &w, &a)) {
+        size_t head = w.n;
+
+        /* the system zlib's blocks when it is there; should it fail, this file's */
+        if (deflate_mt(in, n, &w, &a, libz_use()) && (w.n = head, w.err = 0, deflate_mt(in, n, &w, &a, 0))) {
             free(w.p);
             return -1;
         }
@@ -1545,7 +1765,8 @@ static int inf_codes(infl* f, const htab* lit, const htab* dist) {
 
 /* raw inflate from any bit up to the final block, or to a block boundary at or past stop_bit; *end_bit where the
    stream stood */
-static int segment(const unsigned char* p, size_t n, size_t start_bit, size_t stop_bit, iout* out, size_t* end_bit) {
+static int seg_builtin(const unsigned char* p, size_t n, size_t start_bit, size_t stop_bit, iout* out,
+                       size_t* end_bit) {
     infl* f = (infl*)malloc(sizeof(infl));
     int st = SEG_ERROR;
 
@@ -1599,6 +1820,107 @@ static int segment(const unsigned char* p, size_t n, size_t start_bit, size_t st
     *end_bit = inf_pos(f);
     free(f);
     return st;
+}
+
+/* the same through the system zlib: the history already out given as its dictionary, a start inside a byte primed
+   with that byte's remaining bits, and Z_BLOCK making it return at each block boundary to check the place */
+static int seg_libz(const unsigned char* p, size_t n, size_t start_bit, size_t stop_bit, iout* out, size_t* end_bit) {
+    zstream z;
+    size_t at = start_bit >> 3, fed;
+    int skip = (int)(start_bit & 7), ok, st = SEG_ERROR;
+    unsigned char spare;
+
+    *end_bit = start_bit;
+    memset(&z, 0, sizeof(z));
+
+    if (Z.inflateInit2_(&z, -15, Z.version, (int)sizeof(zstream)) != Z_OK) {
+        return SEG_ERROR;
+    }
+
+    ok = at <= n;
+
+    if (ok && out->op) {
+        size_t k = out->op < 32768 ? out->op : 32768;
+
+        ok = Z.inflateSetDictionary(&z, out->base + out->op - k, (unsigned)k) == Z_OK;
+    }
+
+    if (ok && skip) {
+        ok = at < n && Z.inflatePrime(&z, 8 - skip, p[at] >> skip) == Z_OK;
+        at++;
+    }
+
+    fed = at;   /* the first byte not yet handed over */
+
+    while (ok) {
+        unsigned before_out, before_in;
+        size_t made, bit;
+        int ret, scratch = 0;
+
+        if (z.avail_in == 0 && fed < n) {
+            size_t k = n - fed < ((size_t)1 << 30) ? n - fed : (size_t)1 << 30;
+
+            z.next_in = p + fed;
+            z.avail_in = (unsigned)k;
+            fed += k;
+        }
+
+        if (out->op >= out->cap && !iout_room(out, 65536)) {
+            z.next_out = &spare;    /* a span that is full: anything more is too much */
+            z.avail_out = 1;
+            scratch = 1;
+        } else {
+            size_t room = out->cap - out->op < ((size_t)1 << 30) ? out->cap - out->op : (size_t)1 << 30;
+
+            z.next_out = out->base + out->op;
+            z.avail_out = (unsigned)room;
+        }
+
+        before_out = z.avail_out;
+        before_in = z.avail_in;
+        ret = Z.inflate(&z, Z_BLOCK);
+        made = before_out - z.avail_out;
+
+        if (scratch) {
+            if (made) {
+                break;
+            }
+        } else {
+            out->op += made;
+        }
+
+        bit = (fed - z.avail_in) * 8 - (size_t)(z.data_type & 63);
+
+        /* the end: Z_STREAM_END, or (with Z_BLOCK) a block boundary just after the final block -- zlib reports that
+           as Z_OK, 64 and 128 in data_type, and the stream end only on the call after: not a stop */
+        if (ret == Z_STREAM_END || (ret == Z_OK && (z.data_type & 192) == 192)) {
+            st = SEG_FINAL;
+            *end_bit = bit;
+            break;
+        }
+
+        if (ret != Z_OK && ret != Z_BUF_ERROR) {
+            break;
+        }
+
+        if ((z.data_type & 128) && bit >= stop_bit) {
+            st = SEG_STOPPED;
+            *end_bit = bit;
+            break;
+        }
+
+        if (made == 0 && before_in == z.avail_in && fed >= n && ret == Z_BUF_ERROR) {
+            break;  /* out of input before the end */
+        }
+    }
+
+    Z.inflateEnd(&z);
+    return st;
+}
+
+static int segment(int sys, const unsigned char* p, size_t n, size_t start_bit, size_t stop_bit, iout* out,
+                   size_t* end_bit) {
+    return sys ? seg_libz(p, n, start_bit, stop_bit, out, end_bit) : seg_builtin(p, n, start_bit, stop_bit, out, end_bit);
 }
 
 /* just past the first full-flush mark 00 00 FF FF in [lo, hi), or 0 */
@@ -1733,13 +2055,14 @@ typedef struct {
     iout* piece;
     int* st;
     size_t* end;
+    int sys;
 } spec_job;
 
 static void spec_one(size_t j, void* ctx) {
     spec_job* S = (spec_job*)ctx;
 
     if (j == 0) {
-        S->st[0] = segment(S->p, S->n, 0, S->cand[0] * 8, S->out, &S->end[0]);
+        S->st[0] = segment(S->sys, S->p, S->n, 0, S->cand[0] * 8, S->out, &S->end[0]);
     } else {
         iout* o = &S->piece[j - 1];
         size_t to = j < S->m ? S->cand[j] : S->n;
@@ -1756,7 +2079,7 @@ static void spec_one(size_t j, void* ctx) {
             return;
         }
 
-        S->st[j] = segment(S->p, S->n, S->cand[j - 1] * 8, j < S->m ? S->cand[j] * 8 : (size_t)-1, o, &S->end[j]);
+        S->st[j] = segment(S->sys, S->p, S->n, S->cand[j - 1] * 8, j < S->m ? S->cand[j] * 8 : (size_t)-1, o, &S->end[j]);
     }
 }
 
@@ -1775,7 +2098,7 @@ static void copy_one(size_t i, void* ctx) {
 }
 
 /* raw deflate data into out, in parallel where that can be proven; 1 when it reaches its final block */
-static int inflate_body(const unsigned char* p, size_t n, iout* out, int threads, size_t* end_bit) {
+static int inflate_body(const unsigned char* p, size_t n, iout* out, int threads, int sys, size_t* end_bit) {
     const size_t share = (size_t)1 << 20;
     size_t* cand = NULL, m = 0, k, ns, j, bit, np = 0;
     int wide = !out->grow && out->cap - out->op >= 2 * share && n >= 1024, cur, ok;
@@ -1801,7 +2124,7 @@ static int inflate_body(const unsigned char* p, size_t n, iout* out, int threads
 
     if (m == 0) {
         free(cand);
-        return segment(p, n, 0, (size_t)-1, out, end_bit) == SEG_FINAL;
+        return segment(sys, p, n, 0, (size_t)-1, out, end_bit) == SEG_FINAL;
     }
 
     memset(&S, 0, sizeof(S));
@@ -1810,6 +2133,7 @@ static int inflate_body(const unsigned char* p, size_t n, iout* out, int threads
     S.m = m;
     S.cand = cand;
     S.out = out;
+    S.sys = sys;
     S.piece = (iout*)calloc(m, sizeof(iout));
     S.st = (int*)calloc(m + 1, sizeof(int));
     S.end = (size_t*)calloc(m + 1, sizeof(size_t));
@@ -1821,7 +2145,7 @@ static int inflate_body(const unsigned char* p, size_t n, iout* out, int threads
         free(S.end);
         free(pend);
         free(cand);
-        return segment(p, n, 0, (size_t)-1, out, end_bit) == SEG_FINAL;
+        return segment(sys, p, n, 0, (size_t)-1, out, end_bit) == SEG_FINAL;
     }
 
     /* the output's own start runs as piece 0 while the others run beside it: it grows (or not) as the output does,
@@ -1868,7 +2192,7 @@ static int inflate_body(const unsigned char* p, size_t n, iout* out, int threads
 
         pfor(np, threads, copy_one, pend);
         np = 0;
-        cur = segment(p, n, bit, j <= m ? cand[j - 1] * 8 : (size_t)-1, out, &bit);
+        cur = segment(sys, p, n, bit, j <= m ? cand[j - 1] * 8 : (size_t)-1, out, &bit);
     }
 
     for (k = 0; k < np; k++) {
@@ -1962,7 +2286,7 @@ int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char
 
     threads = cpu_count();
 
-    if (!inflate_body(p + body, n - body, &o, threads, &end_bit)) {
+    if (!inflate_body(p + body, n - body, &o, threads, libz_use(), &end_bit)) {
         free(o.base);
         return -1;
     }

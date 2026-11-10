@@ -231,6 +231,9 @@ int pd_metafile_remake(pd_doc* d, pd_res_id r);
 /* zlib streams (pd_zlib.c): 0 on success, *out malloc'ed */
 int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);
 int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen);
+/* which engine compresses large inputs and inflates: "system zlib <version>" (opened at run time; PD_NO_LIBZ=1
+   refuses it) or "built-in" */
+const char* pd_zlib_engine(void);
 uint32_t pd_crc32(const void* data, size_t n);
 
 /* the capital of a letter whose capital is one code point (Latin, Greek,

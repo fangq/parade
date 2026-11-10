@@ -1587,6 +1587,7 @@ static void test_table_styles(void) {
 }
 
 int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);
+const char* pd_zlib_engine(void);
 #ifndef _WIN32
 int setenv(const char* name, const char* value, int overwrite);
 int unsetenv(const char* name);
@@ -1712,6 +1713,53 @@ static void test_deflate(void) {
     unsetenv("PD_ZLIB_THREADS");
 #endif
     free(z);
+
+#ifndef _WIN32
+    {   /* the system zlib (when there is one) and this file's code, each way round: zlibmt by one inflated by the
+           other, the bytes on one thread as on four, PD_NO_LIBZ refusing the system's */
+        int e, g;
+        unsigned char* zz[2] = { NULL, NULL };
+        size_t zzn[2] = { 0, 0 };
+
+        setenv("PD_NO_LIBZ", "1", 1);
+        CHECK(!strcmp(pd_zlib_engine(), "built-in"));
+
+        for (e = 0; e < 2; e++) {
+            unsigned char* one = NULL;
+            size_t onen = 0;
+
+            setenv("PD_NO_LIBZ", e ? "1" : "0", 1);
+            setenv("PD_ZLIB_THREADS", "1", 1);
+            CHECK(pd_deflate(b, n, 1, &one, &onen) == 0);
+            setenv("PD_ZLIB_THREADS", "4", 1);
+            CHECK(pd_deflate(b, n, 1, &zz[e], &zzn[e]) == 0);
+            CHECK(onen == zzn[e] && !memcmp(one, zz[e], onen));
+            free(one);
+        }
+
+        for (e = 0; e < 2; e++) {
+            for (g = 0; g < 2; g++) {   /* deflated by e, inflated by g, with and without the size */
+                setenv("PD_NO_LIBZ", g ? "1" : "0", 1);
+                r = NULL;
+                CHECK(pd_inflate(zz[e], zzn[e], 1, n, &r, &rn) == 0 && rn == n && !memcmp(r, b, n));
+                free(r);
+                r = NULL;
+                CHECK(pd_inflate(zz[e], zzn[e], 1, 0, &r, &rn) == 0 && rn == n && !memcmp(r, b, n));
+                free(r);
+                zz[e][zzn[e] / 2] ^= 0x10;     /* and damaged: refused, or right */
+                r = NULL;
+                CHECK(pd_inflate(zz[e], zzn[e], 1, n, &r, &rn) != 0 || (rn == n && !memcmp(r, b, n)));
+                free(r);
+                zz[e][zzn[e] / 2] ^= 0x10;
+            }
+        }
+
+        free(zz[0]);
+        free(zz[1]);
+        unsetenv("PD_NO_LIBZ");
+        unsetenv("PD_ZLIB_THREADS");
+    }
+#endif
 
     /* a stream of one block run, no full flush in it (an input under one zlibmt block): inflated serially */
     CHECK(pd_deflate(b, (size_t)3 << 20, 1, &z, &zn) == 0);

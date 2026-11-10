@@ -19,6 +19,9 @@ PD_CFLAGS += -DPD_WITH_SYNC -isystem $(YRS_DIR)/tests-ffi/include
 LDLIBS += $(YRS_DIR)/target/release/libyrs.a -lpthread -ldl
 endif
 LDLIBS  += -lm
+ifneq ($(OS),Windows_NT)
+LDLIBS  += -lpthread -ldl   # zlibmt's threads; the system zlib opened at run time (in libc itself on newer glibc)
+endif
 AR      ?= ar
 
 # address-space cap for test runs, in KB (default 2 GB); 0 disables
