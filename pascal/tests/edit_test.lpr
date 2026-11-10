@@ -7,7 +7,7 @@ program edit_test;
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, Math, Clipbrd, ctypes, parade, paradeedit,
-  paradefonts, paradeshow, paradeanim;
+  paradefonts, paradeshow, paradeanim, paradeshowpdf, process;
 
 type
   { the wheel, as the mouse turns it }
@@ -1941,6 +1941,117 @@ begin
     S.Free;
     E.SetSlideHidden(1, False);
   end;
+end;
+
+{ the show as a PDF that plays it (paradeshowpdf): a page for each still state and for each frame while an effect
+  plays, the transition the page's; the last page, drawn by a PDF viewer, the show's last frame }
+procedure TestShowPdf(E: TParadeEdit);
+var
+  Opt: TShowPdfOptions;
+  Err, Fn, Txt, Out_, Ppm: string;
+  S: TParadeShow;
+  Raw: TStringList;
+  F: TFileStream;
+  Data: array of Byte;
+  P, X, Y, NDur, Off: Integer;
+  Diff, Big: Int64;
+  C: UInt32;
+  BX0, BY0, BX1, BY1: Integer;
+begin
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/anim.pptx');
+  Fn := GetTempDir + 'edit_showpdf_' + IntToStr(GetProcessID) + '.pdf';
+  Opt := ShowPdfDefaults;
+  Opt.Width := 800;
+  Opt.Fps := 20;
+  Check(ParadeShowToPdf(E, Fn, Opt, Err) and FileExists(Fn), 'the show written as a PDF ' + Err);
+  { still: the first slide as it begins and after each of its four clicks; the second once its wipe has played, and
+    after its click }
+  Check(ShowPdfStill = 7, Format('a page for each still state, waiting for a click: %d', [ShowPdfStill]));
+  Raw := TStringList.Create;
+  try
+    Raw.LoadFromFile(Fn);
+    Txt := Raw.Text;
+  finally
+    Raw.Free;
+  end;
+  NDur := 0;
+  P := Pos('/Dur ', Txt);
+  while P > 0 do
+  begin
+    Inc(NDur);
+    P := PosEx('/Dur ', Txt, P + 1);
+  end;
+  Check((NDur = ShowPdfPages - ShowPdfStill) and (NDur >= 40) and (NDur < 120), Format('the frames as the effects play, '
+    + 'each shown for its time: %d of %d pages', [NDur, ShowPdfPages]));
+  Check((Pos('/Trans << /Type /Trans /S /Push /D 1 /Di 0 >>', Txt) > 0) and (Pos('/PageMode /FullScreen', Txt) > 0) and
+    (Pos('/Count ' + IntToStr(ShowPdfPages) + ' ', Txt) > 0), 'the second slide pushed in from the left, as PDF has it; '
+    + 'it opens full screen');
+  if FileExists('/usr/bin/gs') then
+  begin   { (Ghostscript: at 80 dpi the 10-inch page's pictures pixel for pixel, none smoothed) }
+    Ppm := GetTempDir + 'edit_showpdf_' + IntToStr(GetProcessID);
+    RunCommand('/usr/bin/gs', ['-q', '-dNOPAUSE', '-dBATCH', '-dSAFER', '-sDEVICE=ppmraw', '-r80', '-dFirstPage=' +
+      IntToStr(ShowPdfPages), '-dLastPage=' + IntToStr(ShowPdfPages), '-sOutputFile=' + Ppm + '.ppm', Fn], Out_);
+    S := TParadeShow.Create(E, 800, 450, 0);
+    try
+      S.Start(0);
+      S.Next(100); S.Next(200); S.Next(1000); S.Next(2000);
+      S.Tick(3100);
+      S.Next(5000);
+      S.Tick(6100);   { the second slide: its push and its wipe played }
+      S.Tick(6700);
+      S.Next(7000);
+      S.Tick(8200);   { and its group's wheel }
+      Diff := -1;
+      Big := 0;
+      BX0 := MaxInt; BY0 := MaxInt; BX1 := -1; BY1 := -1;
+      if FileExists(Ppm + '.ppm') then
+      begin
+        F := TFileStream.Create(Ppm + '.ppm', fmOpenRead);
+        try
+          SetLength(Data, F.Size);
+          F.ReadBuffer(Data[0], F.Size);
+        finally
+          F.Free;
+        end;
+        DeleteFile(Ppm + '.ppm');
+        Off := 0;
+        for P := 1 to 4 do   { past P6, its width, height and 255 (and any # comment between) }
+        begin
+          while (Off < Length(Data)) and ((Data[Off] in [9, 10, 13, 32]) or (Data[Off] = Ord('#'))) do
+            if Data[Off] = Ord('#') then
+              while (Off < Length(Data)) and (Data[Off] <> 10) do Inc(Off)
+            else
+              Inc(Off);
+          while (Off < Length(Data)) and not (Data[Off] in [9, 10, 13, 32]) do Inc(Off);
+        end;
+        Inc(Off);
+        if Length(Data) - Off = 800 * 450 * 3 then
+        begin
+          Diff := 0;
+          for Y := 0 to 449 do
+            for X := 0 to 799 do
+            begin
+              C := PUInt32(S.Frame.GetDataLineStart(Y))[X];
+              P := Abs(Integer(Data[Off + (Y * 800 + X) * 3]) - Integer((C shr 16) and $FF)) +
+                Abs(Integer(Data[Off + (Y * 800 + X) * 3 + 1]) - Integer((C shr 8) and $FF)) +
+                Abs(Integer(Data[Off + (Y * 800 + X) * 3 + 2]) - Integer(C and $FF));
+              Inc(Diff, P);
+              if P > 60 then
+              begin
+                Inc(Big);
+                BX0 := Min(BX0, X); BY0 := Min(BY0, Y); BX1 := Max(BX1, X); BY1 := Max(BY1, Y);
+              end;
+            end;
+        end;
+      end;
+      Check((Diff = 0) and (Big = 0), Format('the last page as a viewer '
+        + 'draws it: the show''s last frame (%d off in all, %d px far off, in %d,%d-%d,%d)', [Diff, Big, BX0, BY0,
+        BX1, BY1]));
+    finally
+      S.Free;
+    end;
+  end;
+  DeleteFile(Fn);
 end;
 
 procedure TestCommentEdit(E: TParadeEdit);
@@ -3937,6 +4048,7 @@ begin
   TestFormatProps(E);
   Step('slide show');
   TestSlideShow(E);
+  TestShowPdf(E);
   Step('animations edited');
   TestAnimEdit(E);
   Step('balloons in place');
