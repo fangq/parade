@@ -2325,7 +2325,7 @@ var
   Err, Fn, Txt, Ppm, Stat: string;
   S: TParadeShow;
   Raw: TStringList;
-  P, NDur, Off, NextOff: Integer;
+  P, NDur, Off, NextOff, NGrp, NForm: Integer;
   Big: Int64;
   Box: TRect;
 begin
@@ -2362,6 +2362,23 @@ begin
     (Pos('/P0 ', Txt) > 0),
     'the pages draw the slides'' own text and shapes, no pictures of them');
   Check(Length(Txt) < 200000, Format('a frame costs little: %d bytes for %d pages', [Length(Txt), ShowPdfPages]));
+  { a transparency group only where a shape fades as one: a viewer draws each aside, a frame several times slower }
+  NGrp := 0;
+  P := Pos('/Group << /S /Transparency >>', Txt);
+  while P > 0 do
+  begin
+    Inc(NGrp);
+    P := PosEx('/Group << /S /Transparency >>', Txt, P + 1);
+  end;
+  NForm := 0;
+  P := Pos('/Subtype /Form', Txt);
+  while P > 0 do
+  begin
+    Inc(NForm);
+    P := PosEx('/Subtype /Form', Txt, P + 1);
+  end;
+  Check((NGrp >= 1) and (NGrp <= 3) and (NForm >= 12), Format('a group only for a shape seen fading: %d of %d forms',
+    [NGrp, NForm]));
   if FileExists('/usr/bin/gs') then
   begin
     Ppm := GetTempDir + 'edit_showpdf_' + IntToStr(GetProcessID);

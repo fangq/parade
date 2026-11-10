@@ -487,7 +487,7 @@ var
           (M[4] = 0) and (M[5] = 0);
         if Plain then
         begin
-          Result := Result + '/P' + IntToStr(PartOf(Sc.Page, Lo, Hi, Ord(Target >= 0))) + ' Do'#10;
+          Result := Result + '/P' + IntToStr(PartOf(Sc.Page, Lo, Hi, 0)) + ' Do'#10;
           Continue;
         end;
         if Round(255 * Opacity) <= 0 then
@@ -504,7 +504,10 @@ var
           Result := Result + Clip + ' ';
         if (ShiftX <> 0) or (ShiftY <> 0) then
           Result := Result + '1 0 0 1 ' + Num(ShiftX) + ' ' + Num(ShiftY) + ' cm ';
-        Result := Result + ToPx + '/P' + IntToStr(PartOf(Sc.Page, Lo, Hi, Ord(Target >= 0))) + ' Do Q'#10;
+        { a group only while a shape fades as one (its parts not each seen through the other); a viewer draws each
+          group aside, at the page's size, a frame several times slower }
+        Result := Result + ToPx + '/P' + IntToStr(PartOf(Sc.Page, Lo, Hi, Ord((Target >= 0) and
+          (Round(255 * Opacity) < 255)))) + ' Do Q'#10;
       end;
   end;
 
