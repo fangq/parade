@@ -3179,6 +3179,69 @@ begin
   end;
 end;
 
+{ text selected in one text box is shaded there and nowhere else: positions in text boxes were all of one place
+  in the editor's order of paragraphs, so a selection's offsets were shaded in every text box's paragraph (and
+  the document's first) -- double-clicking a word in a drawing's label shaded the start of every label }
+procedure TestBoxSelection(E: TParadeEdit; PA, PB: pd_block_id);
+var
+  Img0, Img1: TLazIntfImage;
+  Pg: Int32;
+  CX, Base, Asc, Desc, CX2: pd_sp;
+  R: TRect;
+  P0, P1: TPoint;
+
+  function Differ(const Box: TRect): Integer;
+  var
+    X, Y: Integer;
+    C, D: TFPColor;
+  begin
+    Result := 0;
+    for Y := Max(0, Box.Top) to Min(Img0.Height, Box.Bottom) - 1 do
+      for X := Max(0, Box.Left) to Min(Img0.Width, Box.Right) - 1 do
+      begin
+        C := Img0.Colors[X, Y];
+        D := Img1.Colors[X, Y];
+        if (C.red <> D.red) or (C.green <> D.green) or (C.blue <> D.blue) then
+          Inc(Result);
+      end;
+  end;
+
+  function TextBox(P: pd_block_id; out Box: TRect): Boolean;
+  begin
+    Result := (pd_layout_caret(E.Layout, PdPos(P, 0), Pg, CX, Base, Asc, Desc) = PD_OK) and
+      (pd_layout_caret(E.Layout, PdPos(P, 3), Pg, CX2, Base, Asc, Desc) = PD_OK);
+    if not Result then
+      Exit;
+    P0 := E.PageToClient(Pg, CX / PD_SP_PER_PT, (Base - Asc) / PD_SP_PER_PT);
+    P1 := E.PageToClient(Pg, CX2 / PD_SP_PER_PT, (Base + Desc) / PD_SP_PER_PT);
+    Box := Rect(P0.X + 2, P0.Y, P1.X - 1, P1.Y);
+  end;
+
+begin
+  Img0 := TLazIntfImage.Create(0, 0);
+  Img1 := TLazIntfImage.Create(0, 0);
+  try
+    E.GoToPos(PdPos(PA, 0));
+    E.Repaint;
+    Application.ProcessMessages;
+    E.RenderView(Img0);
+    E.ProcessKey(VK_RIGHT, [ssShift]);
+    E.ProcessKey(VK_RIGHT, [ssShift]);
+    E.ProcessKey(VK_RIGHT, [ssShift]);
+    E.Repaint;
+    Application.ProcessMessages;
+    E.RenderView(Img1);
+    Check(E.SelectedText = 'Alp', 'three letters selected in a text box: ' + E.SelectedText);
+    Check(TextBox(PA, R) and (Differ(R) > 20), Format('shaded there (%d pixels)', [Differ(R)]));
+    Check(TextBox(PB, R) and (R.Right > R.Left) and (Differ(R) = 0),
+      Format('and not in the other text box (%d pixels)', [Differ(R)]));
+    E.ProcessKey(VK_LEFT, []);
+  finally
+    Img0.Free;
+    Img1.Free;
+  end;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -3615,6 +3678,10 @@ begin
   E.Undo;
   Check(E.SelectedShape(DrawP, DrawSid), 'undo');
   E.Redo;
+  E.ProcessKey(VK_ESCAPE, []);
+  E.Repaint;
+  Application.ProcessMessages;
+  TestBoxSelection(E, pd_doc_child(E.Doc, StA, 0), pd_doc_child(E.Doc, StB, 0));
   { a shape drawn with the mouse: chosen, then dragged in the canvas from its top left corner }
   E.ProcessKey(VK_ESCAPE, []);
   E.ProcessKey(VK_ESCAPE, []);    { the caret after the canvas: in view }

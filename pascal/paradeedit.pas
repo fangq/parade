@@ -3080,7 +3080,34 @@ end;
 procedure TParadeEdit.BuildOrder;
 var
   B: pd_block_id;
-  N: Int32;
+  N, I: Int32;
+
+  procedure Place(Blk: pd_block_id);
+  begin
+    if Blk >= Length(FOrder) then
+      SetLength(FOrder, Blk * 2 + 16);
+    FOrder[Blk] := N;
+    Inc(N);
+  end;
+
+  { a story's blocks, each its own place after the body's and the stories' before it: a text box's paragraphs were
+    left all at place 0, the body's first paragraph's, so two positions in different text boxes compared by their
+    offsets alone -- a selection in one text box was shaded in every one }
+  procedure PlaceTree(Blk: pd_block_id);
+  var
+    K, C: Int32;
+    Kid: pd_block_id;
+  begin
+    Place(Blk);
+    C := ChildCount(Blk);
+    for K := 0 to C - 1 do
+    begin
+      Kid := pd_doc_child(FDoc, Blk, K);
+      if Kid <> 0 then
+        PlaceTree(Kid);
+    end;
+  end;
+
 begin
   if FOrderRev = pd_doc_revision(FDoc) then
     Exit;
@@ -3090,11 +3117,14 @@ begin
   B := FirstPara;
   while B <> 0 do
   begin
-    if B >= Length(FOrder) then
-      SetLength(FOrder, B * 2 + 16);
-    FOrder[B] := N;
-    Inc(N);
+    Place(B);
     B := pd_doc_next_paragraph(FDoc, B);
+  end;
+  for I := 0 to pd_doc_story_count(FDoc) - 1 do
+  begin
+    B := pd_doc_story_at(FDoc, I);
+    if B <> 0 then
+      PlaceTree(B);
   end;
 end;
 
