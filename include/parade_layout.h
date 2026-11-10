@@ -312,6 +312,9 @@ typedef struct {
     int32_t outlines;           /**< bookmarks from titles and headings (default 1) */
     char title[256];            /**< UTF-8; empty = the document's title paragraph */
     char author[128];
+    int32_t jpeg_quality;       /**< 0 (default): pictures as they are, losslessly; 1..100: a picture that as a JPEG
+                                     of this quality is under half its lossless size (a photograph, not a drawing or
+                                     a screenshot) written so. A JPEG picture is written as it is either way */
 } pd_pdf_options;
 
 PD_API void pd_pdf_options_init(pd_pdf_options* options);

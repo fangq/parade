@@ -494,7 +494,7 @@ type
     { the document in a format (PD_CONV_*; PD_CONV_JDATA is the native document, binary
       JData when Binary); leaves Modified alone }
     procedure SaveToStream(Stream: TStream; Format: Int32; Binary: Boolean = False);
-    procedure ExportPDF(const FileName: string);
+    procedure ExportPDF(const FileName: string; JpegQuality: Integer = 0);   { (1..100: photographs as JPEGs) }
 
     { editing, also usable for automation }
     procedure InsertText(const S: string);
@@ -2532,13 +2532,14 @@ begin
     ParadeCheck(pd_doc_export(FDoc, Format, @WriteToStream, Stream), 'export');
 end;
 
-procedure TParadeEdit.ExportPDF(const FileName: string);
+procedure TParadeEdit.ExportPDF(const FileName: string; JpegQuality: Integer);
 var
   Fs: TFileStream;
   Opt: pd_pdf_options;
   Fresh: Ppd_layout;
 begin
   pd_pdf_options_init(Opt);
+  Opt.jpeg_quality := EnsureRange(JpegQuality, 0, 100);
   { a layout of its own: the document as it lays out when opened, not the line breaks editing left }
   ParadeCheck(pd_layout_new(FDoc, Fresh), 'layout');
   try

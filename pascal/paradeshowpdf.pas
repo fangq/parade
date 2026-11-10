@@ -27,6 +27,7 @@ type
     Width: Integer;         { the show's frame, px, the animated things are measured in (their boxes, a px in it) }
     Fps: Integer;           { frames a second while an effect plays }
     FullScreen: Boolean;    { the document opens in full-screen mode }
+    JpegQuality: Integer;   { 0: the slides' pictures as they are; 1..100: photographs as JPEGs of this quality }
   end;
 
 function ShowPdfDefaults: TShowPdfOptions;
@@ -53,6 +54,7 @@ begin
   Result.Width := 1600;
   Result.Fps := 20;
   Result.FullScreen := True;
+  Result.JpegQuality := 85;
 end;
 
 { V with up to D decimals, '.' the point, no zeros after it }
@@ -646,6 +648,7 @@ begin
   CShow.npages := Length(CPages);
   CShow.catalog := PAnsiChar(Catalog);
   pd_pdf_options_init(POpt);
+  POpt.jpeg_quality := EnsureRange(Opt.JpegQuality, 0, 100);
   try
     Fs := TFileStream.Create(FileName, fmCreate);
   except

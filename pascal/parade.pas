@@ -899,6 +899,7 @@ type
     compress, outlines: Int32;
     title: array[0..255] of AnsiChar;
     author: array[0..127] of AnsiChar;
+    jpeg_quality: Int32;
   end;
   Ppd_pdf_options = ^pd_pdf_options;
 

@@ -7,7 +7,7 @@ program edit_test;
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   Interfaces, Forms, Controls, Graphics, LCLType, SysUtils, Classes, StrUtils, IntfGraphics, FPImage, Math, Clipbrd, ctypes, parade, paradeedit,
-  paradefonts, paradeshow, paradeanim, paradeshowpdf, process;
+  paradefonts, paradeshow, paradeanim, paradeshowpdf, process, FPWritePNG, FPReadJPEG;
 
 type
   { the wheel, as the mouse turns it }
@@ -2217,6 +2217,108 @@ begin
     + 'its box (%d of %d points off:%s)', [Bad, Tested, Worst]));
 end;
 
+{ a photograph in the PDF as a JPEG when asked (ExportPDF's JpegQuality): another decoder (FPC's) reads it back as
+  the picture was, but for a JPEG's loss; odd sizes, so the last blocks reach past the picture's edge }
+procedure TestPdfJpeg(E: TParadeEdit);
+var
+  Img, Back: TFPMemoryImage;
+  W: TFPWriterPNG;
+  R: TFPReaderJPEG;
+  Png, Pdf, Txt: string;
+  X, Y, P, Q, N: Integer;
+  Seed: UInt32;
+  C, D: TFPColor;
+  Sq: Double;
+  Raw: TStringList;
+  M: TMemoryStream;
+begin
+  Png := GetTempDir + 'edit_jpeg_' + IntToStr(GetProcessID) + '.png';
+  Pdf := ChangeFileExt(Png, '.pdf');
+  Img := TFPMemoryImage.Create(301, 203);
+  Seed := 7;
+  for Y := 0 to 202 do
+    for X := 0 to 300 do
+    begin
+      Seed := Seed * 1103515245 + 12345;
+      C.red := EnsureRange(X * 200 div 301 + Integer((Seed shr 16) mod 41) - 20 + 20, 0, 255) * 257;
+      C.green := EnsureRange(Y * 200 div 203 + Integer((Seed shr 20) mod 41) - 20 + 20, 0, 255) * 257;
+      C.blue := EnsureRange(255 - (X + Y) * 255 div 504, 0, 255) * 257;
+      C.alpha := $FFFF;
+      Img.Colors[X, Y] := C;
+    end;
+  W := TFPWriterPNG.Create;
+  try
+    W.UseAlpha := False;
+    W.WordSized := False;
+    Img.SaveToFile(Png, W);
+  finally
+    W.Free;
+  end;
+  E.NewDocument;
+  Check(E.InsertPicture(Png), 'a photograph in the page');
+  E.ExportPDF(Pdf);
+  Raw := TStringList.Create;
+  try
+    Raw.LoadFromFile(Pdf);
+    Txt := Raw.Text;
+  finally
+    Raw.Free;
+  end;
+  Check((Pos('/DCTDecode', Txt) = 0) and (Pos('/Width 301 /Height 203 ', Txt) > 0), 'as it is, losslessly, unless '
+    + 'asked');
+  N := Length(Txt);
+  E.ExportPDF(Pdf, 85);
+  M := TMemoryStream.Create;
+  Back := TFPMemoryImage.Create(0, 0);
+  R := TFPReaderJPEG.Create;
+  try
+    M.LoadFromFile(Pdf);
+    SetLength(Txt, M.Size);
+    Move(M.Memory^, Txt[1], M.Size);
+    P := Pos('/Width 301 /Height 203 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ', Txt);
+    Check((P > 0) and (Length(Txt) * 2 < N), Format('asked, the photograph a JPEG: %d bytes, %d lossless',
+      [Length(Txt), N]));
+    if P > 0 then
+    begin
+      P := PosEx('stream'#10, Txt, P) + 7;
+      Q := PosEx(#10'endstream', Txt, P);
+      M.Clear;
+      M.WriteBuffer(Txt[P], Q - P);
+      M.Position := 0;
+      Back.LoadFromStream(M, R);
+      Check((Back.Width = 301) and (Back.Height = 203), Format('another decoder reads it: %d by %d', [Back.Width,
+        Back.Height]));
+      Sq := 0;
+      if (Back.Width = 301) and (Back.Height = 203) then
+      begin
+        for Y := 0 to 202 do
+          for X := 0 to 300 do
+          begin
+            C := Img.Colors[X, Y];
+            D := Back.Colors[X, Y];
+            Sq := Sq + Sqr((C.red shr 8) - (D.red shr 8)) + Sqr((C.green shr 8) - (D.green shr 8)) +
+              Sqr((C.blue shr 8) - (D.blue shr 8));
+          end;
+        Sq := 10 * Log10(Sqr(255) / (Sq / (301 * 203 * 3)));
+        { (the edge's blocks too: the last column and row as near as the rest) }
+        C := Img.Colors[300, 202];
+        D := Back.Colors[300, 202];
+        Check((Abs((C.red shr 8) - (D.red shr 8)) < 40) and (Abs((C.blue shr 8) - (D.blue shr 8)) < 40),
+          'the corner past the last whole block');
+      end;
+      { (its noise is what a JPEG keeps least: libjpeg's own at 85 is 28.6 dB on such a picture) }
+      Check(Sq > 27, Format('the picture as it was, but for a JPEG''s loss: %.1f dB', [Sq]));
+    end;
+  finally
+    R.Free;
+    Back.Free;
+    M.Free;
+    Img.Free;
+    DeleteFile(Png);
+    DeleteFile(Pdf);
+  end;
+end;
+
 procedure TestShowPdf(E: TParadeEdit);
 var
   Opt: TShowPdfOptions;
@@ -4312,6 +4414,7 @@ begin
   TestSlideShow(E);
   TestShowPdf(E);
   TestShowFilterClips;
+  TestPdfJpeg(E);
   Step('animations edited');
   TestAnimEdit(E);
   Step('balloons in place');

@@ -236,6 +236,105 @@ static void test_decoded_images(void) {
     free(big);
 }
 
+/* a 24-bit BMP of w by h: a photograph's noise over a gradient (photo), else three flat colours (a drawing) */
+static void write_bmp(const char* path, int w, int h, int photo) {
+    FILE* fp = fopen(path, "wb");
+    int stride = (w * 3 + 3) & ~3, x, y;
+    uint32_t size = 54 + (uint32_t)stride * (uint32_t)h, seed = 12345;
+    unsigned char hd[54];
+
+    if (!fp) {
+        return;
+    }
+
+    memset(hd, 0, sizeof(hd));
+    hd[0] = 'B';
+    hd[1] = 'M';
+    memcpy(hd + 2, &size, 4);
+    hd[10] = 54;
+    hd[14] = 40;
+    memcpy(hd + 18, &w, 4);
+    memcpy(hd + 22, &h, 4);
+    hd[26] = 1;
+    hd[28] = 24;
+    fwrite(hd, 1, 54, fp);
+
+    for (y = 0; y < h; y++) {
+        unsigned char row[4096];
+
+        memset(row, 0, sizeof(row));
+
+        for (x = 0; x < w; x++) {
+            int v[3], k;
+
+            for (k = 0; k < 3; k++) {
+                seed = seed * 1103515245u + 12345u;
+
+                if (photo) {
+                    v[k] = (x * (k + 1) * 255 / w + y * 255 / h) / 2 + (int)((seed >> 16) % 61) - 30;
+                } else {
+                    v[k] = x < w / 3 ? 40 * k : x < 2 * w / 3 ? 200 - 50 * k : 250;
+                }
+
+                row[x * 3 + 2 - k] = (unsigned char)(v[k] < 0 ? 0 : v[k] > 255 ? 255 : v[k]);
+            }
+        }
+
+        fwrite(row, 1, (size_t)stride, fp);
+    }
+
+    fclose(fp);
+}
+
+static size_t count(const buf_t* b, const char* s) {
+    size_t n = strlen(s), i, c = 0;
+
+    for (i = 0; i + n <= b->n; i++) {
+        c += memcmp(b->p + i, s, n) == 0;
+    }
+
+    return c;
+}
+
+/* jpeg_quality: a photograph written as a JPEG, much smaller; a drawing and a JPEG as they are */
+static void test_jpeg_option(void) {
+    pd_doc* d;
+    pd_layout* L = NULL;
+    pd_pdf_options opt;
+    buf_t lossless = { NULL, 0 }, lossy = { NULL, 0 };
+    pd_block_id p;
+
+    write_bmp("build/test_photo.bmp", 300, 200, 1);
+    write_bmp("build/test_drawing.bmp", 300, 200, 0);
+    pd_doc_new(&d);
+    pd_doc_set_font_resolver(d, resolver, NULL);
+    p = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0);
+    add_image(d, p, "build/test_photo.bmp", "image/bmp", PD_PT(150), PD_PT(100));
+    add_image(d, p, "build/test_drawing.bmp", "image/bmp", PD_PT(150), PD_PT(100));
+    add_image(d, p, "tests/data/photo.jpg", "image/jpeg", PD_PT(90), PD_PT(54));
+    pd_layout_new(d, &L);
+    pd_layout_update(L, NULL);
+    pd_pdf_options_init(&opt);
+    CHECK(opt.jpeg_quality == 0);
+    CHECK(pd_layout_write_pdf(L, &opt, sink, &lossless) == PD_OK);
+    opt.jpeg_quality = 85;
+    CHECK(pd_layout_write_pdf(L, &opt, sink, &lossy) == PD_OK);
+    CHECK(xref_ok(&lossless) && xref_ok(&lossy));
+    CHECK(count(&lossless, "/DCTDecode") == 1);     /* the JPEG only */
+    CHECK(count(&lossy, "/DCTDecode") == 2);        /* and the photograph; not the drawing */
+    CHECK(has(&lossy, "/Width 300 /Height 200 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode"));
+    /* (deflated: its dictionary, then its length) both lossless, the drawing only when the photograph is a JPEG */
+    CHECK(count(&lossless, "/Width 300 /Height 200 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length") == 2);
+    CHECK(count(&lossy, "/Width 300 /Height 200 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length") == 1);
+    CHECK(has(&lossy, "\xFF\xD8\xFF\xDB") && has(&lossy, "\xFF\xD9\nendstream"));
+    CHECK(lossy.n * 2 < lossless.n);
+    printf("  pictures: %zu bytes lossless, %zu with the photograph a JPEG\n", lossless.n, lossy.n);
+    free(lossless.p);
+    free(lossy.p);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     pd_doc* d;
     pd_layout* L;
@@ -383,6 +482,7 @@ int main(void) {
     pd_layout_free(L);
     pd_doc_free(d);
     test_decoded_images();
+    test_jpeg_option();
     pd_font_free(latin);
     pd_font_free(cjk);
     printf("%d checks, %d failures\n", checks, failures);

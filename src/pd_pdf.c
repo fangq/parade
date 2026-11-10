@@ -2930,7 +2930,36 @@ path_done:
                     snprintf(dict + dl, sizeof(dict) - dl, " /SMask %d 0 R", (int)sm);
                 }
 
-                stream_obj(&w, images[i].obj, dict, rgb, (size_t)iw * ih * 3, 1);
+                {
+                    unsigned char* jp = NULL, *z = NULL;
+                    size_t jn = 0, zn = 0;
+                    size_t raw = (size_t)iw * ih * 3;
+
+                    /* a photograph: much smaller as a JPEG than deflated (a drawing, a screenshot: not) */
+                    if (opt->jpeg_quality > 0 && iw >= 16 && ih >= 16 &&
+                            pd_jpeg_encode(rgb, iw, ih, opt->jpeg_quality, &jp, &jn) == 0 &&
+                            pd_deflate(rgb, raw, 1, &z, &zn) == 0 && jn * 2 < zn) {
+                        size_t dl = strlen(dict);
+
+                        snprintf(dict + dl, sizeof(dict) - dl, " /Filter /DCTDecode");
+                        begin_obj(&w, images[i].obj);
+                        w_fmt(&w, "<< %s /Length %lu >>\nstream\n", dict, (unsigned long)jn);
+                        w_raw(&w, jp, jn);
+                        w_str(&w, "\nendstream");
+                        end_obj(&w);
+                    } else if (z && zn < raw) {    /* (deflated already, to compare) */
+                        begin_obj(&w, images[i].obj);
+                        w_fmt(&w, "<< %s /Length %lu /Filter /FlateDecode >>\nstream\n", dict, (unsigned long)zn);
+                        w_raw(&w, z, zn);
+                        w_str(&w, "\nendstream");
+                        end_obj(&w);
+                    } else {
+                        stream_obj(&w, images[i].obj, dict, rgb, raw, 1);
+                    }
+
+                    free(jp);
+                    free(z);
+                }
 
                 if (sm) {
                     snprintf(dict, sizeof(dict), "/Type /XObject /Subtype /Image /Width %d /Height %d "
