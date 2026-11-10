@@ -1632,6 +1632,11 @@ var
   Old, Frm: array of UInt32;
   I, Same, Tried: Integer;
   RL, BL: Int64;
+  RG, PR: TRect;
+  Whole: array of UInt32;
+  Parts: TRectArray;
+  Area: Int64;
+  J: Integer;
 
   function Px(X, Y: Integer): UInt32;
   begin
@@ -1704,7 +1709,8 @@ begin
       not T.Trans.Present, 'the first slide: four clicks, the third two effects, no transition');
     T := S.TimingOf(1);
     Check((T <> nil) and T.Trans.Present and (T.Trans.Kind = 'push') and (T.Trans.Dir = 'r') and (T.Trans.Dur = 1000) and
-      (T.StepCount = 1) and (Length(T.Steps[0].Effects) = 1), 'the second: pushed in, a second; an effect by itself');
+      (T.StepCount = 2) and (Length(T.Steps[0].Effects) = 1), 'the second: pushed in, a second; an effect by itself, '
+      + 'then a click');
     S.Start(0);
     R0 := S.TargetBox(3, 0);
     R1 := S.TargetBox(3, 1);
@@ -1789,10 +1795,78 @@ begin
     S.Tick(6600);
     Check((S.Phase = spIdle) and (Ink(Rect(RT.Left, RT.Top, RT.Right, RT.Top + (RT.Bottom - RT.Top) div 3)) > 0),
       'and all of it once it has');
+    { click 1 there: a group comes in by a wheel, its boxes with it (the group the target, not its first box) }
+    RG := S.TargetBox(9);
+    Check((RG.Right - RG.Left > (RG.Bottom - RG.Top) * 3 div 2) and (Ink(RG) = 0), Format('the group found, both its '
+      + 'boxes (%dx%d), not there before its click', [RG.Right - RG.Left, RG.Bottom - RG.Top]));
+    SetLength(Whole, S.Frame.Width * S.Frame.Height);
+    for I := 0 to S.Frame.Height - 1 do
+      Move(S.Frame.GetDataLineStart(I)^, Whole[I * S.Frame.Width], S.Frame.Width * 4);
+    S.TakeChanged;
     S.Next(7000);
+    { each frame as it turns: what has changed, put on the frame before, the frame now (as a window draws it again,
+      those parts only) }
+    Same := 0;
+    Tried := 0;
+    Area := 0;
+    Mid := 0;
+    for J := 1 to 22 do
+    begin
+      S.Tick(7000 + J * 50);
+      if J = 10 then
+        Mid := Ink(RG);
+      Parts := S.TakeChanged;
+      for PR in Parts do
+      begin
+        Area := Max(Area, Int64(PR.Width) * PR.Height);
+        for I := PR.Top to PR.Bottom - 1 do
+          Move(PUInt32(S.Frame.GetDataLineStart(I))[PR.Left], Whole[I * S.Frame.Width + PR.Left], PR.Width * 4);
+      end;
+      for I := 0 to S.Frame.Height - 1 do
+      begin
+        Inc(Tried);
+        if CompareDWord(Whole[I * S.Frame.Width], S.Frame.GetDataLineStart(I)^, S.Frame.Width) = 0 then
+          Inc(Same);
+      end;
+    end;
+    Check((Same = Tried) and (Area > 0) and (Area * 4 < S.Frame.Width * S.Frame.Height), Format('the changed parts '
+      + 'make each frame again (%d of %d rows), at most %d px of %d', [Same, Tried, Area, S.Frame.Width * S.Frame.Height]));
+    S.Tick(8100);
+    Fin := Ink(RG);
+    Check((Fin > 0) and (Mid > Fin div 5) and (Mid < Fin * 4 div 5), Format('half way the wheel has drawn about half the '
+      + 'group (%d of %d)', [Mid, Fin]));
+    S.TakeChanged;
+    Check(not S.Tick(8200) and (Length(S.TakeChanged) = 0), 'once it is still, nothing changed to draw again');
+    S.Next(9000);
     Check(S.Phase = spEnd, 'past the last slide: the end');
-    S.Next(7100);
+    S.Next(9100);
     Check(S.Finished, 'and a click there ends it');
+    { the next slide made ready while the show waits: what is shown the same as when it is not }
+    S.Free;
+    S := TParadeShow.Create(E, 800, 600, 0);
+    S.Start(0);
+    S.Next(100);
+    S.Next(200);
+    S.Next(1000);
+    S.Next(2000);
+    S.Tick(3100);
+    S.Tick(3150);
+    Check(not S.Ready(1), 'the next slide not drawn yet as this one ends');
+    S.Tick(3500);   { (still for a while: the next slide made ready) }
+    Check(S.Ready(1) and S.Ready(0), 'still a while: the next drawn ready, this one kept');
+    S.Prev(3550);
+    LeftColour(R8, RL, BL);
+    Check((S.CurrentSlide = 0) and (S.StepsDone = 4) and (Ink(R4) > 0) and (RL > BL), 'made ready the next, this slide '
+      + 'is drawn still as it is');
+    S.Next(3560);
+    S.Tick(4600);
+    S.Tick(5000);
+    S.Next(5100);
+    S.Tick(5600);
+    SetLength(Old, Length(Frm));
+    Snap(Old);
+    Check((S.CurrentSlide = 1) and (CompareDWord(Old[0], Frm[0], Length(Frm)) = 0), 'and the next, through its '
+      + 'transition, as it was drawn when not made ready before');
   finally
     S.Free;
   end;

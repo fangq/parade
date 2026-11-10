@@ -4,7 +4,8 @@ written as PowerPoint writes them (a main sequence of click groups, their effect
 
 slide 1: click 1 the content's first paragraph appears; click 2 its second fades in (500 ms); click 3 the box flies
          in from the bottom (500 ms) while the oval fades out; click 4 the gradient box spins once (1000 ms)
-slide 2: pushed in from the left (1000 ms); as it begins, the turned box wipes in from the bottom (500 ms)
+slide 2: pushed in from the left (1000 ms); as it begins, the turned box wipes in from the bottom (500 ms); click 1
+         a group of two boxes comes in by a wheel (1000 ms): its children drawn for it, the group the target
 """
 import sys
 import zipfile
@@ -82,11 +83,26 @@ def slide1():
     ])
 
 
+def box(spid, x, y, clr):
+    return ('<p:sp><p:nvSpPr><p:cNvPr id="%d" name="Box %d"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm>'
+            '<a:off x="%d" y="%d"/><a:ext cx="1000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/>'
+            '</a:prstGeom><a:solidFill><a:srgbClr val="%s"/></a:solidFill></p:spPr></p:sp>' % (spid, spid, x, y, clr))
+
+
+# slide 2's group: id 9, its boxes 10 and 11 side by side
+GROUP2 = ('<p:grpSp><p:nvGrpSpPr><p:cNvPr id="9" name="Group 9"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr>'
+          '<a:xfrm><a:off x="4500000" y="3000000"/><a:ext cx="2000000" cy="1000000"/><a:chOff x="4500000" '
+          'y="3000000"/><a:chExt cx="2000000" cy="1000000"/></a:xfrm></p:grpSpPr>' + box(10, 4500000, 3000000, 'C00000')
+          + box(11, 5500000, 3000000, '0000C0') + '</p:grpSp>')
+
+
 def slide2():
     ids[0] = 2
     return '<p:transition spd="slow"><p:push dir="r"/></p:transition>' + timing([
         group([effect('entr', 22, 'afterEffect', [set_vis(tgt(4), 'visible'),
                                                   anim_effect(tgt(4), 'in', 'wipe(up)', 500)])], auto=True),
+        group([effect('entr', 21, 'clickEffect', [set_vis(tgt(9), 'visible'),
+                                                  anim_effect(tgt(9), 'in', 'wheel(1)', 1000)])]),
     ])
 
 
@@ -100,6 +116,9 @@ def main(src, dst):
             tail = slide1() if item.filename.endswith('slide1.xml') else slide2()
             assert x.count('</p:sld>') == 1
             x = x.replace('</p:sld>', tail + '</p:sld>')
+            if item.filename.endswith('slide2.xml'):
+                assert x.count('</p:spTree>') == 1
+                x = x.replace('</p:spTree>', GROUP2 + '</p:spTree>')
             data = x.encode('utf-8')
         zout.writestr(item, data)
     zout.close()

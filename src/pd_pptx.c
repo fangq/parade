@@ -2741,12 +2741,16 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
 
         pb_puts(C->o, "<wpg:grpSp>");
 
+        /* its id always: what its items are drawn for, the shape a slide's animations name (a group's
+           children are not targets of their own when it is) */
+        pb_printf(C->o, "<wpg:cNvPr id=\"%lld\" name=\"Group\">", xd_int(d, xd_path(d, n, "nvGrpSpPr/cNvPr"), "id", 0) +
+                  C->id_base);
+
         if (marked(C)) {
-            pb_printf(C->o, "<wpg:cNvPr id=\"%lld\" name=\"Group\">", xd_int(d, xd_path(d, n, "nvGrpSpPr/cNvPr"), "id", 0) +
-                      C->id_base);
             put_marker(C, from_of(C), 0);
-            pb_puts(C->o, "</wpg:cNvPr>");
         }
+
+        pb_puts(C->o, "</wpg:cNvPr>");
 
         pb_puts(C->o, "<wpg:cNvGrpSpPr/>");
 

@@ -28,7 +28,7 @@ interface
 
 uses
   Classes, SysUtils, Math, Graphics, Controls, Forms, ExtCtrls, LCLType, LCLIntf, IntfGraphics, GraphType, FPImage,
-  Types, DOM, XMLRead, parade, paradeedit;
+  Types, DOM, XMLRead, parade, paradeedit{$IFDEF LCLGTK2}, gdk2{$ENDIF};
 
 type
   TShowBehKind = (sbSet, sbEffect, sbAnim, sbScale, sbRot, sbMotion, sbOther);
@@ -121,6 +121,7 @@ type
   end;
 
   TShowPhase = (spTrans, spPlay, spIdle, spEnd);
+  TRectArray = array of TRect;
 
   TParadeShow = class
   private
@@ -141,15 +142,28 @@ type
     FBoxes: array of TRect;             { each target's box on the slide, px }
     FFirstEntr: array of Boolean;       { its first effect brings it in: hidden until then }
     FLo, FHi: Integer;                  { RenderSlide's filter: the items it draws }
+    { another slide prepared (the next, made ready while the show waits; or the one before): the same, kept apart }
+    FAPrepared: Integer;
+    FARuns: array of TShowRun;
+    FABase: array of UInt32;
+    FABoxes: array of TRect;
+    FAFirstEntr: array of Boolean;
+    FAItems: TParadeDrawItems;
+    FAParaOf: array of Integer;
     FItems: TParadeDrawItems;
     FParaOf: array of Integer;          { each item's paragraph in its text box, -1 none }
     FFrom, FTo, FCur: array of UInt32;  { a transition's slides, and the slide as it is now }
     FFrame: TLazIntfImage;
     FChanged: Boolean;
+    FBandX0, FBandX1: array of Integer;  { what has changed of the frame since TakeChanged: each band's columns }
+    FWhole: Boolean;                     { the frame is new: all of it written, none compared }
     FFinished: Boolean;
     function KeepItem(const Item: pd_draw; Index: Integer): Boolean;
     function TargetFor(T: TShowTiming; Index: Integer): Integer;
     procedure Prepare(APos: Integer);
+    procedure Build(APos: Integer);
+    procedure SwapPrepared;
+    procedure PrepareAhead(APos: Integer);
     procedure RenderPlain(APos: Integer; var Px: array of UInt32);
     procedure Compose(APos, Done: Integer; PlayT: Double; var Px: array of UInt32);
     procedure StateAt(APos, Done: Integer; PlayT: Double; out S: array of TShowState);
@@ -182,6 +196,10 @@ type
     property Finished: Boolean read FFinished;   { Next past the end }
     property Frame: TLazIntfImage read FFrame;
     property SlideRect: TRect read GetSlideRect;
+    { what of the frame has changed since it was last asked (a window draws those parts again, not the whole) }
+    function TakeChanged: TRectArray;
+    { for a test: whether the slide at ShowIndex is drawn ready, to show with nothing to draw first }
+    function Ready(ShowIndex: Integer): Boolean;
     { for a test: the slide's timing, and a target's box on the slide as it is drawn (px, in the slide) }
     function TimingOf(ShowIndex: Integer): TShowTiming;
     function TargetBox(Shape: Int32; Para: Integer = -1): TRect;
@@ -196,6 +214,7 @@ type
     FBmp: TBitmap;
     FBlank: TColor;
     FBlanked: Boolean;
+    FHeavy: Boolean;        { the last frame sent much of the screen: a tick skipped before the next }
     FTyped: string;
     FLastMove: Int64;
     FOnEnd: TNotifyEvent;
@@ -1214,6 +1233,7 @@ begin
     if FSlides[I] = FromSlide then
       FPos := I;
   FPrepared := -1;
+  FAPrepared := -1;
   FPhase := spIdle;
   Resize(W, H);
 end;
@@ -1255,8 +1275,11 @@ var
 begin
   FW := Max(16, W);
   FH := Max(16, H);
-  Desc.Init_BPP32_B8G8R8A8_BIO_TTB(FW, FH);
+  { opaque, 32 bits a pixel, the fourth byte not alpha: a bitmap made of it is put on the screen as it is, not blended
+    over what is there (which reads the screen back first) }
+  Desc.Init_BPP32_B8G8R8_BIO_TTB(FW, FH);
   FFrame.DataDescription := Desc;
+  FWhole := True;
   FSW := FW;
   FSH := FH;
   Pg := -1;
@@ -1274,6 +1297,7 @@ begin
   SetLength(FTo, FSW * FSH);
   SetLength(FCur, FSW * FSH);
   FPrepared := -1;
+  FAPrepared := -1;
   FChanged := True;
 end;
 
@@ -1328,9 +1352,59 @@ begin
   Result := Whole;
 end;
 
+procedure TParadeShow.SwapPrepared;
+  procedure SwapInt(var A, B: Integer);
+  var
+    C: Integer;
+  begin
+    C := A; A := B; B := C;
+  end;
+var
+  R: array of TShowRun;
+  U: array of UInt32;
+  Bx: array of TRect;
+  Fe: array of Boolean;
+  It: TParadeDrawItems;
+  Po: array of Integer;
+begin   { (the arrays' references, nothing copied) }
+  SwapInt(FPrepared, FAPrepared);
+  R := FRuns; FRuns := FARuns; FARuns := R;
+  U := FBase; FBase := FABase; FABase := U;
+  Bx := FBoxes; FBoxes := FABoxes; FABoxes := Bx;
+  Fe := FFirstEntr; FFirstEntr := FAFirstEntr; FAFirstEntr := Fe;
+  It := FItems; FItems := FAItems; FAItems := It;
+  Po := FParaOf; FParaOf := FAParaOf; FAParaOf := Po;
+end;
+
+{ the slide at APos made ready to show: the one prepared, or the other kept (the slide before, the one made ready
+  next), else drawn now in place of that other }
+procedure TParadeShow.Prepare(APos: Integer);
+begin
+  if FPrepared = APos then
+    Exit;
+  SwapPrepared;
+  if FPrepared <> APos then
+    Build(APos);
+end;
+
+{ the slide at APos made ready, kept apart from the one shown: a click to it then has nothing to draw first }
+procedure TParadeShow.PrepareAhead(APos: Integer);
+begin
+  if (APos < 0) or (APos >= Length(FSlides)) or (FPrepared = APos) or (FAPrepared = APos) then
+    Exit;
+  SwapPrepared;
+  Build(APos);
+  SwapPrepared;
+end;
+
+function TParadeShow.Ready(ShowIndex: Integer): Boolean;
+begin
+  Result := (FPrepared = ShowIndex) or (FAPrepared = ShowIndex);
+end;
+
 { the slide's runs drawn: the first (when it is not animated) on the paper, the others each over black and over
   white, so that where they cover, and how much, is known exactly }
-procedure TParadeShow.Prepare(APos: Integer);
+procedure TParadeShow.Build(APos: Integer);
 var
   T: TShowTiming;
   Pg, I, J, K, L, X, Y, X0, Y0, X1, Y1, A: Integer;
@@ -2114,19 +2188,91 @@ begin
     end;
 end;
 
+const
+  BAND = 32;    { rows: the frame's changes are kept band by band }
+
 procedure TParadeShow.ToFrame(const Px: array of UInt32);
 var
-  Y: Integer;
+  Y, X, X0, X1, B: Integer;
   P: PUInt32;
+  Row: array of UInt32;
 begin
+  if FWhole or (Length(FBandX0) <> (FH + BAND - 1) div BAND) then
+  begin   { (a frame of a new size: all of it) }
+    FWhole := False;
+    FillDWord(PUInt32(FFrame.GetDataLineStart(0))^, FW * FH, $00FFFFFF);   { (unlike any pixel drawn: they are opaque) }
+    SetLength(FBandX0, (FH + BAND - 1) div BAND);
+    SetLength(FBandX1, Length(FBandX0));
+    for B := 0 to High(FBandX0) do
+    begin
+      FBandX0[B] := 0;
+      FBandX1[B] := FW;
+    end;
+  end;
+  SetLength(Row, FW);
   for Y := 0 to FH - 1 do
   begin
     P := PUInt32(FFrame.GetDataLineStart(Y));
-    FillDWord(P^, FW, BLACK_PX);
+    FillDWord(Row[0], FW, BLACK_PX);
     if (Y >= FOY) and (Y < FOY + FSH) and (Length(Px) >= FSW * FSH) then
-      Move(Px[(Y - FOY) * FSW], P[FOX], FSW * 4);
+      Move(Px[(Y - FOY) * FSW], Row[FOX], FSW * 4);
+    X0 := 0;
+    while (X0 < FW) and (P[X0] = Row[X0]) do
+      Inc(X0);
+    if X0 = FW then
+      Continue;     { the row as it was }
+    X1 := FW;
+    while (X1 > X0) and (P[X1 - 1] = Row[X1 - 1]) do
+      Dec(X1);
+    for X := X0 to X1 - 1 do
+      P[X] := Row[X];
+    B := Y div BAND;
+    if FBandX1[B] <= FBandX0[B] then
+    begin
+      FBandX0[B] := X0;
+      FBandX1[B] := X1;
+    end
+    else
+    begin
+      FBandX0[B] := Min(FBandX0[B], X0);
+      FBandX1[B] := Max(FBandX1[B], X1);
+    end;
+    FChanged := True;
   end;
-  FChanged := True;
+end;
+
+function TParadeShow.TakeChanged: TRectArray;
+var
+  B, N: Integer;
+  R: TRect;
+begin
+  Result := nil;
+  N := 0;
+  B := 0;
+  while B <= High(FBandX0) do
+  begin
+    if FBandX1[B] > FBandX0[B] then
+    begin   { the bands changed one after another: one part, as wide as they are together }
+      R := Rect(FBandX0[B], B * BAND, FBandX1[B], Min(FH, (B + 1) * BAND));
+      FBandX1[B] := 0;
+      FBandX0[B] := 0;
+      Inc(B);
+      while (B <= High(FBandX0)) and (FBandX1[B] > FBandX0[B]) do
+      begin
+        R.Left := Min(R.Left, FBandX0[B]);
+        R.Right := Max(R.Right, FBandX1[B]);
+        R.Bottom := Min(FH, (B + 1) * BAND);
+        FBandX1[B] := 0;
+        FBandX0[B] := 0;
+        Inc(B);
+      end;
+      SetLength(Result, N + 1);
+      Result[N] := R;
+      Inc(N);
+    end
+    else
+      Inc(B);
+  end;
 end;
 
 procedure TParadeShow.BeginSteps(Now: Int64);
@@ -2222,7 +2368,9 @@ begin
       end;
     spIdle:
       if (T <> nil) and (T.Trans.AdvTime >= 0) and (FDone >= T.StepCount) and (Now - FIdleSince >= T.Trans.AdvTime) then
-        Enter(FPos + 1, Now, True);
+        Enter(FPos + 1, Now, True)
+      else if Now - FIdleSince >= 300 then
+        PrepareAhead(FPos + 1);   { (while nothing plays: the next slide, ready for the click to it) }
   end;
   Result := FChanged;
   FChanged := False;
@@ -2363,22 +2511,74 @@ begin
 end;
 
 procedure TParadeShowForm.Refresh;
+var
+  Parts: TRectArray;
+  R: TRect;
+  Area, Y: Integer;
+  Piece: TLazIntfImage;
+  PieceBmp: TBitmap;
+  Desc: TRawImageDescription;
 begin
   if FBmp = nil then
     Exit;
-  if FShow <> nil then
+  if FShow = nil then
+  begin
+    Invalidate;
+    Exit;
+  end;
+  { only what has changed goes to the screen: over a remote display a whole frame for each is too much to send }
+  Parts := FShow.TakeChanged;
+  Area := 0;
+  for R in Parts do
+    Area := Area + R.Width * R.Height;
+  FHeavy := (FShow.Phase in [spPlay, spTrans]) and (Area * 8 > FShow.Frame.Width * FShow.Frame.Height);
+  if (FBmp.Width <> FShow.Frame.Width) or (FBmp.Height <> FShow.Frame.Height) or
+     (Area * 2 > FShow.Frame.Width * FShow.Frame.Height) then
+  begin
     FBmp.LoadFromIntfImage(FShow.Frame);
-  Invalidate;
+    Invalidate;
+    Exit;
+  end;
+  for R in Parts do
+  begin
+    Piece := TLazIntfImage.Create(0, 0);
+    PieceBmp := TBitmap.Create;
+    try
+      Desc.Init_BPP32_B8G8R8_BIO_TTB(R.Width, R.Height);   { (opaque, as the frame) }
+      Piece.DataDescription := Desc;
+      for Y := 0 to R.Height - 1 do
+        Move(PUInt32(FShow.Frame.GetDataLineStart(R.Top + Y))[R.Left], Piece.GetDataLineStart(Y)^, R.Width * 4);
+      PieceBmp.LoadFromIntfImage(Piece);
+      FBmp.Canvas.Draw(R.Left, R.Top, PieceBmp);
+    finally
+      PieceBmp.Free;
+      Piece.Free;
+    end;
+    if HandleAllocated then
+      InvalidateRect(Handle, @R, False);
+  end;
+  if FShow.Phase = spEnd then
+    Invalidate;   { (its words over the frame) }
 end;
 
 procedure TParadeShowForm.TimerTick(Sender: TObject);
 begin
   if FShow = nil then
     Exit;
-  if FShow.Tick(GetTickCount64) then
-    Refresh;
   if (Cursor <> crNone) and (GetTickCount64 - FLastMove > 2500) then
     Cursor := crNone;
+  if FHeavy then
+  begin   { (a large part of the screen each frame -- a big picture fading: half as many frames, half as much to send) }
+    FHeavy := False;
+    Exit;
+  end;
+  {$IFDEF LCLGTK2}
+  { the frame before, taken by the X server first: over a slow link (x2go, ssh) frames are left out rather than queued
+    up behind one another, so what is shown keeps to the time and a click is not kept waiting behind them }
+  gdk_flush;
+  {$ENDIF}
+  if FShow.Tick(GetTickCount64) then
+    Refresh;
 end;
 
 procedure TParadeShowForm.Paint;
@@ -2392,7 +2592,7 @@ begin
     Exit;
   end;
   if FBmp.Width > 0 then
-    Canvas.Draw(0, 0, FBmp)
+    Canvas.CopyRect(Canvas.ClipRect, FBmp.Canvas, Canvas.ClipRect)   { (what is to be drawn again, no more) }
   else
   begin
     Canvas.Brush.Color := clBlack;
