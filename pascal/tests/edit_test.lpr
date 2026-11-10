@@ -2083,6 +2083,134 @@ begin
   end;
 end;
 
+{ a resource found where the document shows it, and the view taken there: a picture as itself and inside a drawing
+  (its "img"), in reading order, counted round; each selected as a click selects it -- the whole object, its top
+  near the view's top -- and a drawing so selected not tinted line by line over its labels }
+procedure TestShowResource(E: TParadeEdit);
+const
+  K = PD_SP_PER_PT;
+var
+  Png, Js: string;
+  R, RD, RX: pd_res_id;
+  I, N: Integer;
+  Para: pd_block_id;
+  O: pd_inline;
+  U: TParadePosArray;
+  At: pd_pos;
+  Sid: Integer;
+  Pg: Int32;
+  X0, Y0, X1, Y1: Double;
+  A: TPoint;
+  Img0, Img1: TLazIntfImage;
+  Diff, X, Y: Integer;
+  C0, C1: TFPColor;
+  PP: pd_para_props;
+  Fl, FPara: pd_block_id;
+  Fp: pd_float_props;
+
+  function ParaN(N_: Integer): pd_block_id;
+  var
+    J: Integer;
+  begin
+    Result := pd_doc_next_paragraph(E.Doc, 0);
+    for J := 1 to N_ - 1 do
+      Result := pd_doc_next_paragraph(E.Doc, Result);
+  end;
+
+begin
+  E.NewDocument;
+  for I := 1 to 80 do
+  begin
+    E.InsertText('Line ' + IntToStr(I));
+    if I < 80 then
+      E.ProcessKey(VK_RETURN, []);
+  end;
+  Png := FileText(ExtractFilePath(ParamStr(0)) + '../../tests/data/rgba.png');
+  Check(pd_doc_add_resource(E.Doc, 'image/png', PAnsiChar(Png), Length(Png), R) = PD_OK, 'a picture');
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_IMAGE;
+  O.resource := R;
+  O.width := 120 * K;
+  O.height := 640 * K;   { taller than the view: selecting it puts the caret at its foot, which must not decide }
+  { in a float beside line 40, as a paper's figures are: its own paragraph, its line exactly 14 points -- the
+    picture stands far above its line's text }
+  Check(pd_doc_insert_block(E.Doc, pd_doc_child(E.Doc, pd_doc_root(E.Doc), 0), 39, PD_BLOCK_FLOAT, Fl) = PD_OK,
+    'a float');
+  pd_doc_float_props(E.Doc, Fl, Fp);
+  Fp.placement := PD_PLACE_HERE or PD_PLACE_FORCE;
+  Fp.wrap := PD_WRAP_LEFT;
+  Fp.width := 120 * K;
+  pd_doc_set_float_props(E.Doc, Fl, Fp);
+  FPara := pd_doc_child(E.Doc, Fl, 0);
+  pd_doc_insert_inline(E.Doc, PdPos(FPara, 0), O, nil);
+  pd_doc_para_props(E.Doc, FPara, PP);
+  PP.mask := PP.mask or PD_PP_LINE_SPACING;
+  PP.line_rule := PD_LINE_EXACT;
+  PP.line_height := 14 * K;
+  Check(pd_doc_set_para_props(E.Doc, FPara, PP) = PD_OK, 'its line exactly 14 points');
+  { a drawing that draws the same picture, with a label over it }
+  Js := Format('{"w":%d,"h":%d,"items":[{"img":%d,"x":0,"y":0,"w":%d,"h":%d},' +
+    '{"label":"A label in it","x":%d,"y":%d,"sz":%d,"w":400,"i":0,"c":4278190080,"ha":0}]}',
+    [160 * K, 120 * K, R, 80 * K, 60 * K, 10 * K, 100 * K, 12 * K]);
+  Check(pd_doc_add_resource(E.Doc, 'application/vnd.parade.drawing+json', PAnsiChar(Js), Length(Js), RD) = PD_OK,
+    'a drawing of it');
+  O.resource := RD;
+  O.width := 160 * K;
+  O.height := 120 * K;
+  Para := ParaN(60);
+  pd_doc_insert_inline(E.Doc, PdPos(Para, 0), O, nil);
+  pd_doc_add_resource(E.Doc, 'text/plain', PAnsiChar('unused'), 6, RX);
+  E.ExternalChange;
+  E.ProcessKey(VK_HOME, [ssCtrl]);
+  E.Repaint;
+  Application.ProcessMessages;
+
+  U := E.ResourceUses(R);
+  Check((Length(U) = 2) and (U[0].block = FPara) and (U[1].block = Para),
+    Format('the picture shown twice, in reading order: itself, then in the drawing (%d)', [Length(U)]));
+  Check(E.ShowResource(RX) = 0, 'one shown nowhere: nothing to go to');
+
+  N := E.ShowResource(R, 0);
+  E.Repaint;
+  Application.ProcessMessages;
+  Check((N = 2) and E.SelectedShape(At, Sid) and (At.block = U[0].block) and (At.offset = U[0].offset) and (Sid = -1),
+    'gone to the first, it selected whole as a click selects it');
+  Check(E.ShapePageBox(U[0], -1, Pg, X0, Y0, X1, Y1), 'where it is');
+  A := E.PageToClient(Pg, X0 / K, Y0 / K);
+  Check((A.Y >= 0) and (A.Y < E.ClientHeight div 3), Format('its top near the view''s (%d of %d)', [A.Y, E.ClientHeight]));
+
+  E.ShowResource(R, 1);
+  E.Repaint;
+  Application.ProcessMessages;
+  Check(E.SelectedShape(At, Sid) and (At.block = Para), 'and again: the next, the drawing');
+  Check(E.ShowResource(R, 2) = 2, 'counted round: the first again');
+  E.ShowResource(R, 1);
+  Img0 := TLazIntfImage.Create(0, 0);
+  Img1 := TLazIntfImage.Create(0, 0);
+  try
+    E.RenderView(Img1);
+    E.ProcessKey(VK_LEFT, []);  { not selected now }
+    E.ProcessKey(VK_RIGHT, []);
+    Application.ProcessMessages;
+    E.RenderView(Img0);
+    Check(E.ShapePageBox(U[1], -1, Pg, X0, Y0, X1, Y1), 'where the drawing is');
+    A := E.PageToClient(Pg, X0 / K, Y0 / K);
+    Diff := 0;
+    for Y := Max(0, A.Y) to Min(Img0.Height, A.Y + Round((Y1 - Y0) / K * E.Zoom * 96 / 72)) - 1 do
+      for X := Max(0, A.X) to Min(Img0.Width, A.X + Round((X1 - X0) / K * E.Zoom * 96 / 72)) - 1 do
+      begin
+        C0 := Img0.Colors[X, Y];
+        C1 := Img1.Colors[X, Y];
+        if (C0.red <> C1.red) or (C0.green <> C1.green) or (C0.blue <> C1.blue) then
+          Inc(Diff);
+      end;
+    Check(Diff = 0, Format('the selected drawing not tinted over its labels and picture (%d pixels)', [Diff]));
+  finally
+    Img0.Free;
+    Img1.Free;
+  end;
+end;
+
 { a table by the mouse: a drag from cell to cell selects the rectangle of cells (painted and formatted so); a
   selection in a shaded cell shows; a border shows the sizing cursor, and dragged sizes its column or row }
 procedure TestTableMouse(E: TParadeEdit);
@@ -3660,6 +3788,8 @@ begin
   TestAnimEdit(E);
   Step('balloons in place');
   TestBalloonPlace(E);
+  Step('resources found and shown');
+  TestShowResource(E);
 
   WriteLn(Checks, ' checks, ', Failures, ' failures');
   E.Free;

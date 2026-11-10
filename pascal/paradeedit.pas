@@ -48,6 +48,7 @@ type
   TParadeCellBoxes = array of pd_cell_box;
   TParadeSpArray = array of pd_sp;
   TParadeRanges = array of pd_range;
+  TParadePosArray = array of pd_pos;
   { the nine levels of a list definition }
   TParadeListLevels = array[0..8] of pd_list_level;
   { a page's display list; which of its items a picture of it shows (Index: its place in the list) }
@@ -920,6 +921,12 @@ type
     procedure GetHeadings(List: TStrings);
     { the caret to a position, scrolled into view }
     procedure GoToPos(const P: pd_pos);
+    { where the document shows resource R, in reading order: the images that are it, and the drawings made from it
+      (a metafile's) or that draw it (a picture in a drawing) }
+    function ResourceUses(R: pd_res_id): TParadePosArray;
+    { the view taken to the Nth place resource R is shown (counting round), that object selected as a click selects
+      it; how many places there are (0: shown nowhere, nothing done) }
+    function ShowResource(R: pd_res_id; N: Integer = 0): Integer;
     { the selection's two ends, in document order; False when there is none (only the caret) }
     function SelectionRange(out A, B: pd_pos): Boolean;
     function SelectedText: string;
@@ -6555,6 +6562,84 @@ begin
   finally
     List.EndUpdate;
   end;
+end;
+
+function TParadeEdit.ResourceUses(R: pd_res_id): TParadePosArray;
+var
+  B: pd_block_id;
+  T, S, Id: string;
+  I: Integer;
+  O: pd_inline;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  Hit: Boolean;
+begin
+  Result := nil;
+  if (FDoc = nil) or (R = 0) then
+    Exit;
+  Id := IntToStr(R);
+  B := pd_doc_next_paragraph(FDoc, 0);
+  while B <> 0 do
+  begin
+    T := ParaText(B);
+    I := Pos(#$EF#$BF#$BC, T);
+    while I > 0 do
+    begin
+      if (pd_doc_inline_at(FDoc, PdPos(B, I - 1), O) = PD_OK) and (O.kind = PD_INLINE_IMAGE) then
+      begin
+        Hit := O.resource = R;
+        if not Hit and (pd_doc_resource(FDoc, O.resource, @Mime, @Data, @Len) = PD_OK) and
+           (StrComp(Mime, 'application/vnd.parade.drawing+json') = 0) then
+        begin   { a drawing made from it, or drawing it }
+          SetString(S, PAnsiChar(Data), Len);
+          Hit := (Pos('"src":' + Id + ',', S) > 0) or (Pos('"src":' + Id + '}', S) > 0) or
+                 (Pos('"img":' + Id + ',', S) > 0) or (Pos('"img":' + Id + '}', S) > 0);
+        end;
+        if Hit then
+        begin
+          SetLength(Result, Length(Result) + 1);
+          Result[High(Result)] := PdPos(B, I - 1);
+        end;
+      end;
+      I := PosEx(#$EF#$BF#$BC, T, I + 3);
+    end;
+    B := pd_doc_next_paragraph(FDoc, B);
+  end;
+end;
+
+function TParadeEdit.ShowResource(R: pd_res_id; N: Integer): Integer;
+var
+  U: TParadePosArray;
+  Page: Int32;
+  X, Base, Asc, Desc, W, H: pd_sp;
+  O: pd_inline;
+begin
+  U := ResourceUses(R);
+  Result := Length(U);
+  if Result = 0 then
+    Exit;
+  N := N mod Result;
+  if N < 0 then
+    Inc(N, Result);
+  GoToPos(U[N]);
+  { selected as a click on it selects it: the whole object, its frame and handles }
+  SetLength(FShapeMore, 0);
+  FNodeOn := False;
+  FShapeOn := True;
+  FShapeAt := U[N];
+  FShapeSid := -1;
+  SelectObject(U[N]);
+  { its top near the view's: selected, the caret is at its foot and the view follows the caret, which for a figure
+    taller than the view leaves its top out of sight. It stands on the baseline, as tall as it is shown }
+  if (pd_layout_caret(FLayout, U[N], Page, X, Base, Asc, Desc) = PD_OK) and
+     (pd_doc_inline_at(FDoc, U[N], O) = PD_OK) then
+  begin
+    pd_doc_image_display_size(FDoc, O, W, H);
+    FScrollY := Max(0, FScrollY + PageTop(Page) + Round((Base - H) * PxPerSp) - 3 * FPageGap);
+    UpdateScrollBar;
+  end;
+  Invalidate;
 end;
 
 procedure TParadeEdit.GoToPos(const P: pd_pos);
@@ -14846,7 +14931,11 @@ var
               FillRectImg(Img, OX + Round(x * PxScale), OY + Round(y * PxScale), OX + Round((x + w) * PxScale),
                 OY + Round((y + h) * PxScale), $003390FF, 80);
     end
-    else if HasSelection then
+    else if HasSelection and not (FShapeOn and (FShapeSid < 0) and (SelStart.block = FShapeAt.block) and
+            (SelStart.offset = FShapeAt.offset) and (SelEnd.block = FShapeAt.block) and
+            (SelEnd.offset = FShapeAt.offset + 3)) then
+      { (a whole drawing or picture selected shows its frame and handles: not a band for each line of its labels,
+        the height of the line it stands on) }
       Highlight(SelStart, SelEnd, $003390FF, 80, True);
     for C := 0 to High(FRemote) do   { the others' selections, faintly in their colours }
       with FRemote[C] do
