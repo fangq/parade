@@ -2710,11 +2710,21 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                 ws.both = 0;
                 ws.lw = ws.rx = 0;
 
-                for (pass = 0; pass < 3; pass++) {
+                for (pass = 0; pass < 6; pass++) {
                     for (ws.k0 = 0; ws.k0 < pc->nlines && pc->top[ws.k0 + 1] <= skip; ws.k0++) {
                     }
 
                     for (ws.k = ws.k0; ws.k < pc->nlines && pc->top[ws.k] < skip + rem; ws.k++) {
+                    }
+
+                    if (ws.k0 < pc->nlines && ws.k == pc->nlines && pc->top[pc->nlines] < skip + rem) {
+                        /* beside the float, which reaches past the paragraph's end as it is now: narrower lines make more of
+                           them: as many as its room takes at the last line's height, not one pass's worth at a time
+                           (three passes left a long paragraph's last lines full width over the float) */
+                        pd_sp lh0 = pc->top[pc->nlines] - pc->top[pc->nlines - 1];
+
+                        lh0 = lh0 > 0 ? lh0 : PD_PT(12);
+                        ws.k += (int32_t)((skip + rem - pc->top[pc->nlines] + lh0 - 1) / lh0);
                     }
 
                     if (F->wrap_both) {     /* both sides: as many pairs as rows fit beside it */
@@ -2770,7 +2780,7 @@ static pd_status build_flow(filler* F, pd_block_id container, pd_sp* prev_after,
                     }
                 }
 
-                kwrap = pc->ws_k;
+                kwrap = pc->ws_k < pc->nlines ? pc->ws_k : pc->nlines;   /* (counted on past its end: all of it) */
                 pp = &pc->pp;
             } else if (F->uneq && F->nbcol && F->nbcol[b->id] > 0) {
                 /* columns of their own widths: each line as wide as the column it went to the last time */

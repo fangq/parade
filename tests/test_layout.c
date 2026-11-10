@@ -2442,6 +2442,131 @@ static void test_drawing_label_turned(void) {
     pd_doc_free(d);
 }
 
+/* A long paragraph beside a tall float that takes most of the column: its lines narrowed for all of the float's
+   height, though narrowing them (to a third) makes far more lines than it had -- not just as many as it had at first, which left
+   its last lines full width over the float (a figure's caption). */
+static void test_float_wrap_long(void) {
+    pd_block_id sec, fl, p;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_float_props fp;
+    pd_sp fy, fx1, bottom;
+    int32_t n, k, over = 0, beside = 0;
+    pd_draw* it;
+    char text[6000];
+    size_t i;
+
+    text[0] = '\0';
+    for (i = 0; i < 26; i++) {   /* some 15 lines across the column; 3 times as many beside the float */
+        strcat(text, "Words that wrap beside the figure and on below it. ");
+    }
+
+    fl = add_float(d, sec, 0, PD_PT(300), PD_PT(400), PD_PLACE_HERE);
+    pd_doc_float_props(d, fl, &fp);
+    fp.wrap = PD_WRAP_LEFT;     /* text on its right */
+    fp.width = PD_PT(300);
+    fp.gap = PD_PT(8);
+    pd_doc_set_float_props(d, fl, &fp);
+    p = add_para(d, sec, text);
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, NULL) == PD_OK);
+    CHECK(float_page(L, fl, d, &fy) == 0);
+    fx1 = PD_PT(72) + PD_PT(300);   /* the margin, the float (its gap beyond) */
+    bottom = fy + PD_PT(400);
+    it = items(L, 0, &n);
+
+    {   /* each line's leftmost glyph: beside the float while it lasts */
+        pd_sp ys[200], xs[200];
+        int32_t nl = 0, j;
+
+        for (k = 0; k < n; k++) {
+            if (it[k].kind != PD_DRAW_GLYPH || it[k].y <= fy || it[k].y >= bottom) {
+                continue;
+            }
+
+            for (j = 0; j < nl && ys[j] != it[k].y; j++) {
+            }
+
+            if (j == nl && nl < 200) {
+                ys[nl] = it[k].y;
+                xs[nl++] = it[k].x;
+            } else if (j < nl && it[k].x < xs[j]) {
+                xs[j] = it[k].x;
+            }
+        }
+
+        for (j = 0; j < nl; j++) {
+            if (xs[j] < fx1) {
+                over++;
+            } else {
+                beside++;
+            }
+        }
+    }
+
+    (void)p;
+    CHECK(beside > 25);     /* the float's 400 points, at ~14 a line */
+    CHECK(over == 0);
+    free(it);
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
+/* A paragraph that ends before a float lower down begins (the float set that far below its top) is not beside it:
+   where the page ends inside it, it breaks there as any paragraph does -- not kept whole and sent on to the next page
+   because its lines were counted as the float's. */
+static void test_float_below_paragraph(void) {
+    pd_block_id sec, fl, a;
+    pd_doc* d = new_doc(&sec);
+    pd_layout* L;
+    pd_float_props fp;
+    char fill[8000], mid[4000], tail[8000];
+    size_t i;
+    int32_t pg, k, n, a_pages = 0, seen;
+
+    fill[0] = mid[0] = tail[0] = '\0';
+    for (i = 0; i < 80; i++) {
+        strcat(fill, "Text that fills most of the first page. ");
+    }
+
+    for (i = 0; i < 30; i++) {
+        strcat(mid, "The paragraph the float is anchored at. ");
+    }
+
+    for (i = 0; i < 80; i++) {
+        strcat(tail, "Text that runs on beside the float. ");
+    }
+
+    add_para(d, sec, fill);
+    fl = add_float(d, sec, -1, PD_PT(150), PD_PT(80), PD_PLACE_HERE | PD_PLACE_OFFSET);
+    pd_doc_float_props(d, fl, &fp);
+    fp.wrap = PD_WRAP_LEFT;
+    fp.width = PD_PT(150);
+    fp.gap = PD_PT(8);
+    fp.offset_from = PD_FROM_PARAGRAPH;
+    fp.offset_y = PD_PT(400);    /* below the end of the paragraph it is anchored at */
+    pd_doc_set_float_props(d, fl, &fp);
+    a = add_para(d, sec, mid);
+    add_para(d, sec, tail);
+    pd_layout_new(d, &L);
+    CHECK(pd_layout_update(L, NULL) == PD_OK);
+
+    for (pg = 0; pg < pd_layout_page_count(L); pg++) {
+        pd_draw* it = items(L, pg, &n);
+
+        for (k = 0, seen = 0; k < n; k++) {
+            seen |= it[k].kind == PD_DRAW_GLYPH && it[k].block == a;
+        }
+
+        a_pages |= seen << pg;
+        free(it);
+    }
+
+    CHECK(a_pages == 3);    /* across the first two pages: broken where the first one ends */
+    pd_layout_free(L);
+    pd_doc_free(d);
+}
+
 int main(void) {
     const char* path = getenv("PARADE_TEST_FONT") ? getenv("PARADE_TEST_FONT") :
                        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
@@ -2458,6 +2583,8 @@ int main(void) {
     printf("floats\n");
     test_floats();
     test_float_offset_y();
+    test_float_wrap_long();
+    test_float_below_paragraph();
     printf("headers, fields, columns\n");
     test_headers_fields_columns();
     printf("caret and hit testing\n");
