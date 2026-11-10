@@ -6844,6 +6844,14 @@ static void test_emf_plus(void) {
     plus_fill_rect(&r, 0xFFFF0000u, 10, 10, 20, 20);   /* red: drawn */
     emr_plus(&e, &r);
     gdi_rect(&e, 0x00FF0000u, 1, 60, 60, 90, 90);      /* blue, plain, beside the EMF+ records: not */
+    {   /* a 2 by 2 picture, plain, beside the EMF+ records: not drawn, and not made a picture either */
+        static const uint32_t w[] = { 0, 0, 99, 99, 60, 60, 0, 0, 2, 2, 80, 40, 120, 16, 0, 0x00CC0020u, 30, 30,
+                                      40, 2, 2, 0x00180001u, 0, 16, 0, 0, 0, 0,
+                                      0x00FF0000u, 0x0000FF00u, 0x00FF0000u, 0x0000FF00u
+                                    };
+
+        emr(&e, 81, w, (int)(sizeof(w) / sizeof(w[0])));
+    }
     plus_rec(&r, 0x4004, 0, &d);                        /* GetDC */
     emr_plus(&e, &r);
     gdi_rect(&e, 0x0000FFFFu, 2, 0, 0, 5, 5);          /* yellow, plain, after the GetDC: drawn */
@@ -6919,6 +6927,18 @@ static void test_emf_plus(void) {
 
     js = emf_json(&e, &doc);
     CHECK(js != NULL);
+    {   /* the metafile, its drawing, the metafile inside's drawing... but no PNG of the plain picture nothing shows */
+        const char* mm;
+        const void* dd;
+        size_t ll;
+        int k, pngs = 0;
+
+        for (k = 1; pd_doc_resource(doc, (pd_res_id)k, &mm, &dd, &ll) == PD_OK; k++) {
+            pngs += !strcmp(mm, "image/png");
+        }
+
+        CHECK(pngs == 0);
+    }
 
     if (js) {
         snprintf(want, sizeof(want), "[%d,%d,", (int)(10 * U), (int)(10 * U));

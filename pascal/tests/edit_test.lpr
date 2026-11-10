@@ -2150,9 +2150,9 @@ begin
   PP.line_height := 14 * K;
   Check(pd_doc_set_para_props(E.Doc, FPara, PP) = PD_OK, 'its line exactly 14 points');
   { a drawing that draws the same picture, with a label over it }
-  Js := Format('{"w":%d,"h":%d,"items":[{"img":%d,"x":0,"y":0,"w":%d,"h":%d},' +
+  Js := Format('{"w":%d,"h":%d,"items":[{"sid":0,"box":[0,0,%d,%d]},{"img":%d,"x":0,"y":0,"w":%d,"h":%d},' +
     '{"label":"A label in it","x":%d,"y":%d,"sz":%d,"w":400,"i":0,"c":4278190080,"ha":0}]}',
-    [160 * K, 120 * K, R, 80 * K, 60 * K, 10 * K, 100 * K, 12 * K]);
+    [160 * K, 120 * K, 80 * K, 60 * K, R, 80 * K, 60 * K, 10 * K, 100 * K, 12 * K]);
   Check(pd_doc_add_resource(E.Doc, 'application/vnd.parade.drawing+json', PAnsiChar(Js), Length(Js), RD) = PD_OK,
     'a drawing of it');
   O.resource := RD;
@@ -2183,15 +2183,16 @@ begin
   E.ShowResource(R, 1);
   E.Repaint;
   Application.ProcessMessages;
-  Check(E.SelectedShape(At, Sid) and (At.block = Para), 'and again: the next, the drawing');
+  Check(E.SelectedShape(At, Sid) and (At.block = Para) and (Sid = 0),
+    Format('and again: the next -- in the drawing, its shape that is the picture selected (%d)', [Sid]));
   Check(E.ShowResource(R, 2) = 2, 'counted round: the first again');
-  E.ShowResource(R, 1);
+  Check((E.ShowResource(RD) = 1) and E.SelectedShape(At, Sid) and (Sid = -1), 'the drawing itself: selected whole');
   Img0 := TLazIntfImage.Create(0, 0);
   Img1 := TLazIntfImage.Create(0, 0);
   try
     E.RenderView(Img1);
-    E.ProcessKey(VK_LEFT, []);  { not selected now }
-    E.ProcessKey(VK_RIGHT, []);
+    E.ProcessKey(VK_ESCAPE, []);    { not selected now (an arrow key would move the shape selected) }
+    E.ProcessKey(VK_ESCAPE, []);
     Application.ProcessMessages;
     E.RenderView(Img0);
     Check(E.ShapePageBox(U[1], -1, Pg, X0, Y0, X1, Y1), 'where the drawing is');

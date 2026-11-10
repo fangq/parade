@@ -3310,7 +3310,8 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
                 if (size >= 80) {
                     uint32_t ob = u32(r + 48), cb = u32(r + 52), obits = u32(r + 56), cbits = u32(r + 60);
 
-                    if (ob <= size && cb <= size - ob && obits <= size && cbits <= size - obits && cb && rop_draws(u32(r + 68), r + ob, cb)) {
+                    if (!M->mute && ob <= size && cb <= size - ob && obits <= size && cbits <= size - obits && cb &&
+                            rop_draws(u32(r + 68), r + ob, cb)) {   /* (muted: not made a picture nothing shows) */
                         out_bitmap(M, dib_resource(M->d, r + ob, cb, r + obits, cbits), s32(r + 24), s32(r + 28),
                                    s32(r + 72), s32(r + 76));
                     }
@@ -3322,7 +3323,7 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
                 if (size >= 76) {
                     uint32_t ob = u32(r + 48), cb = u32(r + 52), obits = u32(r + 56), cbits = u32(r + 60);
 
-                    if (ob <= size && cb <= size - ob && obits <= size && cbits <= size - obits && cb) {
+                    if (!M->mute && ob <= size && cb <= size - ob && obits <= size && cbits <= size - obits && cb) {
                         out_bitmap(M, dib_resource(M->d, r + ob, cb, r + obits, cbits), s32(r + 24), s32(r + 28),
                                    s32(r + 40), s32(r + 44));
                     }
@@ -3352,7 +3353,7 @@ static void emf_play(mf* M, const unsigned char* p, size_t n) {
                         }
 
                         M->g.brush = keep;
-                    } else if (ob <= size && cb <= size - ob && obits <= size && cbits <= size - obits &&
+                    } else if (!M->mute && ob <= size && cb <= size - ob && obits <= size && cbits <= size - obits &&
                                rop_draws(u32(r + 40), r + ob, cb)) {
                         out_bitmap(M, dib_resource(M->d, r + ob, cb, r + obits, cbits), x, y, w, h);
                     }

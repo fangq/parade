@@ -928,6 +928,7 @@ type
     { the view taken to the Nth place resource R is shown (counting round), that object selected as a click selects
       it; how many places there are (0: shown nowhere, nothing done) }
     function ShowResource(R: pd_res_id; N: Integer = 0): Integer;
+    function ShapeOfPicture(const P: pd_pos; R: pd_res_id): Integer;
     { which resources the document shows now (index: the id; 0 unused), anywhere -- its text, its tables and floats,
       its headers, footers and text boxes -- as images, and through them: the metafile a drawing is made from, a
       picture a drawing draws or fills with. A picture deleted is not, though kept (Undo brings it back) }
@@ -6703,6 +6704,38 @@ begin
   end;
 end;
 
+{ the shape of the drawing at P that is picture R (its "sid" entry, the last before the picture's item); -1 when the
+  drawing is R itself, has no shapes, or does not draw R }
+function TParadeEdit.ShapeOfPicture(const P: pd_pos; R: pd_res_id): Integer;
+var
+  O: pd_inline;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  S, Key: string;
+  I, J, E: Integer;
+begin
+  Result := -1;
+  if (pd_doc_inline_at(FDoc, P, O) <> PD_OK) or (O.resource = R) or
+     (pd_doc_resource(FDoc, O.resource, @Mime, @Data, @Len) <> PD_OK) or
+     (StrComp(Mime, 'application/vnd.parade.drawing+json') <> 0) then
+    Exit;
+  SetString(S, PAnsiChar(Data), Len);
+  Key := '"img":' + IntToStr(R);
+  I := Pos(Key + ',', S);
+  if I = 0 then
+    I := Pos(Key + '}', S);
+  if I = 0 then
+    Exit;
+  J := RPosEx('"sid":', S, I);
+  if J = 0 then
+    Exit;
+  E := J + 6;
+  while (E <= Length(S)) and (S[E] in ['0'..'9']) do
+    Inc(E);
+  Result := StrToIntDef(Copy(S, J + 6, E - J - 6), -1);
+end;
+
 function TParadeEdit.ShowResource(R: pd_res_id; N: Integer): Integer;
 var
   U: TParadePosArray;
@@ -6718,13 +6751,17 @@ begin
   if N < 0 then
     Inc(N, Result);
   GoToPos(U[N]);
-  { selected as a click on it selects it: the whole object, its frame and handles }
+  { selected as a click on it selects it: the whole object, its frame and handles -- or, a picture in a drawing of
+    shapes (a canvas, a group), that shape of it, as a second click on it selects it }
   SetLength(FShapeMore, 0);
   FNodeOn := False;
   FShapeOn := True;
   FShapeAt := U[N];
-  FShapeSid := -1;
-  SelectObject(U[N]);
+  FShapeSid := ShapeOfPicture(U[N], R);
+  if FShapeSid < 0 then
+    SelectObject(U[N])
+  else
+    SetCaret(U[N], False);
   { its top near the view's: selected, the caret is at its foot and the view follows the caret, which for a figure
     taller than the view leaves its top out of sight. It stands on the baseline, as tall as it is shown }
   if (pd_layout_caret(FLayout, U[N], Page, X, Base, Asc, Desc) = PD_OK) and
