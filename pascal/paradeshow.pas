@@ -123,6 +123,28 @@ type
   TShowPhase = (spTrans, spPlay, spIdle, spEnd);
   TRectArray = array of TRect;
 
+  { a run of the slide's items as the frame drawn last has it, in the slide's px (y down): where each point of it as
+    the slide draws it is now (X' = M[0] X + M[2] Y + M[4], Y' = M[1] X + M[3] Y + M[5]), how see-through, how much of
+    it a filter shows (of its box Box, before M), and for a 'slide' filter how far its content is shifted (Shift,
+    before M, cut to Box) }
+  TShowPlace = record
+    Lo, Hi: Integer;
+    Target: Integer;                { -1: what is not animated }
+    M: array[0..5] of Double;
+    Opacity: Double;
+    Filter: string;                 { '' none (a fade is its opacity) }
+    FilterP: Double;
+    BoxX, BoxY, BoxW, BoxH: Double;
+    ShiftX, ShiftY: Double;
+  end;
+
+  { the frame drawn last: its slide's page, the items drawn on the paper as they are (0..BaseHi, -1 none), the rest }
+  TShowScene = record
+    Page: Integer;
+    BaseHi: Integer;
+    Places: array of TShowPlace;
+  end;
+
   TParadeShow = class
   private
     FEdit: TParadeEdit;
@@ -139,6 +161,8 @@ type
     FPrepared: Integer;
     FRuns: array of TShowRun;
     FBase: array of UInt32;             { the paper and the first run, when it is not animated }
+    FBaseHi: Integer;                   { that run's last item, -1 none }
+    FScene: TShowScene;
     FBoxes: array of TRect;             { each target's box on the slide, px }
     FFirstEntr: array of Boolean;       { its first effect brings it in: hidden until then }
     FLo, FHi: Integer;                  { RenderSlide's filter: the items it draws }
@@ -146,6 +170,7 @@ type
     FAPrepared: Integer;
     FARuns: array of TShowRun;
     FABase: array of UInt32;
+    FABaseHi: Integer;
     FABoxes: array of TRect;
     FAFirstEntr: array of Boolean;
     FAItems: TParadeDrawItems;
@@ -203,6 +228,11 @@ type
     { for a test: the slide's timing, and a target's box on the slide as it is drawn (px, in the slide) }
     function TimingOf(ShowIndex: Integer): TShowTiming;
     function TargetBox(Shape: Int32; Para: Integer = -1): TRect;
+    { the frame drawn last as what it is drawn from (for a PDF that draws it so: ParadeShowPdf) }
+    property Scene: TShowScene read FScene;
+    { the slide's size in the frame, px }
+    property SlideW: Integer read FSW;
+    property SlideH: Integer read FSH;
   end;
 
   TParadeShowForm = class(TForm)
@@ -242,6 +272,10 @@ function ParadeSlideShow(AEdit: TParadeEdit; FromSlide: Integer; AOnEnd: TNotify
 
 { the formulas of PowerPoint's keyframes: #ppt_x, #ppt_y, #ppt_w, #ppt_h, $ and pi, + - * / ^, sin, cos, ... }
 function ShowEval(const Expr: string; X, Y, W, H, Dollar: Double; out V: Double): Boolean;
+
+{ how much of a point a filter shows, P of the way in: XN, YN where it is in the target's box (0..1 each way), PX, PY
+  the frame's px it is drawn at }
+function FilterMask(const F: string; P, XN, YN: Double; PX, PY: Integer): Double;
 
 implementation
 
@@ -1368,6 +1402,7 @@ var
   Po: array of Integer;
 begin   { (the arrays' references, nothing copied) }
   SwapInt(FPrepared, FAPrepared);
+  SwapInt(FBaseHi, FABaseHi);
   R := FRuns; FRuns := FARuns; FARuns := R;
   U := FBase; FBase := FABase; FABase := U;
   Bx := FBoxes; FBoxes := FABoxes; FABoxes := Bx;
@@ -1424,6 +1459,7 @@ begin
     Exit;
   FPrepared := APos;
   FRuns := nil;
+  FBaseHi := -1;
   T := Timing(APos);
   Pg := -1;
   if (APos >= 0) and (APos < Length(FSlides)) then
@@ -1479,6 +1515,7 @@ begin
       FHi := Runs[0].RHi;
       K := 1;
     end;
+    FBaseHi := FHi;
     FEdit.RenderSlide(ImgW, Pg, Scale, clWhite, @KeepItem);
     for Y := 0 to FSH - 1 do
       Move(ImgW.GetDataLineStart(Y)^, FBase[Y * FSW], FSW * 4);
@@ -1845,6 +1882,7 @@ var
   Src: UInt32;
   Bx: TRect;
   Name: string;
+  Op: Double;
 begin
   Prepare(APos);
   T := Timing(APos);
@@ -1852,6 +1890,11 @@ begin
     Done := Min(Done, T.StepCount)
   else
     Done := 0;
+  FScene.Page := -1;
+  if (APos >= 0) and (APos < Length(FSlides)) then
+    FScene.Page := FEdit.SlidePage(FSlides[APos]);
+  FScene.BaseHi := FBaseHi;
+  FScene.Places := nil;
   Move(FBase[0], Px[0], Length(FBase) * 4);
   S := nil;
   if T <> nil then
@@ -1914,6 +1957,46 @@ begin
         Off := 1 - St.FilterP;   { comes in from an edge, within its box }
       Ident := (Abs(CCX - BCX) < 0.5) and (Abs(CCY - BCY) < 0.5) and (Abs(FX - 1) < 1e-3) and (Abs(FY - 1) < 1e-3) and
         (Abs(Sn) < 1e-4) and (Cs > 0) and (Name = '');
+      Op := M / 255;
+      SetLength(FScene.Places, Length(FScene.Places) + 1);
+      with FScene.Places[High(FScene.Places)] do
+      begin   { (what is drawn below, as the points it is drawn from: d = C + R F (s - B)) }
+        Lo := RLo;
+        Hi := RHi;
+        Target := RTarget;
+        if Ident then
+        begin
+          M[0] := 1; M[1] := 0; M[2] := 0; M[3] := 1; M[4] := 0; M[5] := 0;
+        end
+        else
+        begin
+          M[0] := Cs * FX;
+          M[1] := Sn * FX;
+          M[2] := -Sn * FY;
+          M[3] := Cs * FY;
+          M[4] := CCX - M[0] * BCX - M[2] * BCY;
+          M[5] := CCY - M[1] * BCX - M[3] * BCY;
+        end;
+        Opacity := Op;
+        Filter := St.Filter;
+        if (Name = '') or (Name = 'slide') then
+          Filter := '';
+        FilterP := St.FilterP;
+        BoxX := BL;
+        BoxY := BT;
+        BoxW := BWd;
+        BoxH := BHt;
+        ShiftX := 0;
+        ShiftY := 0;
+        if Off <> 0 then
+        begin
+          Filter := 'slide';
+          if Pos('Bottom', St.Filter) > 0 then ShiftY := -Off * BHt
+          else if Pos('Top', St.Filter) > 0 then ShiftY := Off * BHt
+          else if Pos('Left', St.Filter) > 0 then ShiftX := Off * BWd
+          else ShiftX := -Off * BWd;
+        end;
+      end;
       if Ident then
       begin   { where it was drawn: a pixel for a pixel }
         for Y := 0 to RH - 1 do

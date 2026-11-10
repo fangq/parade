@@ -2005,7 +2005,38 @@ static int page_hidden(const pd_layout* L, int32_t pg) {
            pd_doc_section_props(pd_layout_doc(L), pi.section, &sp) == PD_OK && sp.hidden;
 }
 
+static pd_status write_pdf(const pd_layout* L, const pd_pdf_options* opt, const pd_pdf_show* show, pd_writer fn,
+                           void* user);
+
 pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_writer fn, void* user) {
+    return write_pdf(L, opt, NULL, fn, user);
+}
+
+pd_status pd_layout_write_pdf_show(const pd_layout* L, const pd_pdf_options* opt, const pd_pdf_show* show,
+                                   pd_writer fn, void* user) {
+    int32_t i, n = L ? pd_layout_page_count(L) : 0;
+
+    if (!show || show->nparts < 0 || show->npages <= 0 || (show->nparts && !show->parts) || !show->pages) {
+        return PD_ERR_ARG;
+    }
+
+    for (i = 0; i < show->nparts; i++) {
+        if (show->parts[i].page < 0 || show->parts[i].page >= n) {
+            return PD_ERR_ARG;
+        }
+    }
+
+    for (i = 0; i < show->npages; i++) {
+        if (show->pages[i].page < 0 || show->pages[i].page >= n || !show->pages[i].content) {
+            return PD_ERR_ARG;
+        }
+    }
+
+    return write_pdf(L, opt, show, fn, user);
+}
+
+static pd_status write_pdf(const pd_layout* L, const pd_pdf_options* opt, const pd_pdf_show* show, pd_writer fn,
+                           void* user) {
     pd_pdf_options defaults;
     const pd_doc* d;
     pdfw w;
@@ -2015,6 +2046,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
     outline* outs = NULL;
     preslist R;
     int32_t catalog, pages_obj, res_obj, info_obj, outlines_obj = 0, *page_obj, *content_obj;
+    int32_t nstreams = show ? show->nparts : npages, *sp_obj = NULL, s;
     pd_status st = PD_OK;
 
     if (!L || !fn || npages <= 0) {
@@ -2024,6 +2056,15 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
     if (!opt) {
         pd_pdf_options_init(&defaults);
         opt = &defaults;
+    }
+
+    if (show && opt->outlines) {    /* a show's pages are not the layout's: no bookmarks to them */
+        if (opt != &defaults) {
+            defaults = *opt;
+            opt = &defaults;
+        }
+
+        defaults.outlines = 0;
     }
 
     d = pd_layout_doc(L);
@@ -2116,19 +2157,27 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
     pages_obj = new_obj(&w);
     res_obj = new_obj(&w);
     info_obj = new_obj(&w);
-    page_obj = (int32_t*)malloc((size_t)npages * sizeof(int32_t));
-    content_obj = (int32_t*)malloc((size_t)npages * sizeof(int32_t));
+    /* (a show: page_obj the parts' forms, sp_obj its pages and their content) */
+    page_obj = (int32_t*)malloc(((size_t)nstreams + 1) * sizeof(int32_t));
+    content_obj = (int32_t*)malloc(((size_t)nstreams + 1) * sizeof(int32_t));
+    sp_obj = show ? (int32_t*)malloc((size_t)show->npages * 2 * sizeof(int32_t)) : NULL;
 
-    if (!page_obj || !content_obj) {
+    if (!page_obj || !content_obj || (show && !sp_obj)) {
         free(page_obj);
         free(content_obj);
+        free(sp_obj);
         st = PD_ERR_NOMEM;
         goto done;
     }
 
-    for (pg = 0; pg < npages; pg++) {
+    for (pg = 0; pg < nstreams; pg++) {
         page_obj[pg] = new_obj(&w);
-        content_obj[pg] = new_obj(&w);
+        content_obj[pg] = show ? 0 : new_obj(&w);
+    }
+
+    for (pg = 0; show && pg < show->npages; pg++) {
+        sp_obj[2 * pg] = new_obj(&w);
+        sp_obj[2 * pg + 1] = new_obj(&w);
     }
 
     for (i = 0; i < nfonts; i++) {
@@ -2216,12 +2265,20 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
         w_fmt(&w, " /Outlines %d 0 R /PageMode /UseOutlines", (int)outlines_obj);
     }
 
+    if (show && show->catalog) {
+        w_fmt(&w, " %s", show->catalog);
+    }
+
     w_str(&w, " >>");
     end_obj(&w);
     begin_obj(&w, pages_obj);
     w_str(&w, "<< /Type /Pages /Kids [");
 
-    for (pg = 0, k = 0; pg < npages; pg++) {   /* a hidden slide's page left out */
+    for (pg = 0; show && pg < show->npages; pg++) {
+        w_fmt(&w, "%d 0 R ", (int)sp_obj[2 * pg]);
+    }
+
+    for (pg = 0, k = show ? show->npages : 0; !show && pg < npages; pg++) {   /* a hidden slide's page left out */
         if (!page_hidden(L, pg)) {
             w_fmt(&w, "%d 0 R ", (int)page_obj[pg]);
             k++;
@@ -2230,9 +2287,10 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
 
     w_fmt(&w, "] /Count %d >>", (int)k);
     end_obj(&w);
-    /* pages and their content */
-    for (pg = 0; pg < npages && !w.err; pg++) {
+    /* pages and their content (a show: its parts, each a form) */
+    for (s = 0; s < nstreams && !w.err; s++) {
         pd_page_info pi;
+        int32_t lo = 0, hi = 0x7FFFFFFF;
         pd_draw* it;
         int32_t n = 0;
         sbuf c;
@@ -2245,14 +2303,24 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
         int32_t cur_scale = 65536;  /* Tz, per page content stream */
         int in_text = 0, in_tj = 0, run_rot = 0;  /* (run_rot: the run is of a turned glyph) */
 
+        pg = show ? show->parts[s].page : s;
+
+        if (show) {
+            lo = show->parts[s].first;
+            hi = show->parts[s].last;
+        }
+
         memset(&c, 0, sizeof(c));
         pd_layout_page_info(L, pg, &pi);
         num(W, sizeof(W), pi.width);
         num(H, sizeof(H), pi.height);
-        begin_obj(&w, page_obj[pg]);
-        w_fmt(&w, "<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %s %s] /Resources %d 0 R /Contents %d 0 R >>",
-              (int)pages_obj, W, H, (int)res_obj, (int)content_obj[pg]);
-        end_obj(&w);
+
+        if (!show) {
+            begin_obj(&w, page_obj[pg]);
+            w_fmt(&w, "<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %s %s] /Resources %d 0 R /Contents %d 0 R >>",
+                  (int)pages_obj, W, H, (int)res_obj, (int)content_obj[pg]);
+            end_obj(&w);
+        }
 
         pd_layout_page_items(L, pg, NULL, 0, &n);
         it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
@@ -2264,7 +2332,7 @@ pd_status pd_layout_write_pdf(const pd_layout* L, const pd_pdf_options* opt, pd_
 
         pd_layout_page_items(L, pg, it, n, &n);
 
-        for (i = 0; i < n; i++) {
+        for (i = lo < 0 ? 0 : lo; i < n && i <= hi; i++) {
             const pd_draw* a = &it[i];
 
             if (a->kind != PD_DRAW_GLYPH || !a->font) {
@@ -2545,8 +2613,40 @@ path_done:
         }
 
         free(it);
-        stream_obj(&w, content_obj[pg], "", c.p ? c.p : "", c.n, opt->compress);
+
+        if (show) {
+            char dict[224];
+
+            snprintf(dict, sizeof(dict), "/Type /XObject /Subtype /Form /BBox [0 0 %s %s] /Resources %d 0 R%s", W, H,
+                     (int)res_obj, show->parts[s].group ? " /Group << /S /Transparency >>" : "");
+            stream_obj(&w, page_obj[s], dict, c.p ? c.p : "", c.n, opt->compress);
+        } else {
+            stream_obj(&w, content_obj[pg], "", c.p ? c.p : "", c.n, opt->compress);
+        }
+
         free(c.p);
+    }
+
+    /* a show's pages: the parts as each says */
+    for (pg = 0; show && pg < show->npages && !w.err; pg++) {
+        pd_page_info pi;
+        char W[32], H[32];
+
+        pd_layout_page_info(L, show->pages[pg].page, &pi);
+        num(W, sizeof(W), pi.width);
+        num(H, sizeof(H), pi.height);
+        begin_obj(&w, sp_obj[2 * pg]);
+        w_fmt(&w, "<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %s %s] /Resources %d 0 R /Contents %d 0 R",
+              (int)pages_obj, W, H, (int)res_obj, (int)sp_obj[2 * pg + 1]);
+
+        if (show->pages[pg].extra) {
+            w_fmt(&w, " %s", show->pages[pg].extra);
+        }
+
+        w_str(&w, " >>");
+        end_obj(&w);
+        stream_obj(&w, sp_obj[2 * pg + 1], "", show->pages[pg].content, strlen(show->pages[pg].content),
+                   opt->compress);
     }
 
     /* the resources, the shadings and the rest the pages made among them */
@@ -2570,11 +2670,19 @@ path_done:
               (int)(i / 16), (int)(i % 16 * 625));
     }
 
+    for (i = 0; show && i <= 255; i++) {     /* a show's opacities, in 255ths */
+        w_fmt(&w, " /GO%d << /ca %.4f /CA %.4f >>", (int)i, i / 255.0, i / 255.0);
+    }
+
     w_res(&w, &R, 'G', "SG");
     w_str(&w, " >> /XObject <<");
 
     for (i = 0; i < nimages; i++) {
         w_fmt(&w, " /Im%d %d 0 R", (int)i, (int)images[i].obj);
+    }
+
+    for (i = 0; show && i < show->nparts; i++) {
+        w_fmt(&w, " /P%d %d 0 R", (int)i, (int)page_obj[i]);
     }
 
     w_res(&w, &R, 'X', "Xo");
@@ -3021,6 +3129,7 @@ path_done:
     w_flush(&w);
     free(page_obj);
     free(content_obj);
+    free(sp_obj);
 
     if (w.err && st == PD_OK) {
         st = PD_ERR_IO;

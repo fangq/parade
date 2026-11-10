@@ -325,6 +325,36 @@ PD_API void pd_pdf_options_init(pd_pdf_options* options);
 PD_API pd_status pd_layout_write_pdf(const pd_layout* layout, const pd_pdf_options* options, pd_writer fn,
                                      void* user);
 
+/** a part of a page drawn on its own: items first..last of the page's display list, a form (/P<n>, n its index) */
+typedef struct {
+    int32_t page, first, last;
+    int32_t group;              /**< a transparency group: an opacity it is drawn with is the whole part's */
+} pd_pdf_part;
+
+/** a page of the PDF made of parts */
+typedef struct {
+    int32_t page;               /**< the layout's page whose size it has */
+    const char* content;        /**< its content stream: the parts as /P<n>, opacities as /GO0../GO255 (n/255) */
+    const char* extra;          /**< more of the page's dictionary (/Dur 0.05 /Trans << .. >>), or NULL */
+} pd_pdf_show_page;
+
+typedef struct {
+    const pd_pdf_part* parts;
+    int32_t nparts;
+    const pd_pdf_show_page* pages;
+    int32_t npages;
+    const char* catalog;        /**< more of the catalog's dictionary (/PageMode /FullScreen), or NULL */
+} pd_pdf_show;
+
+/**
+ * Write a PDF of pages made of parts of the layout's pages, each part
+ * written once (fonts, images and all as pd_layout_write_pdf has them) and
+ * drawn by any page as its content says: moved, turned, cut or see-through,
+ * an animation as pages shown one after another. No bookmarks.
+ */
+PD_API pd_status pd_layout_write_pdf_show(const pd_layout* layout, const pd_pdf_options* options,
+                                          const pd_pdf_show* show, pd_writer fn, void* user);
+
 #ifdef __cplusplus
 }
 #endif

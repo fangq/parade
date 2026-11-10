@@ -325,6 +325,58 @@ int main(void) {
         }
     }
 
+    /* a show: the page cut in two parts, each a form written once; two pages that draw them, the second the latter
+       part moved and half see-through, shown 50 ms */
+    {
+        pd_pdf_part parts[2];
+        pd_pdf_show_page pages[2];
+        pd_pdf_show show;
+        buf_t v = { NULL, 0 };
+        int32_t n = 0;
+        size_t k, forms = 0;
+
+        pd_layout_page_items(L, 0, NULL, 0, &n);
+        parts[0].page = 0;
+        parts[0].first = 0;
+        parts[0].last = n / 2 - 1;
+        parts[0].group = 0;
+        parts[1].page = 0;
+        parts[1].first = n / 2;
+        parts[1].last = n - 1;
+        parts[1].group = 1;
+        pages[0].page = 0;
+        pages[0].content = "/P0 Do /P1 Do";
+        pages[0].extra = NULL;
+        pages[1].page = 0;
+        pages[1].content = "/P0 Do q /GO128 gs 1 0 0 1 10 0 cm /P1 Do Q";
+        pages[1].extra = "/Dur 0.05";
+        memset(&show, 0, sizeof(show));
+        show.parts = parts;
+        show.nparts = 2;
+        show.pages = pages;
+        show.npages = 2;
+        show.catalog = "/PageMode /FullScreen";
+        CHECK(pd_layout_write_pdf_show(L, &opt, &show, sink, &v) == PD_OK);
+        CHECK(v.n > 1000 && xref_ok(&v));
+
+        for (k = 0; k + 14 <= v.n; k++) {
+            forms += memcmp(v.p + k, "/Subtype /Form", 14) == 0;
+        }
+
+        CHECK(forms == 2);
+        CHECK(has(&v, "/Group << /S /Transparency >>") && has(&v, "/P1 "));
+        CHECK(has(&v, "/GO128 << /ca 0.5020") && has(&v, "/Dur 0.05 >>") && has(&v, "/Count 2 >>"));
+        CHECK(has(&v, "/PageMode /FullScreen") && !has(&v, "/Outlines"));
+        CHECK(has(&v, "/P0 Do q /GO128 gs 1 0 0 1 10 0 cm /P1 Do Q"));
+        CHECK(has(&v, "/FontFile2") && has(&v, "/DCTDecode"));   /* what the parts draw, as the pages have it */
+        pages[1].page = 5;
+        CHECK(pd_layout_write_pdf_show(L, &opt, &show, sink, &v) == PD_ERR_ARG);
+        pages[1].page = 0;
+        pages[1].content = NULL;
+        CHECK(pd_layout_write_pdf_show(L, &opt, &show, sink, &v) == PD_ERR_ARG);
+        free(v.p);
+    }
+
     free(a.p);
     free(b.p);
     free(u.p);

@@ -902,6 +902,26 @@ type
   end;
   Ppd_pdf_options = ^pd_pdf_options;
 
+  pd_pdf_part = record
+    page, first, last, group: Int32;
+  end;
+  Ppd_pdf_part = ^pd_pdf_part;
+
+  pd_pdf_show_page = record
+    page: Int32;
+    content, extra: PAnsiChar;
+  end;
+  Ppd_pdf_show_page = ^pd_pdf_show_page;
+
+  pd_pdf_show = record
+    parts: Ppd_pdf_part;
+    nparts: Int32;
+    pages: Ppd_pdf_show_page;
+    npages: Int32;
+    catalog: PAnsiChar;
+  end;
+  Ppd_pdf_show = ^pd_pdf_show;
+
 { ---- parade.h ---- }
 function pd_version: PAnsiChar; cdecl; PDEXT;
 function pd_status_string(s: pd_status): PAnsiChar; cdecl; PDEXT;
@@ -1126,6 +1146,8 @@ function pd_layout_caret_step(layout: Ppd_layout; pos: pd_pos; dir: Int32; out r
 
 procedure pd_pdf_options_init(out options: pd_pdf_options); cdecl; PDEXT;
 function pd_layout_write_pdf(layout: Ppd_layout; options: Ppd_pdf_options; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+function pd_layout_write_pdf_show(layout: Ppd_layout; options: Ppd_pdf_options; show: Ppd_pdf_show; fn: pd_writer;
+  user: Pointer): pd_status; cdecl; PDEXT;
 function pd_layout_write_svg(layout: Ppd_layout; page: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 function pd_drawing_to_svg(doc: Ppd_doc; res: pd_res_id; width, height: pd_sp; fn: pd_writer;
   user: Pointer): pd_status; cdecl; PDEXT;

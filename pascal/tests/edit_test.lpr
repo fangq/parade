@@ -1945,18 +1945,287 @@ end;
 
 { the show as a PDF that plays it (paradeshowpdf): a page for each still state and for each frame while an effect
   plays, the transition the page's; the last page, drawn by a PDF viewer, the show's last frame }
+type
+  TRgb = array of Byte;
+
+{ page Page of the PDF Fn as Ghostscript draws it at 80 dpi (the 10-inch page 800 by 450 px), RGB; nil if it cannot }
+function GsPage(const Fn: string; Page: Integer; const Tmp: string): TRgb;
+var
+  F: TFileStream;
+  Data: array of Byte;
+  Out_: string;
+  P, Off: Integer;
+begin
+  Result := nil;
+  RunCommand('/usr/bin/gs', ['-q', '-dNOPAUSE', '-dBATCH', '-dSAFER', '-sDEVICE=ppmraw', '-r80', '-dFirstPage=' +
+    IntToStr(Page), '-dLastPage=' + IntToStr(Page), '-sOutputFile=' + Tmp + '.ppm', Fn], Out_);
+  if not FileExists(Tmp + '.ppm') then
+    Exit;
+  F := TFileStream.Create(Tmp + '.ppm', fmOpenRead);
+  try
+    SetLength(Data, F.Size);
+    F.ReadBuffer(Data[0], F.Size);
+  finally
+    F.Free;
+  end;
+  DeleteFile(Tmp + '.ppm');
+  Off := 0;
+  for P := 1 to 4 do   { past P6, its width, height and 255 (and any # comment between) }
+  begin
+    while (Off < Length(Data)) and ((Data[Off] in [9, 10, 13, 32]) or (Data[Off] = Ord('#'))) do
+      if Data[Off] = Ord('#') then
+        while (Off < Length(Data)) and (Data[Off] <> 10) do Inc(Off)
+      else
+        Inc(Off);
+    while (Off < Length(Data)) and not (Data[Off] in [9, 10, 13, 32]) do
+      Inc(Off);
+  end;
+  Inc(Off);
+  if Length(Data) - Off <> 800 * 450 * 3 then
+    Exit;
+  Result := Copy(Data, Off, 800 * 450 * 3);
+end;
+
+function FrameRgb(S: TParadeShow): TRgb;
+var
+  X, Y: Integer;
+  C: UInt32;
+begin
+  SetLength(Result, 800 * 450 * 3);
+  for Y := 0 to 449 do
+    for X := 0 to 799 do
+    begin
+      C := PUInt32(S.Frame.GetDataLineStart(Y))[X];
+      Result[(Y * 800 + X) * 3] := (C shr 16) and $FF;
+      Result[(Y * 800 + X) * 3 + 1] := (C shr 8) and $FF;
+      Result[(Y * 800 + X) * 3 + 2] := C and $FF;
+    end;
+end;
+
+{ how many px of A within R are far from B, a px either way forgiven (two renderers each smooth an edge its own
+  way); -1 when either is missing }
+function PxOff(const A, B: TRgb; const R: TRect): Integer;
+var
+  P, Q, X, Y, DX, DY, D, Best: Integer;
+begin
+  if (Length(A) <> 800 * 450 * 3) or (Length(B) <> Length(A)) then
+    Exit(-1);
+  Result := 0;
+  for Y := Max(0, R.Top) to Min(449, R.Bottom - 1) do
+    for X := Max(0, R.Left) to Min(799, R.Right - 1) do
+    begin
+      Q := (Y * 800 + X) * 3;
+      Best := MaxInt;
+      for DY := Max(0, Y - 1) to Min(449, Y + 1) do
+        for DX := Max(0, X - 1) to Min(799, X + 1) do
+        begin
+          P := (DY * 800 + DX) * 3;
+          D := Abs(Integer(A[P]) - B[Q]) + Abs(Integer(A[P + 1]) - B[Q + 1]) + Abs(Integer(A[P + 2]) - B[Q + 2]);
+          Best := Min(Best, D);
+        end;
+      if Best > 60 then
+        Inc(Result);
+    end;
+end;
+
+{ the page of the PDF Fn, among its pages First..Last, most like the show's frame within R: its number, how many
+  px of it are far off (Off), and of the page next most like it (Next) }
+function BestPage(const Fn: string; First, Last: Integer; const Frame: TRgb; const R: TRect; const Tmp: string;
+  out Off, Next: Integer): Integer;
+var
+  P, D: Integer;
+begin
+  Result := -1;
+  Off := MaxInt;
+  Next := MaxInt;
+  for P := First to Last do
+  begin
+    D := PxOff(GsPage(Fn, P, Tmp), Frame, R);
+    if D < 0 then
+      Continue;
+    if D < Off then
+    begin
+      Next := Off;
+      Off := D;
+      Result := P;
+    end
+    else if D < Next then
+      Next := D;
+  end;
+end;
+
+{ whether the point X, Y is inside a clip path as ShowFilterClip writes it (m l c re h, then W n or W* n) }
+function InClip(const Path: string; X, Y: Double): Boolean;
+var
+  Tok: TStringList;
+  Nums: array of Double;
+  Polys: array of array of Double;
+  I, J, K, Wind, Cross: Integer;
+  T, X0, Y0, X1, Y1, AX, AY: Double;
+  EvenOdd: Boolean;
+  DotFmt: TFormatSettings;
+
+  procedure Pt(PX, PY: Double);
+  begin
+    if Length(Polys) = 0 then
+      SetLength(Polys, 1);
+    Polys[High(Polys)] := Concat(Polys[High(Polys)], [PX, PY]);
+  end;
+
+begin
+  Result := False;
+  DotFmt := DefaultFormatSettings;
+  DotFmt.DecimalSeparator := '.';
+  EvenOdd := Pos('W*', Path) > 0;
+  Tok := TStringList.Create;
+  try
+    Tok.Delimiter := ' ';
+    Tok.StrictDelimiter := True;
+    Tok.DelimitedText := Trim(Path);
+    Nums := nil;
+    Polys := nil;
+    AX := 0; AY := 0;
+    for I := 0 to Tok.Count - 1 do
+    begin
+      if Tok[I] = '' then
+        Continue;
+      if Tok[I] = 'm' then
+      begin
+        SetLength(Polys, Length(Polys) + 1);
+        Pt(Nums[0], Nums[1]);
+        AX := Nums[0]; AY := Nums[1];
+      end
+      else if Tok[I] = 'l' then
+      begin
+        Pt(Nums[0], Nums[1]);
+        AX := Nums[0]; AY := Nums[1];
+      end
+      else if Tok[I] = 'c' then
+      begin
+        for K := 1 to 16 do
+        begin
+          T := K / 16;
+          Pt(Power(1 - T, 3) * AX + 3 * Sqr(1 - T) * T * Nums[0] + 3 * (1 - T) * Sqr(T) * Nums[2] + Power(T, 3) * Nums[4],
+            Power(1 - T, 3) * AY + 3 * Sqr(1 - T) * T * Nums[1] + 3 * (1 - T) * Sqr(T) * Nums[3] + Power(T, 3) * Nums[5]);
+        end;
+        AX := Nums[4]; AY := Nums[5];
+      end
+      else if Tok[I] = 're' then
+      begin
+        SetLength(Polys, Length(Polys) + 1);
+        Pt(Nums[0], Nums[1]);
+        Pt(Nums[0] + Nums[2], Nums[1]);
+        Pt(Nums[0] + Nums[2], Nums[1] + Nums[3]);
+        Pt(Nums[0], Nums[1] + Nums[3]);
+      end
+      else if (Tok[I] = 'h') or (Tok[I] = 'W') or (Tok[I] = 'W*') or (Tok[I] = 'n') then
+      else
+      begin
+        SetLength(Nums, Length(Nums) + 1);
+        Nums[High(Nums)] := StrToFloat(Tok[I], DotFmt);
+        Continue;
+      end;
+      Nums := nil;
+    end;
+  finally
+    Tok.Free;
+  end;
+  Wind := 0;
+  Cross := 0;
+  for J := 0 to High(Polys) do
+    for K := 0 to Length(Polys[J]) div 2 - 1 do
+    begin
+      X0 := Polys[J][2 * K]; Y0 := Polys[J][2 * K + 1];
+      X1 := Polys[J][(2 * K + 2) mod Length(Polys[J])]; Y1 := Polys[J][(2 * K + 3) mod Length(Polys[J])];
+      if (Y0 <= Y) <> (Y1 <= Y) then
+        if X0 + (Y - Y0) * (X1 - X0) / (Y1 - Y0) > X then
+        begin
+          Inc(Cross);
+          if Y1 > Y0 then Inc(Wind) else Dec(Wind);
+        end;
+    end;
+  if EvenOdd then
+    Result := Odd(Cross)
+  else
+    Result := Wind <> 0;
+end;
+
+{ each filter's clip, as the PDF cuts with it: what the show's own mask shows, point for point (but at its edges) }
+procedure TestShowFilterClips;
+const
+  Filters: array[0..31] of string = ('wipe(up)', 'wipe(down)', 'wipe(left)', 'wipe(right)', 'barn(inVertical)',
+    'barn(outVertical)', 'barn(inHorizontal)', 'barn(outHorizontal)', 'blinds(horizontal)', 'blinds(vertical)',
+    'box(in)', 'box(out)', 'circle(in)', 'circle(out)', 'diamond(in)', 'diamond(out)', 'plus(in)', 'plus(out)',
+    'checkerboard(across)', 'checkerboard(down)', 'randombar(horizontal)', 'randombar(vertical)', 'strips(downLeft)',
+    'strips(upLeft)', 'strips(upRight)', 'strips(downRight)', 'wedge', 'wheel(1)', 'wheel(2)', 'wheel(4)', 'wheel(8)',
+    'slide');
+  Ps: array[0..3] of Double = (0.1, 0.37, 0.5, 0.83);
+var
+  Pl: TShowPlace;
+  F, PI_, X, Y, DX, DY, Bad, Tested: Integer;
+  Clip: string;
+  Dest, Want, Edge: Boolean;
+  Msk: array[0..99, 0..99] of Boolean;
+  Worst: string;
+begin
+  FillChar(Pl, SizeOf(Pl), 0);
+  Pl.BoxW := 100;
+  Pl.BoxH := 100;
+  Bad := 0;
+  Tested := 0;
+  Worst := '';
+  for F := 0 to High(Filters) do
+    for PI_ := 0 to High(Ps) do
+    begin
+      Pl.Filter := Filters[F];
+      Pl.FilterP := Ps[PI_];
+      Clip := ShowFilterClip(Pl, 100, 100, Dest);
+      if Clip = '' then
+      begin
+        Inc(Bad);
+        Worst := Worst + ' ' + Filters[F] + ': no clip';
+        Continue;
+      end;
+      for Y := 0 to 99 do
+        for X := 0 to 99 do
+          if Filters[F] = 'slide' then
+            Msk[Y, X] := True
+          else
+            Msk[Y, X] := FilterMask(Filters[F], Ps[PI_], (X + 0.37) / 100, (Y + 0.61) / 100, X, Y) > 0;
+      for Y := 0 to 99 do
+        for X := 0 to 99 do
+        begin
+          Edge := False;
+          for DY := Max(0, Y - 1) to Min(99, Y + 1) do
+            for DX := Max(0, X - 1) to Min(99, X + 1) do
+              if Msk[DY, DX] <> Msk[Y, X] then
+                Edge := True;
+          if Edge then
+            Continue;
+          Want := Msk[Y, X];
+          Inc(Tested);
+          if InClip(Clip, X + 0.37, Y + 0.61) <> Want then   { (off the middle: none on a spoke) }
+          begin
+            Inc(Bad);
+            if Length(Worst) < 300 then
+              Worst := Worst + Format(' %s %.2f at %d,%d', [Filters[F], Ps[PI_], X, Y]);
+            Break;
+          end;
+        end;
+    end;
+  Check((Bad = 0) and (Tested > 32 * 4 * 8000), Format('each filter''s cut as the PDF has it: what the show shows of '
+    + 'its box (%d of %d points off:%s)', [Bad, Tested, Worst]));
+end;
+
 procedure TestShowPdf(E: TParadeEdit);
 var
   Opt: TShowPdfOptions;
-  Err, Fn, Txt, Out_, Ppm: string;
+  Err, Fn, Txt, Ppm, Stat: string;
   S: TParadeShow;
   Raw: TStringList;
-  F: TFileStream;
-  Data: array of Byte;
-  P, X, Y, NDur, Off: Integer;
-  Diff, Big: Int64;
-  C: UInt32;
-  BX0, BY0, BX1, BY1: Integer;
+  P, NDur, Off, NextOff: Integer;
+  Big: Int64;
+  Box: TRect;
 begin
   E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/anim.pptx');
   Fn := GetTempDir + 'edit_showpdf_' + IntToStr(GetProcessID) + '.pdf';
@@ -1986,69 +2255,62 @@ begin
   Check((Pos('/Trans << /Type /Trans /S /Push /D 1 /Di 0 >>', Txt) > 0) and (Pos('/PageMode /FullScreen', Txt) > 0) and
     (Pos('/Count ' + IntToStr(ShowPdfPages) + ' ', Txt) > 0), 'the second slide pushed in from the left, as PDF has it; '
     + 'it opens full screen');
+  { drawn as the slides are: forms, placed; no picture of a frame (800 px wide), only the deck's own and a shadow's }
+  Check((Pos('/Subtype /Form', Txt) > 0) and (Pos('/Subtype /Image', Txt) > 0) and (Pos('/Width 800 ', Txt) = 0) and
+    (Pos('/P0 ', Txt) > 0),
+    'the pages draw the slides'' own text and shapes, no pictures of them');
+  Check(Length(Txt) < 200000, Format('a frame costs little: %d bytes for %d pages', [Length(Txt), ShowPdfPages]));
   if FileExists('/usr/bin/gs') then
-  begin   { (Ghostscript: at 80 dpi the 10-inch page's pictures pixel for pixel, none smoothed) }
+  begin
     Ppm := GetTempDir + 'edit_showpdf_' + IntToStr(GetProcessID);
-    RunCommand('/usr/bin/gs', ['-q', '-dNOPAUSE', '-dBATCH', '-dSAFER', '-sDEVICE=ppmraw', '-r80', '-dFirstPage=' +
-      IntToStr(ShowPdfPages), '-dLastPage=' + IntToStr(ShowPdfPages), '-sOutputFile=' + Ppm + '.ppm', Fn], Out_);
+    Stat := Ppm + '_static.pdf';
+    E.ExportPDF(Stat);
     S := TParadeShow.Create(E, 800, 450, 0);
     try
       S.Start(0);
-      S.Next(100); S.Next(200); S.Next(1000); S.Next(2000);
+      S.Next(100); S.Next(200); S.Next(1000);
+      S.Tick(1250);   { the box half way up from below the slide, the oval half faded: a page draws it so }
+      Box := S.TargetBox(4);
+      Box := Rect(Box.Left - 4, Box.Top - 4, Box.Right + 4, 450);
+      { (its text, Ghostscript's glyphs, a few hundred px off; the frames before and after it thousands) }
+      P := BestPage(Fn, 1, ShowPdfPages - 25, FrameRgb(S), Box, Ppm, Off, NextOff);
+      Check((P > 0) and (Off < 1000) and (Off * 4 < NextOff), Format('the box flying in, half way: page %d as the '
+        + 'show has it (%d px far off, the next most like it %d)', [P, Off, NextOff]));
+      Box := S.TargetBox(5);   { the oval, as it fades out: half see-through }
+      Box := Rect(Box.Left - 4, Box.Top - 4, Box.Right + 4, Box.Bottom + 4);
+      P := BestPage(Fn, 1, ShowPdfPages - 25, FrameRgb(S), Box, Ppm, Off, NextOff);
+      { (a frame of a fade is much as the next: only how near; drawn opaque it is thousands off) }
+      Check((P > 0) and (Off < 1000), Format('the oval half faded: page %d as the show has it (%d px far off)',
+        [P, Off]));
+      S.Next(2000);
+      S.Tick(2250);   { the gradient box a quarter turned }
+      Box := S.TargetBox(8);
+      Box := Rect(Box.Left - Box.Width div 3, Box.Top - Box.Height div 3, Box.Right + Box.Width div 3,
+        Box.Bottom + Box.Height div 3);
+      P := BestPage(Fn, 1, ShowPdfPages - 25, FrameRgb(S), Box, Ppm, Off, NextOff);
+      Check((P > 0) and (Off < 1000) and (Off * 4 < NextOff), Format('the box turning, a quarter of the way: page %d '
+        + 'as the show has it (%d px far off, the next most like it %d)', [P, Off, NextOff]));
       S.Tick(3100);
       S.Next(5000);
       S.Tick(6100);   { the second slide: its push and its wipe played }
       S.Tick(6700);
       S.Next(7000);
-      S.Tick(8200);   { and its group's wheel }
-      Diff := -1;
-      Big := 0;
-      BX0 := MaxInt; BY0 := MaxInt; BX1 := -1; BY1 := -1;
-      if FileExists(Ppm + '.ppm') then
-      begin
-        F := TFileStream.Create(Ppm + '.ppm', fmOpenRead);
-        try
-          SetLength(Data, F.Size);
-          F.ReadBuffer(Data[0], F.Size);
-        finally
-          F.Free;
-        end;
-        DeleteFile(Ppm + '.ppm');
-        Off := 0;
-        for P := 1 to 4 do   { past P6, its width, height and 255 (and any # comment between) }
-        begin
-          while (Off < Length(Data)) and ((Data[Off] in [9, 10, 13, 32]) or (Data[Off] = Ord('#'))) do
-            if Data[Off] = Ord('#') then
-              while (Off < Length(Data)) and (Data[Off] <> 10) do Inc(Off)
-            else
-              Inc(Off);
-          while (Off < Length(Data)) and not (Data[Off] in [9, 10, 13, 32]) do Inc(Off);
-        end;
-        Inc(Off);
-        if Length(Data) - Off = 800 * 450 * 3 then
-        begin
-          Diff := 0;
-          for Y := 0 to 449 do
-            for X := 0 to 799 do
-            begin
-              C := PUInt32(S.Frame.GetDataLineStart(Y))[X];
-              P := Abs(Integer(Data[Off + (Y * 800 + X) * 3]) - Integer((C shr 16) and $FF)) +
-                Abs(Integer(Data[Off + (Y * 800 + X) * 3 + 1]) - Integer((C shr 8) and $FF)) +
-                Abs(Integer(Data[Off + (Y * 800 + X) * 3 + 2]) - Integer(C and $FF));
-              Inc(Diff, P);
-              if P > 60 then
-              begin
-                Inc(Big);
-                BX0 := Min(BX0, X); BY0 := Min(BY0, Y); BX1 := Max(BX1, X); BY1 := Max(BY1, Y);
-              end;
-            end;
-        end;
-      end;
-      Check((Diff = 0) and (Big = 0), Format('the last page as a viewer '
-        + 'draws it: the show''s last frame (%d off in all, %d px far off, in %d,%d-%d,%d)', [Diff, Big, BX0, BY0,
-        BX1, BY1]));
+      S.Tick(7500);   { its group's wheel half way round: the page ten frames (of 50 ms) before the last }
+      Box := S.TargetBox(9);
+      Check(Box.Width > 50, 'the group''s box');
+      Box := Rect(Box.Left - 4, Box.Top - 4, Box.Right + 4, Box.Bottom + 4);
+      Big := PxOff(GsPage(Fn, ShowPdfPages - 10, Ppm), FrameRgb(S), Box);
+      Check((Big >= 0) and (Big < 20), Format('the wheel half way, as a viewer draws its page: the show''s frame then '
+        + '(%d px far off, past a px of edge)', [Big]));
+      Big := PxOff(GsPage(Fn, ShowPdfPages - 15, Ppm), FrameRgb(S), Box);
+      Check(Big > 200, Format('(and the page a quarter round is not that frame: %d px off)', [Big]));
+      { played: the slide as it is, the slides' own PDF's page as the same viewer draws it }
+      Big := PxOff(GsPage(Fn, ShowPdfPages, Ppm), GsPage(Stat, 2, Ppm), Rect(0, 0, 800, 450));
+      Check((Big >= 0) and (Big < 20), Format('the last page: the second slide as the slides'' PDF has it (%d px far '
+        + 'off)', [Big]));
     finally
       S.Free;
+      DeleteFile(Stat);
     end;
   end;
   DeleteFile(Fn);
@@ -4049,6 +4311,7 @@ begin
   Step('slide show');
   TestSlideShow(E);
   TestShowPdf(E);
+  TestShowFilterClips;
   Step('animations edited');
   TestAnimEdit(E);
   Step('balloons in place');
