@@ -147,6 +147,8 @@ void bld_set_format(pd_bld* b, const pd_char_props* cp);
 /* the format set last as the current paragraph's, when it has no text: its empty line's size */
 void bld_mark_format(pd_bld* b);
 void pd_doc_set_mark_format(pd_doc* d, pd_block_id para, pd_format_id fmt);
+/* an empty paragraph's format (its mark's, as read from a file); 0 for one with text, or none */
+pd_format_id pd_doc_mark_format(const pd_doc* d, pd_block_id para);
 /* containers */
 void bld_table_begin(pd_bld* b);
 void bld_row_begin(pd_bld* b, int header);

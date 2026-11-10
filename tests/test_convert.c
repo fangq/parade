@@ -2815,6 +2815,35 @@ static void test_docx_preset_adjust(void) {
     }
 }
 
+/* An empty paragraph's mark sized smaller than its style (a table's empty cells at 8 points): written back in its
+   w:pPr's w:rPr, so read again it is as tall as it was -- not at the style's size, every row of the table taller */
+static void test_docx_empty_mark_size(void) {
+    pd_doc* d = docx_doc("word/document.xml",
+                         "<w:document xmlns:w=\"w\"><w:body><w:p><w:pPr><w:rPr><w:sz w:val=\"16\"/></w:rPr></w:pPr></w:p>"
+                         "<w:p><w:r><w:t>Text.</w:t></w:r></w:p></w:body></w:document>", NULL);
+    int pass;
+
+    CHECK(d != NULL);
+
+    for (pass = 0; pass < 2 && d; pass++) {     /* written, read back, written again */
+        buf_t b = { NULL, 0 };
+        size_t n = 0;
+        char* x;
+        pd_doc* e = NULL;
+
+        CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        x = b.p ? (char*)pd_zip_get((const unsigned char*)b.p, b.n, "word/document.xml", &n) : NULL;
+        CHECK(x && has_mem(x, n, "<w:rPr><w:sz w:val=\"16\"/></w:rPr></w:pPr></w:p>"));
+        free(x);
+        CHECK(b.p && pd_doc_import(b.p, b.n, PD_CONV_DOCX, &e) == PD_OK);
+        free(b.p);
+        pd_doc_free(d);
+        d = e;
+    }
+
+    pd_doc_free(d);
+}
+
 /* A canvas Word wrote with its VML fallback beside it: the fallback kept for readers without DrawingML (Word 2007),
    but not the o:gfxdata on its shapes -- the DrawingML of the whole drawing again, pictures and all, in base64,
    for Word 2007 to carry through a save, never shown. Written back without it, the VML otherwise as it was. */
@@ -11587,6 +11616,7 @@ int main(void) {
     printf("docx floats\n");
     test_docx_floats();
     test_docx_duplicate_media();
+    test_docx_empty_mark_size();
     printf("docx writer\n");
     test_docx_writer();
     printf("docx character effects\n");

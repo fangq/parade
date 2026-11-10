@@ -4138,6 +4138,12 @@ void pd_doc_set_mark_format(pd_doc* d, pd_block_id para, pd_format_id fmt) {
     }
 }
 
+pd_format_id pd_doc_mark_format(const pd_doc* d, pd_block_id para) {
+    blk* b = d ? para_of(d, para) : NULL;
+
+    return b && b->st.len == 0 ? b->st.empty_format : 0;
+}
+
 pd_status pd_doc_set_format(pd_doc* d, pd_range r, pd_format_id fmt) {
     return d && format_of(d, fmt) ? for_range(d, r, 3, NULL, 0, (pd_style_id)fmt, "Format") : PD_ERR_ARG;
 }

@@ -2738,13 +2738,46 @@ static void dx_para(dxo* x, pd_block_id p, const char* extra_ppr) {
     }
 
     {
-        /* its mark inserted or deleted */
+        /* its mark: inserted or deleted, and an empty paragraph's format -- what its line is sized by (a table's
+           empty cells at 8 points, which at the style's size made every row taller when read back) */
         pd_para_attrs pat;
+        pd_format_id mf = pd_doc_mark_format(x->d, p);
+        int rev = pd_doc_para_attrs(x->d, p, &pat) == PD_OK && pat.mark_rev;
+        size_t at = o->n;
 
-        if (pd_doc_para_attrs(x->d, p, &pat) == PD_OK && pat.mark_rev) {
+        if (rev || mf) {
             pb_puts(o, "<w:rPr>");
-            dx_rev_mark(x, pat.mark_rev, NULL);
-            pb_puts(o, "</w:rPr>");
+
+            if (rev) {
+                dx_rev_mark(x, pat.mark_rev, NULL);
+            }
+
+            if (mf) {
+                pd_char_props mc, base;
+                pd_buf tb;
+                pd_buf* o0 = x->o;
+
+                memset(&tb, 0, sizeof(tb));
+
+                if (pd_doc_format_resolve(x->d, p, mf, &mc) == PD_OK) {
+                    pd_conv_base_props(x->d, p, &base);
+                    x->o = &tb;
+                    dx_rpr(x, &mc, &base, NULL);    /* <w:rPr>...</w:rPr>, or nothing when it is the base */
+                    x->o = o0;
+
+                    if (tb.n > 15) {
+                        pb_put(o, tb.p + 7, tb.n - 15);
+                    }
+                }
+
+                pb_free(&tb);
+            }
+
+            if (o->n == at + 7) {
+                o->n = at;  /* nothing to say */
+            } else {
+                pb_puts(o, "</w:rPr>");
+            }
         }
     }
 
