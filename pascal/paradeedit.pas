@@ -88,6 +88,13 @@ type
     Story: pd_block_id;      { a text box's: the story of its text; 0 for a shape without }
   end;
   TParadeShapeBoxes = array of TParadeShapeBox;
+  { a placeholder of a slide's layout: its type and idx, where it is (EMU, 0 wide when neither it nor the master's
+    of its kind says) }
+  TParadeLayoutPh = record
+    Typ, Idx: string;
+    X, Y, W, H: Double;
+  end;
+  TParadeLayoutPhs = array of TParadeLayoutPh;
   { what a right click is on, for a menu of its own (TParadeEdit.ContextAt): several can hold at once -- a field in
     a table, a link in a comment's text -- and the host's menu offers each one's commands }
   TParadeContext = record
@@ -405,6 +412,8 @@ type
     { a text box's edge under a point of the page (sp), in the drawing at D: its shape, or -1 }
     function TextBoxEdgeAt(const D: pd_pos; SX, SY: pd_sp): Integer;
     procedure PaintTextBoxFrame;
+    procedure PaintPlaceholderPrompts;
+    function KeptPartData(const AName: string): string;
     procedure PaintSizeHandles(L, T, R, B: Integer);
     procedure PaintRotHandle(const P: TPoint);
     { a press on a handle of the text box being typed in: the box selected, and sized or turned by the drag }
@@ -740,6 +749,24 @@ type
     { a slide's page at the top of the view, the selection as it is }
     procedure ShowSlide(Index: Integer);
     function NewSlide(After: Integer; Copy: Boolean = False): Boolean;
+    { PowerPoint's New Slide (Ctrl+M): after slide After, on its layout -- the master's and the layout's shapes as
+      it has them, its placeholders (title, subtitle, content ...) empty, nothing else of its own; one step }
+    function NewLayoutSlide(After: Integer): Boolean;
+    { the slide's placeholders back where its layout has them, their text kept (PowerPoint's Reset) }
+    function ResetSlide(Index: Integer): Boolean;
+    { the layout part the slide is on (ppt/slideLayouts/...), as the presentation came; '' none known }
+    function SlideLayoutPath(Index: Integer): string;
+    { the placeholders of the slide's layout, placed where the layout or its master has them; False when the layout
+      is not known (a presentation not read from PowerPoint's) }
+    function LayoutPlaceholders(Index: Integer; out Phs: TParadeLayoutPhs): Boolean;
+    { of a layout's placeholders, the one a slide's placeholder (type, idx) is: by its idx, else by its kind
+      (a title a title, a body a subtitle or content); -1 none }
+    class function MatchPlaceholder(const Phs: TParadeLayoutPhs; const PhType, PhIdx: string): Integer;
+    { the placeholder a shape of the drawing at D is, as the slide it came from had it: its type (title,
+      ctrTitle, subTitle, body, obj ...; '' none given) and idx; False when it is none }
+    function PlaceholderOf(const D: pd_pos; Sid: Integer; out PhType, PhIdx: string): Boolean;
+    { the prompt an empty placeholder of that type shows: 'Click to add title' ... }
+    class function PlaceholderPrompt(const PhType: string): string;
     function DeleteSlide(Index: Integer): Boolean;
     function MoveSlide(Index, ToIndex: Integer): Boolean;
     { the selected drawing is a canvas (made here, or read from Word) shapes can go into }
@@ -11260,6 +11287,448 @@ begin
     Result := '';
 end;
 
+{ the pd:sp mark of element E of a drawing's XML: where it came from, the placeholder it is }
+function MarkOf(const Xml: string; const Els: TXmlEls; E: Integer; out From, Ph, Idx: string): Boolean;
+var
+  P, Q: Integer;
+begin
+  From := '';
+  Ph := '';
+  Idx := '';
+  Result := False;
+  if (E < 0) or (E > High(Els)) then
+    Exit;
+  P := PosEx('<pd:sp ', Xml, Els[E].A);
+  if (P = 0) or (P >= Els[E].B) then
+    Exit;
+  Q := PosEx('>', Xml, P);
+  From := AttrOf(Xml, P, 'from');
+  if PosEx(' ph="', Copy(Xml, P, Q - P)) > 0 then
+    Ph := AttrOf(Xml, P, 'ph');
+  Idx := AttrOf(Xml, P, 'idx');
+  Result := True;
+end;
+
+function TParadeEdit.PlaceholderOf(const D: pd_pos; Sid: Integer; out PhType, PhIdx: string): Boolean;
+var
+  J: TJSONObject;
+  Xml, From: string;
+  Els: TXmlEls;
+  P: Integer;
+begin
+  Result := False;
+  PhType := '';
+  PhIdx := '';
+  J := DrawingJson(FDoc, D);
+  if J = nil then
+    Exit;
+  try
+    Xml := J.Get('xml', '');
+  finally
+    J.Free;
+  end;
+  if Xml = '' then
+    Exit;
+  Els := XmlElements(Xml);
+  if not MarkOf(Xml, Els, SidElement(Els, Sid), From, PhType, PhIdx) then
+    Exit;
+  P := PosEx('<pd:sp ', Xml, Els[SidElement(Els, Sid)].A);
+  Result := (P > 0) and (PosEx(' ph="', Copy(Xml, P, PosEx('>', Xml, P) - P)) > 0) or (PhIdx <> '');
+end;
+
+class function TParadeEdit.PlaceholderPrompt(const PhType: string): string;
+begin
+  if (PhType = 'title') or (PhType = 'ctrTitle') then
+    Result := 'Click to add title'
+  else if PhType = 'subTitle' then
+    Result := 'Click to add subtitle'
+  else if PhType = 'pic' then
+    Result := 'Click to add picture'
+  else if (PhType = 'dt') or (PhType = 'ftr') or (PhType = 'sldNum') then
+    Result := ''
+  else
+    Result := 'Click to add text';
+end;
+
+function TParadeEdit.NewLayoutSlide(After: Integer): Boolean;
+var
+  Sec: pd_block_id;
+  D: pd_pos;
+  Boxes: TParadeShapeBoxes;
+  J: TJSONObject;
+  Xml, From, Ph, Idx: string;
+  Els: TXmlEls;
+  I, N: Integer;
+  B, Last: pd_block_id;
+  Sids: array of Integer;
+  Phs: TParadeLayoutPhs;
+  HaveLayout: Boolean;
+begin
+  Result := False;
+  if not NewSlide(After, True) then
+    Exit;
+  Result := True;
+  Sec := pd_doc_child(FDoc, pd_doc_root(FDoc), After + 1);
+  if not SectionCanvas(FDoc, Sec, D) then
+    Exit;
+  J := DrawingJson(FDoc, D);
+  if J = nil then
+    Exit;
+  try
+    Xml := J.Get('xml', '');
+  finally
+    J.Free;
+  end;
+  Els := XmlElements(Xml);
+  Boxes := DrawingShapes(D);
+  HaveLayout := LayoutPlaceholders(After + 1, Phs);
+  { its placeholders emptied (each to one empty paragraph, as it was formatted) }
+  for I := 0 to High(Boxes) do
+    if (Boxes[I].Story <> 0) and MarkOf(Xml, Els, SidElement(Els, Boxes[I].Sid), From, Ph, Idx) and
+       (From = 'slide') and ((Ph <> '') or (Idx <> '')) then
+    begin
+      N := ChildCount(Boxes[I].Story);
+      if N = 0 then
+        Continue;
+      B := pd_doc_child(FDoc, Boxes[I].Story, 0);
+      Last := pd_doc_child(FDoc, Boxes[I].Story, N - 1);
+      pd_doc_delete(FDoc, PdRange(PdPos(B, 0), PdPos(Last, Length(ParaText(Last)))), nil);
+    end;
+  { and what is the slide's own but no placeholder -- pictures, text boxes, shapes -- gone, the last first }
+  SetLength(Sids, 0);
+  for I := 0 to High(Boxes) do
+    if MarkOf(Xml, Els, SidElement(Els, Boxes[I].Sid), From, Ph, Idx) and (From = 'slide') and
+       (((Ph = '') and (Idx = '')) or (HaveLayout and (MatchPlaceholder(Phs, Ph, Idx) < 0))) then
+    begin   { (a placeholder the layout has none of: not one a new slide on it has, as in PowerPoint) }
+      SetLength(Sids, Length(Sids) + 1);
+      Sids[High(Sids)] := Boxes[I].Sid;
+    end
+    else if not MarkOf(Xml, Els, SidElement(Els, Boxes[I].Sid), From, Ph, Idx) then
+    begin   { unmarked: made in the editor, the slide's own }
+      SetLength(Sids, Length(Sids) + 1);
+      Sids[High(Sids)] := Boxes[I].Sid;
+    end;
+  for I := High(Sids) downto 0 do
+  begin
+    FShapeOn := True;
+    FShapeAt := D;
+    FShapeSid := Sids[I];
+    SetLength(FShapeMore, 0);
+    DeleteShape;
+  end;
+  ClearShapeSelection;
+  Changed;
+  GoToSlide(After + 1);
+end;
+
+{ a part the PowerPoint reader kept (PD_PPTX_KEEP_MIME), by its name in the package; '' none }
+function TParadeEdit.KeptPartData(const AName: string): string;
+var
+  R: pd_res_id;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  P, E, Z, K, N: PtrUInt;
+  Nm: string;
+  B: PByte;
+begin
+  Result := '';
+  R := 1;
+  while (R < 100000) and (pd_doc_resource(FDoc, R, @Mime, @Data, @Len) = PD_OK) do
+  begin
+    if StrComp(Mime, 'application/vnd.parade.pptx-kept-parts') = 0 then
+    begin
+      B := PByte(Data);
+      P := 0;
+      while P < Len do
+      begin   { name NUL content-type NUL source NUL extra NUL length(4) bytes }
+        Z := P;
+        while (Z < Len) and (B[Z] <> 0) do Inc(Z);
+        SetString(Nm, PAnsiChar(@B[P]), Z - P);
+        E := Z + 1;
+        for K := 1 to 3 do
+        begin
+          while (E < Len) and (B[E] <> 0) do Inc(E);
+          Inc(E);
+        end;
+        if E + 4 > Len then
+          Exit;
+        N := B[E] or (B[E + 1] shl 8) or (B[E + 2] shl 16) or (PtrUInt(B[E + 3]) shl 24);
+        Inc(E, 4);
+        if E + N > Len then
+          Exit;
+        if Nm = AName then
+        begin
+          SetString(Result, PAnsiChar(@B[E]), N);
+          Exit;
+        end;
+        P := E + N;
+      end;
+      Exit;
+    end;
+    Inc(R);
+  end;
+end;
+
+{ the layout the slide is on: its line of the reader's map, or for a slide made since, the one before it's }
+function TParadeEdit.SlideLayoutPath(Index: Integer): string;
+var
+  Map, Key, L: string;
+  Lines: TStringList;
+  I, K: Integer;
+begin
+  Result := '';
+  Map := KeptPartData('map');
+  if Map = '' then
+    Exit;
+  Lines := TStringList.Create;
+  try
+    Lines.Text := Map;
+    for K := Index downto 0 do
+    begin
+      Key := IntToStr(SlideSection(K)) + #9;
+      for I := 0 to Lines.Count - 1 do
+      begin
+        L := Lines[I];
+        if Copy(L, 1, Length(Key)) = Key then
+        begin
+          Delete(L, 1, Length(Key));
+          if Pos(#9, L) > 0 then
+            L := Copy(L, 1, Pos(#9, L) - 1);
+          if L <> '' then
+            Exit(L);
+        end;
+      end;
+    end;
+  finally
+    Lines.Free;
+  end;
+end;
+
+{ the placeholders of a layout's or a master's XML, with where they are when they say so }
+function GatherPlaceholders(const XX: string): TParadeLayoutPhs;
+var
+  EE: TXmlEls;
+  A, B, C, Z: Integer;
+  T: TParadeLayoutPh;
+begin
+  Result := nil;
+  EE := XmlElements(XX);
+  for A := 0 to High(EE) do
+    if EE[A].Name = 'p:sp' then
+    begin
+      T.Typ := '';
+      T.Idx := '';
+      T.X := 0; T.Y := 0; T.W := 0; T.H := 0;
+      Z := -1;
+      for B := A + 1 to High(EE) do
+      begin
+        if EE[B].A >= EE[A].B then
+          Break;
+        if EE[B].Name = 'p:ph' then
+        begin
+          Z := B;
+          T.Typ := AttrOf(XX, EE[B].A, 'type');
+          T.Idx := AttrOf(XX, EE[B].A, 'idx');
+        end
+        else if (EE[B].Name = 'a:off') and (T.W = 0) then
+        begin
+          T.X := StrToFloatDef(AttrOf(XX, EE[B].A, 'x'), 0);
+          T.Y := StrToFloatDef(AttrOf(XX, EE[B].A, 'y'), 0);
+        end
+        else if (EE[B].Name = 'a:ext') and (T.W = 0) then
+        begin
+          T.W := StrToFloatDef(AttrOf(XX, EE[B].A, 'cx'), 0);
+          T.H := StrToFloatDef(AttrOf(XX, EE[B].A, 'cy'), 0);
+        end;
+      end;
+      if Z >= 0 then
+      begin
+        if T.Typ = '' then
+          T.Typ := 'body';    { a placeholder with no type is a body's (ECMA-376 19.7.10) }
+        C := Length(Result);
+        SetLength(Result, C + 1);
+        Result[C] := T;
+      end;
+    end;
+end;
+
+function SameKindPh(const A, B: string): Boolean;
+begin
+  Result := (A = B) or (((A = 'title') or (A = 'ctrTitle')) and ((B = 'title') or (B = 'ctrTitle'))) or
+    (((A = 'body') or (A = 'subTitle') or (A = 'obj')) and ((B = 'body') or (B = 'subTitle') or (B = 'obj')));
+end;
+
+class function TParadeEdit.MatchPlaceholder(const Phs: TParadeLayoutPhs; const PhType, PhIdx: string): Integer;
+var
+  M: Integer;
+  T: string;
+begin
+  Result := -1;
+  T := PhType;
+  if T = '' then
+    T := 'body';
+  if PhIdx <> '' then
+    for M := 0 to High(Phs) do
+      if Phs[M].Idx = PhIdx then
+        Exit(M);
+  for M := 0 to High(Phs) do
+    if SameKindPh(T, Phs[M].Typ) then
+      Exit(M);
+end;
+
+function TParadeEdit.LayoutPlaceholders(Index: Integer; out Phs: TParadeLayoutPhs): Boolean;
+var
+  LayPath, Lay, Rels, Mst, Base: string;
+  MPhs: TParadeLayoutPhs;
+  I, M, Q, E: Integer;
+begin
+  Phs := nil;
+  Result := False;
+  LayPath := SlideLayoutPath(Index);
+  if LayPath = '' then
+    Exit;
+  Lay := KeptPartData(LayPath);
+  if Lay = '' then
+    Exit;
+  Phs := GatherPlaceholders(Lay);
+  Result := True;
+  { its master, by the layout's relationship to it: a placeholder of the layout that says nothing of where it is
+    is where the master's of its kind is }
+  Base := ExtractFilePath(LayPath);
+  Rels := KeptPartData(Base + '_rels/' + ExtractFileName(LayPath) + '.rels');
+  Mst := '';
+  Q := Pos('Target="', Rels);
+  while (Q > 0) and (Mst = '') do
+  begin
+    E := PosEx('"', Rels, Q + 8);
+    if Pos('slideMaster', Copy(Rels, Q + 8, E - Q - 8)) > 0 then
+      Mst := Copy(Rels, Q + 8, E - Q - 8);
+    Q := PosEx('Target="', Rels, E);
+  end;
+  if Mst = '' then
+    Exit;
+  Mst := ExpandFileName('/' + Base + Mst);
+  Delete(Mst, 1, 1);
+  Mst := KeptPartData(Mst);
+  if Mst = '' then
+    Exit;
+  MPhs := GatherPlaceholders(Mst);
+  for I := 0 to High(Phs) do
+    if Phs[I].W <= 0 then
+      for M := 0 to High(MPhs) do
+        if (MPhs[M].W > 0) and SameKindPh(Phs[I].Typ, MPhs[M].Typ) then
+        begin
+          Phs[I].X := MPhs[M].X; Phs[I].Y := MPhs[M].Y; Phs[I].W := MPhs[M].W; Phs[I].H := MPhs[M].H;
+          Break;
+        end;
+end;
+
+function TParadeEdit.ResetSlide(Index: Integer): Boolean;
+var
+  Phs: TParadeLayoutPhs;
+  D: pd_pos;
+  Boxes: TParadeShapeBoxes;
+  Sp: pd_section_props;
+  Pg: Int32;
+  PX, PY, PW, PH_, JW, JH, K: Double;
+  I, Best: Integer;
+  Ph, Idx: string;
+begin
+  Result := False;
+  if not FCanvasPage or (Index < 0) or (Index >= SlideCount) or EditBlocked or
+     not LayoutPlaceholders(Index, Phs) then
+    Exit;
+  if not SectionCanvas(FDoc, SlideSection(Index), D) or not DrawingPlace(D, Pg, PX, PY, PW, PH_, JW, JH) or
+     (pd_doc_section_props(FDoc, SlideSection(Index), Sp) <> PD_OK) or (Sp.page_width <= 0) then
+    Exit;
+  K := JW / (Sp.page_width / PD_SP_PER_PT * 12700);     { drawing units an EMU }
+  Boxes := DrawingShapes(D);
+  for I := 0 to High(Boxes) do
+    if PlaceholderOf(D, Boxes[I].Sid, Ph, Idx) then
+    begin
+      Best := MatchPlaceholder(Phs, Ph, Idx);
+      if (Best < 0) or (Phs[Best].W <= 0) then
+        Continue;
+      FShapeOn := True;
+      FShapeAt := D;
+      FShapeSid := Boxes[I].Sid;
+      SetLength(FShapeMore, 0);
+      if SetShapeBox(Boxes[I].Sid, Phs[Best].X * K, Phs[Best].Y * K, (Phs[Best].X + Phs[Best].W) * K,
+         (Phs[Best].Y + Phs[Best].H) * K) then
+        Result := True;
+      SectionCanvas(FDoc, SlideSection(Index), D);    { the drawing made again: where it is now }
+    end;
+  ClearShapeSelection;
+end;
+
+{ an empty placeholder of a slide on screen: its prompt in gray where its text would begin, as PowerPoint shows it
+  -- not text of the document; none while the caret is in it }
+procedure TParadeEdit.PaintPlaceholderPrompts;
+var
+  S, I, N: Integer;
+  D, CD: pd_pos;
+  CSid: Integer;
+  Boxes: TParadeShapeBoxes;
+  Ph, Idx, Txt: string;
+  B: pd_block_id;
+  Pg, CPg: Int32;
+  X, Y, W, H, JW, JH: Double;
+  CX, Base, Asc, Desc: pd_sp;
+  L, R, TopY, Bot, TX, TW: Integer;
+begin
+  if not FCanvasPage or FPresent then
+    Exit;
+  if not CaretTextBox(CD, CSid) then
+    CSid := -2;
+  for S := 0 to SlideCount - 1 do
+  begin
+    if not SectionCanvas(FDoc, SlideSection(S), D) or not DrawingPlace(D, Pg, X, Y, W, H, JW, JH) or (JW <= 0) or
+       (JH <= 0) then
+      Continue;
+    if (PageTop(Pg) > ClientHeight) or (PageTop(Pg) + Round(H * PxPerSp) < 0) then
+      Continue;     { not in view }
+    Boxes := DrawingShapes(D);
+    for I := 0 to High(Boxes) do
+    begin
+      if Boxes[I].Story = 0 then
+        Continue;
+      N := ChildCount(Boxes[I].Story);
+      B := pd_doc_child(FDoc, Boxes[I].Story, 0);
+      if (N <> 1) or (B = 0) or (Length(ParaText(B)) > 0) then
+        Continue;
+      if (CSid = Boxes[I].Sid) and (CD.block = D.block) and (CD.offset = D.offset) then
+        Continue;     { being typed in }
+      if not PlaceholderOf(D, Boxes[I].Sid, Ph, Idx) then
+        Continue;
+      Txt := PlaceholderPrompt(Ph);
+      if (Txt = '') or (pd_layout_caret(FLayout, PdPos(B, 0), CPg, CX, Base, Asc, Desc) <> PD_OK) then
+        Continue;
+      L := PageLeft(Pg) + Round((X + Boxes[I].X0 * W / JW) * PxPerSp);
+      R := PageLeft(Pg) + Round((X + Boxes[I].X1 * W / JW) * PxPerSp);
+      TopY := PageTop(CPg) + Round((Base - Asc) * PxPerSp);
+      Bot := PageTop(CPg) + Round((Base + Desc) * PxPerSp);
+      Canvas.Font.Name := 'Sans';
+      Canvas.Font.Height := -Max(6, Round(Asc * PxPerSp * 0.9));
+      Canvas.Font.Color := $00909090;
+      Canvas.Brush.Style := bsClear;
+      TW := Canvas.TextWidth(Txt);
+      TX := PageLeft(CPg) + Round(CX * PxPerSp);
+      if Abs(TX - (L + R) div 2) < (R - L) div 10 then
+        TX := TX - TW div 2           { a centred line: the prompt centred }
+      else if R - TX < (R - L) div 10 then
+        TX := TX - TW;                { a right-aligned one: to its end }
+      Canvas.TextOut(TX, TopY + (Bot - TopY - Canvas.TextHeight(Txt)) div 2, Txt);
+      { and the box's edge, dotted, as an empty placeholder's }
+      Canvas.Pen.Color := $00B0B0B0;
+      Canvas.Pen.Style := psDot;
+      Canvas.Rectangle(L, PageTop(Pg) + Round((Y + Boxes[I].Y0 * H / JH) * PxPerSp), R + 1,
+        PageTop(Pg) + Round((Y + Boxes[I].Y1 * H / JH) * PxPerSp) + 1);
+      Canvas.Pen.Style := psSolid;
+    end;
+  end;
+end;
+
 { Office's preset at a size (its own units) with adjustments ("adj1=5000 ..."), as pd_preset_json describes it:
   its adjustments, handles and paths; nil for none }
 function PresetJson(const Prst: string; W, H: Double; const Adj: string): TJSONObject;
@@ -16461,6 +16930,7 @@ begin
     Canvas.FillRect(R);
   end;
   PaintTextBoxFrame;
+  PaintPlaceholderPrompts;
   PaintShapeSelection;
   PaintPageCorner;
   if FTblDrag > 0 then

@@ -3746,6 +3746,97 @@ begin
     'the box wider (%.0f, was %.0f)', [(BX1 - BX0) / PD_SP_PER_PT, W0 / PD_SP_PER_PT]));
 end;
 
+{ PowerPoint's New Slide (Ctrl+M): after the slide, on its layout -- its placeholders empty, showing their prompts
+  ("Click to add title"), the slide's own shapes not copied; Reset Slide puts a moved placeholder back where the
+  layout has it }
+procedure TestNewLayoutSlide(E: TParadeEdit; AForm: TForm);
+var
+  N, I, Sid, Gray, Title: Integer;
+  D, At: pd_pos;
+  Boxes: TParadeShapeBoxes;
+  Ph, Idx, Names: string;
+  X0, Y0, X1, Y1, TX0, TY0: Double;
+  Pg: Int32;
+  Bmp: TBitmap;
+  Img: TLazIntfImage;
+  C, C2: TFPColor;
+  Bmp2: TBitmap;
+  Img2: TLazIntfImage;
+  Xml: string;
+begin
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/slides.pptx');
+  E.Repaint;
+  Application.ProcessMessages;
+  N := E.SlideCount;
+  Check(E.SlideLayoutPath(0) <> '', 'the first slide''s layout known: ' + E.SlideLayoutPath(0));
+  Check(E.NewLayoutSlide(0), 'New Slide after the first');
+  Check(E.SlideCount = N + 1, 'a slide more');
+  Check(E.CurrentSlide = 1, 'the new one being edited');
+  Check(E.GoToSlide(1) and E.SelectedShape(D, Sid), 'its canvas');
+  Boxes := E.DrawingShapes(D);
+  Title := -1;
+  for I := 0 to High(Boxes) do
+    if E.PlaceholderOf(D, Boxes[I].Sid, Ph, Idx) and ((Ph = 'title') or (Ph = 'ctrTitle')) then
+      Title := I;
+  Check(Title >= 0, 'a title placeholder on it');
+  if Title >= 0 then
+    Check((Boxes[Title].Story <> 0) and (E.ParaText(pd_doc_child(E.Doc, Boxes[Title].Story, 0)) = ''), 'empty');
+  if not E.KeptXml(Xml) then
+    Xml := '';
+  Check((Pos('name="Box"', Xml) = 0) and (Pos('name="Oval"', Xml) = 0), 'the slide''s own shapes not on it');
+  { its prompt, gray, where the title would be -- and gone with the caret in it }
+  E.ClearShapeSelection;
+  E.ShowSlide(1);
+  E.Repaint;
+  Application.ProcessMessages;
+  Gray := 0;
+  if (Title >= 0) and E.ShapePageBox(D, Boxes[Title].Sid, Pg, X0, Y0, X1, Y1) then
+  begin
+    Bmp := AForm.GetFormImage;
+    Img := Bmp.CreateIntfImage;
+    E.GoToPos(PdPos(pd_doc_child(E.Doc, Boxes[Title].Story, 0), 0));
+    E.Repaint;
+    Application.ProcessMessages;
+    Bmp2 := AForm.GetFormImage;
+    Img2 := Bmp2.CreateIntfImage;
+    try
+      with E.PageToClient(Pg, X0 / PD_SP_PER_PT, Y0 / PD_SP_PER_PT) do
+        for I := Max(0, Y + E.Top) to Min(Img.Height - 1, E.PageToClient(Pg, 0, Y1 / PD_SP_PER_PT).Y + E.Top) do
+          for Sid := Max(0, X + E.Left) to Min(Img.Width - 1, E.PageToClient(Pg, X1 / PD_SP_PER_PT, 0).X + E.Left) do
+          begin
+            C := Img.Colors[Sid, I];
+            C2 := Img2.Colors[Sid, I];
+            if (Abs(C.red - $9090) < $1800) and (Abs(C.green - $9090) < $1800) and (Abs(C.blue - $9090) < $1800) and
+               ((C.red <> C2.red) or (C.green <> C2.green) or (C.blue <> C2.blue)) then
+              Inc(Gray);
+          end;
+    finally
+      Img.Free;
+      Bmp.Free;
+      Img2.Free;
+      Bmp2.Free;
+    end;
+  end;
+  Check(Gray > 30, Format('its prompt drawn, gray, and gone with the caret in it (%d pixels)', [Gray]));
+  { moved, then Reset Slide: back }
+  if Title >= 0 then
+  begin
+    Check(E.GoToSlide(1) and E.SelectedShape(D, Sid) and E.ShapePageBox(D, Boxes[Title].Sid, Pg, TX0, TY0, X1, Y1),
+      'where the title is');
+    E.ToggleShape(Boxes[Title].Sid);
+    Check(E.SelectedShape(At, Sid) and E.ShapeBox(Sid, X0, Y0, X1, Y1) and E.SetShapeBox(Sid, X0 + 500000, Y0 + 500000,
+      X1 + 500000, Y1 + 500000), 'the title moved');
+    E.ClearShapeSelection;
+    Check(E.ResetSlide(1), 'Reset Slide');
+    E.GoToSlide(1);
+    E.SelectedShape(D, Sid);
+    Check(E.ShapePageBox(D, Boxes[Title].Sid, Pg, X0, Y0, X1, Y1) and (Abs(X0 - TX0) < PD_SP_PER_PT) and
+      (Abs(Y0 - TY0) < PD_SP_PER_PT), Format('the title back where the layout has it (%.0f,%.0f; %.0f,%.0f)',
+      [X0 / PD_SP_PER_PT, Y0 / PD_SP_PER_PT, TX0 / PD_SP_PER_PT, TY0 / PD_SP_PER_PT]));
+  end;
+  Names := '';
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -5089,6 +5180,8 @@ begin
   TestListLabelClick(E);
   Step('the handles of a text box typed in');
   TestTypingBoxHandles(E, Form);
+  Step('a new slide on its layout');
+  TestNewLayoutSlide(E, Form);
   Step('slide show');
   TestSlideShow(E);
   TestShowPdf(E);
