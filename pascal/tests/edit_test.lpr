@@ -3481,6 +3481,47 @@ begin
     Check(False, 'a header made');
 end;
 
+{ pages side by side once two fit across, as Word shows them: at 40% a document's second page beside its first, at
+  the same top; a click on it a place on it; one column without MultiPage }
+procedure TestPagesAcross(E: TParadeEdit);
+var
+  I: Integer;
+  Info: pd_page_info;
+  P: pd_pos;
+  Pg: Int32;
+  CX, Base, Asc, Desc: pd_sp;
+  Was: Double;
+begin
+  E.NewDocument;
+  for I := 1 to 150 do
+  begin
+    E.InsertText('Line ' + IntToStr(I) + ' of a document of several pages');
+    E.ProcessKey(VK_RETURN, []);
+  end;
+  Was := E.Zoom;
+  E.Zoom := 0.4;
+  E.Repaint;
+  Application.ProcessMessages;
+  Check(E.PageCount >= 3, 'several pages: ' + IntToStr(E.PageCount));
+  Check(E.PagesAcross >= 2, Format('at 40%% in %d pixels: pages side by side (%d across)', [E.ClientWidth,
+    E.PagesAcross]));
+  Check((E.PageToClient(1, 0, 0).Y = E.PageToClient(0, 0, 0).Y) and (E.PageToClient(1, 0, 0).X > E.PageToClient(0, 0, 0).X), Format('the second beside the first ' +
+    '(%d,%d and %d,%d)', [E.PageToClient(0, 0, 0).X, E.PageToClient(0, 0, 0).Y, E.PageToClient(1, 0, 0).X, E.PageToClient(1, 0, 0).Y]));
+  pd_layout_page_info(E.Layout, 1, Info);
+  Check(E.PageToClient(1, 0, 0).X >= E.PageToClient(0, Info.width / PD_SP_PER_PT, 0).X, 'and not over it');
+  { a click in the second page's text: a place on that page, not the first }
+  Check(E.PageAt(E.PageToClient(1, 0, 0).X + 30, E.PageToClient(1, 0, 0).Y + 80) = 1, 'the page at a point of the second: the second');
+  E.ClickAt(1, 80, 80);
+  Check((pd_layout_caret(E.Layout, E.CaretPos, Pg, CX, Base, Asc, Desc) = PD_OK) and (Pg = 1),
+    Format('clicked on the second page: the caret on it (page %d)', [Pg]));
+  E.MultiPage := False;
+  E.Repaint;
+  Application.ProcessMessages;
+  Check((E.PagesAcross = 1) and (E.PageToClient(1, 0, 0).Y > E.PageToClient(0, 0, 0).Y), 'without MultiPage: one column');
+  E.MultiPage := True;
+  E.Zoom := Was;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -4827,6 +4868,8 @@ begin
   TestAnimEdit(E);
   Step('balloons in place');
   TestBalloonPlace(E);
+  Step('pages side by side');
+  TestPagesAcross(E);
   Step('fields shaded');
   TestFieldShade(E);
   Step('what a right click is on');

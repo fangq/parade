@@ -263,6 +263,12 @@ type
     FBackSig: string;              { what they were drawn for: size, zoom, layout, selection -- not the scroll }
     FBackScroll: Integer;          { ... and the scroll position they were drawn at }
     FLayoutEpoch: Integer;         { counts layout updates }
+    { where each page is when the pages are in rows (PlacePages): its left and its top before scrolling, the rows'
+      total height, how many across; remade when what they depend on changes (FPlaceKey) }
+    FPlaceL, FPlaceT: array of Integer;
+    FPlaceTotal, FPlaceCols: Integer;
+    FPlaceKey: string;
+    FMultiPage: Boolean;
     FAuthor: string;               { who tracked changes and comments are by }
     FTrack: Boolean;
     FHasMarkup: Boolean;           { some page has changes or comments: the balloon column shows }
@@ -288,6 +294,7 @@ type
     function PastEnds(const P: pd_pos): pd_pos;
     function GetPageCount: Integer;
     function MarkupWidth: Integer;
+    procedure SetMultiPage(AValue: Boolean);
     function HiddenAt(const P: pd_pos): Boolean;
     function RevisionAt(const P: pd_pos; out Rev: pd_revision): Boolean;
     function StripRevision(Fmt: pd_format_id): pd_format_id;
@@ -355,7 +362,7 @@ type
     procedure MoveCellContent(From, Into: pd_block_id);
     { the table cells laid out on a page, their boxes }
     function PageCells(Page: Integer): TParadeCellBoxes;
-    function PageAtY(Y: Integer): Integer;
+    procedure PlacePages;
     function TableOfCell(Cell: pd_block_id): pd_block_id;
     function GridCount(Table: pd_block_id): Integer;
     { a table's border under a point of the control: a column's edge (Kind 1, Edge of Edges) or a row's foot (2) }
@@ -655,6 +662,12 @@ type
     function PageToClient(Page: Integer; XPt, YPt: Double): TPoint;
     { the shape kind waiting for a drag in the canvas ('' none) }
     property DrawKind: string read FDrawKind;
+    { pages side by side, as many as fit across, as Word shows them once two fit (default); False: one column }
+    property MultiPage: Boolean read FMultiPage write SetMultiPage;
+    { how many pages across the view shows now }
+    function PagesAcross: Integer;
+    { the page at a point of the control: the one whose place holds it, else the nearest in its row }
+    function PageAt(X, Y: Integer): Integer;
     { the selected object (a picture or a drawing) made W by H (sp) -- a canvas given that much room, its shapes
       not stretched; one step of undo }
     function ResizeObject(W, H: pd_sp): Boolean;
@@ -2157,6 +2170,7 @@ begin
   Cursor := crIBeam;       { a text editor's: the scroll bar has its own, below }
   FZoom := 1.0;
   FPageGap := 16;
+  FMultiPage := True;
   FAuthor := GetEnvironmentVariable('USER');
   if FAuthor = '' then
     FAuthor := GetEnvironmentVariable('USERNAME');
@@ -2607,25 +2621,141 @@ begin
 end;
 
 function TParadeEdit.PageTop(Page: Integer): Integer;
-var
-  I: Integer;
-  Info: pd_page_info;
 begin
-  Result := FPageGap - FScrollY;
-  for I := 0 to Page - 1 do
+  PlacePages;
+  if (Page >= 0) and (Page < Length(FPlaceT)) then
+    Result := FPlaceT[Page] - FScrollY
+  else
+    Result := FPageGap - FScrollY;
+end;
+
+{ Where the pages go: in rows, as many across as fit beside each other with their balloon columns (one when not
+  MultiPage, or in a slide show), each row as tall as its tallest page, the rows and the pages in them centred;
+  one across is the column it always was. }
+procedure TParadeEdit.PlacePages;
+var
+  N, I, R, C, Cols, Avail, SlotW, MaxW, RowH, Y, X0, W: Integer;
+  Info: pd_page_info;
+  Key: string;
+  Ws, Hs: array of Integer;
+begin
+  N := PageCount;
+  Key := Format('%d %d %d %d %.8f %d %d %d', [FLayoutEpoch, PtrUInt(FLayout), N, ClientWidth, PxPerSp, MarkupWidth,
+    Ord(FMultiPage), FPageGap]);
+  if Key = FPlaceKey then
+    Exit;
+  FPlaceKey := Key;
+  SetLength(FPlaceL, N);
+  SetLength(FPlaceT, N);
+  SetLength(Ws, N);
+  SetLength(Hs, N);
+  MaxW := 0;
+  for I := 0 to N - 1 do
   begin
     pd_layout_page_info(FLayout, I, Info);
-    Inc(Result, Round(Info.height * PxPerSp) + FPageGap);
+    Ws[I] := Round(Info.width * PxPerSp);
+    Hs[I] := Round(Info.height * PxPerSp);
+    if Ws[I] > MaxW then
+      MaxW := Ws[I];
   end;
+  Avail := ClientWidth - FScrollBar.Width;
+  SlotW := MaxW + MarkupWidth;
+  Cols := 1;
+  if FMultiPage and not FPresent and (SlotW > 0) then
+    Cols := Max(1, (Avail - FPageGap) div (SlotW + FPageGap));
+  if Cols > N then
+    Cols := Max(1, N);
+  FPlaceCols := Cols;
+  Y := FPageGap;
+  I := 0;
+  while I < N do
+  begin
+    RowH := 0;
+    for C := 0 to Cols - 1 do
+      if (I + C < N) and (Hs[I + C] > RowH) then
+        RowH := Hs[I + C];
+    if Cols = 1 then
+      X0 := 0
+    else
+      X0 := (Avail - (Cols * SlotW + (Cols - 1) * FPageGap)) div 2;
+    for C := 0 to Cols - 1 do
+    begin
+      R := I + C;
+      if R >= N then
+        Break;
+      if Cols = 1 then
+      begin   { alone in its row: centred in the view, as it always was }
+        W := (Avail - Ws[R] - MarkupWidth) div 2;
+        if W < FPageGap then
+          W := FPageGap;
+        FPlaceL[R] := W;
+      end
+      else
+        FPlaceL[R] := Max(FPageGap, X0) + C * (SlotW + FPageGap) + (MaxW - Ws[R]) div 2;
+      FPlaceT[R] := Y;
+    end;
+    Inc(Y, RowH + FPageGap);
+    Inc(I, Cols);
+  end;
+  FPlaceTotal := Y;
+end;
+
+function TParadeEdit.PagesAcross: Integer;
+begin
+  PlacePages;
+  Result := FPlaceCols;
+end;
+
+procedure TParadeEdit.SetMultiPage(AValue: Boolean);
+begin
+  if AValue = FMultiPage then
+    Exit;
+  FMultiPage := AValue;
+  UpdateScrollBar;
+  Invalidate;
+end;
+
+function TParadeEdit.PageAt(X, Y: Integer): Integer;
+var
+  I, Best, D, DBest, L, T: Integer;
+  Info: pd_page_info;
+begin
+  Result := -1;
+  PlacePages;
+  Best := -1;
+  DBest := MaxInt;
+  for I := 0 to PageCount - 1 do
+  begin
+    pd_layout_page_info(FLayout, I, Info);
+    L := FPlaceL[I];
+    T := FPlaceT[I] - FScrollY;
+    { the distance from its place, with half a gap round it: 0 inside }
+    D := 0;
+    if Y < T - FPageGap div 2 then
+      Inc(D, (T - FPageGap div 2 - Y) * 4)       { rows first: a page in another row is further than one beside }
+    else if Y > T + Round(Info.height * PxPerSp) + FPageGap div 2 then
+      Inc(D, (Y - T - Round(Info.height * PxPerSp) - FPageGap div 2) * 4);
+    if X < L - FPageGap div 2 then
+      Inc(D, L - FPageGap div 2 - X)
+    else if X > L + Round(Info.width * PxPerSp) + MarkupWidth + FPageGap div 2 then
+      Inc(D, X - L - Round(Info.width * PxPerSp) - MarkupWidth - FPageGap div 2);
+    if D < DBest then
+    begin
+      DBest := D;
+      Best := I;
+      if D = 0 then
+        Break;
+    end;
+  end;
+  Result := Best;
 end;
 
 function TParadeEdit.PageLeft(Page: Integer): Integer;
-var
-  Info: pd_page_info;
 begin
-  pd_layout_page_info(FLayout, Page, Info);
-  Result := (ClientWidth - FScrollBar.Width - Round(Info.width * PxPerSp) - MarkupWidth) div 2;
-  if Result < FPageGap then
+  PlacePages;
+  if (Page >= 0) and (Page < Length(FPlaceL)) then
+    Result := FPlaceL[Page]
+  else
     Result := FPageGap;
 end;
 
@@ -2649,16 +2779,9 @@ begin
 end;
 
 function TParadeEdit.TotalHeight: Integer;
-var
-  I: Integer;
-  Info: pd_page_info;
 begin
-  Result := FPageGap;
-  for I := 0 to PageCount - 1 do
-  begin
-    pd_layout_page_info(FLayout, I, Info);
-    Inc(Result, Round(Info.height * PxPerSp) + FPageGap);
-  end;
+  PlacePages;
+  Result := FPlaceTotal;
 end;
 
 procedure TParadeEdit.UpdateScrollBar;
@@ -3286,22 +3409,13 @@ end;
 function TParadeEdit.PointToPos(X, Y: Integer; out P: pd_pos): Boolean;
 var
   Page: Integer;
-  Info: pd_page_info;
-  PTop, H: Integer;
 begin
   Result := False;
-  for Page := 0 to PageCount - 1 do
-  begin
-    pd_layout_page_info(FLayout, Page, Info);
-    PTop := PageTop(Page);
-    H := Round(Info.height * PxPerSp);
-    if (Y < PTop + H + FPageGap div 2) or (Page = PageCount - 1) then
-    begin
-      Result := pd_layout_hit_test(FLayout, Page, Round((X - PageLeft(Page)) / PxPerSp),
-        Round((Y - PTop) / PxPerSp), P) = PD_OK;
-      Exit;
-    end;
-  end;
+  Page := PageAt(X, Y);
+  if Page < 0 then
+    Exit;
+  Result := pd_layout_hit_test(FLayout, Page, Round((X - PageLeft(Page)) / PxPerSp),
+    Round((Y - PageTop(Page)) / PxPerSp), P) = PD_OK;
 end;
 
 procedure TParadeEdit.ClickAt(Page: Integer; XPt, YPt: Double; Extend: Boolean);
@@ -5895,20 +6009,6 @@ begin
     Result := nil;
 end;
 
-function TParadeEdit.PageAtY(Y: Integer): Integer;
-var
-  Page: Integer;
-  Info: pd_page_info;
-begin
-  for Page := 0 to PageCount - 1 do
-  begin
-    pd_layout_page_info(FLayout, Page, Info);
-    if (Y < PageTop(Page) + Round(Info.height * PxPerSp) + FPageGap div 2) or (Page = PageCount - 1) then
-      Exit(Page);
-  end;
-  Result := -1;
-end;
-
 function TParadeEdit.TableOfCell(Cell: pd_block_id): pd_block_id;
 var
   Info: pd_block_info;
@@ -5970,7 +6070,7 @@ begin
   Result := False;
   Kind := 0; Table := 0; Row := 0; Edge := -1; Edges := nil; RowTop := 0;
   Span := Rect(0, 0, 0, 0);
-  Page := PageAtY(Y);
+  Page := PageAt(X, Y);
   if Page < 0 then
     Exit;
   B := PageCells(Page);
@@ -9749,7 +9849,7 @@ begin
     for Page := 0 to PageCount - 1 do
     begin
       pd_layout_page_info(FLayout, Page, Info);
-      if (Y < PageTop(Page) + Round(Info.height * PxPerSp) + FPageGap div 2) or (Page = PageCount - 1) then
+      if Page = PageAt(X, Y) then
       begin
         if DrawingAt(Page, Round((X - PageLeft(Page)) / PxPerSp), Round((Y - PageTop(Page)) / PxPerSp), D) and
            (D.block = FShapeAt.block) and (D.offset = FShapeAt.offset) and ((FShapeSid < 0) or
@@ -9931,7 +10031,7 @@ begin
     for Page := 0 to PageCount - 1 do
     begin
       pd_layout_page_info(FLayout, Page, PI_);
-      if (Y < PageTop(Page) + Round(PI_.height * PxPerSp) + FPageGap div 2) or (Page = PageCount - 1) then
+      if Page = PageAt(X, Y) then
       begin
         if pd_layout_hit_test(FLayout, Page, Round((X - PageLeft(Page)) / PxPerSp),
            Round((Y - PageTop(Page)) / PxPerSp), HP) = PD_OK then
@@ -15054,7 +15154,7 @@ begin
     for Page := 0 to PageCount - 1 do     { a drawing, or a shape of it: selected }
     begin
       pd_layout_page_info(FLayout, Page, Info);
-      if (Y < PageTop(Page) + Round(Info.height * PxPerSp) + FPageGap div 2) or (Page = PageCount - 1) then
+      if Page = PageAt(X, Y) then
       begin
         if ClickPage(Page, Round((X - PageLeft(Page)) / PxPerSp), Round((Y - PageTop(Page)) / PxPerSp), Shift) then
         begin
@@ -15111,7 +15211,7 @@ var
     Result := At;
     if not CellAt(AnchorPos, C1, R1, T1) then
       Exit;
-    Pg2 := PageAtY(MY);
+    Pg2 := PageAt(MX, MY);
     if Pg2 < 0 then
       Exit;
     B := PageCells(Pg2);
