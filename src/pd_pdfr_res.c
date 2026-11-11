@@ -19,6 +19,8 @@
 
 #define IMG_BUDGET ((size_t)384 << 20)
 
+pimage* pimage_level(pdoc* d, pimage* im, double px_w, double px_h);
+
 static double clamp01(double v) {
     return v < 0 ? 0 : v > 1 ? 1 : v;
 }
@@ -1968,6 +1970,21 @@ pimage* pdr_image_fetch(pdoc* d, dimgref* r) {
     }
 
     im = pdr_image_decode(d, r->stream, NULL, 0, r->res);
+
+    /* a picture of tens of megapixels (a figure scanned or plotted at print resolution) kept at most 8: halved
+       until it is, so a page of them fits the cache; zoomed past its size, it is drawn from what is kept */
+    while (im && (int64_t)im->w * im->h > 8000000 && im->w >= 4 && im->h >= 4) {
+        pimage* h = pimage_level(d, im, im->w / 2.0 - 2, im->h / 2.0 - 2);
+
+        if (h == im || !h) {
+            break;
+        }
+
+        im->half = NULL;    /* the half kept on its own, the full size let go */
+        d->imgbytes -= h->bytes;
+        pimage_free(im);
+        im = h;
+    }
 
     if (!im) {
         /* a picture that fails is remembered as an empty one, so it is not tried on every draw */
