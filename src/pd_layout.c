@@ -7408,6 +7408,26 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
                 continue;
             }
 
+            {   /* in a change not shown here (deleted, with deletions in balloons or the final text): not drawn */
+                pd_char_props ocp;
+                int32_t r;
+                pd_format_id of = b->st.empty_format;
+
+                for (r = 0; r < b->st.nruns; r++) {
+                    if (b->st.runs[r].start <= q->offset && q->offset < b->st.runs[r].end) {
+                        of = b->st.runs[r].format;
+                        break;
+                    }
+                }
+
+                pd_doc_format_resolve(d, b->id, of, &ocp);
+                pd_doc_markup_props(d, b->id, &ocp);
+
+                if (ocp.hidden) {
+                    continue;
+                }
+            }
+
             a.h = q->obj.height + q->obj.depth;
             a.y = l->oy + g[i].y - q->obj.height;
 

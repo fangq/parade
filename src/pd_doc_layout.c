@@ -679,6 +679,10 @@ pd_status pd_doc_para_build_ex(const pd_doc* d, pd_block_id para, pd_sp column, 
                         break;
                 }
 
+                if (cp.hidden) {    /* a picture deleted where deletions are not shown: no room, as its text has none */
+                    ow = oh = od = 0;
+                }
+
                 if ((st = pd_para_add_object(out, ow, oh, od, k)) != PD_OK) {
                     return st;
                 }

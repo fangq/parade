@@ -4640,6 +4640,58 @@ static void test_docx_deleted_float(void) {
     pd_doc_free(d);
 }
 
+/* A picture in the text deleted with track changes, its replacement inserted after it -- how Word keeps a picture
+   swapped for another: where deletions are not shown in the text (balloons, final) it is not drawn and takes no
+   room, as a deleted float already was not; shown inline (and in the original), it is.  Drawn regardless, the
+   deleted one stood beside its replacement in a narrow box and the two overlapped (a proposal's Fig. 2b, 2f). */
+static void test_docx_deleted_inline_picture(void) {
+    static const char* pic =
+        "<w:drawing><wp:inline><wp:extent cx=\"1270000\" cy=\"1270000\"/><a:graphic><a:graphicData><pic:pic>"
+        "<pic:blipFill><a:blip r:embed=\"rId5\"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline>"
+        "</w:drawing>";
+    char xml[4096];
+    pd_doc* d;
+    int pass;
+
+    snprintf(xml, sizeof(xml),
+             "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:pic=\"pic\" xmlns:r=\"r\"><w:body>"
+             "<w:p><w:del w:id=\"1\" w:author=\"A\"><w:r>%s</w:r></w:del><w:ins w:id=\"2\" w:author=\"A\"><w:r>%s"
+             "</w:r></w:ins></w:p></w:body></w:document>", pic, pic);
+    d = docx_doc(
+        "word/_rels/document.xml.rels",
+        "<Relationships xmlns=\"r\"><Relationship Id=\"rId5\" Type=\"t/image\" Target=\"media/image1.png\"/>"
+        "</Relationships>",
+        "word/media/image1.png", "tests/data/rgba.png",
+        "word/document.xml", xml,
+        NULL);
+
+    for (pass = 0; pass < 2; pass++, d = docx_again(d)) {
+        CHECK(d != NULL);
+
+        if (!d) {
+            return;
+        }
+
+        CHECK(pd_doc_revision_count(d) >= 2);
+
+        if (!have_layout_font()) {
+            continue;
+        }
+
+        pd_doc_set_markup(d, PD_MARKUP_BALLOONS);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 1);
+        pd_doc_set_markup(d, PD_MARKUP_FINAL);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 1);
+        pd_doc_set_markup(d, PD_MARKUP_INLINE);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 2);
+        pd_doc_set_markup(d, PD_MARKUP_ORIGINAL);
+        CHECK(count_draws(d, PD_DRAW_IMAGE, 0) == 1);
+        pd_doc_set_markup(d, PD_MARKUP_BALLOONS);
+    }
+
+    pd_doc_free(d);
+}
+
 /* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
 static int near_color(uint32_t got, uint32_t want) {
     int k;
@@ -11682,6 +11734,7 @@ int main(void) {
     test_docx_shading_edges();
     test_docx_group_textbox_table();
     test_docx_deleted_float();
+    test_docx_deleted_inline_picture();
     test_docx_group_turned_shapes();
     test_docx_canvas_3d();
     test_docx_custgeom_paths();
