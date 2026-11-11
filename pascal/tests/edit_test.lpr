@@ -3362,6 +3362,125 @@ begin
   end;
 end;
 
+{ what a right click is on, for a menu of its own: plain text nothing; a link its address (and Remove Link keeping
+  its text); a table; a tracked change; a comment's text its comment; a field its code; a picture; a header; a right
+  click in the selection leaving it as it is }
+procedure TestContext(E: TParadeEdit);
+var
+  P: array[0..7] of pd_block_id;
+  C: TParadeContext;
+  A, B: pd_pos;
+  U: string;
+  Pt: TPoint;
+  I: Integer;
+  SP: pd_section_props;
+
+  function At(Blk: pd_block_id; Off: UInt32): TPoint;
+  var
+    Pg: Int32;
+    CX, Base, Asc, Desc: pd_sp;
+  begin
+    Result := Point(-1, -1);
+    E.Repaint;
+    Application.ProcessMessages;
+    if pd_layout_caret(E.Layout, PdPos(Blk, Off), Pg, CX, Base, Asc, Desc) = PD_OK then
+      Result := E.PageToClient(Pg, CX / PD_SP_PER_PT + 1.5, (Base - Asc div 2) / PD_SP_PER_PT);
+  end;
+
+  function RightAt(Blk: pd_block_id; Off: UInt32): TParadeContext;
+  begin
+    Pt := At(Blk, Off);
+    E.ContextClick(Pt.X, Pt.Y);
+    Result := E.ContextAt(Pt.X, Pt.Y);
+  end;
+
+  function Para(N: Integer): pd_block_id;
+  var
+    K: Integer;
+  begin
+    Result := pd_doc_next_paragraph(E.Doc, 0);
+    for K := 1 to N do
+      Result := pd_doc_next_paragraph(E.Doc, Result);
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertText('Plain words here');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('See ');
+  E.InsertLink('https://example.org/', 'Example');
+  E.InsertText(' now');
+  E.ProcessKey(VK_RETURN, []);
+  E.TrackChanges := True;
+  E.InsertText('Added words');
+  E.TrackChanges := False;
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Noted words');
+  E.ProcessKey(VK_HOME, []);
+  E.ProcessKey(VK_END, [ssShift]);
+  E.AddComment('A note');
+  E.ProcessKey(VK_END, []);
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Page ');
+  E.InsertField(PD_FIELD_PAGE);
+  E.ProcessKey(VK_RETURN, []);
+  Check(E.InsertPicture(ExtractFilePath(ParamStr(0)) + '../../tests/data/rgba.png'), 'a picture for the menu');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertTable(2, 2);
+  E.InsertText('cell');
+  for I := 0 to 5 do
+    P[I] := Para(I);
+
+  C := RightAt(P[0], 2);
+  Check((C.Shape = '') and not C.Table and (C.Link = '') and not C.Field and (C.Comment = 0) and not C.Change and
+    (C.HeaderFooter = 0), 'plain text: nothing but text');
+  C := RightAt(P[1], 9);     { in "Example", past the link's zero-width start }
+  Check(C.Link = 'https://example.org/', 'a link: its address: ' + C.Link);
+  C := RightAt(P[2], 3);
+  Check(C.Change, 'a tracked insertion: a change');
+  C := RightAt(P[3], 3);
+  Check(C.Comment <> 0, 'commented text: its comment');
+  C := RightAt(P[4], 5);     { on the number: the caret beside it, which is the field's for a menu }
+  Check(C.Field and (C.FieldCode = 'PAGE'), 'a page number: a field, PAGE: ' + C.FieldCode);
+  C := RightAt(P[5], 0);
+  Check(C.Shape = 'picture', 'a picture: selected, a picture: ' + C.Shape);
+  Check(E.SelectedShape(A, I), 'and selected by the right click');
+  E.ClearShapeSelection;
+  E.GoToPos(PdPos(Para(6), 0));
+  C := E.ContextAt(0, 0);
+  Check(C.Table, 'in a table: a table');
+
+  { the selection stays when the right click is in it, goes when it is not }
+  E.GoToPos(PdPos(P[0], 0));
+  E.ProcessKey(VK_END, [ssShift]);
+  Pt := At(P[0], 6);
+  E.ContextClick(Pt.X, Pt.Y);
+  Check(E.SelectedText = 'Plain words here', 'a right click in the selection: it stays');
+  Pt := At(P[2], 3);
+  E.ContextClick(Pt.X, Pt.Y);
+  Check(E.SelectedText = '', 'one elsewhere: the caret there');
+
+  { Remove Link: its text kept, the link gone }
+  Check(E.RemoveLink(PdPos(P[1], 7)) and (Pos('See ', E.ParaText(P[1])) = 1) and
+    not E.LinkAt(PdPos(P[1], 5), U, A, B), 'Remove Link: ' + E.ParaText(P[1]));
+  Check(Pos('Example now', E.ParaText(P[1])) > 0, 'its text kept');
+  E.Undo;
+  Check(E.LinkAt(PdPos(P[1], 7), U, A, B), 'and back with undo');
+
+  { a header: right-clicked in it }
+  E.SetHeaderFooter(False, 'Head text');
+  E.GoToPos(PdPos(P[0], 0));
+  SP := E.CurrentSectionProps;
+  if (SP.header <> 0) and (pd_doc_child(E.Doc, SP.header, 0) <> 0) then
+  begin
+    Pt := At(pd_doc_child(E.Doc, SP.header, 0), 2);
+    C := E.ContextAt(Pt.X, Pt.Y);
+    Check(C.HeaderFooter = 1, Format('the header: a header (%d at %d,%d)', [C.HeaderFooter, Pt.X, Pt.Y]));
+  end
+  else
+    Check(False, 'a header made');
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -4710,6 +4829,8 @@ begin
   TestBalloonPlace(E);
   Step('fields shaded');
   TestFieldShade(E);
+  Step('what a right click is on');
+  TestContext(E);
   Step('resources found and shown');
   TestShowResource(E);
 

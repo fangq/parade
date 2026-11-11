@@ -88,6 +88,22 @@ type
     Story: pd_block_id;      { a text box's: the story of its text; 0 for a shape without }
   end;
   TParadeShapeBoxes = array of TParadeShapeBox;
+  { what a right click is on, for a menu of its own (TParadeEdit.ContextAt): several can hold at once -- a field in
+    a table, a link in a comment's text -- and the host's menu offers each one's commands }
+  TParadeContext = record
+    Comment: pd_comment_id;     { a comment's balloon under the pointer, or the comment over the caret }
+    Change: Boolean;            { a tracked change at the caret or in the selection, or a change's balloon }
+    Shape: string;              { the selected object: 'picture', 'chart', 'equation', 'line', 'textbox', 'shape',
+                                  'canvas', 'drawing'; '' none }
+    Float: Boolean;             { it floats: wrapping applies }
+    Table: Boolean;
+    Field: Boolean;
+    FieldCode: string;          { a kept field's instruction (REF _Ref1 \h), or what Parade works out (PAGE) }
+    FieldTarget: string;        { the bookmark a REF or PAGEREF names, '' none }
+    Control: string;            { a content control's kind ('checkbox', 'dropDownList', 'date', ...), '' none }
+    Link: string;               { a link's address, '' none }
+    HeaderFooter: Integer;      { 1 in a header, 2 in a footer, 0 neither }
+  end;
   { a shape of a slide its animations can name: its DrawingML id (pd_draw.shape) and name }
   TParadeAnimShape = record
     Id: Int32;
@@ -977,6 +993,19 @@ type
       a caption's number) its one character, one kept as Word wrote it (a cross-reference, a citation) from its
       start to its end, its result between.  Shaded gray while so, as Word shades a field when it is selected }
     function SelectedFields: TParadeRanges;
+    { a right press at X, Y: the caret put there, or the object there selected, as a left press would -- unless the
+      press is in the selection or on the selected shape, which stay what the menu is for (as in Word) }
+    procedure ContextClick(X, Y: Integer);
+    { what the right click at X, Y is on, after ContextClick }
+    function ContextAt(X, Y: Integer): TParadeContext;
+    { the link over P: its address and its text's extent }
+    function LinkAt(const P: pd_pos; out URL: string; out AStart, AEnd: pd_pos): Boolean;
+    { the link over P made plain text again, its text kept; one step of undo }
+    function RemoveLink(const P: pd_pos): Boolean;
+    { the selection from A to B, the caret at B }
+    procedure SetSelection(const A, B: pd_pos);
+    { the caret at the bookmark named, False when there is none }
+    function GoToBookmark(const AName: string): Boolean;
     { the balloons as last drawn, for a check: where each is, and whether a change's (PD_MARK_*) }
     function BalloonCount: Integer;
     function BalloonRect(AIndex: Integer): TRect;
@@ -9703,6 +9732,338 @@ begin
       Break;
     Blk := pd_doc_next_paragraph(FDoc, Blk);
     Inc(Guard);
+  end;
+end;
+
+procedure TParadeEdit.ContextClick(X, Y: Integer);
+var
+  P, D: pd_pos;
+  Page: Integer;
+  Info: pd_page_info;
+begin
+  FDownAt := Point(X, Y);
+  if CommentAtPoint(X, Y) <> 0 then
+    Exit;     { a comment's balloon: what the menu is for, and the caret where it was }
+  if FShapeOn then
+  begin   { the selected drawing, or a shape of it, under the press: kept }
+    for Page := 0 to PageCount - 1 do
+    begin
+      pd_layout_page_info(FLayout, Page, Info);
+      if (Y < PageTop(Page) + Round(Info.height * PxPerSp) + FPageGap div 2) or (Page = PageCount - 1) then
+      begin
+        if DrawingAt(Page, Round((X - PageLeft(Page)) / PxPerSp), Round((Y - PageTop(Page)) / PxPerSp), D) and
+           (D.block = FShapeAt.block) and (D.offset = FShapeAt.offset) and ((FShapeSid < 0) or
+           (PickShape(D, Page, Round((X - PageLeft(Page)) / PxPerSp), Round((Y - PageTop(Page)) / PxPerSp)) =
+           FShapeSid)) then
+          Exit;
+        Break;
+      end;
+    end;
+  end
+  else if HasSelection and PointToPos(X, Y, P) and (Compare(SelStart, P) <= 0) and (Compare(P, SelEnd) <= 0) then
+    Exit;     { in the selection: it stays }
+  MouseDown(mbLeft, [], X, Y);
+  MouseUp(mbLeft, [], X, Y);
+end;
+
+function TParadeEdit.ContextAt(X, Y: Integer): TParadeContext;
+var
+  A, B, At, LA, LB, HP: pd_pos;
+  Sid, I, K: Integer;
+  G: TParadeShapeGeom;
+  O: pd_inline;
+  J: TJSONObject;
+  R: pd_range;
+  F: TParadeRanges;
+  Kind, Spec, U: string;
+  St, Blk, Sec: pd_block_id;
+  Info: pd_block_info;
+  SP: pd_section_props;
+  Page: Integer;
+  PI_: pd_page_info;
+  Found: Boolean;
+
+  function WordAfter(const S, Key: string): string;
+  var
+    Q: Integer;
+  begin
+    Result := '';
+    Q := Pos(Key, S);
+    if Q = 0 then
+      Exit;
+    Q := Q + Length(Key);
+    while (Q <= Length(S)) and (S[Q] = ' ') do
+      Inc(Q);
+    while (Q <= Length(S)) and not (S[Q] in [' ', '\', '"']) do
+    begin
+      Result := Result + S[Q];
+      Inc(Q);
+    end;
+  end;
+
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.Shape := '';
+  Result.FieldCode := '';
+  Result.FieldTarget := '';
+  Result.Control := '';
+  Result.Link := '';
+  Result.Comment := CommentAtPoint(X, Y);
+  for I := 0 to High(FBalloons) do
+    if (FBalloons[I].Kind <> PD_MARK_COMMENT) and PtInRect(FBalloons[I].R, Point(X, Y)) then
+      Result.Change := True;
+
+  if FShapeOn and SelectedShape(At, Sid) then
+  begin   { the object selected: what kind }
+    Result.Float := SelectedFloat <> 0;
+    if Sid >= 0 then
+    begin
+      if SelectedShapeGeom(G) then
+        if G.Pic then
+          Result.Shape := 'picture'
+        else if G.TextBox then
+          Result.Shape := 'textbox'
+        else if (G.Prst = 'line') or (Pos('Connector', G.Prst) > 0) then
+          Result.Shape := 'line'
+        else
+          Result.Shape := 'shape'
+      else
+        Result.Shape := 'shape';
+    end
+    else if pd_doc_inline_at(FDoc, At, O) = PD_OK then
+    begin
+      if O.kind = PD_INLINE_EQUATION then
+        Result.Shape := 'equation'
+      else if CanvasSelected then
+        Result.Shape := 'canvas'
+      else
+      begin
+        J := DrawingJson(FDoc, At);
+        if J = nil then
+          Result.Shape := 'picture'
+        else
+          try
+            if J.Find('chart') <> nil then Result.Shape := 'chart' else Result.Shape := 'drawing';
+          finally
+            J.Free;
+          end;
+      end;
+    end;
+    Exit;     { a selected object's menu is about it alone }
+  end;
+
+  A := SelStart;
+  B := SelEnd;
+  if Result.Comment = 0 then
+    Result.Comment := CommentAt(CaretPos);
+  if not Result.Change then
+  begin   { a change over the caret, or meeting the selection }
+    Blk := A.block;
+    K := 0;
+    At := PdPos(Blk, 0);
+    while (K < 1000) and (pd_doc_revision_find(FDoc, At, 1, R, nil) = PD_OK) and
+          (Compare(R.start, B) <= 0) do
+    begin
+      if ((Compare(A, B) = 0) and (Compare(R.start, A) <= 0) and (Compare(A, R.finish) <= 0)) or
+         ((Compare(A, B) < 0) and (Compare(R.start, B) < 0) and (Compare(A, R.finish) < 0)) then
+      begin
+        Result.Change := True;
+        Break;
+      end;
+      if (R.finish.block = At.block) and (R.finish.offset <= At.offset) then
+        Break;
+      At := R.finish;
+      Inc(K);
+    end;
+  end;
+  if (A.offset >= 3) and (Compare(A, B) = 0) and (pd_doc_inline_at(FDoc, PdPos(A.block, A.offset - 3), O) = PD_OK) and
+     (O.kind = PD_INLINE_EQUATION) then
+    Result.Shape := 'equation';
+  Result.Table := InTable;
+  F := SelectedFields;
+  if (Length(F) = 0) and (Compare(A, B) = 0) then
+  begin   { a field Parade works out is one character: the caret beside it, as a click on it puts the caret, is on it }
+    if (pd_doc_inline_at(FDoc, A, O) = PD_OK) and (O.kind = PD_INLINE_FIELD) and (O.field <> PD_FIELD_KEPT) then
+    begin
+      SetLength(F, 1);
+      F[0] := PdRange(A, PdPos(A.block, A.offset + 3));
+    end
+    else if (A.offset >= 3) and (pd_doc_inline_at(FDoc, PdPos(A.block, A.offset - 3), O) = PD_OK) and
+            (O.kind = PD_INLINE_FIELD) and (O.field <> PD_FIELD_KEPT) then
+    begin
+      SetLength(F, 1);
+      F[0] := PdRange(PdPos(A.block, A.offset - 3), A);
+    end;
+  end;
+  if Length(F) > 0 then
+  begin
+    Result.Field := True;
+    if pd_doc_inline_at(FDoc, F[0].start, O) = PD_OK then
+      if O.field = PD_FIELD_KEPT then
+      begin
+        SetString(Result.FieldCode, O.source, O.source_len);
+        Result.FieldCode := Trim(Result.FieldCode);
+        if (Pos('REF', UpperCase(Result.FieldCode)) = 1) or (Pos('PAGEREF', UpperCase(Result.FieldCode)) = 1) then
+          Result.FieldTarget := WordAfter(Result.FieldCode, ' ');
+      end
+      else
+        case O.field of
+          PD_FIELD_PAGE: Result.FieldCode := 'PAGE';
+          PD_FIELD_PAGES: Result.FieldCode := 'NUMPAGES';
+          PD_FIELD_SECTION_PAGE: Result.FieldCode := 'SECTIONPAGES';
+          PD_FIELD_REF_NUMBER: Result.FieldCode := 'REF';
+          PD_FIELD_REF_PAGE: Result.FieldCode := 'PAGEREF';
+          PD_FIELD_SEQ: Result.FieldCode := 'SEQ ' + PAnsiChar(@O.name[0]);
+          PD_FIELD_HEADING: Result.FieldCode := 'STYLEREF';
+          PD_FIELD_DATE: Result.FieldCode := 'DATE';
+        else
+          Result.FieldCode := 'field';
+        end;
+  end;
+  if ControlAt(CaretPos, Kind, Spec, LA, LB) then
+    Result.Control := Kind;
+  if LinkAt(CaretPos, U, LA, LB) then
+    Result.Link := U;
+
+  { a header's or a footer's: the caret's story, or the one under the pointer, among the sections' }
+  St := StoryTopOf(CaretPos.block);
+  if St = 0 then
+    for Page := 0 to PageCount - 1 do
+    begin
+      pd_layout_page_info(FLayout, Page, PI_);
+      if (Y < PageTop(Page) + Round(PI_.height * PxPerSp) + FPageGap div 2) or (Page = PageCount - 1) then
+      begin
+        if pd_layout_hit_test(FLayout, Page, Round((X - PageLeft(Page)) / PxPerSp),
+           Round((Y - PageTop(Page)) / PxPerSp), HP) = PD_OK then
+          St := StoryTopOf(HP.block);
+        Break;
+      end;
+    end;
+  if St <> 0 then
+  begin
+    Found := False;
+    Blk := FirstPara;
+    Sec := 0;
+    K := 0;
+    while (Blk <> 0) and not Found and (K < 200000) do
+    begin
+      At.block := Blk;
+      while (At.block <> 0) and (pd_doc_block_info(FDoc, At.block, Info) = PD_OK) and
+            (Info.kind <> PD_BLOCK_SECTION) do
+        At.block := Info.parent;
+      if (At.block <> 0) and (At.block <> Sec) then
+      begin
+        Sec := At.block;
+        if pd_doc_section_props(FDoc, Sec, SP) = PD_OK then
+          if (St = SP.header) or (St = SP.header_first) or (St = SP.header_even) then
+          begin
+            Result.HeaderFooter := 1;
+            Found := True;
+          end
+          else if (St = SP.footer) or (St = SP.footer_first) or (St = SP.footer_even) then
+          begin
+            Result.HeaderFooter := 2;
+            Found := True;
+          end;
+      end;
+      Blk := pd_doc_next_paragraph(FDoc, Blk);
+      Inc(K);
+    end;
+  end;
+end;
+
+function TParadeEdit.LinkAt(const P: pd_pos; out URL: string; out AStart, AEnd: pd_pos): Boolean;
+var
+  T, U: string;
+  I: Integer;
+  O: pd_inline;
+  Opens: array of record Off: UInt32; Url: string; end;
+begin
+  Result := False;
+  URL := '';
+  AStart := P;
+  AEnd := P;
+  T := ParaText(P.block);
+  SetLength(Opens, 0);
+  I := Pos(#$EF#$BF#$BC, T);
+  while I > 0 do
+  begin
+    if (pd_doc_inline_at(FDoc, PdPos(P.block, I - 1), O) = PD_OK) and (O.kind = PD_INLINE_LINK) then
+      if O.source_len > 0 then
+      begin
+        SetString(U, O.source, O.source_len);
+        SetLength(Opens, Length(Opens) + 1);
+        Opens[High(Opens)].Off := I - 1;
+        Opens[High(Opens)].Url := U;
+      end
+      else if Length(Opens) > 0 then
+      begin
+        if (Opens[High(Opens)].Off < P.offset) and (P.offset <= UInt32(I - 1)) then
+        begin
+          URL := Opens[High(Opens)].Url;
+          AStart := PdPos(P.block, Opens[High(Opens)].Off);
+          AEnd := PdPos(P.block, I + 2);
+          Exit(True);
+        end;
+        SetLength(Opens, Length(Opens) - 1);
+      end;
+    I := PosEx(#$EF#$BF#$BC, T, I + 3);
+  end;
+end;
+
+function TParadeEdit.RemoveLink(const P: pd_pos): Boolean;
+var
+  U: string;
+  A, B: pd_pos;
+begin
+  Result := not EditBlocked and LinkAt(P, U, A, B);
+  if not Result then
+    Exit;
+  pd_doc_begin_group(FDoc, 'Remove link');
+  pd_doc_delete(FDoc, PdRange(PdPos(B.block, B.offset - 3), B), nil);   { its end, then its start }
+  pd_doc_delete(FDoc, PdRange(A, PdPos(A.block, A.offset + 3)), nil);
+  pd_doc_end_group(FDoc);
+  SetCaret(PdPos(A.block, Max(Integer(A.offset), Integer(P.offset) - 3)), False);
+  Changed;
+end;
+
+procedure TParadeEdit.SetSelection(const A, B: pd_pos);
+begin
+  ClearShapeSelection;
+  pd_doc_marker_set(FDoc, FAnchor, A);
+  pd_doc_marker_set(FDoc, FCaret, B);
+  FHasDesiredX := False;
+  EnsureCaretVisible;
+  Invalidate;
+  CheckSelection;
+end;
+
+function TParadeEdit.GoToBookmark(const AName: string): Boolean;
+var
+  B: pd_block_id;
+  T: string;
+  I: Integer;
+  O: pd_inline;
+begin
+  Result := False;
+  if AName = '' then
+    Exit;
+  B := FirstPara;
+  while B <> 0 do
+  begin
+    T := ParaText(B);
+    I := Pos(#$EF#$BF#$BC, T);
+    while I > 0 do
+    begin
+      if (pd_doc_inline_at(FDoc, PdPos(B, I - 1), O) = PD_OK) and (O.kind = PD_INLINE_BOOKMARK) and
+         SameText(PAnsiChar(@O.name[0]), AName) then
+      begin
+        GoToPos(PdPos(B, I - 1));
+        Exit(True);
+      end;
+      I := PosEx(#$EF#$BF#$BC, T, I + 3);
+    end;
+    B := pd_doc_next_paragraph(FDoc, B);
   end;
 end;
 
