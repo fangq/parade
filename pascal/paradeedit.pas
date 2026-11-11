@@ -269,6 +269,7 @@ type
     FPlaceTotal, FPlaceCols: Integer;
     FPlaceKey: string;
     FMultiPage: Boolean;
+    FOnZoomChange: TNotifyEvent;
     FAuthor: string;               { who tracked changes and comments are by }
     FTrack: Boolean;
     FHasMarkup: Boolean;           { some page has changes or comments: the balloon column shows }
@@ -664,6 +665,8 @@ type
     property DrawKind: string read FDrawKind;
     { pages side by side, as many as fit across, as Word shows them once two fit (default); False: one column }
     property MultiPage: Boolean read FMultiPage write SetMultiPage;
+    { the zoom changed, by Zoom or by Ctrl+wheel: for a host's slider or its percentage }
+    property OnZoomChange: TNotifyEvent read FOnZoomChange write FOnZoomChange;
     { how many pages across the view shows now }
     function PagesAcross: Integer;
     { the page at a point of the control: the one whose place holds it, else the nearest in its row }
@@ -2818,6 +2821,8 @@ begin
   ClearGlyphCache;
   UpdateScrollBar;
   Invalidate;
+  if Assigned(FOnZoomChange) then
+    FOnZoomChange(Self);
 end;
 
 procedure TParadeEdit.Relayout;
