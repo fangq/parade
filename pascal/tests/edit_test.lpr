@@ -3691,6 +3691,61 @@ begin
   end;
 end;
 
+{ the text box being typed in shows its handles, as Word and PowerPoint show them -- to size it and to turn it, the
+  turning one orange -- and a drag of one sizes the box }
+procedure TestTypingBoxHandles(E: TParadeEdit; AForm: TForm);
+var
+  At: pd_pos;
+  Sid, I, J, Orange: Integer;
+  St, Para: pd_block_id;
+  Pg: Int32;
+  X0, Y0, X1, Y1, W0, BX0, BY0, BX1, BY1: Double;
+  Bmp: TBitmap;
+  Img: TLazIntfImage;
+  C: TFPColor;
+  Pt: TPoint;
+begin
+  E.NewDocument;
+  E.InsertText('Before');
+  E.ProcessKey(VK_RETURN, []);
+  Check(E.InsertCanvas(300, 150) and E.AddShape('textbox', 40 * PD_SP_PER_PT, 40 * PD_SP_PER_PT, 200 * PD_SP_PER_PT,
+    100 * PD_SP_PER_PT) and E.SelectedShape(At, Sid), 'a text box in a canvas');
+  St := pd_doc_story_at(E.Doc, pd_doc_story_count(E.Doc) - 1);
+  Para := pd_doc_child(E.Doc, St, 0);
+  pd_doc_insert_text(E.Doc, PdPos(Para, 0), 'Typed in', 8, 0, nil);
+  E.ClearShapeSelection;
+  E.GoToPos(PdPos(Para, 3));
+  E.Repaint;
+  Application.ProcessMessages;
+  Check(not E.SelectedShape(At, I), 'the caret in the box''s text, the box not selected');
+  Bmp := AForm.GetFormImage;
+  Img := Bmp.CreateIntfImage;
+  try
+    Orange := 0;
+    for J := 0 to Img.Height - 1 do
+      for I := 0 to Img.Width - 1 do
+      begin
+        C := Img.Colors[I, J];
+        if (C.red > $F000) and (C.green > $7800) and (C.green < $A000) and (C.blue < $2000) then
+          Inc(Orange);
+      end;
+    Check(Orange > 20, Format('typing in it: its turning handle, orange (%d pixels)', [Orange]));
+  finally
+    Img.Free;
+    Bmp.Free;
+  end;
+  { its right edge's handle dragged 40 pixels on: wider }
+  Check(E.ShapePageBox(At, Sid, Pg, X0, Y0, X1, Y1), 'where the box is');
+  W0 := X1 - X0;
+  Pt := E.PageToClient(Pg, X1 / PD_SP_PER_PT, (Y0 + Y1) / 2 / PD_SP_PER_PT);
+  TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+  TParadeWheel(E).MouseMove([ssLeft], Pt.X + 20, Pt.Y);
+  TParadeWheel(E).MouseMove([ssLeft], Pt.X + 40, Pt.Y);
+  TParadeWheel(E).MouseUp(mbLeft, [], Pt.X + 40, Pt.Y);
+  Check(E.ShapePageBox(At, Sid, Pg, BX0, BY0, BX1, BY1) and (BX1 - BX0 > W0 * 1.1), Format('its handle dragged: ' +
+    'the box wider (%.0f, was %.0f)', [(BX1 - BX0) / PD_SP_PER_PT, W0 / PD_SP_PER_PT]));
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -5032,6 +5087,8 @@ begin
   TestSlideOfTextBox(E);
   Step('a bullet clicked');
   TestListLabelClick(E);
+  Step('the handles of a text box typed in');
+  TestTypingBoxHandles(E, Form);
   Step('slide show');
   TestSlideShow(E);
   TestShowPdf(E);

@@ -405,6 +405,10 @@ type
     { a text box's edge under a point of the page (sp), in the drawing at D: its shape, or -1 }
     function TextBoxEdgeAt(const D: pd_pos; SX, SY: pd_sp): Integer;
     procedure PaintTextBoxFrame;
+    procedure PaintSizeHandles(L, T, R, B: Integer);
+    procedure PaintRotHandle(const P: TPoint);
+    { a press on a handle of the text box being typed in: the box selected, and sized or turned by the drag }
+    function TypingBoxHandle(X, Y: Integer): Boolean;
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
     function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
     procedure PushShapeStep(const Lbl: string; const At: pd_pos);
@@ -7498,8 +7502,71 @@ begin
     end;
 end;
 
+
+const
+  { a sizing handle's half-width: a square 9 pixels across (it was 7, a little small to take) }
+  HandleHalf = 4;
+
+{ the eight sizing handles round L, T, R, B: white squares edged in the selection's colour }
+procedure TParadeEdit.PaintSizeHandles(L, T, R, B: Integer);
+var
+  I, HX, HY: Integer;
+begin
+  Canvas.Pen.Style := psSolid;
+  Canvas.Pen.Width := 1;
+  Canvas.Pen.Color := $00D77800;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Brush.Color := clWhite;
+  for I := 0 to 7 do
+  begin
+    case I of
+      0: begin HX := L; HY := T; end;
+      1: begin HX := (L + R) div 2; HY := T; end;
+      2: begin HX := R; HY := T; end;
+      3: begin HX := R; HY := (T + B) div 2; end;
+      4: begin HX := R; HY := B; end;
+      5: begin HX := (L + R) div 2; HY := B; end;
+      6: begin HX := L; HY := B; end;
+    else
+      begin HX := L; HY := (T + B) div 2; end;
+    end;
+    Canvas.Rectangle(HX - HandleHalf, HY - HandleHalf, HX + HandleHalf + 1, HY + HandleHalf + 1);
+  end;
+end;
+
+{ the turning handle: an orange disc with a white turning arrow in it }
+procedure TParadeEdit.PaintRotHandle(const P: TPoint);
+begin
+  Canvas.Pen.Style := psSolid;
+  Canvas.Pen.Width := 1;
+  Canvas.Pen.Color := $000060D0;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Brush.Color := $00008CFF;      { orange }
+  Canvas.Ellipse(P.X - HandleHalf - 2, P.Y - HandleHalf - 2, P.X + HandleHalf + 3, P.Y + HandleHalf + 3);
+  Canvas.Pen.Color := clWhite;
+  Canvas.Arc(P.X - 3, P.Y - 3, P.X + 4, P.Y + 4, P.X + 4, P.Y, P.X, P.Y - 4);
+end;
+
 { the text box the caret is in: its edge dashed, as Word shows the one being typed in -- where it is taken to be
   moved or sized }
+function TParadeEdit.TypingBoxHandle(X, Y: Integer): Boolean;
+var
+  D: pd_pos;
+  Sid, K, I: Integer;
+begin
+  Result := False;
+  if FShapeOn or not CaretTextBox(D, Sid) or (Sid < 0) then
+    Exit;
+  FShapeOn := True;
+  FShapeAt := D;
+  FShapeSid := Sid;
+  SetLength(FShapeMore, 0);
+  K := ShapeHandleAt(X, Y, I);
+  if ((K in [0..7]) or (K = 10)) and ShapeDragStart(X, Y) then
+    Exit(True);
+  FShapeOn := False;   { not on a handle: the text, as it was }
+end;
+
 procedure TParadeEdit.PaintTextBoxFrame;
 var
   D: pd_pos;
@@ -7507,6 +7574,13 @@ var
   Pg: Int32;
   X, Y, W, H, JW, JH: Double;
   Boxes: TParadeShapeBoxes;
+  L, T, R, B: Integer;
+  G: TParadeShapeGeom;
+  M: TParadeDrawMap;
+  TP, P: TPoint;
+  WasOn: Boolean;
+  WasAt: pd_pos;
+  WasSid: Integer;
 begin
   if FShapeOn or not CaretTextBox(D, Sid) or (Sid < 0) or not DrawingPlace(D, Pg, X, Y, W, H, JW, JH) or
      (JW <= 0) or (JH <= 0) then
@@ -7515,15 +7589,36 @@ begin
   for I := 0 to High(Boxes) do
     if Boxes[I].Sid = Sid then
     begin
+      L := PageLeft(Pg) + Round((X + Boxes[I].X0 * W / JW) * PxPerSp);
+      T := PageTop(Pg) + Round((Y + Boxes[I].Y0 * H / JH) * PxPerSp);
+      R := PageLeft(Pg) + Round((X + Boxes[I].X1 * W / JW) * PxPerSp);
+      B := PageTop(Pg) + Round((Y + Boxes[I].Y1 * H / JH) * PxPerSp);
       Canvas.Brush.Style := bsClear;
       Canvas.Pen.Color := $00D77800;
       Canvas.Pen.Width := 1;
       Canvas.Pen.Style := psDash;
-      Canvas.Rectangle(PageLeft(Pg) + Round((X + Boxes[I].X0 * W / JW) * PxPerSp) - 1,
-        PageTop(Pg) + Round((Y + Boxes[I].Y0 * H / JH) * PxPerSp) - 1,
-        PageLeft(Pg) + Round((X + Boxes[I].X1 * W / JW) * PxPerSp) + 2,
-        PageTop(Pg) + Round((Y + Boxes[I].Y1 * H / JH) * PxPerSp) + 2);
+      Canvas.Rectangle(L - 1, T - 1, R + 2, B + 2);
       Canvas.Pen.Style := psSolid;
+      { and, as Word and PowerPoint show the box being typed in, its handles: to size it and to turn it }
+      PaintSizeHandles(L, T, R, B);
+      WasOn := FShapeOn;
+      WasAt := FShapeAt;
+      WasSid := FShapeSid;
+      FShapeOn := True;
+      FShapeAt := D;
+      FShapeSid := Sid;
+      try
+        if ShapeGeom(Sid, G) and DrawMap(M) and RotHandle(M, G, G.Rot, TP, P) then
+        begin
+          Canvas.Pen.Color := $00D77800;
+          Canvas.Line(TP, P);
+          PaintRotHandle(P);
+        end;
+      finally
+        FShapeOn := WasOn;
+        FShapeAt := WasAt;
+        FShapeSid := WasSid;
+      end;
     end;
 end;
 
@@ -8231,24 +8326,8 @@ begin
   Canvas.Pen.Style := psSolid;
   if not (FCanvasPage and (FShapeSid < 0)) then     { (the canvas page's own canvas: no box, no handles) }
     Canvas.Rectangle(L, T, R + 1, B + 1);
-  Canvas.Brush.Style := bsSolid;
-  Canvas.Brush.Color := clWhite;
-  K := 3;
-  for I := 0 to 7 * Ord(not (FCanvasPage and (FShapeSid < 0))) - Ord(FCanvasPage and (FShapeSid < 0)) do
-  begin
-    case I of
-      0: begin HX := L; HY := T; end;
-      1: begin HX := (L + R) div 2; HY := T; end;
-      2: begin HX := R; HY := T; end;
-      3: begin HX := R; HY := (T + B) div 2; end;
-      4: begin HX := R; HY := B; end;
-      5: begin HX := (L + R) div 2; HY := B; end;
-      6: begin HX := L; HY := B; end;
-    else
-      begin HX := L; HY := (T + B) div 2; end;
-    end;
-    Canvas.Rectangle(HX - K, HY - K, HX + K + 1, HY + K + 1);
-  end;
+  if not (FCanvasPage and (FShapeSid < 0)) then
+    PaintSizeHandles(L, T, R, B);
   PaintShapeExtras;
   PaintDrawPath;
   if (FShapeDrag in [0..9]) and not ((FShapeDrag = 9) and (FDrawKind = 'scribble')) and ShapeClientRect(FShapeNew, Rc) then
@@ -13511,7 +13590,7 @@ begin
       end;
       Exit;
     end;
-    if RotHandle(M, G, G.Rot, T, P) and (Abs(X - P.X) <= 6) and (Abs(Y - P.Y) <= 6) then
+    if RotHandle(M, G, G.Rot, T, P) and (Abs(X - P.X) <= HandleHalf + 4) and (Abs(Y - P.Y) <= HandleHalf + 4) then
       Exit(10);
     for I := 0 to High(G.HX) do
     begin
@@ -13552,7 +13631,7 @@ begin
     else
       begin HX := R.Left; HY := (R.Top + R.Bottom) div 2; end;
     end;
-    if (Abs(X - HX) <= 5) and (Abs(Y - HY) <= 5) then
+    if (Abs(X - HX) <= HandleHalf + 2) and (Abs(Y - HY) <= HandleHalf + 2) then
       Exit(I);
   end;
   if (FShapeSid < 0) and OnDrawingBody(X, Y) then
@@ -13762,10 +13841,7 @@ begin
     Canvas.Pen.Style := psSolid;
     Canvas.Pen.Color := $00D77800;
     Canvas.Line(T, P);
-    Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := clWhite;
-    Canvas.Ellipse(P.X - 5, P.Y - 5, P.X + 6, P.Y + 6);
-    Canvas.Arc(P.X - 3, P.Y - 3, P.X + 4, P.Y + 4, P.X + 4, P.Y, P.X, P.Y - 4);
+    PaintRotHandle(P);
   end;
   { the adjustments: yellow diamonds }
   Canvas.Pen.Style := psSolid;
@@ -15281,6 +15357,8 @@ begin
     Exit;
   end;
   FLabelOn := False;
+  if (Button = mbLeft) and (Shift * [ssShift, ssCtrl, ssDouble, ssTriple] = []) and TypingBoxHandle(X, Y) then
+    Exit;     { a handle of the text box being typed in: sized or turned }
   { a bullet or a number: its list's labels at that level, as Word selects them -- before the shape selected is
     taken for a move (a slide's canvas is selected while its text is edited, and a bullet is inside a text box,
     away from the handles on its edge) }
