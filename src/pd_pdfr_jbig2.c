@@ -40,7 +40,18 @@ typedef struct {
     size_t n, bp;
     uint32_t chigh, clow, a;
     int ct;
+    int64_t* budget;            /* pixels still to be decoded in this image (a damaged one stops) */
 } mq;
+
+/* a bitmap's pixels taken from the budget: 0 if there are not that many left */
+static int spend(mq* m, int64_t px) {
+    if (!m->budget) {
+        return 1;
+    }
+
+    *m->budget -= px;
+    return *m->budget >= 0;
+}
 
 static uint32_t mq_byte(const mq* m, size_t i) {
     return i < m->n ? m->p[i] : 0xFF;
@@ -79,6 +90,7 @@ static void mq_init(mq* m, const uint8_t* p, size_t n) {
     m->clow = (m->clow << 7) & 0xFFFF;
     m->ct -= 7;
     m->a = 0x8000;
+    m->budget = NULL;
 }
 
 static int mq_bit(mq* m, uint8_t* cx) {
@@ -178,8 +190,8 @@ static int32_t ia_int(mq* m, iactx* c) {
         v = ia_bits(m, c, &prev, 32) + 4436;
     }
 
-    if (v > 0x7FFFFFFF) {
-        v = 0x7FFFFFFF;
+    if (v > (1u << 26)) {   /* more than any page measures: kept so sums of them cannot overflow */
+        v = 1u << 26;
     }
 
     if (sign) {
@@ -245,9 +257,17 @@ static int px_at(const jbm* b, int32_t x, int32_t y) {
     return x >= 0 && y >= 0 && x < b->w && y < b->h ? b->px[(size_t)y * (size_t)b->w + (size_t)x] : 0;
 }
 
+/* a position kept within what any page measures, so damaged streams' sums do not overflow */
+static int32_t clamp28(int64_t v) {
+    return v > (1 << 28) ? (1 << 28) : v < -(1 << 28) ? -(1 << 28) : (int32_t)v;
+}
+
 /* B into A at (x, y) by operator op: 0 OR, 1 AND, 2 XOR, 3 XNOR, 4 REPLACE */
 static void bm_compose(jbm* a, const jbm* b, int32_t x, int32_t y, int op) {
     int32_t i, j;
+
+    x = clamp28(x);
+    y = clamp28(y);
 
     for (j = 0; j < b->h; j++) {
         int32_t yy = y + j;
@@ -301,7 +321,7 @@ static jbm* generic_arith(mq* m, uint8_t* cx, int32_t w, int32_t h, int tmpl, in
     const off* t = tmpl == 0 ? tmpl0 : tmpl == 1 ? tmpl1 : tmpl == 2 ? tmpl2 : tmpl3;
     int n = tmpl == 0 ? 16 : tmpl == 1 ? 13 : 10, k, ltp = 0;
     int8_t dx[16], dy[16];
-    jbm* b = bm_new(w, h);
+    jbm* b = spend(m, (int64_t)w * h) ? bm_new(w, h) : NULL;
     int32_t x, y;
 
     if (!b) {
@@ -373,7 +393,7 @@ static jbm* generic_mmr(const uint8_t* p, size_t n, int32_t w, int32_t h) {
 
 static jbm* refine(mq* m, uint8_t* cx, int32_t w, int32_t h, int tmpl, const jbm* ref, int32_t rdx, int32_t rdy,
                    const int8_t* rat) {
-    jbm* b = bm_new(w, h);
+    jbm* b = spend(m, (int64_t)w * h) ? bm_new(w, h) : NULL;
     int32_t x, y;
 
     if (!b) {
@@ -442,6 +462,7 @@ typedef struct {
     jbm* page;
     int page_op, page_def;
     int32_t page_h_known;
+    int64_t budget;             /* pixels the image's segments may decode in all */
 } jdoc;
 
 static uint32_t be32(const uint8_t* p) {
@@ -627,7 +648,7 @@ static jbm* text_region(mq* m, jctx* C, int32_t w, int32_t h, int32_t ninst, jbm
         return b;
     }
 
-    stript = -stript * strips;
+    stript = clamp28(-(int64_t)stript * strips);
 
     while (i < ninst) {
         int32_t dt = ia_int(m, &C->dt), dfs, curs;
@@ -637,19 +658,19 @@ static jbm* text_region(mq* m, jctx* C, int32_t w, int32_t h, int32_t ninst, jbm
             break;
         }
 
-        stript += dt * strips;
+        stript = clamp28((int64_t)stript + (int64_t)dt * strips);
         dfs = ia_int(m, &C->fs);
 
         if (dfs == OOB) {
             break;
         }
 
-        firsts += dfs;
+        firsts = clamp28((int64_t)firsts + dfs);
         curs = firsts;
 
         for (;;) {
             int32_t curt = strips > 1 ? ia_int(m, &C->it) : 0;
-            int32_t t = stript + curt, id, sw, sh, ot, os, ds;
+            int32_t t = clamp28((int64_t)stript + curt), id, sw, sh, ot, os, ds;
             jbm* sym, *made = NULL;
 
             id = (int32_t)ia_id(m, C->id, idlen);
@@ -683,7 +704,7 @@ static jbm* text_region(mq* m, jctx* C, int32_t w, int32_t h, int32_t ninst, jbm
 
             if (!transposed) {
                 if (refcorner & 2) {    /* right: the instance ends where S is */
-                    curs += sw - 1;
+                    curs = clamp28((int64_t)curs + sw - 1);
                 }
 
                 ot = (refcorner & 1) ? t : t - sh + 1;     /* top or bottom */
@@ -691,13 +712,13 @@ static jbm* text_region(mq* m, jctx* C, int32_t w, int32_t h, int32_t ninst, jbm
                 bm_compose(b, sym, os, ot, op);
 
                 if (!(refcorner & 2)) {
-                    curs += sw - 1;
+                    curs = clamp28((int64_t)curs + sw - 1);
                 }
             } else {
                 /* transposed: S runs down the page, T across; the corner's top or bottom is S's, its left or
                    right T's (6.4.5 3c) */
                 if (!(refcorner & 1)) {
-                    curs += sh - 1;
+                    curs = clamp28((int64_t)curs + sh - 1);
                 }
 
                 ot = (refcorner & 2) ? t - sw + 1 : t;
@@ -705,7 +726,7 @@ static jbm* text_region(mq* m, jctx* C, int32_t w, int32_t h, int32_t ninst, jbm
                 bm_compose(b, sym, ot, os, op);
 
                 if (refcorner & 1) {
-                    curs += sh - 1;
+                    curs = clamp28((int64_t)curs + sh - 1);
                 }
             }
 
@@ -722,7 +743,7 @@ static jbm* text_region(mq* m, jctx* C, int32_t w, int32_t h, int32_t ninst, jbm
                 break;
             }
 
-            curs += ds + dsoff;
+            curs = clamp28((int64_t)curs + ds + dsoff);
         }
     }
 
@@ -808,6 +829,7 @@ static void symbol_dict(jdoc* J, jseg* s, jctx* C) {
     memset(C->gb, 0, sizeof(C->gb));
     memset(C->gr, 0, sizeof(C->gr));
     mq_init(&m, p + at, n - at);
+    m.budget = &J->budget;
 
     if (refagg) {
         int len = code_len(nin + (int32_t)nnew);
@@ -822,9 +844,9 @@ static void symbol_dict(jdoc* J, jseg* s, jctx* C) {
             break;
         }
 
-        hc += dh;
+        hc = clamp28((int64_t)hc + dh);
 
-        if (hc < 0 || hc > 8192) {  /* a symbol taller than any glyph of a scan: a damaged stream */
+        if (hc < 0 || hc > 4096) {  /* a symbol taller than any glyph of a scan: a damaged stream */
             break;
         }
 
@@ -836,9 +858,9 @@ static void symbol_dict(jdoc* J, jseg* s, jctx* C) {
                 break;
             }
 
-            sw += dw;
+            sw = clamp28((int64_t)sw + dw);
 
-            if (sw < 0 || sw > 8192) {
+            if (sw < 0 || sw > 4096) {
                 ndec = (int32_t)nnew;
                 break;
             }
@@ -870,8 +892,9 @@ static void symbol_dict(jdoc* J, jseg* s, jctx* C) {
                 }
             }
 
-            if (!sym) {
-                sym = bm_new(sw > 0 ? sw : 0, hc);
+            if (!sym) {     /* the budget spent, or the stream damaged: the dictionary ends here */
+                ndec = (int32_t)nnew + 1;
+                break;
             }
 
             all[nin + ndec] = sym;
@@ -879,17 +902,31 @@ static void symbol_dict(jdoc* J, jseg* s, jctx* C) {
         }
     }
 
+    if (ndec > (int32_t)nnew) {     /* ended early: what was decoded is what there is */
+        int32_t k2;
+
+        for (k2 = 0; k2 < (int32_t)nnew && all[nin + k2]; k2++) {
+        }
+
+        ndec = k2;
+    }
+
     /* the symbols exported: runs of IAEX, off then on */
     {
-        int32_t total = nin + ndec, i = 0, cur = 0, nout = 0;
+        int32_t total = nin + ndec, i = 0, cur = 0, nout = 0, zeros = 0;
         jbm** out = (jbm**)calloc((size_t)total + 1, sizeof(jbm*));
         uint8_t* kept = (uint8_t*)calloc((size_t)total + 1, 1);
 
         while (out && kept && i < total) {
             int32_t run = ia_int(&m, &C->ex), r;
 
-            if (run == OOB || run < 0) {
+            /* a run may be empty, but not one after another for ever (a damaged stream) */
+            if (run == OOB || run < 0 || (run == 0 && ++zeros > 2)) {
                 break;
+            }
+
+            if (run > 0) {
+                zeros = 0;
             }
 
             for (r = 0; r < run && i < total; r++, i++) {
@@ -990,6 +1027,7 @@ static void region(jdoc* J, jseg* s, jctx* C) {
         memset(C->gr, 0, sizeof(C->gr));
         C->id = (uint8_t*)calloc((size_t)1 << (code_len(nsyms) + 1), 1);
         mq_init(&m, p + at, n - at);
+        m.budget = &J->budget;
 
         if (C->id) {
             b = text_region(&m, C, w, h, ninst, syms, nsyms, flags, rat);
@@ -1022,6 +1060,7 @@ static void region(jdoc* J, jseg* s, jctx* C) {
 
             memset(C->gb, 0, sizeof(C->gb));
             mq_init(&m, p + at, n - at);
+            m.budget = &J->budget;
             b = generic_arith(&m, C->gb, w, h, tmpl, tpgdon, gat);
         }
     } else if (s->type == 40 || s->type == 42 || s->type == 43) {   /* generic refinement of the page */
@@ -1048,6 +1087,10 @@ unsigned char* pd_jbig2_decode(const unsigned char* data, size_t n, const unsign
     unsigned char* out = NULL;
 
     memset(&J, 0, sizeof(J));
+
+    /* what a sound image decodes is a few times its own pixels (its symbols, its regions): far more is a damaged
+       stream decoding noise, stopped */
+    J.budget = (int64_t)(w > 0 ? w : 1) * (h > 0 ? h : 1) * 8 + 4000000;
 
     if (!C) {
         return NULL;
