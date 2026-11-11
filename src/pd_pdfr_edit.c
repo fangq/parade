@@ -430,15 +430,20 @@ static void pdf_string(pbuf* b, const unsigned char* s, size_t n) {
     qb_puts(b, ")");
 }
 
-/* Helvetica as an annotation's or field's font: a resource dictionary of it */
-static pv helv_font(pdoc* d) {
+/* a standard 14 font as a resource dictionary (WinAnsi) */
+static pv std_font(pdoc* d, const char* name) {
     pv f = pv_dict(d, 4);
 
     pd_dict_set(d, &f, "Type", pv_name(d, "Font"));
     pd_dict_set(d, &f, "Subtype", pv_name(d, "Type1"));
-    pd_dict_set(d, &f, "BaseFont", pv_name(d, "Helvetica"));
+    pd_dict_set(d, &f, "BaseFont", pv_name(d, name));
     pd_dict_set(d, &f, "Encoding", pv_name(d, "WinAnsiEncoding"));
     return f;
+}
+
+/* Helvetica as an annotation's or field's font */
+static pv helv_font(pdoc* d) {
+    return std_font(d, "Helvetica");
 }
 
 /* text in a font, a code a character it has ('?' for one it has not) */
@@ -2367,13 +2372,14 @@ static int edit_in_place(pdoc* d, int32_t page, const tchar* first, const tchar*
     return ok;
 }
 
-/* the old text covered in white, the new written over it in Helvetica (a stream added to the page) */
+/* the old text covered in white, the new written over it in the standard font most like the old (a stream added to
+   the page) */
 static int edit_overlay(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, const char* utf8) {
     const tchar* f = &L->chars[a];
     double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30, size;
     int32_t i;
     pbuf b;
-    pv font = helv_font(d), pg, res, fonts, c, arr;
+    pv font = std_font(d, pf_std14(f->font)), pg, res, fonts, c, arr;
     pfont* pf = pf_load(d, font);
     unsigned char enc[4096];
     size_t n = encode_in(pf, utf8, enc, sizeof(enc));

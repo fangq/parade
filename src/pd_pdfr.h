@@ -244,6 +244,8 @@ typedef struct {
 int pf_outline(pfont* f, uint32_t code, const pf_sink* sink, void* user);
 /* the font a code shows the same glyph of (for an outline cache's key), and its glyph id */
 uint32_t pf_glyph_key(pfont* f, uint32_t code);
+/* the standard 14 font most like it (Times, Helvetica, Courier and their weights and slants) */
+const char* pf_std14(pfont* f);
 /* encode UTF-8 in the font (for edits): bytes written, 0 if a character has no code */
 size_t pf_encode(pfont* f, const char* utf8, unsigned char* out, size_t cap);
 

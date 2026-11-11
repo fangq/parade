@@ -3285,3 +3285,50 @@ size_t pf_encode(pfont* f, const char* utf8, unsigned char* out, size_t cap) {
 
     return k;
 }
+
+/* the standard 14 font most like this one (for text written over it): Times, Helvetica or Courier, its weight and
+   slant kept */
+const char* pf_std14(pfont* f) {
+    static const char* const names[3][4] = {
+        { "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique" },
+        { "Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic" },
+        { "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique" }
+    };
+    pv desc;
+    int64_t flags;
+    const char* b;
+    int fam = 0, style = 0;
+
+    if (!f) {
+        return "Helvetica";
+    }
+
+    b = f->base;
+    desc = pd_get(f->doc, f->dict, "FontDescriptor");
+
+    if (f->kind == FT_TYPE0) {
+        desc = pd_get(f->doc, pd_index(f->doc, pd_get(f->doc, f->dict, "DescendantFonts"), 0), "FontDescriptor");
+    }
+
+    flags = pd_getint(f->doc, desc, "Flags", 0);
+
+    if (has_word(b, "Courier") || has_word(b, "Mono") || (flags & 1)) {
+        fam = 2;
+    } else if (has_word(b, "Times") || has_word(b, "Roman") || has_word(b, "Serif") || has_word(b, "Georgia") ||
+               has_word(b, "Garamond") || has_word(b, "Cambria") || has_word(b, "Palatino") || has_word(b, "Book") ||
+               has_word(b, "Minion") || has_word(b, "CMR") || has_word(b, "Century") ||
+               ((flags & 2) && !has_word(b, "Sans") && !has_word(b, "Arial") && !has_word(b, "Helvetica"))) {
+        fam = 1;
+    }
+
+    if (has_word(b, "Bold") || has_word(b, "Black") || has_word(b, "Semibold") || has_word(b, "Heavy") ||
+        (flags & (1 << 18)) || pd_getnum(f->doc, desc, "FontWeight", 400) >= 600) {
+        style |= 1;
+    }
+
+    if (has_word(b, "Italic") || has_word(b, "Oblique") || (flags & 64)) {
+        style |= 2;
+    }
+
+    return names[fam][style];
+}
