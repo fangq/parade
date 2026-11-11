@@ -2832,6 +2832,165 @@ begin
   Result := Result + Copy(Src, Last, MaxInt);
 end;
 
+// a LaTeX file's bibliography from its .bib files, as BibTeX would bring it: the files \bibliography names (or
+// biblatex's \addbibresource, put in at \printbibliography) put in as a parade-bibtex block, which the importer
+// sets out with the entries cited; with no .bib beside it, the .bbl BibTeX last wrote (Job.bbl) as it is
+function TexWithBibs(const Src, Dir, Job: string; var Budget: Int64): string;
+var
+  I, J, E, Last: Integer;
+  InComment, Done: Boolean;
+  Resources: string;
+
+  function ReadText(const Path: string): string;
+  var
+    Fs: TFileStream;
+  begin
+    Result := '';
+    if (Budget <= 0) or not FileExists(Path) then
+      Exit;
+    try
+      Fs := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
+      try
+        if Fs.Size > Budget then
+          Exit;
+        SetLength(Result, Fs.Size);
+        if Fs.Size > 0 then
+          Fs.ReadBuffer(Result[1], Fs.Size);
+        Dec(Budget, Fs.Size);
+      finally
+        Fs.Free;
+      end;
+    except
+      Result := '';
+    end;
+  end;
+
+  { the block for a list of .bib names ('' when none of them is there and there is no .bbl) }
+  function Block(const Names: string): string;
+  var
+    Sl: TStringList;
+    K: Integer;
+    Path, Data, Bbl: string;
+  begin
+    Result := '';
+    Data := '';
+    Sl := TStringList.Create;
+    try
+      Sl.StrictDelimiter := True;
+      Sl.Delimiter := ',';
+      Sl.DelimitedText := Names;
+      for K := 0 to Sl.Count - 1 do
+      begin
+        Path := Trim(Sl[K]);
+        if Path = '' then
+          Continue;
+        if not FilenameIsAbsolute(Path) then
+          Path := Dir + Path;
+        if not FileExists(Path) and FileExists(Path + '.bib') then
+          Path := Path + '.bib';
+        Data := Data + ReadText(Path) + LineEnding;
+      end;
+    finally
+      Sl.Free;
+    end;
+    if Trim(Data) <> '' then
+      Result := '\begin{parade-bibtex}' + LineEnding + Data + LineEnding + '\end{parade-bibtex}' + LineEnding
+    else if Job <> '' then
+    begin
+      Bbl := ReadText(Dir + Job + '.bbl');
+      if Pos('\begin{thebibliography}', Bbl) > 0 then
+        Result := Bbl;
+    end;
+  end;
+
+  { the argument of the command at I that starts with Cmd, an option before it passed over: its range J..E-1 }
+  function ArgAt(const Cmd: string): Boolean;
+  begin
+    Result := False;
+    if Copy(Src, I, Length(Cmd)) <> Cmd then
+      Exit;
+    J := I + Length(Cmd);
+    if (J <= Length(Src)) and (Src[J] in ['a'..'z', 'A'..'Z']) then
+      Exit;     { (\bibliographystyle) }
+    while (J <= Length(Src)) and (Src[J] in [' ', #9]) do
+      Inc(J);
+    if (J <= Length(Src)) and (Src[J] = '[') then
+    begin
+      while (J <= Length(Src)) and (Src[J] <> ']') and (Src[J] <> #10) do
+        Inc(J);
+      Inc(J);
+    end;
+    if (J > Length(Src)) or (Src[J] <> '{') then
+    begin
+      E := J - 1;   { (no argument: what follows from J) }
+      Result := Cmd = '\printbibliography';
+      Exit;
+    end;
+    Inc(J);
+    E := J;
+    while (E <= Length(Src)) and (Src[E] <> '}') and (Src[E] <> #10) do
+      Inc(E);
+    Result := (E <= Length(Src)) and (Src[E] = '}');
+  end;
+
+  procedure Put(const Text: string; Upto: Integer);
+  begin
+    Result := Result + Copy(Src, Last, I - Last) + Text;
+    Last := Upto;
+    I := Upto;
+  end;
+
+var
+  B: string;
+begin
+  Result := '';
+  Resources := '';
+  I := 1;
+  Last := 1;
+  InComment := False;
+  Done := False;
+  while I <= Length(Src) do
+  begin
+    if Src[I] = #10 then
+      InComment := False
+    else if (Src[I] = '%') and ((I = 1) or (Src[I - 1] <> '\')) then
+      InComment := True;
+    if InComment or (Src[I] <> '\') then
+    begin
+      Inc(I);
+      Continue;
+    end;
+    if (not Done) and ArgAt('\bibliography') then
+    begin
+      B := Block(Copy(Src, J, E - J));
+      if B <> '' then
+      begin
+        Put(B, E + 1);
+        Done := True;
+        Continue;
+      end;
+    end
+    else if ArgAt('\addbibresource') then
+    begin
+      Resources := Resources + Copy(Src, J, E - J) + ',';
+      Put('', E + 1);
+      Continue;
+    end
+    else if (not Done) and (Resources <> '') and ArgAt('\printbibliography') then
+    begin
+      B := Block(Resources);
+      if B <> '' then
+      begin
+        Put(B, E + 1);
+        Done := True;
+        Continue;
+      end;
+    end;
+    Inc(I);
+  end;
+  Result := Result + Copy(Src, Last, MaxInt);
+end;
+
 procedure TParadeEdit.LoadFromStream(Stream: TStream; Format: Int32; const FileName: string);
 var
   Ms: TMemoryStream;
@@ -2849,6 +3008,8 @@ begin
       SetString(Tex, PAnsiChar(Ms.Memory), Ms.Size);
       Budget := 64 * 1024 * 1024;
       Tex := TexWithInputs(Tex, ExtractFilePath(ExpandFileName(FileName)), 0, Budget);
+      Tex := TexWithBibs(Tex, ExtractFilePath(ExpandFileName(FileName)),
+        ChangeFileExt(ExtractFileName(FileName), ''), Budget);
       Ms.Clear;
       if Tex <> '' then
         Ms.WriteBuffer(Tex[1], Length(Tex));

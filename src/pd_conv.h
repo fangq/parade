@@ -184,6 +184,12 @@ pd_status pd_rtf_export(const pd_doc* d, pd_buf* out);
 pd_status pd_rtf_import(pd_doc* d, const char* s, size_t n);
 /* LaTeX: an article, report or book read for what it means (pd_latex_read.c) */
 pd_status pd_latex_import(pd_doc* d, const char* s, size_t n);
+/* a .bib file's entries keys names (each once; with all, then every other entry too) as the body of a
+   thebibliography list: "{99}" then \bibitem[Author(Year)]{key} ... a line each, in the order named or, sorted, by
+   author, year and title; given names as initials when abbrev. Keys it has not are left out. The caller frees it;
+   NULL when out of memory (pd_bibtex.c) */
+char* pd_bibtex_thebibliography(const char* bib, size_t n, const char* const* keys, int nkeys, int all,
+                                int sorted, int abbrev, size_t* len);
 pd_status pd_docx_export(const pd_doc* d, pd_buf* out);
 pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl);
 pd_status pd_docx_import(pd_doc* d, const unsigned char* s, size_t n);

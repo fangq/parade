@@ -5536,6 +5536,118 @@ static int keyed_found(const pd_doc* d, int* opaque_white) {
 }
 
 /* a LaTeX file read: its parts as what they mean, numbered as LaTeX numbers them, its macros expanded */
+/* a document's text, paragraphs joined by '|' */
+static void doc_text(pd_doc* d, char* all, size_t cap) {
+    pd_block_id p;
+    size_t w = 0;
+
+    for (p = pd_doc_next_paragraph(d, 0); p; p = pd_doc_next_paragraph(d, p)) {
+        uint32_t n;
+        const char* t = para_text(d, p, &n);
+
+        if (w + n + 2 < cap) {
+            memcpy(all + w, t, n);
+            w += n;
+            all[w++] = '|';
+        }
+    }
+
+    all[w] = '\0';
+}
+
+/* the .bib led puts in where \bibliography names it: the cited entries set out, numbered as cited or sorted */
+static void test_latex_bibtex(void) {
+    static const char bib[] =
+        "@string{jbo = \"J. Biomed.\"}\n"
+        "@comment{ @article{ghost, title={Not an entry}} }\n"
+        "@article{zed, author = {Zed, Zoe and van der Berg, Jan}, title = {Last {GPU} Paper},\n"
+        "  journal = jbo # \" Opt.\", volume = 17, number = {4}, pages = {1-5}, month = jul, year = 2012,\n"
+        "  doi = {10.1117/1.JBO.17.4.047004}}\n"
+        "@ARTICLE{Alpha, author = \"Ann Alpha and Bob Beta\", title = \"First?\", journal = {Optics}, year = {2001}}\n"
+        "@inproceedings{many, author = {Gina Gamma and H. Hill and {\\\"O}zg{\\\"u}r Ilk}, title = {Talk},\n"
+        "  crossref = {conf}, pages = {7--9}}\n"
+        "@proceedings{conf, title = {Proc. SPIE Photonics}, year = 2020, publisher = {SPIE}}\n"
+        "@misc{extra, title = {A Tool}, howpublished = {Software}, url = {https://x.org/a%20b}, year = {2023}}\n"
+        "@book{unused, author = {No One}, title = {Never Cited}, publisher = {P}, year = 1999}\n";
+    char tex[4096], all[8192];
+    pd_doc* d = NULL;
+    int n;
+
+    /* the order cited (no style named: unsrt's) */
+    n = snprintf(tex, sizeof(tex),
+                 "\\documentclass{article}\\begin{document}\n"
+                 "A \\cite{zed,Alpha} B \\citet{Alpha} C \\citeauthor{many} D \\cite[p.~2]{many} E \\cite{nokey}.\n"
+                 "\\nocite{extra}\n\\begin{parade-bibtex}%s\n\\end{parade-bibtex}\n\\end{document}\n", bib);
+    CHECK(pd_doc_import(tex, (size_t)n, PD_CONV_LATEX, &d) == PD_OK && d);
+
+    if (d) {
+        doc_text(d, all, sizeof(all));
+        CHECK(strstr(all, "A [1, 2] B Alpha and Beta [2] C Gamma et\xC2\xA0" "al. D [3, p.\xC2\xA0" "2] E [nokey].|"));
+        CHECK(strstr(all, "|References|[1] Zoe\xC2\xA0Zed and Jan\xC2\xA0van der Berg. Last GPU Paper. J. Biomed. Opt., "
+                     "17(4):1\xE2\x80\x93" "5, July 2012. doi:") != NULL);
+        CHECK(strstr(all, "\xEF\xBF\xBC" "10.1117/1.JBO.17.4.047004\xEF\xBF\xBC|") != NULL);    /* a link */
+        CHECK(strstr(all, "|[2] Ann\xC2\xA0" "Alpha and Bob\xC2\xA0" "Beta. First? Optics, 2001.|") != NULL);
+        CHECK(strstr(all, "|[3] Gina\xC2\xA0Gamma, H.\xC2\xA0Hill, and \xC3\x96zg\xC3\xBCr\xC2\xA0Ilk. Talk. In Proc. SPIE "
+                     "Photonics, pages 7\xE2\x80\x93" "9, SPIE, 2020.|") != NULL);    /* crossref */
+        CHECK(strstr(all, "|[4] A Tool. Software, 2023. \xEF\xBF\xBChttps://x.org/a%20b\xEF\xBF\xBC|") != NULL);    /* \nocite */
+        CHECK(strstr(all, "Never Cited") == NULL && strstr(all, "ghost") == NULL && strstr(all, "Not an entry") == NULL);
+        pd_doc_free(d);
+        d = NULL;
+    }
+
+    /* abbrv: sorted by author, given names as initials */
+    n = snprintf(tex, sizeof(tex),
+                 "\\documentclass{article}\\begin{document}\n"
+                 "A \\cite{zed,Alpha,many}.\n\\bibliographystyle{abbrv}\n"
+                 "\\begin{parade-bibtex}%s\n\\end{parade-bibtex}\n\\end{document}\n", bib);
+    CHECK(pd_doc_import(tex, (size_t)n, PD_CONV_LATEX, &d) == PD_OK && d);
+
+    if (d) {
+        doc_text(d, all, sizeof(all));
+        CHECK(strstr(all, "A [3, 1, 2].|") != NULL);
+        CHECK(strstr(all, "|[1] A.\xC2\xA0" "Alpha and B.\xC2\xA0" "Beta.") != NULL);
+        CHECK(strstr(all, "|[2] G.\xC2\xA0Gamma, H.\xC2\xA0Hill, and \xC3\x96.\xC2\xA0Ilk.") != NULL);
+        CHECK(strstr(all, "|[3] Z.\xC2\xA0Zed and J.\xC2\xA0van der Berg.") != NULL);
+        pd_doc_free(d);
+        d = NULL;
+    }
+
+    /* an entry with no type, listed with \nocite{*}: there, and an end to it (it once went round for ever) */
+    {
+        static const char odd[] =
+            "\\documentclass{article}\\begin{document}\\nocite{*}\\begin{parade-bibtex}@{t, title={Typeless}}\n"
+            "@article{u, title={Unclosed\n\\end{parade-bibtex}\\end{document}\n";
+
+        CHECK(pd_doc_import(odd, sizeof(odd) - 1, PD_CONV_LATEX, &d) == PD_OK && d);
+
+        if (d) {
+            doc_text(d, all, sizeof(all));
+            CHECK(strstr(all, "[1] Typeless.|") != NULL);
+            pd_doc_free(d);
+            d = NULL;
+        }
+    }
+
+    /* a .bbl's list (natbib): \citet has the names it gives, \bibinfo its text */
+    {
+        static const char bbl[] =
+            "\\documentclass{article}\\begin{document}\n\\citet{k} and \\citeyear{k}.\n"
+            "\\begin{thebibliography}{1}\n\\providecommand{\\natexlab}[1]{#1}\n"
+            "\\bibitem[Fang and Boas(2009)]{k}\n\\bibinfo{author}{Q.~Fang} and D.~Boas.\n\\newblock Monte Carlo."
+            "\\BibitemShut{NoStop}\n\\end{thebibliography}\n\\end{document}\n";
+
+        CHECK(pd_doc_import(bbl, sizeof(bbl) - 1, PD_CONV_LATEX, &d) == PD_OK && d);
+
+        if (d) {
+            doc_text(d, all, sizeof(all));
+            CHECK(strstr(all, "Fang and Boas [1] and 2009.|") != NULL);
+            CHECK(strstr(all, "[1] Q.\xC2\xA0" "Fang and D.\xC2\xA0" "Boas. Monte Carlo.|") != NULL);
+            CHECK(strstr(all, "author") == NULL && strstr(all, "NoStop") == NULL);
+            pd_doc_free(d);
+        }
+    }
+}
+
 static void test_latex_import(void) {
     static const char tex[] =
         "\\documentclass{article}\n"
@@ -12055,6 +12167,7 @@ int main(void) {
     test_pptx_transparent_color();
     test_gif_frames();
     test_latex_import();
+    test_latex_bibtex();
     test_pptx_chart();
     test_pptx_ph_inherit();
     test_pptx_run_props();

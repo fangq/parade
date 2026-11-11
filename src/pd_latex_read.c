@@ -48,6 +48,13 @@ typedef struct {
 } tlabel;
 
 typedef struct {
+    char key[80];
+    char who[96];                   /* natbib's \bibitem[Smith et al.(2020)]: "Smith et al." */
+    char year[16];
+    char label[24];                 /* \bibitem[Fan09]: cited as [Fan09], not a number */
+} tbib;
+
+typedef struct {
     pd_bld* b;
     int dry;                        /* counting only: nothing built */
     const char* src;                /* the whole file */
@@ -56,8 +63,16 @@ typedef struct {
     int nmac, capmac;
     tlabel* lab;
     int nlab, caplab;
-    char (*bib)[80];                /* bibliography keys, in order */
+    tbib* bib;                      /* bibliography entries, in order */
     int nbib, capbib;
+    char (*cited)[80];              /* the keys cited, in the order first cited (the first time through) */
+    int ncited, capcited, cite_all; /* cite_all: \nocite{*} */
+    char bibstyle[48];
+    char* bibdata;                  /* a .bib file's text the document's \bibliography brought (parade-bibtex) */
+    size_t bibdata_len;
+    char* bibgen;                   /* that set out as a thebibliography list */
+    size_t bibgen_len;
+    int bib_shown;                  /* that list put in (once: a second \bibliography has it already) */
     /* counters */
     int has_chapter, appendix;
     int sec[7];                     /* chapter section subsection subsubsection paragraph subparagraph */
@@ -525,18 +540,18 @@ static int bib_index(lt* L, const char* key, size_t kn, int add) {
     int k;
 
     for (k = 0; k < L->nbib; k++) {
-        if (strlen(L->bib[k]) == kn && !strncmp(L->bib[k], key, kn)) {
+        if (strlen(L->bib[k].key) == kn && !strncmp(L->bib[k].key, key, kn)) {
             return k;
         }
     }
 
-    if (!add || kn >= sizeof(L->bib[0])) {
+    if (!add || kn >= sizeof(L->bib[0].key)) {
         return -1;
     }
 
     if (L->nbib == L->capbib) {
         int nc = L->capbib ? L->capbib * 2 : 64;
-        char (*q)[80] = (char (*)[80])realloc(L->bib, sizeof(L->bib[0]) * (size_t)nc);
+        tbib* q = (tbib*)realloc(L->bib, sizeof(L->bib[0]) * (size_t)nc);
 
         if (!q) {
             return -1;
@@ -546,9 +561,75 @@ static int bib_index(lt* L, const char* key, size_t kn, int add) {
         L->capbib = nc;
     }
 
-    memcpy(L->bib[L->nbib], key, kn);
-    L->bib[L->nbib][kn] = '\0';
+    memset(&L->bib[L->nbib], 0, sizeof(L->bib[0]));
+    memcpy(L->bib[L->nbib].key, key, kn);
+    L->bib[L->nbib].key[kn] = '\0';
     return L->nbib++;
+}
+
+/* a key cited, the first time through: the order a .bib's entries are listed in */
+static void note_cited(lt* L, const char* key, size_t kn) {
+    int k;
+
+    if (!L->dry || kn == 0 || kn >= sizeof(L->cited[0])) {
+        return;
+    }
+
+    if (kn == 1 && key[0] == '*') {
+        L->cite_all = 1;
+        return;
+    }
+
+    for (k = 0; k < L->ncited; k++) {
+        if (strlen(L->cited[k]) == kn && !strncmp(L->cited[k], key, kn)) {
+            return;
+        }
+    }
+
+    if (L->ncited == L->capcited) {
+        int nc = L->capcited ? L->capcited * 2 : 64;
+        char (*q)[80] = (char (*)[80])realloc(L->cited, sizeof(L->cited[0]) * (size_t)nc);
+
+        if (!q) {
+            return;
+        }
+
+        L->cited = q;
+        L->capcited = nc;
+    }
+
+    memcpy(L->cited[L->ncited], key, kn);
+    L->cited[L->ncited][kn] = '\0';
+    L->ncited++;
+}
+
+/* each key of a list ("a, b,c"): fn with it */
+static void each_key(lt* L, const char* s, size_t a, size_t b, void (*fn)(lt*, const char*, size_t)) {
+    size_t i = a;
+
+    while (i < b) {
+        size_t e = i, ka = i, kb;
+
+        while (e < b && s[e] != ',') {
+            e++;
+        }
+
+        kb = e;
+
+        while (ka < kb && isspace((unsigned char)s[ka])) {
+            ka++;
+        }
+
+        while (kb > ka && isspace((unsigned char)s[kb - 1])) {
+            kb--;
+        }
+
+        if (kb > ka) {
+            fn(L, s + ka, kb - ka);
+        }
+
+        i = e + 1;
+    }
 }
 
 static void set_label_target(lt* L, const char* num, const char* kind) {
@@ -1578,8 +1659,9 @@ static void bibliography(lt* L, const char* s, size_t a, size_t b) {
 
     /* each \bibitem's text, from it to the next */
     while (i < b) {
-        size_t at = i, next, ka, kb, oa, ob;
-        char num[16];
+        size_t at = i, next, ka, kb, oa = 0, ob = 0;
+        char num[40];
+        int k;
 
         while (at + 8 <= b && strncmp(s + at, "\\bibitem", 8)) {
             at++;
@@ -1590,7 +1672,10 @@ static void bibliography(lt* L, const char* s, size_t a, size_t b) {
         }
 
         i = at + 8;
-        read_opt(s, b, &i, &oa, &ob);
+
+        if (!read_opt(s, b, &i, &oa, &ob)) {
+            oa = ob = 0;
+        }
 
         if (!read_arg(s, b, &i, &ka, &kb)) {
             break;
@@ -1607,8 +1692,30 @@ static void bibliography(lt* L, const char* s, size_t a, size_t b) {
         }
 
         count++;
-        bib_index(L, s + ka, kb - ka, 1);
-        snprintf(num, sizeof(num), "[%d] ", bib_index(L, s + ka, kb - ka, 0) + 1);
+        k = bib_index(L, s + ka, kb - ka, 1);
+
+        if (k >= 0 && ob > oa) {
+            tbib* t = &L->bib[k];
+            const char* lp = memchr(s + oa, '(', ob - oa);
+
+            if (lp) {     /* natbib: Smith et al.(2020) */
+                const char* rp = memchr(lp, ')', (size_t)(s + ob - lp));
+                size_t wn = (size_t)(lp - (s + oa)), yn = rp ? (size_t)(rp - lp - 1) : 0;
+
+                snprintf(t->who, sizeof(t->who), "%.*s", (int)wn, s + oa);
+                snprintf(t->year, sizeof(t->year), "%.*s", (int)yn, lp + 1);
+            } else if (ob - oa < sizeof(t->label)) {
+                memcpy(t->label, s + oa, ob - oa);
+                t->label[ob - oa] = '\0';
+            }
+        }
+
+        if (k >= 0 && L->bib[k].label[0]) {
+            snprintf(num, sizeof(num), "[%s] ", L->bib[k].label);
+        } else {
+            snprintf(num, sizeof(num), "[%d] ", k + 1);
+        }
+
         out_str(L, num);
         L->line_start = 1;      /* (the blanks after the key: not the entry's) */
         run(L, s + i, next - i);
@@ -1705,6 +1812,25 @@ static void environment(lt* L, const char* s, size_t n, size_t* i) {
 
     memcpy(name, s + na, nb - na);
     name[nb - na] = '\0';
+
+    /* a .bib file's text, as led puts it where \bibliography names it: its entries set out as BibTeX would */
+    if (!strcmp(name, "parade-bibtex")) {
+        after = verb_end(s, n, *i, name, &ce);
+
+        if (L->dry && !L->bibdata) {
+            L->bibdata = dup_range(s, *i, ce);
+            L->bibdata_len = L->bibdata ? ce - *i : 0;
+        } else if (!L->dry && L->bibgen && !L->bib_shown) {
+            size_t j = 0, a, b;
+
+            L->bib_shown = 1;
+            read_arg(L->bibgen, L->bibgen_len, &j, &a, &b);
+            bibliography(L, L->bibgen, j, L->bibgen_len);
+        }
+
+        *i = after;
+        return;
+    }
 
     /* verbatim: raw to its end */
     if (!strcmp(name, "verbatim") || !strcmp(name, "verbatim*") || !strcmp(name, "lstlisting") ||
@@ -2002,7 +2128,8 @@ static int skip_args(const char* name, size_t n) {
         { "tabcolsep", 0 }, { "arraystretch", 0 }, { "newline", 0 }, { "linebreak", 0 }, { "thanks", 1 },
         { "acknowledgments", 0 }, { "IEEEoverridecommandlockouts", 0 }, { "IEEEpeerreviewmaketitle", 0 },
         { "balance", 0 }, { "and", 0 }, { "printindex", 0 }, { "makeindex", 0 }, { "date", 1 }, { "title", 1 },
-        { "author", 1 }
+        { "author", 1 }, { "newblock", 0 }, { "BibitemOpen", 0 }, { "BibitemShut", 1 }, { "bibAnnoteFile", 1 },
+        { "bibAnnote", 2 }, { "providebibliographyfont", 0 }
     };
     size_t k;
 
@@ -2130,17 +2257,33 @@ static void reference(lt* L, const char* key, size_t kn, int how) {
     out_str(L, buf);
 }
 
-static void citation(lt* L, const char* s, size_t a, size_t b, size_t na, size_t nb, int has_note) {
+/* a citation: how 0 "[1, 2]", 1 "Smith et al. [1]" (\citet), 2 "Smith et al." (\citeauthor), 3 "2020" (\citeyear);
+   a key the bibliography has not: the key itself */
+/* a URL as written in a group: \% \# \& \_ \{ \} \~ are its characters (as hyperref reads them) */
+static void url_text(pd_buf* u, const char* s, size_t n) {
+    size_t k;
+
+    memset(u, 0, sizeof(*u));
+
+    for (k = 0; k < n; k++) {
+        if (s[k] == '\\' && k + 1 < n && strchr("%#&_{}~$", s[k + 1])) {
+            k++;
+        }
+
+        pb_putc(u, s[k]);
+    }
+}
+
+static void citation(lt* L, const char* s, size_t a, size_t b, size_t na, size_t nb, int has_note, int how) {
     pd_buf o;
     size_t i = a;
-    int first = 1;
+    int first = 1, bracket = 0;
 
     memset(&o, 0, sizeof(o));
-    pb_putc(&o, '[');
+    each_key(L, s, a, b, note_cited);
 
     while (i < b) {
         size_t e = i, ka, kb;
-        int k;
 
         while (e < b && s[e] != ',') {
             e++;
@@ -2158,16 +2301,53 @@ static void citation(lt* L, const char* s, size_t a, size_t b, size_t na, size_t
         }
 
         if (kb > ka) {
-            k = bib_index(L, s + ka, kb - ka, 0);
+            int k = bib_index(L, s + ka, kb - ka, 0);
+            const tbib* t = k >= 0 ? &L->bib[k] : NULL;
+            int named = how && t && t->who[0];
 
-            if (!first) {
-                pb_puts(&o, ", ");
-            }
+            if (named) {     /* the names in the text */
+                if (bracket) {
+                    pb_putc(&o, ']');
+                    bracket = 0;
+                }
 
-            if (k >= 0) {
-                pb_printf(&o, "%d", k + 1);
+                if (!first) {
+                    pb_puts(&o, how == 3 ? ", " : "; ");
+                }
+
+                /* (the names as LaTeX: et~al., {\"O}) */
+                out_raw(L, o.p ? o.p : "", o.n);
+                o.n = 0;
+                run(L, how == 3 ? t->year : t->who, strlen(how == 3 ? t->year : t->who));
+
+                if (how == 1) {
+                    pb_printf(&o, " [%s", t->label[0] ? t->label : "");
+
+                    if (!t->label[0]) {
+                        pb_printf(&o, "%d", k + 1);
+                    }
+
+                    bracket = 1;
+                }
             } else {
-                pb_put(&o, s + ka, kb - ka);
+                if (!bracket) {
+                    if (!first) {
+                        pb_putc(&o, ' ');
+                    }
+
+                    pb_putc(&o, '[');
+                    bracket = 1;
+                } else {
+                    pb_puts(&o, ", ");
+                }
+
+                if (t && t->label[0]) {
+                    pb_puts(&o, t->label);
+                } else if (t) {
+                    pb_printf(&o, "%d", k + 1);
+                } else {
+                    pb_put(&o, s + ka, kb - ka);
+                }
             }
 
             first = 0;
@@ -2177,12 +2357,23 @@ static void citation(lt* L, const char* s, size_t a, size_t b, size_t na, size_t
     }
 
     if (has_note && nb > na) {
-        pb_puts(&o, ", ");
-        pb_put(&o, s + na, nb - na);
+        if (!bracket) {
+            pb_puts(&o, " [");
+            bracket = 1;
+        } else {
+            pb_puts(&o, ", ");
+        }
+
+        out_raw(L, o.p ? o.p : "", o.n);
+        o.n = 0;
+        run(L, s + na, nb - na);   /* p.~2 */
     }
 
-    pb_putc(&o, ']');
-    out_raw(L, o.p, o.n);
+    if (bracket) {
+        pb_putc(&o, ']');
+    }
+
+    out_raw(L, o.p ? o.p : "", o.n);
     pb_free(&o);
 }
 
@@ -2616,9 +2807,11 @@ static void command(lt* L, const char* s, size_t n, size_t* i) {
     }
 
     if (IS("cite") || IS("citep") || IS("citet") || IS("citealp") || IS("citeauthor") || IS("citeyear") ||
-        IS("parencite") || IS("textcite") || IS("autocite") || IS("supercite")) {
+        IS("parencite") || IS("textcite") || IS("autocite") || IS("supercite") || IS("Cite") || IS("Citet") ||
+        IS("citealt") || IS("Citeauthor") || IS("citeyearpar") || IS("footcite") || IS("smartcite")) {
         size_t na = 0, nb = 0, pa, pb;
-        int note;
+        int note, how = IS("citet") || IS("Citet") || IS("textcite") || IS("citealt") ? 1 :
+                        IS("citeauthor") || IS("Citeauthor") ? 2 : IS("citeyear") || IS("citeyearpar") ? 3 : 0;
 
         read_star(s, n, i);
         note = read_opt(s, n, i, &na, &nb);
@@ -2629,9 +2822,36 @@ static void command(lt* L, const char* s, size_t n, size_t* i) {
         }
 
         if (read_arg(s, n, i, &x, &y)) {
-            citation(L, s, x, y, na, nb, note);
+            citation(L, s, x, y, na, nb, note, how);
         }
 
+        return;
+    }
+
+    if (IS("nocite")) {
+        if (read_arg(s, n, i, &x, &y)) {
+            each_key(L, s, x, y, note_cited);
+        }
+
+        return;
+    }
+
+    if (IS("bibliographystyle")) {
+        if (read_arg(s, n, i, &x, &y) && y - x < sizeof(L->bibstyle)) {
+            memcpy(L->bibstyle, s + x, y - x);
+            L->bibstyle[y - x] = '\0';
+        }
+
+        return;
+    }
+
+    if (IS("bibinfo") || IS("bibfield")) {     /* a .bbl's \bibinfo{author}{...}: the second its text */
+        read_arg(s, n, i, &x, &y);
+        return;
+    }
+
+    if (IS("urlprefix")) {
+        out_str(L, "URL ");
         return;
     }
 
@@ -2684,6 +2904,9 @@ static void command(lt* L, const char* s, size_t n, size_t* i) {
 
         if (read_arg(s, n, i, &ua, &ub) && read_arg(s, n, i, &x, &y)) {
             pd_inline o;
+            pd_buf u;
+
+            url_text(&u, s + ua, ub - ua);
 
             par_begin(L);
 
@@ -2696,11 +2919,12 @@ static void command(lt* L, const char* s, size_t n, size_t* i) {
             if (!L->dry) {
                 memset(&o, 0, sizeof(o));
                 o.kind = PD_INLINE_LINK;
-                o.source = s + ua;
-                o.source_len = (int32_t)(ub - ua);
+                o.source = u.p ? u.p : "";
+                o.source_len = (int32_t)u.n;
                 bld_inline(L->b, &o);
             }
 
+            pb_free(&u);
             run(L, s + x, y - x);
 
             if (!L->dry) {
@@ -2717,6 +2941,9 @@ static void command(lt* L, const char* s, size_t n, size_t* i) {
         if (read_arg(s, n, i, &x, &y)) {
             pd_inline o;
             pd_char_props keep = L->cp;
+            pd_buf u;
+
+            url_text(&u, s + x, y - x);
 
             par_begin(L);
 
@@ -2729,15 +2956,16 @@ static void command(lt* L, const char* s, size_t n, size_t* i) {
             if (!L->dry && IS("url")) {
                 memset(&o, 0, sizeof(o));
                 o.kind = PD_INLINE_LINK;
-                o.source = s + x;
-                o.source_len = (int32_t)(y - x);
+                o.source = u.p ? u.p : "";
+                o.source_len = (int32_t)u.n;
                 bld_inline(L->b, &o);
             }
 
             L->cp.mask |= PD_CP_FAMILY;
             strcpy(L->cp.family, "monospace");
             apply_format(L);
-            out_raw(L, s + x, y - x);   /* (as it is: a URL's characters are its own) */
+            out_raw(L, u.p ? u.p : "", u.n);   /* (as it is: a URL's characters are its own) */
+            pb_free(&u);
             L->cp = keep;
             apply_format(L);
 
@@ -3239,6 +3467,9 @@ static void lx_free(lt* L) {
     free(L->mac);
     free(L->lab);
     free(L->bib);
+    free(L->cited);
+    free(L->bibdata);
+    free(L->bibgen);
     free(L->title);
     free(L->author);
     free(L->date);
@@ -3258,6 +3489,108 @@ static void lx_forget_macros(lt* L) {
     free(L->author);
     free(L->date);
     L->title = L->author = L->date = NULL;
+}
+
+static int starts(const char* s, const char* const* list) {
+    for (; *list; list++) {
+        if (!strncmp(s, *list, strlen(*list))) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int contains(const char* s, const char* const* list) {
+    for (; *list; list++) {
+        if (strstr(s, *list)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* how the style a document names lists a .bib's entries: sorted by author (plain, abbrv, natbib's author-year
+   styles, biblatex unless sorting=none) or in the order cited (unsrt, ieeetr, the journals'); given names as
+   initials (abbrv, IEEE, the physics and optics journals') or whole */
+static void bib_style(const lt* L, const char* s, size_t n, int* sorted, int* abbrev) {
+    static const char* const SORTED[] = {
+        "plain", "abbrv", "alpha", "acm", "siam", "apalike", "apa", "chicago", "harvard", "agsm", "dcu",
+        "named", "elsarticle-harv", "spbasic", "authordate", "jss", "mla", "ametsoc", "agu", "copernicus", NULL
+    };
+    static const char* const ABBREV[] = {
+        "abbrv", "ieee", "IEEE", "spie", "osa", "opt", "nature", "aps", "aip", "acs", "ama", "vancouver",
+        "splncs", "elsarticle-num", "bmc", "plos", "unsrtabbrv", NULL
+    };
+    static const char* const BL_UNSORTED[] = { "sorting=none", "style=ieee", "style=nature", "style=phys",
+                                               "style=vancouver", NULL };
+    static const char* const BL_ABBREV[] = { "giveninits=true", "firstinits=true", "style=ieee",
+                                             "style=nature", "style=phys", NULL };
+
+    *sorted = *abbrev = 0;
+
+    if (L->bibstyle[0]) {
+        *sorted = starts(L->bibstyle, SORTED);
+        *abbrev = contains(L->bibstyle, ABBREV);
+        return;
+    }
+
+    {
+        /* biblatex: its options in the preamble */
+        size_t pre = n;
+        const char* p;
+        char* head;
+
+        for (p = s; (size_t)(p - s) + 16 <= n; p++) {
+            if (*p == '\\' && !strncmp(p, "\\begin{document}", 16)) {
+                pre = (size_t)(p - s);
+                break;
+            }
+        }
+
+        head = dup_range(s, 0, pre);
+
+        if (head && strstr(head, "{biblatex}")) {
+            *sorted = !contains(head, BL_UNSORTED);
+            *abbrev = contains(head, BL_ABBREV);
+        }
+
+        free(head);
+    }
+}
+
+/* the entries of the .bib the document brought, the cited ones, set out; numbered before the text's citations
+   are read the second time */
+static void bib_prepare(lt* L, const char* s, size_t n) {
+    const char** keys;
+    int k, sorted, abbrev;
+
+    if (!L->bibdata) {
+        return;
+    }
+
+    keys = (const char**)malloc(sizeof(char*) * (size_t)(L->ncited + 1));
+
+    if (!keys) {
+        return;
+    }
+
+    for (k = 0; k < L->ncited; k++) {
+        keys[k] = L->cited[k];
+    }
+
+    bib_style(L, s, n, &sorted, &abbrev);
+    L->bibgen = pd_bibtex_thebibliography(L->bibdata, L->bibdata_len, keys, L->ncited, L->cite_all, sorted, abbrev,
+                                          &L->bibgen_len);
+    free(keys);
+
+    if (L->bibgen) {
+        size_t j = 0, a, b;
+
+        read_arg(L->bibgen, L->bibgen_len, &j, &a, &b);
+        bibliography(L, L->bibgen, j, L->bibgen_len);     /* (dry: the keys and names noted) */
+    }
 }
 
 pd_status pd_latex_import(pd_doc* d, const char* s, size_t n) {
@@ -3299,6 +3632,10 @@ pd_status pd_latex_import(pd_doc* d, const char* s, size_t n) {
         L.in_document = !has_document;
         run(&L, s, n);
         par_end(&L);
+
+        if (pass == 0) {
+            bib_prepare(&L, s, n);
+        }
     }
 
     lx_free(&L);
