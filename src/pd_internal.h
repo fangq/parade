@@ -240,6 +240,7 @@ int pd_jpeg_encode(const unsigned char* rgb, int32_t w, int32_t h, int quality, 
 int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char** out, size_t* outlen);
 /* which engine compresses large inputs and inflates: "system zlib <version>" (opened at run time; PD_NO_LIBZ=1
    refuses it) or "built-in" */
+int pd_inflate_partial(const void* data, size_t n, size_t limit, unsigned char** out, size_t* outlen);
 const char* pd_zlib_engine(void);
 uint32_t pd_crc32(const void* data, size_t n);
 

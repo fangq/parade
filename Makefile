@@ -31,7 +31,9 @@ ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
 SRC     := src/pd_font.c src/pd_raster.c src/pd_svg.c src/pd_cff.c src/pd_unidata.c src/pd_text.c src/pd_bidi.c src/pd_shape.c src/pd_hyph.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_doc.c src/pd_doc_io.c \
            src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c src/pd_jpeg.c src/pd_conv.c src/pd_markup.c src/pd_html.c \
-           src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c src/pd_pptx.c src/pd_pptx_write.c src/pd_xdoc.c src/pd_dgm.c src/pd_preset.c src/pd_chart.c src/pd_math.c src/pd_emf.c src/pd_omml.c
+           src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c src/pd_pptx.c src/pd_pptx_write.c src/pd_xdoc.c src/pd_dgm.c src/pd_preset.c src/pd_chart.c src/pd_math.c src/pd_emf.c src/pd_omml.c \
+           src/pd_pdfr.c src/pd_pdfr_jpeg.c src/pd_pdfr_font.c src/pd_pdfr_res.c src/pd_pdfr_draw.c src/pd_pdfr_raster.c \
+           src/pd_pdfr_edit.c
 ifeq ($(SYNC),yrs)
 SRC     += src/pd_sync.c src/pd_tsync.c
 endif
@@ -39,18 +41,19 @@ BUILD   ?= build
 OBJ     := $(SRC:src/%.c=$(BUILD)/%.o)
 LIB     := $(BUILD)/libparade.a
 SO      := $(BUILD)/libparade.so
-TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout $(BUILD)/test_pdf $(BUILD)/test_convert
+TESTS   := $(BUILD)/test_parade $(BUILD)/test_doc $(BUILD)/test_layout $(BUILD)/test_pdf $(BUILD)/test_convert \
+           $(BUILD)/test_pdfr
 ifeq ($(SYNC),yrs)
 TESTS   += $(BUILD)/test_sync $(BUILD)/test_tsync
 TOOLS_SYNC := $(BUILD)/pd_compact
 endif
 BENCH   := $(BUILD)/bench_parade
 
-all: $(LIB) $(SO) $(TESTS) $(BENCH) $(BUILD)/pd_dump $(BUILD)/pd_conv $(TOOLS_SYNC)
+all: $(LIB) $(SO) $(TESTS) $(BENCH) $(BUILD)/pd_dump $(BUILD)/pd_pdfr $(BUILD)/pd_conv $(TOOLS_SYNC)
 
 $(BUILD)/%.o: src/%.c include/parade.h include/parade_doc.h include/parade_layout.h include/parade_convert.h \
-           include/parade_sync.h include/parade_tsync.h \
-           src/pd_internal.h src/pd_doc_internal.h src/pd_json.h src/pd_conv.h | $(BUILD)
+           include/parade_sync.h include/parade_tsync.h include/parade_pdfread.h \
+           src/pd_pdfr.h src/pd_pdfr_dl.h src/pd_pdfr_enc.inc src/pd_internal.h src/pd_doc_internal.h src/pd_json.h src/pd_conv.h | $(BUILD)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) -c $< -o $@
 
 $(LIB): $(OBJ)
@@ -86,6 +89,9 @@ oracle: $(SO)
 	    python3 tools/font_oracle.py --max-mem $(ORACLE_MAX_MEM) - > build/oracle.txt; \
 	    rc=$$?; grep -v ' 0 mismatches' build/oracle.txt; \
 	    grep -c ' 0 mismatches' build/oracle.txt | sed 's/$$/ fonts match fontTools/'; exit $$rc
+
+$(BUILD)/pd_pdfr: tools/pd_pdfr.c $(LIB)
+	$(CC) $(PD_CFLAGS) $(CFLAGS) -D_POSIX_C_SOURCE=199309L $< $(LIB) -o $@ $(LDLIBS)
 
 $(BUILD)/pd_dump: tools/pd_dump.c $(LIB)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) $< $(LIB) -o $@ $(LDLIBS)

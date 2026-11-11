@@ -2313,6 +2313,35 @@ int pd_inflate(const void* data, size_t n, int zlib, size_t limit, unsigned char
     return 0;
 }
 
+/* a raw deflate stream inflated as far as it goes: a PDF's stream cut short or with a bad check still gives what it
+   holds. 0 when it ended as it should, 1 when only a part came out (*out holds it), -1 when nothing did */
+int pd_inflate_partial(const void* data, size_t n, size_t limit, unsigned char** out, size_t* outlen) {
+    iout o;
+    size_t end_bit = 0;
+    int st;
+
+    fixed_init();
+    memset(&o, 0, sizeof(o));
+    o.limit = limit ? limit : (size_t)1 << 30;
+    o.cap = n * 4 + 4096 < o.limit ? n * 4 + 4096 : o.limit;
+    o.grow = 1;
+
+    if ((o.base = (unsigned char*)malloc(o.cap ? o.cap : 1)) == NULL) {
+        return -1;
+    }
+
+    st = segment(libz_use(), (const unsigned char*)data, n, 0, (size_t)-1, &o, &end_bit);
+
+    if (st != SEG_FINAL && o.op == 0) {
+        free(o.base);
+        return -1;
+    }
+
+    *out = o.base;
+    *outlen = o.op;
+    return st == SEG_FINAL ? 0 : 1;
+}
+
 /* CRC-32 (zip, PNG), a table a byte */
 uint32_t pd_crc32(const void* data, size_t n) {
     static uint32_t table[256];

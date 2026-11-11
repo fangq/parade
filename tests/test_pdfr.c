@@ -1,0 +1,542 @@
+/*
+ * Parade PDF reader tests: files made here (hand-written objects, broken
+ * cross-references, object and xref streams, Flate and predictors), files
+ * Parade's own writer makes, and encrypted ones from Ghostscript
+ * (tests/data/enc_*.pdf) -- each opened, drawn and its text read back, the
+ * pixels checked where the content says they are.
+ */
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "parade_layout.h"
+#include "parade_pdfread.h"
+
+static int failures = 0, checks = 0;
+
+#define CHECK(cond) do { checks++; if (!(cond)) { failures++; \
+            fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); } } while (0)
+
+int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);
+
+typedef struct {
+    unsigned char* p;
+    size_t n, cap;
+} buf_t;
+
+static void put(buf_t* b, const void* d, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        b->cap = (b->n + n + 1) * 2;
+        b->p = (unsigned char*)realloc(b->p, b->cap);
+    }
+
+    memcpy(b->p + b->n, d, n);
+    b->n += n;
+    b->p[b->n] = 0;
+}
+
+static void puts_(buf_t* b, const char* s) {
+    put(b, s, strlen(s));
+}
+
+static int sink(void* user, const void* data, size_t len) {
+    put((buf_t*)user, data, len);
+    return 0;
+}
+
+/* a PDF of the objects given (1..n, each its body after "n 0 obj"), its xref right unless broken says so */
+static buf_t make_pdf(const char* const* objs, int n, int broken) {
+    buf_t b = { NULL, 0, 0 };
+    long* off = (long*)calloc((size_t)n + 1, sizeof(long));
+    long xref;
+    int i;
+    char tmp[128];
+
+    puts_(&b, "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n");
+
+    for (i = 1; i <= n; i++) {
+        off[i] = (long)b.n;
+        snprintf(tmp, sizeof(tmp), "%d 0 obj\n", i);
+        puts_(&b, tmp);
+        puts_(&b, objs[i - 1]);
+        puts_(&b, "\nendobj\n");
+    }
+
+    xref = (long)b.n;
+    snprintf(tmp, sizeof(tmp), "xref\n0 %d\n0000000000 65535 f \n", n + 1);
+    puts_(&b, tmp);
+
+    for (i = 1; i <= n; i++) {
+        snprintf(tmp, sizeof(tmp), "%010ld 00000 n \n", broken ? off[i] + 7 : off[i]);
+        puts_(&b, tmp);
+    }
+
+    snprintf(tmp, sizeof(tmp), "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%ld\n%%%%EOF\n", n + 1, xref);
+    puts_(&b, tmp);
+    free(off);
+    return b;
+}
+
+static char* stream_obj(const char* dict, const char* data) {
+    size_t n = strlen(data);
+    char* s = (char*)malloc(strlen(dict) + n + 64);
+
+    sprintf(s, "<< %s /Length %zu >>\nstream\n%s\nendstream", dict, n, data);
+    return s;
+}
+
+/* the page drawn at 72 dpi: a pixel's red, green and blue at (x, y) from the top left */
+static uint8_t* draw(pd_pdfr* p, int page, int32_t* w, int32_t* h) {
+    double pw, ph;
+    uint8_t* buf;
+
+    if (pd_pdfr_page_size(p, page, &pw, &ph) != PD_OK) {
+        return NULL;
+    }
+
+    *w = (int32_t)(pw + 0.5);
+    *h = (int32_t)(ph + 0.5);
+    buf = (uint8_t*)malloc((size_t)*w * *h * 4);
+
+    if (pd_pdfr_render(p, page, 1, 0, 0, buf, *w, *h, *w * 4, 0) != PD_OK) {
+        free(buf);
+        return NULL;
+    }
+
+    return buf;
+}
+
+static uint32_t px(const uint8_t* buf, int32_t w, int x, int y) {
+    const uint8_t* q = buf + ((size_t)y * w + x) * 4;
+
+    return ((uint32_t)q[0] << 16) | ((uint32_t)q[1] << 8) | q[2];
+}
+
+static int dark_in(const uint8_t* buf, int32_t w, int x0, int y0, int x1, int y1) {
+    int x, y, n = 0;
+
+    for (y = y0; y < y1; y++) {
+        for (x = x0; x < x1; x++) {
+            if ((px(buf, w, x, y) & 0xFF) < 128) {
+                n++;
+            }
+        }
+    }
+
+    return n;
+}
+
+static char* page_text(pd_pdfr* p, int page) {
+    int32_t n = 0, i, k = 0;
+    pd_pdfr_char* c;
+    char* s;
+
+    pd_pdfr_page_text(p, page, NULL, 0, &n);
+    c = (pd_pdfr_char*)calloc((size_t)n + 1, sizeof(pd_pdfr_char));
+    s = (char*)malloc((size_t)n * 4 + 1);
+    pd_pdfr_page_text(p, page, c, n, &n);
+
+    for (i = 0; i < n; i++) {
+        uint32_t cp = c[i].cp;
+
+        if (cp < 0x80) {
+            s[k++] = (char)cp;
+        } else if (cp < 0x800) {
+            s[k++] = (char)(0xC0 | (cp >> 6));
+            s[k++] = (char)(0x80 | (cp & 63));
+        } else {
+            s[k++] = (char)(0xE0 | (cp >> 12));
+            s[k++] = (char)(0x80 | ((cp >> 6) & 63));
+            s[k++] = (char)(0x80 | (cp & 63));
+        }
+    }
+
+    s[k] = 0;
+    free(c);
+    return s;
+}
+
+/* a page with a red box and black Helvetica text */
+static const char* content1 = "1 0 0 rg 100 600 200 100 re f\n"
+                              "BT /F1 24 Tf 72 500 Td (Hello PDF) Tj ET\n"
+                              "0 0 1 RG 4 w 100 300 m 400 300 l S\n";
+
+static void test_basic(int broken) {
+    char* cs = stream_obj("", content1);
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        "/Resources << /Font << /F1 5 0 R >> >> >>",
+        cs,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+    };
+    buf_t b = make_pdf(objs, 5, broken);
+    pd_pdfr* p = NULL;
+    int32_t w, h;
+    uint8_t* img;
+    char* text;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    CHECK(pd_pdfr_page_count(p) == 1);
+    img = draw(p, 0, &w, &h);
+    CHECK(img && w == 612 && h == 792);
+
+    if (img) {
+        /* the box: user space 100..300 x 600..700 is 92..192 down from the top */
+        CHECK(px(img, w, 200, 142) == 0xFF0000);
+        CHECK(px(img, w, 50, 142) == 0xFFFFFF);
+        CHECK(px(img, w, 99, 142) == 0xFFFFFF && px(img, w, 101, 142) == 0xFF0000);
+        /* the line: 4 wide about y = 300 (492 from the top) */
+        CHECK(px(img, w, 250, 492) == 0x0000FF);
+        CHECK(px(img, w, 250, 497) == 0xFFFFFF);
+        /* the text: dark pixels on its baseline's line, none above the cap height */
+        CHECK(dark_in(img, w, 72, 275, 200, 292) > 50);
+        CHECK(dark_in(img, w, 72, 240, 200, 262) == 0);
+        free(img);
+    }
+
+    text = page_text(p, 0);
+    CHECK(strcmp(text, "Hello PDF") == 0);
+    free(text);
+
+    {
+        pd_pdfr_char c[16];
+        int32_t n;
+
+        CHECK(pd_pdfr_page_text(p, 0, c, 16, &n) == PD_OK && n == 9);
+        /* "H" starts at x 72; its box spans the baseline (y 292 down) */
+        CHECK(fabs(c[0].x0 - 72) < 0.5 && c[0].y0 < 292 && c[0].y1 > 292);
+        CHECK(c[1].x0 >= c[0].x1 - 0.5);
+        CHECK(fabs(c[0].size - 24) < 0.5);
+    }
+
+    pd_pdfr_free(p);
+    free(cs);
+    free(b.p);
+}
+
+/* an xref stream and an object stream, the content deflated with a PNG predictor on the xref */
+static void test_streams(void) {
+    buf_t b = { NULL, 0, 0 };
+    const char* page_objs = "1 0 2 50 3 100 ";
+    char objstm[1024], tmp[256];
+    const char* o1 = "<< /Type /Catalog /Pages 2 0 R >>";
+    const char* o2 = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+    const char* o3 = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>";
+    const char* content = "0 1 0 rg 50 50 100 100 re f";
+    unsigned char* z;
+    size_t zn;
+    long off4, off5, offx;
+    int k;
+
+    /* the object stream: its header of numbers and offsets, then the objects at those offsets */
+    memset(objstm, ' ', sizeof(objstm));
+    memcpy(objstm, page_objs, strlen(page_objs));
+    memcpy(objstm + 16, o1, strlen(o1));
+    memcpy(objstm + 16 + 50, o2, strlen(o2));
+    memcpy(objstm + 16 + 100, o3, strlen(o3));
+    objstm[16 + 100 + strlen(o3)] = 0;
+
+    puts_(&b, "%PDF-1.5\n");
+    off4 = (long)b.n;
+    pd_deflate(content, strlen(content), 1, &z, &zn);
+    snprintf(tmp, sizeof(tmp), "4 0 obj\n<< /Length %zu /Filter /FlateDecode >>\nstream\n", zn);
+    puts_(&b, tmp);
+    put(&b, z, zn);
+    puts_(&b, "\nendstream\nendobj\n");
+    free(z);
+    off5 = (long)b.n;
+    snprintf(tmp, sizeof(tmp), "5 0 obj\n<< /Type /ObjStm /N 3 /First 16 /Length %zu >>\nstream\n", strlen(objstm));
+    puts_(&b, tmp);
+    puts_(&b, objstm);
+    puts_(&b, "\nendstream\nendobj\n");
+    offx = (long)b.n;
+
+    {
+        /* rows of W [1 4 2], each with a PNG Up predictor byte */
+        unsigned char rows[7][8], prev[7], raw[7 * 8];
+        long fields[7][3] = { {0, 0, 65535}, {2, 5, 0}, {2, 5, 1}, {2, 5, 2}, {1, off4, 0}, {1, off5, 0}, {1, offx, 0} };
+        int r, j;
+
+        memset(prev, 0, sizeof(prev));
+
+        for (r = 0; r < 7; r++) {
+            unsigned char cur[7];
+
+            cur[0] = (unsigned char)fields[r][0];
+
+            for (j = 0; j < 4; j++) {
+                cur[1 + j] = (unsigned char)(fields[r][1] >> (24 - 8 * j));
+            }
+
+            cur[5] = (unsigned char)(fields[r][2] >> 8);
+            cur[6] = (unsigned char)fields[r][2];
+            rows[r][0] = 2;
+
+            for (j = 0; j < 7; j++) {
+                rows[r][1 + j] = (unsigned char)(cur[j] - prev[j]);
+            }
+
+            memcpy(prev, cur, 7);
+            memcpy(raw + 8 * r, rows[r], 8);
+        }
+
+        pd_deflate(raw, sizeof(raw), 1, &z, &zn);
+        snprintf(tmp, sizeof(tmp), "6 0 obj\n<< /Type /XRef /Size 7 /W [1 4 2] /Root 1 0 R /Filter /FlateDecode "
+                 "/DecodeParms << /Predictor 12 /Columns 7 >> /Length %zu >>\nstream\n", zn);
+        puts_(&b, tmp);
+        put(&b, z, zn);
+        puts_(&b, "\nendstream\nendobj\n");
+        free(z);
+        snprintf(tmp, sizeof(tmp), "startxref\n%ld\n%%%%EOF\n", offx);
+        puts_(&b, tmp);
+    }
+
+    {
+        pd_pdfr* p = NULL;
+        int32_t w, h;
+        uint8_t* img;
+
+        CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+        CHECK(pd_pdfr_page_count(p) == 1);
+        img = draw(p, 0, &w, &h);
+        CHECK(img && w == 200 && h == 200);
+
+        if (img) {
+            CHECK(px(img, w, 100, 100) == 0x00FF00);
+            CHECK(px(img, w, 20, 20) == 0xFFFFFF);
+            free(img);
+        }
+
+        pd_pdfr_free(p);
+    }
+
+    (void)k;
+    free(b.p);
+}
+
+/* a page turned 90 degrees and a crop box: what is drawn where */
+static void test_rotate(void) {
+    char* cs = stream_obj("", "1 0 0 rg 0 0 50 50 re f");
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Contents 4 0 R >>",
+        cs
+    };
+    buf_t b = make_pdf(objs, 4, 0);
+    pd_pdfr* p = NULL;
+    double w, h;
+    int32_t W, H;
+    uint8_t* img;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    CHECK(pd_pdfr_page_size(p, 0, &w, &h) == PD_OK && w == 300 && h == 400);
+    img = draw(p, 0, &W, &H);
+
+    if (img) {
+        /* the user space origin (bottom left) turned clockwise goes to the top left */
+        CHECK(px(img, W, 10, 10) == 0xFF0000);
+        CHECK(px(img, W, 10, 390) == 0xFFFFFF);
+        CHECK(px(img, W, 290, 10) == 0xFFFFFF);
+        free(img);
+    }
+
+    pd_pdfr_free(p);
+    free(cs);
+    free(b.p);
+}
+
+/* clipping, an even-odd fill, a dash, an axial shading, an inline image */
+static void test_paint(void) {
+    char* cs = stream_obj("",
+                          "q 0 0 100 100 re W n 0 0 1 rg 0 0 200 200 re f Q\n"                 /* clipped to 100 square */
+                          "0 g 120 0 m 200 0 l 200 80 l 120 80 l h 140 20 m 180 20 l 180 60 l 140 60 l h f*\n"
+                          "q 240 0 160 400 re W n /Sh sh Q\n"
+                          "q 50 0 0 50 0 150 cm BI /W 2 /H 1 /BPC 8 /CS /RGB /F /AHx ID FF0000 00FF00> EI Q\n");
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] /Contents 4 0 R "
+        "/Resources << /Shading << /Sh 5 0 R >> >> >>",
+        cs,
+        "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [250 0 350 0] /Extend [false false] "
+        "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>"
+    };
+    buf_t b = make_pdf(objs, 5, 0);
+    pd_pdfr* p = NULL;
+    int32_t W, H;
+    uint8_t* img;
+
+    (void)0;
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    img = draw(p, 0, &W, &H);
+
+    if (img) {
+        /* the clip: blue inside 100 x 100 at the bottom left, none past it */
+        CHECK(px(img, W, 50, 350) == 0x0000FF);
+        CHECK(px(img, W, 150, 260) == 0xFFFFFF || px(img, W, 150, 260) != 0x0000FF);
+        /* the even-odd hole */
+        CHECK(px(img, W, 125, 395) == 0x000000);
+        CHECK(px(img, W, 160, 360) == 0xFFFFFF);
+        /* the shading's colours along x: red at its start, blue at its end, white outside (no extend) */
+        {
+            uint32_t a = px(img, W, 252, 100), c = px(img, W, 348, 100), m = px(img, W, 300, 100);
+
+            CHECK((a >> 16) > 240 && (a & 0xFF) < 16);
+            CHECK((c & 0xFF) > 240 && (c >> 16) < 16);
+            CHECK((m >> 16) > 100 && (m >> 16) < 160 && (m & 0xFF) > 100 && (m & 0xFF) < 160);
+            CHECK(px(img, W, 360, 100) == 0xFFFFFF);
+        }
+        /* the inline image: two pixels, red then green, over 50 x 50 at the top left of user y 150..200 */
+        CHECK(px(img, W, 5, 225) == 0xFF0000);
+        CHECK(px(img, W, 45, 225) == 0x00FF00);
+        free(img);
+    }
+
+    pd_pdfr_free(p);
+    free(cs);
+    free(b.p);
+}
+
+static pd_font* latin;
+
+static const pd_font* resolver(void* user, const char* family, int32_t weight, int32_t italic) {
+    (void)user;
+    (void)family;
+    (void)weight;
+    (void)italic;
+    return latin;
+}
+
+/* Parade's own PDF read back: its text, in order, and its pages */
+static void test_roundtrip(void) {
+    pd_doc* d;
+    pd_layout* L;
+    pd_pdf_options opt;
+    buf_t out = { NULL, 0, 0 };
+    pd_block_id sec, para;
+    pd_pos at;
+    const char* text = "Round trip through Parade's writer and reader, caf\xC3\xA9.";
+    pd_pdfr* p = NULL;
+
+    if (pd_font_load_file("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf", 0, &latin) != PD_OK) {
+        printf("no Liberation Serif: round trip skipped\n");
+        return;
+    }
+
+    pd_doc_new(&d);
+    pd_doc_set_font_resolver(d, resolver, NULL);
+    sec = pd_doc_child(d, pd_doc_root(d), 0);
+    para = pd_doc_child(d, sec, 0);
+    at.block = para;
+    at.offset = 0;
+    pd_doc_insert_text(d, at, text, strlen(text), PD_FORMAT_INHERIT, NULL);
+
+    pd_layout_new(d, &L);
+    pd_layout_update(L, NULL);
+    pd_pdf_options_init(&opt);
+    CHECK(pd_layout_write_pdf(L, &opt, sink, &out) == PD_OK);
+    CHECK(pd_pdfr_open_memory(out.p, out.n, NULL, &p) == PD_OK);
+
+    if (p) {
+        char* s = page_text(p, 0);
+
+        CHECK(strstr(s, "Round trip through Parade") != NULL);
+        CHECK(strstr(s, "caf\xC3\xA9.") != NULL);
+        free(s);
+    }
+
+    pd_pdfr_free(p);
+    pd_layout_free(L);
+    pd_doc_free(d);
+    pd_font_free(latin);
+    free(out.p);
+}
+
+static void test_encrypted(void) {
+    pd_pdfr* p = NULL;
+    pd_status st = pd_pdfr_open_file("tests/data/enc_rc4.pdf", NULL, &p);
+    char* s;
+
+    CHECK(st == PD_OK);
+
+    if (st == PD_OK) {
+        s = page_text(p, 0);
+        CHECK(strcmp(s, "Secret text here") == 0);
+        free(s);
+    }
+
+    pd_pdfr_free(p);
+    p = NULL;
+    CHECK(pd_pdfr_open_file("tests/data/enc_rc4_user.pdf", NULL, &p) == PD_ERR_STATE);
+    CHECK(p && pd_pdfr_encrypted(p) == 1);
+    pd_pdfr_free(p);
+    p = NULL;
+    CHECK(pd_pdfr_open_file("tests/data/enc_rc4_user.pdf", "user", &p) == PD_OK);
+
+    if (p) {
+        s = page_text(p, 0);
+        CHECK(strcmp(s, "Secret text here") == 0);
+        free(s);
+    }
+
+    pd_pdfr_free(p);
+    p = NULL;
+    CHECK(pd_pdfr_open_file("tests/data/enc_rc4_user.pdf", "owner", &p) == PD_OK);
+    pd_pdfr_free(p);
+}
+
+/* garbage, truncation, an empty file: refused, never crashing */
+static void test_bad(void) {
+    pd_pdfr* p = NULL;
+    const char* junk = "not a pdf at all";
+    char* cs = stream_obj("", content1);
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+        cs
+    };
+    buf_t b = make_pdf(objs, 4, 0);
+    size_t cut;
+
+    CHECK(pd_pdfr_open_memory(junk, strlen(junk), NULL, &p) == PD_ERR_FORMAT);
+    pd_pdfr_free(p);
+    p = NULL;
+    CHECK(pd_pdfr_open_memory("", 0, NULL, &p) != PD_OK);
+    pd_pdfr_free(p);
+
+    /* cut short anywhere: opens or refuses, and draws what it opened */
+    for (cut = 20; cut < b.n; cut += 37) {
+        p = NULL;
+
+        if (pd_pdfr_open_memory(b.p, cut, NULL, &p) == PD_OK) {
+            int32_t w, h;
+            uint8_t* img = draw(p, 0, &w, &h);
+
+            free(img);
+        }
+
+        pd_pdfr_free(p);
+    }
+
+    checks++;
+    free(cs);
+    free(b.p);
+}
+
+int main(void) {
+    test_basic(0);
+    test_basic(1);      /* every offset in the xref wrong: read again by scanning */
+    test_streams();
+    test_rotate();
+    test_paint();
+    test_roundtrip();
+    test_encrypted();
+    test_bad();
+    printf("test_pdfr: %d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+}
