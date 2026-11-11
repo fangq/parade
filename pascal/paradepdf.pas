@@ -146,6 +146,13 @@ function pd_pdfr_add_shape(pdf: Ppd_pdfr; page, kind: Int32; x0, y0, x1, y1: Dou
 function pd_pdfr_add_note(pdf: Ppd_pdfr; page: Int32; x, y: Double; utf8: PAnsiChar; rgb: UInt32): Int32; cdecl; PDEXT;
 function pd_pdfr_add_text_box(pdf: Ppd_pdfr; page: Int32; x0, y0, x1, y1: Double; utf8: PAnsiChar; size: Double;
   rgb: UInt32): Int32; cdecl; PDEXT;
+{ a picture in a box on the page as shown: RGBA pixels (alpha a soft mask), or a JPEG's own bytes (rgba nil) }
+function pd_pdfr_add_image(pdf: Ppd_pdfr; page: Int32; x0, y0, x1, y1: Double; rgba: PByte; w, h: Int32;
+  jpeg: Pointer; jpeg_len: SizeUInt): Int32; cdecl; PDEXT;
+{ a link over a box: to a URI, or '#page=N' }
+function pd_pdfr_add_link(pdf: Ppd_pdfr; page: Int32; x0, y0, x1, y1: Double; uri: PAnsiChar): Int32; cdecl; PDEXT;
+{ an annotation's box (as shown) set: what it draws scaled into it }
+function pd_pdfr_annot_set_rect(pdf: Ppd_pdfr; page, index: Int32; x0, y0, x1, y1: Double): pd_status; cdecl; PDEXT;
 
 function pd_pdfr_field_count(pdf: Ppd_pdfr): Int32; cdecl; PDEXT;
 function pd_pdfr_field_get(pdf: Ppd_pdfr; index: Int32; out f: pd_pdfr_field): pd_status; cdecl; PDEXT;

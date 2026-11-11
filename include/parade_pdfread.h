@@ -130,6 +130,19 @@ PD_API int32_t   pd_pdfr_add_note(pd_pdfr* pdf, int32_t page, double x, double y
 PD_API int32_t   pd_pdfr_add_text_box(pd_pdfr* pdf, int32_t page, double x0, double y0, double x1, double y1,
                                       const char* utf8, double size, uint32_t rgb);
 
+/** a picture in the box (x0, y0)-(x1, y1) on the page as shown (y down), upright as the page is shown: rgba, w * h
+    pixels of 4 bytes (its alpha kept as a soft mask), or a JPEG's own bytes (jpeg, w and h its size; rgba may then
+    be NULL). A Stamp annotation: moved, resized and deleted as the others are. Its index, or -1 */
+PD_API int32_t   pd_pdfr_add_image(pd_pdfr* pdf, int32_t page, double x0, double y0, double x1, double y1,
+                                   const uint8_t* rgba, int32_t w, int32_t h, const void* jpeg, size_t jpeg_len);
+/** a link over the box (as shown): to a URI (a web address, mailto:...), or "#page=N" to a page of the file. Its
+    index, or -1 */
+PD_API int32_t   pd_pdfr_add_link(pd_pdfr* pdf, int32_t page, double x0, double y0, double x1, double y1,
+                                  const char* uri);
+/** an annotation's box (as shown) made (x0, y0)-(x1, y1): what it draws scaled into it */
+PD_API pd_status pd_pdfr_annot_set_rect(pd_pdfr* pdf, int32_t page, int32_t index, double x0, double y0, double x1,
+                                        double y1);
+
 /* ------------------------------------------------------------------ */
 /* form fields                                                        */
 /* ------------------------------------------------------------------ */

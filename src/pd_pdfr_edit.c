@@ -1398,6 +1398,208 @@ int32_t pd_pdfr_add_text_box(pd_pdfr* d, int32_t page, double x0, double y0, dou
     return at;
 }
 
+/* a stream made now as it is, not deflated (a JPEG's bytes: DCTDecode already) */
+static pv raw_stream(pdoc* d, pv dict, const unsigned char* data, size_t n) {
+    pstream* st = (pstream*)pa_alloc(&d->arena, sizeof(pstream));
+    pv v = pv_null();
+
+    st->data = (const uint8_t*)pa_strdup(&d->arena, (const char*)data, n);
+    st->len = (int64_t)n;
+    st->d = dict.u.d;
+    st->nd = dict.n;
+    v.t = PV_STREAM;
+    v.u.st = st;
+    pd_dict_set(d, &v, "Length", pv_int((int64_t)n));
+    return v;
+}
+
+/* a JPEG's components (1 grey, 3 colour, 4 CMYK) and whether Adobe wrote it (its CMYK inverted); 0 if not one */
+static int jpeg_components(const unsigned char* p, size_t n, int* adobe) {
+    size_t i = 2;
+
+    *adobe = 0;
+
+    if (n < 4 || p[0] != 0xFF || p[1] != 0xD8) {
+        return 0;
+    }
+
+    while (i + 4 <= n) {
+        unsigned m;
+        size_t len;
+
+        if (p[i] != 0xFF) {
+            i++;
+            continue;
+        }
+
+        m = p[i + 1];
+
+        if (m == 0xFF) {
+            i++;
+            continue;
+        }
+
+        if (m == 0xD8 || (m >= 0xD0 && m <= 0xD7) || m == 0x01) {
+            i += 2;
+            continue;
+        }
+
+        len = ((size_t)p[i + 2] << 8) | p[i + 3];
+
+        if (m == 0xEE && len >= 7 && i + 9 <= n && !memcmp(p + i + 4, "Adobe", 5)) {
+            *adobe = 1;
+        }
+
+        if ((m >= 0xC0 && m <= 0xC3) || (m >= 0xC5 && m <= 0xC7) || (m >= 0xC9 && m <= 0xCB) ||
+            (m >= 0xCD && m <= 0xCF)) {
+            return i + 9 < n ? p[i + 9] : 0;
+        }
+
+        if (m == 0xD9 || m == 0xDA) {
+            return 0;
+        }
+
+        i += 2 + len;
+    }
+
+    return 0;
+}
+
+/* an image XObject of RGBA pixels (its alpha a soft mask when it has any), or of a JPEG's bytes */
+static pv image_object(pdoc* d, const uint8_t* rgba, int32_t w, int32_t h, const unsigned char* jpeg, size_t jn) {
+    pv im = pv_dict(d, 8);
+    int adobe, nc = jpeg ? jpeg_components(jpeg, jn, &adobe) : 0;
+
+    pd_dict_set(d, &im, "Type", pv_name(d, "XObject"));
+    pd_dict_set(d, &im, "Subtype", pv_name(d, "Image"));
+    pd_dict_set(d, &im, "Width", pv_int(w));
+    pd_dict_set(d, &im, "Height", pv_int(h));
+    pd_dict_set(d, &im, "BitsPerComponent", pv_int(8));
+
+    if (nc == 1 || nc == 3 || nc == 4) {
+        pd_dict_set(d, &im, "ColorSpace", pv_name(d, nc == 1 ? "DeviceGray" : nc == 3 ? "DeviceRGB" : "DeviceCMYK"));
+
+        if (nc == 4 && adobe) {
+            static const double inv[8] = { 1, 0, 1, 0, 1, 0, 1, 0 };
+
+            pd_dict_set(d, &im, "Decode", arr_of(d, inv, 8));
+        }
+
+        pd_dict_set(d, &im, "Filter", pv_name(d, "DCTDecode"));
+        return raw_stream(d, im, jpeg, jn);
+    }
+
+    if (!rgba) {
+        return pv_null();
+    }
+
+    {
+        size_t np = (size_t)w * (size_t)h, k;
+        unsigned char* rgb = (unsigned char*)malloc(np * 3 + 1);
+        unsigned char* al = (unsigned char*)malloc(np + 1);
+        int has_alpha = 0;
+        pv v;
+
+        if (!rgb || !al) {
+            free(rgb);
+            free(al);
+            return pv_null();
+        }
+
+        for (k = 0; k < np; k++) {
+            rgb[3 * k] = rgba[4 * k];
+            rgb[3 * k + 1] = rgba[4 * k + 1];
+            rgb[3 * k + 2] = rgba[4 * k + 2];
+            al[k] = rgba[4 * k + 3];
+            has_alpha |= al[k] != 255;
+        }
+
+        pd_dict_set(d, &im, "ColorSpace", pv_name(d, "DeviceRGB"));
+
+        if (has_alpha) {
+            pv sm = pv_dict(d, 7);
+
+            pd_dict_set(d, &sm, "Type", pv_name(d, "XObject"));
+            pd_dict_set(d, &sm, "Subtype", pv_name(d, "Image"));
+            pd_dict_set(d, &sm, "Width", pv_int(w));
+            pd_dict_set(d, &sm, "Height", pv_int(h));
+            pd_dict_set(d, &sm, "BitsPerComponent", pv_int(8));
+            pd_dict_set(d, &sm, "ColorSpace", pv_name(d, "DeviceGray"));
+            pd_dict_set(d, &im, "SMask", pv_ref(new_obj(d, make_stream(d, sm, al, np)), 0));
+        }
+
+        v = make_stream(d, im, rgb, np * 3);
+        free(rgb);
+        free(al);
+        return v;
+    }
+}
+
+int32_t pd_pdfr_add_image(pd_pdfr* d, int32_t page, double x0, double y0, double x1, double y1, const uint8_t* rgba,
+                          int32_t w, int32_t h, const void* jpeg, size_t jpeg_len) {
+    double u[6], r[4], m[6];
+    pv a, img, xo, res, ap, apd;
+    pbuf b;
+    int32_t at;
+
+    if (!valid_page(d, page) || w <= 0 || h <= 0 || (size_t)w * (size_t)h > ((size_t)1 << 28) ||
+        (!rgba && !jpeg) || !(x1 > x0) || !(y1 > y0)) {
+        return -1;
+    }
+
+    edit_begin(d);
+    img = image_object(d, rgba, w, h, (const unsigned char*)jpeg, jpeg ? jpeg_len : 0);
+
+    if (img.t != PV_STREAM) {
+        edit_end(d);
+        return -1;
+    }
+
+    /* the picture upright as the page is shown: its corners (bottom left, bottom right, top left) in user space */
+    to_user(d, page, x0, y1, &u[0], &u[1]);
+    to_user(d, page, x1, y1, &u[2], &u[3]);
+    to_user(d, page, x0, y0, &u[4], &u[5]);
+    {
+        double xy[8];
+
+        xy[0] = u[0];
+        xy[1] = u[1];
+        xy[2] = u[2];
+        xy[3] = u[3];
+        xy[4] = u[4];
+        xy[5] = u[5];
+        xy[6] = u[2] + u[4] - u[0];
+        xy[7] = u[3] + u[5] - u[1];
+        bounds_of(xy, 4, 0, r);
+    }
+    m[0] = u[2] - u[0];
+    m[1] = u[3] - u[1];
+    m[2] = u[4] - u[0];
+    m[3] = u[5] - u[1];
+    m[4] = u[0];
+    m[5] = u[1];
+    memset(&b, 0, sizeof(b));
+    qb_puts(&b, "q ");
+    nums(&b, m, 6);
+    qb_puts(&b, " cm /Im0 Do Q\n");
+    xo = pv_dict(d, 1);
+    pd_dict_set(d, &xo, "Im0", pv_ref(new_obj(d, img), 0));
+    res = pv_dict(d, 1);
+    pd_dict_set(d, &res, "XObject", xo);
+    ap = appearance(d, &b, r, res);
+    qb_free(&b);
+    a = pv_dict(d, 10);
+    pd_dict_set(d, &a, "Subtype", pv_name(d, "Stamp"));
+    pd_dict_set(d, &a, "Name", pv_name(d, "Image"));
+    pd_dict_set(d, &a, "Rect", arr_of(d, r, 4));
+    apd = pv_dict(d, 1);
+    pd_dict_set(d, &apd, "N", pv_ref(new_obj(d, ap), 0));
+    pd_dict_set(d, &a, "AP", apd);
+    at = add_annot(d, page, a);
+    edit_end(d);
+    return at;
+}
+
 /* an annotation's own object, copied for a change: its number (0 if it is not an object of its own) */
 static int32_t annot_for_write(pdoc* d, int32_t page, int32_t index, pv* copy) {
     pv arr = annots_of(d, page), ref;
@@ -1532,6 +1734,142 @@ pd_status pd_pdfr_annot_move(pd_pdfr* d, int32_t page, int32_t index, double dx,
         }
     }
 
+    edit_end(d);
+    return PD_OK;
+}
+
+int32_t pd_pdfr_add_link(pd_pdfr* d, int32_t page, double x0, double y0, double x1, double y1, const char* uri) {
+    double u[4], r[4];
+    pv a, act, border;
+    int32_t at;
+    static const double none[3] = { 0, 0, 0 };
+
+    if (!valid_page(d, page) || !uri || !uri[0] || !(x1 > x0) || !(y1 > y0)) {
+        return -1;
+    }
+
+    to_user(d, page, x0, y0, &u[0], &u[1]);
+    to_user(d, page, x1, y1, &u[2], &u[3]);
+    bounds_of(u, 2, 0, r);
+    edit_begin(d);
+    a = pv_dict(d, 8);
+    pd_dict_set(d, &a, "Subtype", pv_name(d, "Link"));
+    pd_dict_set(d, &a, "Rect", arr_of(d, r, 4));
+    border = arr_of(d, none, 3);
+    pd_dict_set(d, &a, "Border", border);
+
+    if (!strncmp(uri, "#page=", 6)) {      /* a page of this file: shown whole */
+        long n = strtol(uri + 6, NULL, 10);
+        pv dest = pv_array(d, 2);
+
+        if (n < 1 || n > d->npages) {
+            edit_end(d);
+            return -1;
+        }
+
+        dest.u.a[0] = d->pages[n - 1].ref;
+        dest.u.a[1] = pv_name(d, "Fit");
+        pd_dict_set(d, &a, "Dest", dest);
+    } else {
+        act = pv_dict(d, 2);
+        pd_dict_set(d, &act, "S", pv_name(d, "URI"));
+        pd_dict_set(d, &act, "URI", pv_string(d, uri, strlen(uri)));
+        pd_dict_set(d, &a, "A", act);
+    }
+
+    at = add_annot(d, page, a);
+    edit_end(d);
+    return at;
+}
+
+/* the numbers of an array (nested too) as x, y pairs through m */
+static void map_nums(pdoc* d, pv* arr, const double* m) {
+    pv a = pd_resolve(d, *arr), o;
+    int32_t i;
+
+    if (a.t != PV_ARRAY) {
+        return;
+    }
+
+    o = pv_array(d, a.n);
+
+    for (i = 0; i < a.n; i++) {
+        pv e = pd_resolve(d, a.u.a[i]);
+        double x, y;
+
+        if (e.t == PV_ARRAY) {
+            map_nums(d, &e, m);
+            o.u.a[i] = e;
+        } else if (i % 2 == 0 && i + 1 < a.n && pd_num(d, e, &x) && pd_num(d, pd_resolve(d, a.u.a[i + 1]), &y)) {
+            double mx, my;
+
+            mat_pt(m, x, y, &mx, &my);
+            o.u.a[i] = pv_real(mx);
+            o.u.a[i + 1] = pv_real(my);
+            i++;
+        } else {
+            o.u.a[i] = e;
+        }
+    }
+
+    *arr = o;
+}
+
+pd_status pd_pdfr_annot_set_rect(pd_pdfr* d, int32_t page, int32_t index, double x0, double y0, double x1,
+                                 double y1) {
+    pd_pdfr_annot was;
+    double S[6], B[6], U[6], T[6], r[4];
+    pv a;
+    int32_t num;
+    static const char* const keys[] = { "QuadPoints", "InkList", "L", "Vertices", "CL" };
+    size_t k;
+
+    if (!valid_page(d, page) || !(x1 > x0) || !(y1 > y0) || pd_pdfr_annot_get(d, page, index, &was) != PD_OK ||
+        !(was.x1 > was.x0) || !(was.y1 > was.y0)) {
+        return PD_ERR_ARG;
+    }
+
+    num = annot_for_write(d, page, index, &a);
+
+    if (!num || !pd_rect(d, pd_get(d, a, "Rect"), r)) {
+        return PD_ERR_RANGE;
+    }
+
+    /* user space to the page as shown, the old box onto the new there, back */
+    S[0] = (x1 - x0) / (was.x1 - was.x0);
+    S[3] = (y1 - y0) / (was.y1 - was.y0);
+    S[1] = S[2] = 0;
+    S[4] = x0 - was.x0 * S[0];
+    S[5] = y0 - was.y0 * S[3];
+    pd_page_base(d, page, B);
+    page_inv(d, page, U);
+    mat_mul(B, S, T);
+    mat_mul(T, U, T);
+    edit_begin(d);
+
+    {
+        double xy[8];
+
+        mat_pt(T, r[0], r[1], &xy[0], &xy[1]);
+        mat_pt(T, r[2], r[3], &xy[2], &xy[3]);
+        mat_pt(T, r[0], r[3], &xy[4], &xy[5]);
+        mat_pt(T, r[2], r[1], &xy[6], &xy[7]);
+        bounds_of(xy, 4, 0, r);
+        pd_dict_set(d, &a, "Rect", arr_of(d, r, 4));
+    }
+
+    for (k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        pv v = pd_get(d, a, keys[k]);
+
+        if (v.t == PV_ARRAY) {
+            map_nums(d, &v, T);
+            pd_dict_set(d, &a, keys[k], v);
+        }
+    }
+
+    /* drawn again where Parade draws its kind; else its appearance's box is mapped onto the new rectangle */
+    remake_ap(d, &a);
+    set_obj(d, num, a);
     edit_end(d);
     return PD_OK;
 }

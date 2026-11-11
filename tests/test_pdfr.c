@@ -761,6 +761,206 @@ static void test_annots(void) {
     free(b.p);
 }
 
+/* a colour within tol of another, each channel */
+static int near_rgb(uint32_t a, uint32_t b, int tol) {
+    int k;
+
+    for (k = 0; k < 24; k += 8) {
+        int x = (int)((a >> k) & 255), y = (int)((b >> k) & 255);
+
+        if (x - y > tol || y - x > tol) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/* a picture put on the page: upright, its transparent part not painted, resized, moved, saved, on a turned page,
+   a JPEG kept as it is */
+static void test_insert_image(void) {
+    static const uint8_t rgba[16] = {
+        255, 0, 0, 255,   0, 200, 0, 255,       /* top: red, green */
+        0, 0, 255, 255,   0, 0, 0, 0            /* bottom: blue, nothing */
+    };
+    buf_t b = hello_pdf(), out;
+    pd_pdfr* p = NULL, *q;
+    pd_pdfr_annot a;
+    int32_t w, h;
+    uint8_t* img;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+
+    if (!p) {
+        free(b.p);
+        return;
+    }
+
+    CHECK(pd_pdfr_add_image(p, 0, 300, 300, 200, 400, rgba, 2, 2, NULL, 0) == -1);     /* no box */
+    CHECK(pd_pdfr_add_image(p, 0, 100, 300, 200, 400, NULL, 2, 2, NULL, 0) == -1);     /* no pixels */
+    CHECK(pd_pdfr_add_image(p, 0, 100, 300, 200, 400, rgba, 2, 2, NULL, 0) == 0);
+    CHECK(pd_pdfr_annot_get(p, 0, 0, &a) == PD_OK && a.kind == PD_ANNOT_STAMP);
+    CHECK(fabs(a.x0 - 100) < 0.01 && fabs(a.y0 - 300) < 0.01 && fabs(a.x1 - 200) < 0.01 && fabs(a.y1 - 400) < 0.01);
+    CHECK(pd_pdfr_annot_at(p, 0, 150, 350) == 0);
+    img = draw(p, 0, &w, &h);
+
+    if (img) {
+        CHECK(near_rgb(px(img, w, 120, 320), 0xFF0000, 40));     /* top left red: the right way up */
+        CHECK(near_rgb(px(img, w, 180, 320), 0x00C800, 40));
+        CHECK(near_rgb(px(img, w, 120, 380), 0x0000FF, 40));
+        CHECK(px(img, w, 185, 385) == 0xFFFFFF);                  /* its transparent quarter: the page */
+        CHECK(px(img, w, 95, 350) == 0xFFFFFF);
+        free(img);
+    }
+
+    /* resized: twice as wide and tall, from the same corner */
+    CHECK(pd_pdfr_annot_set_rect(p, 0, 0, 100, 300, 300, 500) == PD_OK);
+    CHECK(pd_pdfr_annot_get(p, 0, 0, &a) == PD_OK && fabs(a.x1 - 300) < 0.01 && fabs(a.y1 - 500) < 0.01);
+    img = draw(p, 0, &w, &h);
+
+    if (img) {
+        CHECK(near_rgb(px(img, w, 150, 350), 0xFF0000, 40));
+        CHECK(near_rgb(px(img, w, 250, 350), 0x00C800, 40));
+        CHECK(near_rgb(px(img, w, 150, 450), 0x0000FF, 40));
+        CHECK(px(img, w, 260, 460) == 0xFFFFFF);
+        free(img);
+    }
+
+    /* a shape resized: drawn again in its new box */
+    CHECK(pd_pdfr_add_shape(p, 0, PD_ANNOT_SQUARE, 400, 100, 450, 150, 0xFF0000, 0xFF00FF00, 2) == 1);
+    CHECK(pd_pdfr_annot_set_rect(p, 0, 1, 400, 100, 550, 200) == PD_OK);
+    img = draw(p, 0, &w, &h);
+
+    if (img) {
+        CHECK(px(img, w, 520, 180) == 0x00FF00);    /* inside the new box, outside the old */
+        CHECK(px(img, w, 401, 190) == 0xFF0000);    /* its border, 2 wide still */
+        CHECK(px(img, w, 404, 190) == 0x00FF00);
+        free(img);
+    }
+
+    CHECK(pd_pdfr_annot_move(p, 0, 0, 10, 0) == PD_OK);
+    out = saved(p);
+    q = reopen(&out, NULL);
+
+    if (q) {
+        CHECK(pd_pdfr_annot_get(q, 0, 0, &a) == PD_OK && a.kind == PD_ANNOT_STAMP && fabs(a.x0 - 110) < 0.01);
+        img = draw(q, 0, &w, &h);
+
+        if (img) {
+            CHECK(near_rgb(px(img, w, 160, 350), 0xFF0000, 40));
+            CHECK(px(img, w, 105, 350) == 0xFFFFFF);
+            free(img);
+        }
+
+        pd_pdfr_free(q);
+    }
+
+    free(out.p);
+    /* undone: the move, the shape's resize, the shape, the picture's resize, the picture */
+    CHECK(pd_pdfr_undo(p) == PD_OK && pd_pdfr_undo(p) == PD_OK && pd_pdfr_undo(p) == PD_OK);
+    CHECK(pd_pdfr_annot_count(p, 0) == 1);
+    CHECK(pd_pdfr_undo(p) == PD_OK && pd_pdfr_annot_get(p, 0, 0, &a) == PD_OK && fabs(a.x1 - 200) < 0.01);
+    CHECK(pd_pdfr_undo(p) == PD_OK && pd_pdfr_annot_count(p, 0) == 0);
+
+    /* a JPEG: its bytes in the file as they are */
+    {
+        FILE* f = fopen("tests/data/photo.jpg", "rb");
+        unsigned char jpg[4096];
+        size_t jn = f ? fread(jpg, 1, sizeof(jpg), f) : 0;
+
+        if (f) {
+            fclose(f);
+        }
+
+        CHECK(jn > 100);
+        CHECK(pd_pdfr_add_image(p, 0, 100, 100, 220, 172, NULL, 60, 36, jpg, jn) == 0);
+        out = saved(p);
+        CHECK(has_bytes(out.p + b.n, out.n - b.n, "/DCTDecode") && has_bytes(out.p + b.n, out.n - b.n, "/DeviceRGB"));
+        CHECK(jn > 100 && has_bytes(out.p, out.n, "JFIF") == has_bytes(jpg, jn, "JFIF"));
+        img = draw(p, 0, &w, &h);
+
+        if (img) {
+            CHECK(near_rgb(px(img, w, 160, 136), 0xF2C923, 50));     /* the middle, yellow */
+            CHECK(near_rgb(px(img, w, 110, 110), 0x1E5AA2, 50));     /* a corner, blue */
+            free(img);
+        }
+
+        free(out.p);
+    }
+
+    /* links: to the web, to a page; read back as links are */
+    CHECK(pd_pdfr_add_link(p, 0, 50, 50, 150, 70, "") == -1);
+    CHECK(pd_pdfr_add_link(p, 0, 50, 50, 150, 70, "#page=9") == -1);   /* no such page */
+    CHECK(pd_pdfr_add_link(p, 0, 50, 50, 150, 70, "https://example.org/a?b=1") == 1);
+    CHECK(pd_pdfr_add_link(p, 0, 50, 80, 150, 100, "#page=1") == 2);
+    out = saved(p);
+    q = reopen(&out, NULL);
+
+    if (q) {
+        CHECK(pd_pdfr_annot_get(q, 0, 1, &a) == PD_OK && a.kind == PD_ANNOT_LINK &&
+              strcmp(a.uri, "https://example.org/a?b=1") == 0 && fabs(a.x0 - 50) < 0.01 && fabs(a.y1 - 70) < 0.01);
+        CHECK(pd_pdfr_annot_get(q, 0, 2, &a) == PD_OK && a.kind == PD_ANNOT_LINK && strcmp(a.uri, "#page=1") == 0);
+        CHECK(pd_pdfr_annot_at(q, 0, 100, 60) == 1);
+        img = draw(q, 0, &w, &h);
+
+        if (img) {
+            CHECK(px(img, w, 100, 60) == 0xFFFFFF);     /* no border drawn */
+            free(img);
+        }
+
+        pd_pdfr_free(q);
+    }
+
+    free(out.p);
+    pd_pdfr_free(p);
+    free(b.p);
+
+    /* a page turned a quarter: the picture still upright as it is shown */
+    {
+        char* cs = stream_obj("", "");
+        const char* objs[] = {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /Rotate 90 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Contents 4 0 R >>",
+            cs
+        };
+        buf_t r = make_pdf(objs, 4, 0);
+
+        CHECK(pd_pdfr_open_memory(r.p, r.n, NULL, &p) == PD_OK);
+
+        if (p) {
+            CHECK(pd_pdfr_add_image(p, 0, 50, 100, 250, 300, rgba, 2, 2, NULL, 0) == 0);
+            img = draw(p, 0, &w, &h);
+
+            if (img) {
+                CHECK(w == 300 && h == 400);
+                CHECK(near_rgb(px(img, w, 100, 150), 0xFF0000, 40));
+                CHECK(near_rgb(px(img, w, 200, 150), 0x00C800, 40));
+                CHECK(near_rgb(px(img, w, 100, 250), 0x0000FF, 40));
+                CHECK(px(img, w, 210, 260) == 0xFFFFFF);
+                free(img);
+            }
+
+            /* resized there too */
+            CHECK(pd_pdfr_annot_set_rect(p, 0, 0, 50, 100, 150, 200) == PD_OK);
+            CHECK(pd_pdfr_annot_get(p, 0, 0, &a) == PD_OK && fabs(a.x0 - 50) < 0.01 && fabs(a.y1 - 200) < 0.01);
+            img = draw(p, 0, &w, &h);
+
+            if (img) {
+                CHECK(near_rgb(px(img, w, 75, 125), 0xFF0000, 40));
+                CHECK(near_rgb(px(img, w, 75, 175), 0x0000FF, 40));
+                CHECK(px(img, w, 200, 150) == 0xFFFFFF);
+                free(img);
+            }
+
+            pd_pdfr_free(p);
+        }
+
+        free(cs);
+        free(r.p);
+    }
+}
+
 static void test_forms(void) {
     char* off = stream_obj("/BBox [0 0 20 20]", "");
     char* yes = stream_obj("/BBox [0 0 20 20]", "0 0 1 rg 3 3 14 14 re f");
@@ -1399,6 +1599,7 @@ int main(void) {
     test_encrypted();
     test_bad();
     test_annots();
+    test_insert_image();
     test_forms();
     test_replace_text();
     test_replace_in_tj();
