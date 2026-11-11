@@ -206,6 +206,11 @@ static void acc_line(acc_t* A, double px0, double py0, double px1, double py1) {
     int32_t y, ystart, yend;
     double w = A->w;
 
+    /* not a number or out past any page (a broken file's coordinates): nothing drawn */
+    if (!(fabs(px0) < 1e8) || !(fabs(px1) < 1e8) || !(fabs(py0) < 1e8) || !(fabs(py1) < 1e8)) {
+        return;
+    }
+
     px0 -= A->x0;
     px1 -= A->x0;
     py0 -= A->y0;
@@ -265,6 +270,11 @@ static void acc_line(acc_t* A, double px0, double py0, double px1, double py1) {
         {
             double xaf = floor(xa);
             int32_t xai = (int32_t)xaf, xbi = (int32_t)ceil(xb);
+
+            if (xai < 0 || xbi > A->w + 1 || xai > A->w) {     /* cannot happen with the clamps; a guard all the same */
+                x = xnext;
+                continue;
+            }
 
             if (xbi <= xai + 1) {
                 double xmf = 0.5 * (x0c + x1c) - xaf;
@@ -1253,8 +1263,12 @@ static void draw_stroke(rctx* R, const ditem* it, mask* m) {
     int32_t x0, y0, x1, y1, r;
     uint8_t* cov;
 
-    if (hw < 0.4) {     /* a hairline: a pixel or so wide */
+    if (!(hw >= 0.4)) {     /* a hairline (or a width not a number): a pixel or so wide */
         hw = 0.4;
+    }
+
+    if (hw > 1e5) {
+        hw = 1e5;
     }
 
     flatten(R, R->L->pts + it->path, it->npath, R->M);
@@ -1439,6 +1453,10 @@ static void draw_glyph(rctx* R, const ditem* it, mask* m) {
     px = G[4];
     py = G[5];
     em = sqrt(fabs(G[0] * G[3] - G[1] * G[2])) * 1000;
+
+    if (!(fabs(px) < 1e8) || !(fabs(py) < 1e8) || !(em < 1e7)) {
+        return;
+    }
 
     if (key == 0xFFFFFFFFu || px < -em * 2 - 100 || py < -em * 2 - 100 || px > R->t->w + em * 2 + 100 ||
         py > R->t->h + em * 2 + 100) {

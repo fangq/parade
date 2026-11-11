@@ -3236,8 +3236,9 @@ int pf_unicode(pfont* f, uint32_t code, uint32_t* out, int cap) {
         return 0;
     }
 
-    /* a CID font without ToUnicode: its glyph's code point in the program's cmap */
-    {
+    /* a CID font without ToUnicode: its glyph's code point in the program's cmap (a font not embedded has no
+       program to ask, and its glyph is found from the text, so the text cannot be found from the glyph) */
+    if (f->prog == PG_SFNT || f->prog == PG_CFF) {
         int32_t g = cid_gid(f, code);
 
         build_gid2uni(f);

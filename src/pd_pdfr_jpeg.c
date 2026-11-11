@@ -494,7 +494,7 @@ static void decode_scan(jdec* J) {
 #define F2F(x) ((int)(((x) * 4096 + 0.5)))
 #define FSH(x) ((x) * 4096)
 #define IDCT_1D(s0, s1, s2, s3, s4, s5, s6, s7) \
-    int t0, t1, t2, t3, p1, p2, p3, p4, p5, x0, x1, x2, x3; \
+    int64_t t0, t1, t2, t3, p1, p2, p3, p4, p5, x0, x1, x2, x3; \
     p2 = s2; \
     p3 = s6; \
     p1 = (p2 + p3) * F2F(0.5411961f); \
@@ -530,8 +530,13 @@ static void decode_scan(jdec* J) {
     t1 += p2 + p4; \
     t0 += p1 + p3;
 
-static unsigned char clampb(int x) {
+static unsigned char clampb(int64_t x) {
     return (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x);
+}
+
+/* a damaged stream's coefficients kept within what eight bits of samples can come from */
+static int clampv(int64_t x) {
+    return (int)(x < -(1 << 24) ? -(1 << 24) : x > (1 << 24) ? (1 << 24) : x);
 }
 
 static void idct_block(unsigned char* out, int stride, const int16_t* in, const uint16_t* q) {
@@ -539,14 +544,14 @@ static void idct_block(unsigned char* out, int stride, const int16_t* in, const 
     unsigned char* o;
 
     for (i = 0; i < 64; i++) {
-        d[i] = in[i] * q[i];
+        d[i] = clampv((int64_t)in[i] * q[i]);
     }
 
     for (i = 0; i < 8; i++, v++) {
         const int* c = d + i;
 
         if (c[8] == 0 && c[16] == 0 && c[24] == 0 && c[32] == 0 && c[40] == 0 && c[48] == 0 && c[56] == 0) {
-            int dc = c[0] * 4;
+            int dc = clampv((int64_t)c[0] * 4);
 
             v[0] = v[8] = v[16] = v[24] = v[32] = v[40] = v[48] = v[56] = dc;
         } else {
@@ -555,14 +560,14 @@ static void idct_block(unsigned char* out, int stride, const int16_t* in, const 
             x1 += 512;
             x2 += 512;
             x3 += 512;
-            v[0] = (x0 + t3) >> 10;
-            v[56] = (x0 - t3) >> 10;
-            v[8] = (x1 + t2) >> 10;
-            v[48] = (x1 - t2) >> 10;
-            v[16] = (x2 + t1) >> 10;
-            v[40] = (x2 - t1) >> 10;
-            v[24] = (x3 + t0) >> 10;
-            v[32] = (x3 - t0) >> 10;
+            v[0] = clampv((x0 + t3) >> 10);
+            v[56] = clampv((x0 - t3) >> 10);
+            v[8] = clampv((x1 + t2) >> 10);
+            v[48] = clampv((x1 - t2) >> 10);
+            v[16] = clampv((x2 + t1) >> 10);
+            v[40] = clampv((x2 - t1) >> 10);
+            v[24] = clampv((x3 + t0) >> 10);
+            v[32] = clampv((x3 - t0) >> 10);
         }
     }
 

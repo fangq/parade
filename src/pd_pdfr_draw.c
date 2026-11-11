@@ -47,6 +47,7 @@ typedef struct interp {
     dlist* L;
     gstate* gs;
     int ngs, capgs;
+    int ghosts;                 /* saves past the most kept, each undone by a restore before a kept one is */
     pv res;
     pbuf path;                  /* doubles, in list space */
     int path_open;
@@ -186,12 +187,8 @@ static gstate* gs(interp* I) {
 }
 
 static void gs_save(interp* I) {
-    if (I->ngs >= MAX_GSTATE) {
-        I->ngs++;   /* counted, not kept: the restore that matches drops it */
-        return;
-    }
-
-    if (!grow((void**)&I->gs, &I->capgs, I->ngs + 1, sizeof(gstate))) {
+    if (I->ngs >= MAX_GSTATE || !grow((void**)&I->gs, &I->capgs, I->ngs + 1, sizeof(gstate))) {
+        I->ghosts++;    /* counted, not kept: the restore that matches drops it, the state as it is */
         return;
     }
 
@@ -200,12 +197,10 @@ static void gs_save(interp* I) {
 }
 
 static void gs_restore(interp* I, int floor) {
-    if (I->ngs > floor) {
+    if (I->ghosts > 0) {
+        I->ghosts--;
+    } else if (I->ngs > floor) {
         I->ngs--;
-
-        if (I->ngs > I->capgs) {
-            I->ngs = I->capgs;
-        }
     }
 }
 
@@ -745,15 +740,16 @@ static void show_glyph(interp* I, pfont* f, uint32_t code, const double* trm) {
 
         {
             pv saved_res = I->res;
-            int saved_unc = I->uncolored, saved_stream = I->stream, saved_text = I->text, floor;
+            int saved_unc = I->uncolored, saved_stream = I->stream, saved_text = I->text, floor, floor_g;
             size_t saved_path = I->path.n;
             double tm[6], tlm[6];
             const unsigned char* saved_src = I->src;
 
             memcpy(tm, I->tm, sizeof(tm));
             memcpy(tlm, I->tlm, sizeof(tlm));
-            gs_save(I);
             floor = I->ngs;
+            floor_g = I->ghosts;
+            gs_save(I);
             memcpy(gs(I)->ctm, m, sizeof(m));
             I->type3_depth++;
             I->stream = -1;
@@ -761,11 +757,8 @@ static void show_glyph(interp* I, pfont* f, uint32_t code, const double* trm) {
             run_stream(I, data, len, res.t == PV_DICT ? res : I->res);
             I->type3_depth--;
 
-            while (I->ngs > floor) {
-                gs_restore(I, 1);
-            }
-
-            gs_restore(I, 1);
+            I->ngs = floor;    /* all the states it pushed taken off again */
+            I->ghosts = floor_g;
             I->res = saved_res;
             I->uncolored = saved_unc;
             I->stream = saved_stream;
@@ -991,7 +984,7 @@ static void do_form(interp* I, pv form) {
     unsigned char* data;
     double m[6] = { 1, 0, 0, 1, 0, 0 }, bbox[4];
     pv res;
-    int floor;
+    int floor, floor_g;
 
     if (I->depth >= MAX_FORM_DEPTH) {
         return;
@@ -1005,8 +998,9 @@ static void do_form(interp* I, pv form) {
 
     pd_matrix(I->d, pd_get(I->d, form, "Matrix"), m);
     res = pd_get(I->d, form, "Resources");
-    gs_save(I);
     floor = I->ngs;
+    floor_g = I->ghosts;
+    gs_save(I);
     mat_mul(m, gs(I)->ctm, gs(I)->ctm);
 
     if (pd_rect(I->d, pd_get(I->d, form, "BBox"), bbox)) {
@@ -1034,11 +1028,8 @@ static void do_form(interp* I, pv form) {
         memcpy(I->tlm, tlm, sizeof(tlm));
     }
 
-    while (I->ngs > floor) {
-        gs_restore(I, 1);
-    }
-
-    gs_restore(I, 1);
+    I->ngs = floor;    /* all the states it pushed taken off again */
+    I->ghosts = floor_g;
     free(data);
 }
 
@@ -2097,10 +2088,11 @@ static void draw_annot(interp* I, pv annot, const double* base) {
         mat_mul(A, base, M);
 
         {
-            int floor;
+            int floor, floor_g;
 
-            gs_save(I);
             floor = I->ngs;
+            floor_g = I->ghosts;
+            gs_save(I);
             memcpy(gs(I)->ctm, M, sizeof(M));
             gs(I)->clip = -1;
             gs(I)->fa = gs(I)->sa = 1;
@@ -2117,11 +2109,8 @@ static void draw_annot(interp* I, pv annot, const double* base) {
             /* the form drawn with its own matrix inside A */
             do_form(I, form);
 
-            while (I->ngs > floor) {
-                gs_restore(I, 1);
-            }
-
-            gs_restore(I, 1);
+            I->ngs = floor;    /* all the states it pushed taken off again */
+            I->ghosts = floor_g;
         }
     }
 }

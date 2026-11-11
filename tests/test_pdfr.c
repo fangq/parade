@@ -437,6 +437,52 @@ static const pd_font* resolver(void* user, const char* family, int32_t weight, i
     return latin;
 }
 
+/* q nested 300 deep, a colour set at the bottom: all of it undone by the Qs, nothing read past what was kept */
+static void test_deep_q(void) {
+    char content[8192] = "", *cs;
+    int i;
+
+    for (i = 0; i < 300; i++) {
+        strcat(content, "q ");
+    }
+
+    strcat(content, "0 1 0 rg 0 0 50 50 re f ");
+
+    for (i = 0; i < 300; i++) {
+        strcat(content, "Q ");
+    }
+
+    strcat(content, "60 0 50 50 re f");
+    cs = stream_obj("", content);
+
+    {
+        const char* objs[] = {
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>",
+            cs
+        };
+        buf_t b = make_pdf(objs, 4, 0);
+        pd_pdfr* p = NULL;
+        int32_t w, h;
+        uint8_t* img;
+
+        CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+        img = draw(p, 0, &w, &h);
+
+        if (img) {
+            CHECK(px(img, w, 25, 175) == 0x00FF00);     /* green, at the bottom of the nesting */
+            CHECK(px(img, w, 85, 175) == 0x000000);     /* black again once it is all restored */
+            free(img);
+        }
+
+        pd_pdfr_free(p);
+        free(b.p);
+    }
+
+    free(cs);
+}
+
 /* Parade's own PDF read back: its text, in order, and its pages */
 static void test_roundtrip(void) {
     pd_doc* d;
@@ -1054,6 +1100,7 @@ int main(void) {
     test_streams();
     test_rotate();
     test_paint();
+    test_deep_q();
     test_roundtrip();
     test_encrypted();
     test_bad();

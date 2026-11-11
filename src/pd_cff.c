@@ -184,28 +184,35 @@ static void out(interp* I, int op, int32_t* xs, int32_t* ys, int npts) {
     I->emit(I->user, op, ox, oy, npts);
 }
 
+/* a damaged font's coordinates kept from overflowing (a sound font's are far inside this) */
+static int32_t sadd(int32_t a, int32_t b) {
+    int64_t r = (int64_t)a + b;
+
+    return r > (1 << 30) ? (1 << 30) : r < -(1 << 30) ? -(1 << 30) : (int32_t)r;
+}
+
 static void moveto(interp* I, int32_t dx, int32_t dy) {
-    I->x += dx;
-    I->y += dy;
+    I->x = sadd(I->x, dx);
+    I->y = sadd(I->y, dy);
     out(I, OP_MOVE, &I->x, &I->y, 1);
     I->open = 1;
 }
 
 static void lineto(interp* I, int32_t dx, int32_t dy) {
-    I->x += dx;
-    I->y += dy;
+    I->x = sadd(I->x, dx);
+    I->y = sadd(I->y, dy);
     out(I, OP_LINE, &I->x, &I->y, 1);
 }
 
 static void curveto(interp* I, int32_t dxa, int32_t dya, int32_t dxb, int32_t dyb, int32_t dxc, int32_t dyc) {
     int32_t xs[3], ys[3];
 
-    xs[0] = I->x + dxa;
-    ys[0] = I->y + dya;
-    xs[1] = xs[0] + dxb;
-    ys[1] = ys[0] + dyb;
-    xs[2] = xs[1] + dxc;
-    ys[2] = ys[1] + dyc;
+    xs[0] = sadd(I->x, dxa);
+    ys[0] = sadd(I->y, dya);
+    xs[1] = sadd(xs[0], dxb);
+    ys[1] = sadd(ys[0], dyb);
+    xs[2] = sadd(xs[1], dxc);
+    ys[2] = sadd(ys[1], dyc);
     I->x = xs[2];
     I->y = ys[2];
     out(I, OP_CUBIC, xs, ys, 3);
