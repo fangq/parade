@@ -83,6 +83,11 @@ typedef struct {
     const char* style;
     int32_t role, level, align;     /* align -1: the style's */
     int ragged;                     /* \raggedright: body text not justified (until its environment ends) */
+    int noindent;                   /* the next paragraph not indented: \noindent, or text going on after a display,
+                                       a list or a float with no blank line (not a new paragraph to LaTeX) */
+    int after_heading;              /* nor the first after a heading, a blank line or not (LaTeX's \@afterheading) */
+    int parskip_pkg;                /* \usepackage{parskip}: no indents, a space between paragraphs */
+    pd_sp parindent, parskip;
     /* lists */
     int ldepth;
     int lkind[10];                  /* 1 bullets, 2 numbers, 3 description */
@@ -658,6 +663,8 @@ static void par_end(lt* L) {
 }
 
 static void par_begin(lt* L) {
+    int indent;
+
     if (L->in_para) {
         return;
     }
@@ -665,6 +672,9 @@ static void par_begin(lt* L) {
     L->in_para = 1;
     L->space_pending = 0;
     L->line_start = 0;
+    indent = !L->noindent && !L->after_heading && L->role == PD_ROLE_BODY && L->ldepth == 0 && !L->in_float &&
+             L->align < 0 && L->in_document;
+    L->noindent = L->after_heading = 0;
 
     if (L->dry) {
         return;
@@ -690,6 +700,18 @@ static void par_begin(lt* L) {
                               L->role == PD_ROLE_DEFINITION || L->role == PD_ROLE_CAPTION)) {
         L->b->pp.mask |= PD_PP_ALIGN;   /* TeX justifies its text */
         L->b->pp.align = PD_ALIGN_JUSTIFY;
+    }
+
+    if (L->role == PD_ROLE_BODY && L->ldepth == 0 && !L->in_float && L->in_document) {
+        if (indent && L->parindent > 0) {     /* \parindent: every paragraph's first line, but those above */
+            L->b->pp.mask |= PD_PP_INDENT_FIRST;
+            L->b->pp.indent_first = L->parindent;
+        }
+
+        if (L->parskip > 0) {
+            L->b->pp.mask |= PD_PP_SPACE_BEFORE;
+            L->b->pp.space_before = L->parskip;
+        }
     }
 
     bld_begin_para(L->b);
@@ -803,6 +825,7 @@ static void out_equation(lt* L, const char* src, size_t n, int display) {
         L->style = style;
         L->level = level;
         L->align = align;
+        L->noindent = 1;    /* the text after it goes on in the same paragraph */
     } else {
         par_begin(L);
 
@@ -1043,6 +1066,7 @@ static void heading(lt* L, int k, int star, const char* s, size_t a, size_t b) {
     L->role = role;
     L->level = lvl;
     L->align = align;
+    L->after_heading = 1;
 }
 
 /* a subfigure begun: its letter, what a \label in it names ("3(b)", the figure's number to come) */
@@ -2096,6 +2120,7 @@ static void environment(lt* L, const char* s, size_t n, size_t* i) {
 
     L->align = align;
     L->ragged = ragged;
+    L->noindent = 1;    /* text right after it (no blank line) goes on the paragraph it was in */
     L->cp = was;
     apply_format(L);
 }
@@ -2458,6 +2483,48 @@ static void def_tex(lt* L, const char* s, size_t n, size_t* i) {
     }
 
     define_macro(L, s + na, ne - na, nargs, NULL, 0, s + ba, bb - ba, 0, NULL, 0);
+}
+
+/* a TeX length at s ("15pt", "0.5em", "1.5cm", "-2 mm"; plus and minus parts ignored), in sp; *used: bytes read */
+static int tex_length(const char* s, size_t n, pd_sp* out, size_t* used) {
+    static const struct { const char* u; double sp; } U[] = {
+        { "pt", 65536.0 }, { "bp", 65536.0 * 72.27 / 72 }, { "mm", 65536.0 * 72.27 / 25.4 },
+        { "cm", 65536.0 * 72.27 / 2.54 }, { "in", 65536.0 * 72.27 }, { "em", 65536.0 * 10 }, { "ex", 65536.0 * 4.3 },
+        { "pc", 65536.0 * 12 }, { "sp", 1.0 }
+    };
+    size_t j = 0, k;
+    double v = 0, f = 0.1;
+    int neg = 0, digits = 0;
+
+    if (j < n && (s[j] == '-' || s[j] == '+')) {
+        neg = s[j++] == '-';
+    }
+
+    while (j < n && s[j] >= '0' && s[j] <= '9') {
+        v = v * 10 + (s[j++] - '0');
+        digits++;
+    }
+
+    if (j < n && (s[j] == '.' || s[j] == ',')) {
+        for (j++; j < n && s[j] >= '0' && s[j] <= '9'; j++, f /= 10) {
+            v += (s[j] - '0') * f;
+            digits++;
+        }
+    }
+
+    while (j < n && s[j] == ' ') {
+        j++;
+    }
+
+    for (k = 0; digits && k < sizeof(U) / sizeof(U[0]); k++) {
+        if (j + 2 <= n && !strncmp(s + j, U[k].u, 2)) {
+            *out = (pd_sp)((neg ? -v : v) * U[k].sp + (neg ? -0.5 : 0.5));
+            *used = j + 2;
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static void command(lt* L, const char* s, size_t n, size_t* i) {
@@ -3180,7 +3247,58 @@ static void command(lt* L, const char* s, size_t n, size_t* i) {
 
     if (IS("par")) {
         par_end(L);
+        L->noindent = 0;
         return;
+    }
+
+    if (IS("noindent")) {
+        L->noindent = 1;
+        return;
+    }
+
+    if (IS("indent")) {
+        L->noindent = L->after_heading = 0;
+        return;
+    }
+
+    if (IS("parindent") || IS("parskip")) {     /* TeX's way: \parindent=0pt, \parskip 6pt */
+        size_t j = *i, used;
+        pd_sp v;
+
+        while (j < n && (s[j] == ' ' || s[j] == '='))
+            j++;
+
+        if (tex_length(s + j, n - j, &v, &used)) {
+            *(name[3] == 'i' ? &L->parindent : &L->parskip) = v;
+            *i = j + used;
+        }
+
+        return;
+    }
+
+    if (IS("setlength")) {      /* \setlength{\parindent}{0pt} */
+        size_t j = *i, na0, nb0, c, d, used;
+        pd_sp v;
+
+        if (read_arg(s, n, &j, &na0, &nb0) && read_arg(s, n, &j, &c, &d)) {
+            while (na0 < nb0 && s[na0] == ' ')
+                na0++;
+
+            while (nb0 > na0 && s[nb0 - 1] == ' ')
+                nb0--;
+
+            if ((nb0 - na0 == 10 && !strncmp(s + na0, "\\parindent", 10)) || (nb0 - na0 == 8 && !strncmp(s + na0, "\\parskip", 8))) {
+                while (c < d && s[c] == ' ')
+                    c++;
+
+                if (tex_length(s + c, d - c, &v, &used)) {
+                    *(s[na0 + 4] == 'i' ? &L->parindent : &L->parskip) = v;
+                }
+
+                *i = j;
+                return;
+            }
+        }
     }
 
     if (IS("newline") || IS("linebreak")) {
@@ -3405,6 +3523,7 @@ static void run(lt* L, const char* s, size_t n) {
 
                 if (blank) {
                     par_end(L);
+                    L->noindent = 0;
 
                     while (j < n && (s[j] == '\n' || s[j] == ' ' || s[j] == '\t' || s[j] == '\r')) {
                         j++;
@@ -3459,6 +3578,9 @@ static void lx_reset(lt* L) {
     L->level = 0;
     L->align = -1;
     L->ragged = 0;
+    L->noindent = L->after_heading = 0;
+    L->parindent = L->parskip_pkg ? 0 : PD_PT(15);   /* article's at 10pt, the size the text is set in */
+    L->parskip = L->parskip_pkg ? PD_PT(6) : 0;
     L->ldepth = 0;
     L->item_pending = 0;
     memset(&L->cp, 0, sizeof(L->cp));
@@ -3615,6 +3737,21 @@ pd_status pd_latex_import(pd_doc* d, const char* s, size_t n) {
     memset(&L, 0, sizeof(L));
     L.src = s;
     L.len = n;
+
+    {   /* \usepackage{parskip}, [..]{parskip} or {amsmath,parskip}: the package's name back to its \usepackage */
+        size_t k, j;
+
+        for (k = 0; k + 8 <= n; k++) {
+            if (!memcmp(s + k, "parskip}", 8) && k > 0 && (s[k - 1] == '{' || s[k - 1] == ',' || s[k - 1] == ' ')) {
+                for (j = k; j > 0 && k - j < 200 && s[j - 1] != '\\' && s[j - 1] != '\n'; j--) {
+                }
+
+                if (j > 0 && s[j - 1] == '\\' && k - j >= 10 && !memcmp(s + j, "usepackage", 10)) {
+                    L.parskip_pkg = 1;
+                }
+            }
+        }
+    }
 
     /* a book or report: chapters at the top */
     for (p = s; p && (size_t)(p - s) + 8 < n; p++) {

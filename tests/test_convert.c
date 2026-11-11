@@ -5640,6 +5640,56 @@ static void test_latex_justified(void) {
     }
 }
 
+/* LaTeX's paragraph indents: every paragraph's first line by \parindent, but the first after a heading, one after
+   \noindent, and text going on after a display or a list with no blank line (the same paragraph to LaTeX) */
+static void test_latex_indent(void) {
+    static const char tex[] =
+        "\\documentclass{article}\\begin{document}\n"
+        "Opening.\n\n"
+        "\\section{A}\n\nFirst.\n\nSecond.\n\n\\noindent Third.\n\n"
+        "Fourth\n\\[ x = 1 \\]\ncontinued.\n\n"
+        "Fifth\n\\begin{itemize}\\item An item\\end{itemize}\nafter the list.\n\n"
+        "\\begin{center}Centred\\end{center}\n\nSixth.\n\n"
+        "\\setlength{\\parindent}{2em}Seventh.\n\n\\parindent=0pt Eighth.\n"
+        "\\end{document}\n";
+    static const char pk[] =
+        "\\documentclass{article}\\usepackage[skip=4pt]{parskip}\\begin{document}\n"
+        "One.\n\nTwo.\n\\end{document}\n";
+    pd_doc* d = NULL;
+    char all[4096];
+
+    CHECK(pd_doc_import(tex, sizeof(tex) - 1, PD_CONV_LATEX, &d) == PD_OK && d);
+
+    if (d) {
+        CHECK(para_resolved(d, find_para(d, "Opening")).indent_first == PD_PT(15));
+        CHECK(para_resolved(d, find_para(d, "First")).indent_first == 0);      /* after the heading, a blank line or not */
+        CHECK(para_resolved(d, find_para(d, "Second")).indent_first == PD_PT(15));
+        CHECK(para_resolved(d, find_para(d, "Third")).indent_first == 0);
+        CHECK(para_resolved(d, find_para(d, "Fourth")).indent_first == PD_PT(15));
+        CHECK(para_resolved(d, find_para(d, "continued")).indent_first == 0);
+        CHECK(para_resolved(d, find_para(d, "Fifth")).indent_first == PD_PT(15));
+        CHECK(para_resolved(d, find_para(d, "after the list")).indent_first == 0);
+        CHECK(para_resolved(d, find_para(d, "An item")).indent_first != PD_PT(15));
+        CHECK(para_resolved(d, find_para(d, "Centred")).indent_first == 0);
+        CHECK(para_resolved(d, find_para(d, "Sixth")).indent_first == PD_PT(15));
+        CHECK(para_resolved(d, find_para(d, "Seventh")).indent_first == PD_PT(20));
+        CHECK(para_resolved(d, find_para(d, "Eighth")).indent_first == 0);
+        CHECK(para_resolved(d, find_para(d, "Second")).space_before == 0);
+        doc_text(d, all, sizeof(all));
+        CHECK(strstr(all, "0pt") == NULL && strstr(all, "2em") == NULL);
+        pd_doc_free(d);
+        d = NULL;
+    }
+
+    CHECK(pd_doc_import(pk, sizeof(pk) - 1, PD_CONV_LATEX, &d) == PD_OK && d);
+
+    if (d) {    /* parskip: no indents, a space between */
+        CHECK(para_resolved(d, find_para(d, "Two")).indent_first == 0);
+        CHECK(para_resolved(d, find_para(d, "Two")).space_before == PD_PT(6));
+        pd_doc_free(d);
+    }
+}
+
 static void test_latex_bibtex(void) {
     static const char bib[] =
         "@string{jbo = \"J. Biomed.\"}\n"
@@ -12253,6 +12303,7 @@ int main(void) {
     test_latex_import();
     test_latex_bibtex();
     test_latex_justified();
+    test_latex_indent();
     test_pptx_chart();
     test_pptx_ph_inherit();
     test_pptx_run_props();
