@@ -8965,7 +8965,7 @@ static void test_docx_char_scale(void) {
         CHECK(chars_at(d, pd_doc_next_paragraph(d, 0), 2).hscale == 2000);
 
         if (have_layout_font()) {
-            pd_sp ml, mh, nl, nh;
+            pd_sp ml = 0, mh = 0, nl = 0, nh = 0;
             pd_draw* it;
             int32_t n = 0, k, scaled = 0;
 
@@ -10578,7 +10578,7 @@ static void test_cell_text_dir(void) {
         if (L) {
             pd_draw u[2], w[2];
             int32_t pg;
-            pd_sp bx, by;
+            pd_sp bx = 0, by = 0;
 
             CHECK(two_glyphs(d, L, "UPWARD", u) && two_glyphs(d, L, "DOWNWARD", w) &&
                   text_drawn(d, L, "below", &pg, &bx, &by));

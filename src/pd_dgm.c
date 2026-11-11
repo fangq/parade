@@ -1467,7 +1467,7 @@ static void size_lin(dgm* D, int n) {
         nk++;
     }
 
-    kids = (int*)malloc(sizeof(int) * (size_t)(nk + 1));
+    kids = (int*)calloc((size_t)nk + 1, sizeof(int));
     cs = (double(*)[2])malloc(sizeof(double[2]) * (size_t)(nk + 1));
     nk = 0;
 

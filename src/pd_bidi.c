@@ -383,7 +383,7 @@ int pd_bidi_levels(const uint32_t* cp, int32_t n, int dir, uint8_t* levels) {
     seqrun* runs = NULL;
     int32_t* buf = NULL, *bufbase = NULL;
 
-    orig = (uint8_t*)malloc((size_t)n + 1);
+    orig = (uint8_t*)calloc((size_t)n + 1, 1);     /* zeroed: past n is never read, but nothing is left unset */
     t = (uint8_t*)malloc((size_t)n + 1);
 
     if (!orig || !t) {

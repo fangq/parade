@@ -1248,7 +1248,7 @@ static void mesh_parse(pdoc* d, pshade* s, pv v, int ncomp) {
         memset(pc, 0, sizeof(pc));
 
         while (br.bit / 8 + 1 < len) {
-            int flag = (int)bits_read(&br, bpf), np = tensor ? 16 : 12, ncol = 4, start = 0, i;
+            int flag = (int)bits_read(&br, bpf), ncol = 4, start = 0, i;
             double q[16][2];
 
             if (flag != 0 && !have) {
@@ -1256,7 +1256,6 @@ static void mesh_parse(pdoc* d, pshade* s, pv v, int ncomp) {
             }
 
             if (flag != 0) {
-                np -= 4;
                 ncol = 2;
                 start = 4;
             }
