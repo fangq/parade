@@ -3242,6 +3242,126 @@ begin
   end;
 end;
 
+{ a field shaded gray while the caret is in it or the selection takes it in, as Word shades one: a field Parade works
+  out (a page number) its one character, one kept as Word wrote it (a cross-reference) from start to end }
+procedure TestFieldShade(E: TParadeEdit);
+var
+  Para: pd_block_id;
+  O: pd_inline;
+  Src: string;
+  F: TParadeRanges;
+  Img0, Img1: TLazIntfImage;
+  Pg: Int32;
+  CX, CX2, Base, Asc, Desc: pd_sp;
+  P0, P1: TPoint;
+  R: TRect;
+  KB, KE, F1: Integer;
+
+  function Differ(const Box: TRect): Integer;
+  var
+    X, Y: Integer;
+    C, D: TFPColor;
+  begin
+    Result := 0;
+    for Y := Max(0, Box.Top) to Min(Img0.Height, Box.Bottom) - 1 do
+      for X := Max(0, Box.Left) to Min(Img0.Width, Box.Right) - 1 do
+      begin
+        C := Img0.Colors[X, Y];
+        D := Img1.Colors[X, Y];
+        if (C.red <> D.red) or (C.green <> D.green) or (C.blue <> D.blue) then
+          Inc(Result);
+      end;
+  end;
+
+  function Band(A, B: UInt32): TRect;
+  begin
+    Result := Rect(0, 0, 0, 0);
+    if (pd_layout_caret(E.Layout, PdPos(Para, A), Pg, CX, Base, Asc, Desc) = PD_OK) and
+       (pd_layout_caret(E.Layout, PdPos(Para, B), Pg, CX2, Base, Asc, Desc) = PD_OK) then
+    begin
+      P0 := E.PageToClient(Pg, CX / PD_SP_PER_PT, (Base - Asc) / PD_SP_PER_PT);
+      P1 := E.PageToClient(Pg, CX2 / PD_SP_PER_PT, (Base + Desc) / PD_SP_PER_PT);
+      Result := Rect(P0.X, P0.Y, P1.X, P1.Y);
+    end;
+  end;
+
+  procedure Show;
+  begin
+    E.Repaint;
+    Application.ProcessMessages;
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertText('See  and Fig. 1');
+  Para := pd_doc_next_paragraph(E.Doc, 0);
+  { right to left, so the offsets before each stay as they are: the cross-reference's end, its start, the page }
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_FIELD;
+  O.field := PD_FIELD_KEPT;
+  pd_doc_insert_inline(E.Doc, PdPos(Para, 15), O, nil);
+  Src := 'REF _Ref1 \h';
+  O.source := PAnsiChar(Src);
+  O.source_len := Length(Src);
+  pd_doc_insert_inline(E.Doc, PdPos(Para, 9), O, nil);
+  FillChar(O, SizeOf(O), 0);
+  O.kind := PD_INLINE_FIELD;
+  O.field := PD_FIELD_PAGE;
+  pd_doc_insert_inline(E.Doc, PdPos(Para, 4), O, nil);
+  { written and read back as Word would have it: laid out afresh, and the cross-reference as the reader reads one }
+  E.SaveToFile(ExtractFilePath(ParamStr(0)) + 'edit_fields.docx');
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + 'edit_fields.docx');
+  Para := pd_doc_next_paragraph(E.Doc, 0);
+  { where each one is now: Word's \h made the cross-reference's text a link, inside the field }
+  Src := E.ParaText(Para);
+  KB := -1;
+  KE := -1;
+  for Pg := 0 to Length(Src) - 1 do
+    if (Copy(Src, Pg + 1, 3) = #$EF#$BF#$BC) and (pd_doc_inline_at(E.Doc, PdPos(Para, Pg), O) = PD_OK) and
+       (O.kind = PD_INLINE_FIELD) and (O.field = PD_FIELD_KEPT) then
+      if O.source_len > 0 then KB := Pg else KE := Pg;
+  F1 := Pos('Fig. 1', Src) - 1;
+  Check((KB > 4) and (KB < F1) and (KE > F1), Format('the fields read back: start %d, text %d, end %d', [KB, F1, KE]));
+  E.Repaint;
+  Application.ProcessMessages;
+
+  E.GoToPos(PdPos(Para, Pos(' and ', Src) + 1));
+  Check(Length(E.SelectedFields) = 0, 'the caret between fields: none shaded');
+  E.GoToPos(PdPos(Para, F1 + 2));
+  F := E.SelectedFields;
+  Check((Length(F) = 1) and (F[0].start.offset = UInt32(KB)) and (F[0].finish.offset = UInt32(KE + 3)),
+    'the caret in a cross-reference''s text: the whole of it');
+  E.GoToPos(PdPos(Para, KB));
+  Check(Length(E.SelectedFields) = 0, 'at its very start: not in it');
+  E.GoToPos(PdPos(Para, 4));
+  E.ProcessKey(VK_RIGHT, [ssShift]);
+  F := E.SelectedFields;
+  Check((Length(F) = 1) and (F[0].start.offset = 4) and (F[0].finish.offset = 7), 'a page number selected: it');
+  E.GoToPos(PdPos(Para, 0));
+  E.ProcessKey(VK_END, [ssShift]);
+  Check(Length(E.SelectedFields) = 2, 'the line selected: both');
+
+  { drawn: gray over the cross-reference's text with the caret in it, and nothing beside it }
+  Img0 := TLazIntfImage.Create(0, 0);
+  Img1 := TLazIntfImage.Create(0, 0);
+  try
+    E.GoToPos(PdPos(Para, Pos(' and ', Src) + 1));
+    Show;
+    E.RenderView(Img0);
+    E.GoToPos(PdPos(Para, F1 + 2));
+    Show;
+    E.RenderView(Img1);
+    R := Band(F1, F1 + 5);     { "Fig. " }
+    Check((R.Right > R.Left) and (Differ(R) > (R.Right - R.Left) * (R.Bottom - R.Top) div 2),
+      Format('the cross-reference shaded (%d of %d pixels)', [Differ(R), (R.Right - R.Left) * (R.Bottom - R.Top)]));
+    R := Band(7, KB - 1);
+    Check(Differ(Rect(R.Left + 2, R.Top, R.Right - 2, R.Bottom)) = 0, 'the text before it not');
+  finally
+    Img0.Free;
+    Img1.Free;
+  end;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -4588,6 +4708,8 @@ begin
   TestAnimEdit(E);
   Step('balloons in place');
   TestBalloonPlace(E);
+  Step('fields shaded');
+  TestFieldShade(E);
   Step('resources found and shown');
   TestShowResource(E);
 

@@ -973,6 +973,10 @@ type
     { a comment's or a reply's text replaced -- anyone's, as Word lets any reviewer: its author and date stay; one
       undo step. False when read-only, the id is gone, or the text is empty }
     function EditComment(Id: pd_comment_id; const AText: string): Boolean;
+    { the fields the caret is in or the selection takes in, each whole: a field Parade works out (a page number,
+      a caption's number) its one character, one kept as Word wrote it (a cross-reference, a citation) from its
+      start to its end, its result between.  Shaded gray while so, as Word shades a field when it is selected }
+    function SelectedFields: TParadeRanges;
     { the balloons as last drawn, for a check: where each is, and whether a change's (PD_MARK_*) }
     function BalloonCount: Integer;
     function BalloonRect(AIndex: Integer): TRect;
@@ -9628,6 +9632,80 @@ begin
     FHeld.Kind := 0;     { the selection moved on: let go }
 end;
 
+function TParadeEdit.SelectedFields: TParadeRanges;
+var
+  A, B: pd_pos;
+  Blk: pd_block_id;
+  T: string;
+  I, N, Depth, Guard: Integer;
+  O: pd_inline;
+  Open: array of UInt32;
+
+  procedure Consider(Lo, Hi: UInt32);
+  var
+    S, F: pd_pos;
+    In_: Boolean;
+  begin
+    S := PdPos(Blk, Lo);
+    F := PdPos(Blk, Hi);
+    if Compare(A, B) = 0 then     { the caret: inside it, not at either end }
+      In_ := (Compare(S, A) < 0) and (Compare(A, F) < 0)
+    else
+      In_ := (Compare(S, B) < 0) and (Compare(A, F) < 0);
+    if In_ then
+    begin
+      SetLength(Result, N + 1);
+      Result[N] := PdRange(S, F);
+      Inc(N);
+    end;
+  end;
+
+begin
+  Result := nil;
+  N := 0;
+  if FShapeOn then
+    Exit;
+  A := SelStart;
+  B := SelEnd;
+  Blk := A.block;
+  Guard := 0;
+  while (Blk <> 0) and (Guard < 500) do
+  begin
+    T := ParaText(Blk);
+    SetLength(Open, 0);
+    I := Pos(#$EF#$BF#$BC, T);
+    while I > 0 do
+    begin
+      if (pd_doc_inline_at(FDoc, PdPos(Blk, I - 1), O) = PD_OK) and (O.kind = PD_INLINE_FIELD) then
+        if O.field <> PD_FIELD_KEPT then
+          Consider(I - 1, I + 2)                       { worked out: its one character }
+        else if O.source_len > 0 then
+        begin                                          { a kept one's start, its instruction with it }
+          SetLength(Open, Length(Open) + 1);
+          Open[High(Open)] := I - 1;
+        end
+        else
+        begin                                          { and its end }
+          Depth := Length(Open);
+          if Depth > 0 then
+          begin
+            Consider(Open[Depth - 1], I + 2);
+            SetLength(Open, Depth - 1);
+          end
+          else
+            Consider(0, I + 2);                        { begun in a paragraph before: from this one's start }
+        end;
+      I := PosEx(#$EF#$BF#$BC, T, I + 3);
+    end;
+    for I := High(Open) downto 0 do                    { going on past this paragraph: to its end }
+      Consider(Open[I], Length(T));
+    if Blk = B.block then
+      Break;
+    Blk := pd_doc_next_paragraph(FDoc, Blk);
+    Inc(Guard);
+  end;
+end;
+
 function TParadeEdit.BalloonCount: Integer;
 begin
   Result := Length(FBalloons);
@@ -15096,12 +15174,16 @@ var
     Cells: TParadeBlockArray;
     Boxes: TParadeCellBoxes;
     Q, R: Integer;
+    Flds: TParadeRanges;
   begin
     if pd_doc_comment_count(FDoc) > 0 then
       for C := 1 to pd_doc_comment_count(FDoc) do
         if (pd_doc_comment_get(FDoc, C, Cm) = PD_OK) and (Cm.parent = 0) and (Cm.resolved = 0) and
            (Compare(Cm.range.start, Cm.range.finish) < 0) then
           Highlight(Cm.range.start, Cm.range.finish, pd_doc_author_color(FDoc, Cm.author) and $FFFFFF, 40, False);
+    Flds := SelectedFields;   { a field the caret is in, or selected: gray, as Word shades it }
+    for Q := 0 to High(Flds) do
+      Highlight(Flds[Q].start, Flds[Q].finish, $00808080, 72, False);
     if HasSelection and CellSelection then
     begin   { from cell to cell: the rectangle of cells, each whole }
       Cells := SelectedCells;
