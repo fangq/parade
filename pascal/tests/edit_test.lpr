@@ -3884,6 +3884,100 @@ begin
   Names := '';
 end;
 
+{ a slide's master and layout shapes (a background picture, a band) are not the slide's: a click on one does not
+  select it, a band drawn round the slide leaves it out -- as PowerPoint has them, the master's to edit; the
+  slide's own shapes still are selected }
+procedure TestInheritedShapes(E: TParadeEdit);
+var
+  S, I, Inh, Own, Sid, N: Integer;
+  D, At: pd_pos;
+  Boxes: TParadeShapeBoxes;
+  Pg: Int32;
+  X0, Y0, X1, Y1: Double;
+  Pt: TPoint;
+  Sids: TIntegerArray;
+  GX, GY, Found: Integer;
+  FX, FY: Double;
+  Free_: Boolean;
+begin
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/slides.pptx');
+  E.Repaint;
+  Application.ProcessMessages;
+  Inh := -1;
+  Own := -1;
+  for S := 0 to E.SlideCount - 1 do
+    if Inh < 0 then
+    begin
+      E.GoToSlide(S);
+      E.SelectedShape(D, Sid);
+      Boxes := E.DrawingShapes(D);
+      for I := 0 to High(Boxes) do
+        if E.InheritedShape(D, Boxes[I].Sid) then
+          Inh := I
+        else if (Own < 0) and (Boxes[I].Story = 0) then
+          Own := I;
+      if Inh < 0 then
+        Own := -1
+      else
+        Found := S;
+    end;
+  Check(Inh >= 0, 'a slide with a shape of its layout or master on it');
+  if Inh < 0 then
+    Exit;
+  S := Found;
+  E.ShowSlide(S);
+  E.Repaint;
+  Application.ProcessMessages;
+  Check(E.ShapePageBox(D, Boxes[Inh].Sid, Pg, X0, Y0, X1, Y1), 'where it is');
+  { a point of it no other shape covers }
+  Pt := Point(-1, -1);
+  for GY := 1 to 19 do
+    for GX := 1 to 19 do
+      if Pt.X < 0 then
+      begin
+        FX := Boxes[Inh].X0 + (Boxes[Inh].X1 - Boxes[Inh].X0) * GX / 20;
+        FY := Boxes[Inh].Y0 + (Boxes[Inh].Y1 - Boxes[Inh].Y0) * GY / 20;
+        Free_ := True;
+        for I := 0 to High(Boxes) do
+          if (I <> Inh) and (FX >= Boxes[I].X0) and (FX <= Boxes[I].X1) and (FY >= Boxes[I].Y0) and
+             (FY <= Boxes[I].Y1) then
+            Free_ := False;
+        if Free_ then
+          Pt := E.PageToClient(Pg, (X0 + (X1 - X0) * GX / 20) / PD_SP_PER_PT, (Y0 + (Y1 - Y0) * GY / 20) / PD_SP_PER_PT);
+      end;
+  Check(Pt.X >= 0, 'a point of it no other shape covers');
+  for I := 1 to 2 do
+  begin
+    TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  end;
+  Check(not (E.SelectedShape(At, Sid) and (Sid = Boxes[Inh].Sid)), Format('clicked twice: not selected (sid %d)',
+    [Sid]));
+  E.GoToSlide(S);
+  E.SelectedShape(D, Sid);
+  N := E.SelectShapesIn(-1e9, -1e9, 1e12, 1e12);
+  Sids := E.SelectedShapes;
+  Sid := 0;
+  for I := 0 to High(Sids) do
+    if Sids[I] = Boxes[Inh].Sid then
+      Sid := 1;
+  Check((N >= 0) and (Sid = 0), Format('a band round the whole slide leaves it out (%d taken)', [N]));
+  if Own >= 0 then
+  begin   { the slide's own: still selected by a click }
+    E.ClearShapeSelection;
+    E.GoToSlide(S);
+    E.SelectedShape(D, Sid);
+    if E.ShapePageBox(D, Boxes[Own].Sid, Pg, X0, Y0, X1, Y1) then
+    begin
+      Pt := E.PageToClient(Pg, (X0 + X1) / 2 / PD_SP_PER_PT, (Y0 + Y1) / 2 / PD_SP_PER_PT);
+      TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+      TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+    end;
+    Check(E.SelectedShape(At, Sid) and (Sid >= 0) and not E.InheritedShape(At, Sid),
+      Format('a shape of the slide''s own, clicked: selected (sid %d)', [Sid]));
+  end;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -5229,6 +5323,8 @@ begin
   TestTypingBoxHandles(E, Form);
   Step('a new slide on its layout');
   TestNewLayoutSlide(E, Form);
+  Step('a slide''s master shapes not selected');
+  TestInheritedShapes(E);
   Step('slide show');
   TestSlideShow(E);
   TestShowPdf(E);

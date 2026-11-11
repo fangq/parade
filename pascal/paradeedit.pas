@@ -278,6 +278,10 @@ type
     FPlaceKey: string;
     FMultiPage: Boolean;
     FOnZoomChange: TNotifyEvent;
+    { the shapes of a slide's drawing that are its master's or its layout's (InheritedShape), by the drawing's
+      resource they were read from }
+    FInhRes: pd_res_id;
+    FInh: array of Boolean;
     { a list's labels selected, as a click on a bullet selects them in Word: the list and the level, shaded }
     FLabelOn: Boolean;
     FLabelList: pd_list_id;
@@ -765,6 +769,11 @@ type
     { the placeholder a shape of the drawing at D is, as the slide it came from had it: its type (title,
       ctrTitle, subTitle, body, obj ...; '' none given) and idx; False when it is none }
     function PlaceholderOf(const D: pd_pos; Sid: Integer; out PhType, PhIdx: string): Boolean;
+    { a shape of a slide's drawing that is its master's or its layout's -- a background picture, a logo, a band:
+      not to be selected, moved or typed in on the slide, as PowerPoint has them (they are the master's to edit) }
+    function InheritedShape(const D: pd_pos; Sid: Integer): Boolean;
+    { the text of a story that is an inherited shape's (InheritedShape) in the drawing at D }
+    function StoryInherited(const D: pd_pos; Story: pd_block_id): Boolean;
     { the prompt an empty placeholder of that type shows: 'Click to add title' ... }
     class function PlaceholderPrompt(const PhType: string): string;
     function DeleteSlide(Index: Integer): Boolean;
@@ -7554,7 +7563,7 @@ begin
   Mi := 2 / PxPerSp;
   Boxes := DrawingShapes(D);
   for I := High(Boxes) downto 0 do    { the one drawn last first: on top }
-    if Boxes[I].Story <> 0 then
+    if (Boxes[I].Story <> 0) and not InheritedShape(D, Boxes[I].Sid) then
     begin
       L := X + Boxes[I].X0 * W / JW;
       T := Y + Boxes[I].Y0 * H / JH;
@@ -8193,7 +8202,7 @@ begin
   Best := 1e300;
   for I := 0 to High(Boxes) do
     with Boxes[I] do
-      if (LX >= X0) and (LX <= X1) and (LY >= Y0) and (LY <= Y1) then
+      if (LX >= X0) and (LX <= X1) and (LY >= Y0) and (LY <= Y1) and not InheritedShape(P, Sid) then
       begin
         A := (X1 - X0) * (Y1 - Y0);
         if A < Best then
@@ -8250,7 +8259,7 @@ begin
       StoryTop := Info.parent;
     if (pd_doc_block_info(FDoc, StoryTop, Info) = PD_OK) and (Info.kind = PD_BLOCK_STORY) and
        (pd_layout_caret(FLayout, HP, CPage, CX, Base, Asc, Desc) = PD_OK) and (CPage = Page) and
-       (SY >= Base - Asc) and (SY <= Base + Desc) then
+       (SY >= Base - Asc) and (SY <= Base + Desc) and not StoryInherited(D, StoryTop) then
     begin
       if FShapeOn then
         ClearShapeSelection;
@@ -11395,6 +11404,60 @@ begin
     Exit;
   P := PosEx('<pd:sp ', Xml, Els[SidElement(Els, Sid)].A);
   Result := (P > 0) and (PosEx(' ph="', Copy(Xml, P, PosEx('>', Xml, P) - P)) > 0) or (PhIdx <> '');
+end;
+
+function TParadeEdit.InheritedShape(const D: pd_pos; Sid: Integer): Boolean;
+var
+  O: pd_inline;
+  J: TJSONObject;
+  Xml, From, Ph, Idx: string;
+  Els: TXmlEls;
+  I, K: Integer;
+begin
+  Result := False;
+  if not FCanvasPage or (Sid < 0) or (pd_doc_inline_at(FDoc, D, O) <> PD_OK) then
+    Exit;
+  if O.resource <> FInhRes then
+  begin   { the drawing's marks read once for it }
+    FInhRes := O.resource;
+    SetLength(FInh, 0);
+    J := DrawingJson(FDoc, D);
+    if J <> nil then
+      try
+        Xml := J.Get('xml', '');
+      finally
+        J.Free;
+      end
+    else
+      Xml := '';
+    if Xml <> '' then
+    begin
+      Els := XmlElements(Xml);
+      K := 0;
+      for I := 0 to High(Els) do
+        if (Els[I].Name = 'wps:wsp') or (Els[I].Name = 'pic:pic') then
+        begin
+          SetLength(FInh, K + 1);
+          FInh[K] := MarkOf(Xml, Els, I, From, Ph, Idx) and ((From = 'master') or (From = 'layout'));
+          Inc(K);
+        end;
+    end;
+  end;
+  Result := (Sid <= High(FInh)) and FInh[Sid];
+end;
+
+function TParadeEdit.StoryInherited(const D: pd_pos; Story: pd_block_id): Boolean;
+var
+  Boxes: TParadeShapeBoxes;
+  I: Integer;
+begin
+  Result := False;
+  if not FCanvasPage then
+    Exit;
+  Boxes := DrawingShapes(D);
+  for I := 0 to High(Boxes) do
+    if Boxes[I].Story = Story then
+      Exit(InheritedShape(D, Boxes[I].Sid));
 end;
 
 class function TParadeEdit.PlaceholderPrompt(const PhType: string): string;
@@ -15809,7 +15872,8 @@ begin
     Sids := SelectedShapes;
   Boxes := DrawingShapes(FShapeAt);
   for I := 0 to High(Boxes) do
-    if (Boxes[I].X0 >= X0) and (Boxes[I].Y0 >= Y0) and (Boxes[I].X1 <= X1) and (Boxes[I].Y1 <= Y1) then
+    if (Boxes[I].X0 >= X0) and (Boxes[I].Y0 >= Y0) and (Boxes[I].X1 <= X1) and (Boxes[I].Y1 <= Y1) and
+       not InheritedShape(FShapeAt, Boxes[I].Sid) then
     begin
       Have := False;
       for K := 0 to High(Sids) do
