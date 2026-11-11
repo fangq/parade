@@ -19,6 +19,7 @@ static int failures = 0, checks = 0;
             fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); } } while (0)
 
 int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);
+int pd_jbig2_mq_check(void);
 
 typedef struct {
     unsigned char* p;
@@ -1109,6 +1110,7 @@ int main(void) {
     test_replace_text();
     test_replace_in_tj();
     test_type1();
+    CHECK(pd_jbig2_mq_check() == 0);    /* JBIG2's arithmetic decoder, T.88 H.2 */
     test_encrypted_save();
     printf("test_pdfr: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

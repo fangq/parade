@@ -1643,7 +1643,24 @@ pimage* pdr_image_decode(pdoc* d, pv dict, const unsigned char* raw, size_t rawl
         data = px;
         len = ol;
         bpc = 1;
-    } else if (filt == PF_JPX || filt == PF_JBIG2) {
+    } else if (filt == PF_JBIG2) {
+        pv g = pd_get(d, parms, "JBIG2Globals");
+        size_t gn = 0, ol = 0;
+        unsigned char* gd = g.t == PV_STREAM ? pd_stream_data(d, g, &gn, NULL, NULL) : NULL;
+        unsigned char* px = pd_jbig2_decode(data, len, gd, gn, w, h, &ol);
+
+        free(gd);
+
+        if (px) {
+            free(data);
+            data = px;
+            len = ol;
+            bpc = 1;
+        } else {
+            jpx = data;     /* not decoded: a grey picture of its size stands in */
+            data = NULL;
+        }
+    } else if (filt == PF_JPX) {
         jpx = data;     /* not decoded: a grey picture of its size stands in */
         data = NULL;
     }

@@ -219,6 +219,10 @@ unsigned char* pd_jpeg_decode(const unsigned char* data, size_t n, int32_t* w, i
 unsigned char* pd_ccitt_decode(const unsigned char* data, size_t n, int32_t k, int32_t columns, int32_t rows,
                                int black1, int byte_align, size_t* outlen);
 
+/* JBIG2 (pd_pdfr_jbig2.c): an embedded stream and its globals as rows of 1-bit samples, 0 black */
+unsigned char* pd_jbig2_decode(const unsigned char* data, size_t n, const unsigned char* globals, size_t gn,
+                               int32_t w, int32_t h, size_t* outlen);
+
 /* page tree */
 int pd_pages_load(pdoc* d);
 
