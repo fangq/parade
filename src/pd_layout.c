@@ -1167,6 +1167,8 @@ static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int
         return;
     }
 
+    /* "story" without its colon: a drawing written by fpjson has "story" : 12, and asked for "story": its text boxes
+       were all blank once the editor had written the drawing again (a picture of it resized) */
     for (k = 0; k < b->st.ninl && !any; k++) {  /* a drawing with a story in it, or nothing to do */
         const char* mime = NULL;
         const void* data = NULL;
@@ -1174,7 +1176,7 @@ static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int
 
         any = b->st.inl[k].obj.kind == PD_INLINE_IMAGE &&
               pd_doc_resource(L->doc, b->st.inl[k].obj.resource, &mime, &data, &len) == PD_OK &&
-              !strcmp(mime, "application/vnd.parade.drawing+json") && pd_memfind(data, len, "\"story\":", 8);
+              !strcmp(mime, "application/vnd.parade.drawing+json") && pd_memfind(data, len, "\"story\"", 7);
     }
 
     if (!any || pd_para_get_glyphs(pc->para, line, NULL, 0, &n) != PD_OK || n <= 0 ||
@@ -1197,7 +1199,7 @@ static void place_drawing_text(pd_layout* L, int32_t page, const pcache* pc, int
 
         if (!q || q->obj.kind != PD_INLINE_IMAGE ||
                 pd_doc_resource(L->doc, q->obj.resource, &mime, &data, &len) != PD_OK ||
-                strcmp(mime, "application/vnd.parade.drawing+json") || !pd_memfind(data, len, "\"story\":", 8)) {
+                strcmp(mime, "application/vnd.parade.drawing+json") || !pd_memfind(data, len, "\"story\"", 7)) {
             continue;
         }
 

@@ -3682,6 +3682,18 @@ begin
   E.Repaint;
   Application.ProcessMessages;
   TestBoxSelection(E, pd_doc_child(E.Doc, StA, 0), pd_doc_child(E.Doc, StB, 0));
+  { a shape of the drawing resized: the text boxes' text still laid out and drawn.  The drawing written again by the
+    editor (fpjson's AsJSON: "story" : 12) was not looked in for text boxes, the layout asking for "story": with no
+    space, so every text box of a drawing showed blank once one of its pictures was resized }
+  E.GoToPos(PdPos(pd_doc_child(E.Doc, StA, 0), 0));
+  Check(E.SelectTextBox and E.SelectedShape(DrawP, DrawSid) and E.ShapeBox(DrawSid, BX0, BY0, BX1, BY1) and
+    E.SetShapeBox(DrawSid, BX0, BY0, BX0 + (BX1 - BX0) * 0.9, BY1), 'a text box made narrower');
+  E.Repaint;
+  Application.ProcessMessages;
+  Check((pd_layout_caret(E.Layout, PdPos(pd_doc_child(E.Doc, StA, 0), 0), CapPage, CapX, CapBase, CapAsc,
+    CapDesc) = PD_OK) and (pd_layout_caret(E.Layout, PdPos(pd_doc_child(E.Doc, StB, 0), 0), CapPage, CapX, CapBase,
+    CapAsc, CapDesc) = PD_OK), 'and the text of both text boxes still laid out');
+  E.Undo;
   { a shape drawn with the mouse: chosen, then dragged in the canvas from its top left corner }
   E.ProcessKey(VK_ESCAPE, []);
   E.ProcessKey(VK_ESCAPE, []);    { the caret after the canvas: in view }
