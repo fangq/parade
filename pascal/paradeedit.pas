@@ -348,6 +348,7 @@ type
     function PageLeft(Page: Integer): Integer;
     function TotalHeight: Integer;
     procedure UpdateScrollBar;
+    procedure SetViewTop(AValue: Integer);
     procedure Changed;
     procedure BuildOrder;
     function Compare(const A, B: pd_pos): Integer;
@@ -1128,7 +1129,7 @@ type
     property Anchors;
     property Zoom: Double read FZoom write SetZoom;
     { how far down the document the view is scrolled, in pixels }
-    property ViewTop: Integer read FScrollY;
+    property ViewTop: Integer read FScrollY write SetViewTop;
     property OnChange: TNotifyEvent read FOnChange write FOnChange;
     { the caret moved, the selection changed or the document did: for a toolbar showing what is here }
     property OnSelectionChange: TNotifyEvent read FOnSelectionChange write FOnSelectionChange;
@@ -2269,11 +2270,14 @@ end;
 { a picture by its address, for pd_doc_load_images: a path relative to the document's folder (user
   points at it, a string) or absolute, or a file:// URL; nothing is fetched from the network. A name without its
   extension (LaTeX's \includegraphics{fig}) as the file with one LaTeX would find; a PDF as its first page }
+var
+  FigureCache: TStringList = nil;   { a PDF figure's file, its time and size -> the picture drawn of it }
+
 function FetchFile(user: Pointer; address: PAnsiChar; write: pd_writer; sink: Pointer): cint; cdecl;
 const
   EXTS: array[0..4] of string = ('.pdf', '.png', '.jpg', '.jpeg', '.gif');
 var
-  Path: string;
+  Path, Key: string;
   Ms, Png: TMemoryStream;
   K: Integer;
 begin
@@ -2302,12 +2306,26 @@ begin
       Ms.LoadFromFile(Path);
       if (Ms.Size > 5) and (CompareByte(Ms.Memory^, PAnsiChar('%PDF-')^, 5) = 0) then
       begin
+        { drawn once: a .tex shown again as it is typed fetches its figures each time }
+        Key := Path + #0 + IntToStr(FileAge(Path)) + #0 + IntToStr(Ms.Size);
+        K := FigureCache.IndexOf(Key);
+        if K >= 0 then
+        begin
+          Png := TMemoryStream(FigureCache.Objects[K]);
+          Result := write(sink, Png.Memory, Png.Size);
+          Exit;
+        end;
         Png := PdfFigureAsPng(Ms);
-        try
-          if Png <> nil then
-            Result := write(sink, Png.Memory, Png.Size);
-        finally
-          Png.Free;
+        if Png <> nil then
+        begin
+          Result := write(sink, Png.Memory, Png.Size);
+          { the newest last; the oldest let go past 48 }
+          FigureCache.AddObject(Key, Png);
+          while FigureCache.Count > 48 do
+          begin
+            FigureCache.Objects[0].Free;
+            FigureCache.Delete(0);
+          end;
         end;
       end
       else if Ms.Size > 0 then
@@ -3336,6 +3354,13 @@ begin
   FScrollBar.LargeChange := Math.Min(32767, Math.Max(1, ClientHeight * 9 div 10));   { 1..32767; 0 before it is shown }
   FScrollBar.SmallChange := 40;
   FScrollBar.Position := FScrollY;
+end;
+
+procedure TParadeEdit.SetViewTop(AValue: Integer);
+begin
+  FScrollY := Math.Max(0, AValue);
+  UpdateScrollBar;    { (kept within the document) }
+  Invalidate;
 end;
 
 procedure TParadeEdit.ScrollBarChange(Sender: TObject);
@@ -18234,5 +18259,16 @@ begin
       NextY := Y + H + Round(4 * FZoom);
     end;
 end;
+
+initialization
+  FigureCache := TStringList.Create;
+
+finalization
+  while FigureCache.Count > 0 do
+  begin
+    FigureCache.Objects[0].Free;
+    FigureCache.Delete(0);
+  end;
+  FigureCache.Free;
 
 end.
