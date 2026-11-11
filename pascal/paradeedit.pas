@@ -1154,6 +1154,10 @@ procedure MergeParaProps(var A: pd_para_props; const B: pd_para_props);
 { what a slide's <pd:tail> XML holds (its transition, timing ...), without the element around it; '' none }
 function ParadeTailInner(const Xml: string): string;
 
+{ the language a LaTeX file's preamble sets (polyglossia's, babel's), as hyphenation patterns name it ('en_GB');
+  'en_US' when it sets none }
+function TexLanguage(const Tex: string): string;
+
 implementation
 
 uses
@@ -2767,6 +2771,212 @@ begin
   end;
 end;
 
+var
+  HyphCache: TStringList = nil;   { a language -> its hyphenation patterns (nil: none found), each read once }
+
+{ the hyphenation patterns of a language ('en_US', 'de_DE'): libhyphen's hyph_*.dic, from $PARADE_HYPHEN_DIR,
+  a hyphen folder beside the program, or where Linux and Homebrew keep them; the language's other countries' when
+  its own are not there; nil when there are none.  Kept for the life of the program, since documents point at
+  them (and are freed after this unit is) }
+function HyphPatterns(const Tag: string): Pointer;
+const
+  Dirs: array[0..5] of string = ('', '', '/usr/share/hyphen/', '/usr/local/share/hyphen/',
+    '/opt/homebrew/share/hyphen/', '/usr/share/myspell/dicts/');
+var
+  D, Path, Lang: string;
+  SR: TSearchRec;
+  K, Pass: Integer;
+  H: Pointer;
+begin
+  Result := nil;
+  if Tag = '' then
+    Exit;
+  K := HyphCache.IndexOf(Tag);
+  if K >= 0 then
+    Exit(Pointer(HyphCache.Objects[K]));
+  Lang := Tag;
+  if Pos('_', Lang) > 0 then
+    Lang := Copy(Lang, 1, Pos('_', Lang) - 1);
+  Path := '';
+  for Pass := 0 to 1 do
+    for K := Low(Dirs) to High(Dirs) do
+      if Path = '' then
+      begin
+        D := Dirs[K];
+        if K = 0 then
+          D := GetEnvironmentVariable('PARADE_HYPHEN_DIR')
+        else if K = 1 then
+          D := ExtractFilePath(ParamStr(0)) + 'hyphen';
+        if D = '' then
+          Continue;
+        D := IncludeTrailingPathDelimiter(D);
+        if Pass = 0 then
+        begin
+          if FileExists(D + 'hyph_' + Tag + '.dic') then
+            Path := D + 'hyph_' + Tag + '.dic';
+        end
+        else if FindFirst(D + 'hyph_' + Lang + '*.dic', faAnyFile, SR) = 0 then
+        begin   { hyph_de.dic, hyph_de_AT.dic: a language's patterns serve its countries }
+          Path := D + SR.Name;
+          FindClose(SR);
+        end;
+      end;
+  H := nil;
+  if (Path <> '') and (pd_hyph_load_file(PAnsiChar(AnsiString(Path)), H) <> PD_OK) then
+    H := nil;
+  HyphCache.AddObject(Tag, TObject(H));
+  Result := H;
+end;
+
+{ the language a LaTeX document is written in, as a pattern file names it: polyglossia's main language, or
+  babel's (its main= option, else its last, else the class's); US English when it says none, as TeX's own
+  hyphen.tex is }
+function TexLanguage(const Tex: string): string;
+const
+  Names: array[0..33] of string = ('english', 'en_US', 'american', 'en_US', 'usenglish', 'en_US',
+    'british', 'en_GB', 'ukenglish', 'en_GB', 'german', 'de_DE', 'ngerman', 'de_DE', 'austrian', 'de_AT',
+    'french', 'fr_FR', 'francais', 'fr_FR', 'spanish', 'es_ES', 'italian', 'it_IT', 'portuguese', 'pt_PT',
+    'brazil', 'pt_BR', 'brazilian', 'pt_BR', 'dutch', 'nl_NL', 'polish', 'pl_PL');
+  More: array[0..15] of string = ('russian', 'ru_RU', 'swedish', 'sv_SE', 'danish', 'da_DK',
+    'finnish', 'fi_FI', 'czech', 'cs_CZ', 'hungarian', 'hu_HU', 'norsk', 'nb_NO', 'greek', 'el_GR');
+  Poly: array[0..1] of string = ('\setdefaultlanguage', '\setmainlanguage');
+var
+  Pre, Opts, W: string;
+  P, Q, I, P0: Integer;
+
+  function TagOf(const Name: string): string;
+  var
+    J: Integer;
+    N: string;
+  begin
+    Result := '';
+    N := LowerCase(Trim(Name));
+    if Pos('=', N) > 0 then
+      N := Trim(Copy(N, Pos('=', N) + 1, MaxInt));
+    J := 0;
+    while J < High(Names) do
+    begin
+      if Names[J] = N then
+        Exit(Names[J + 1]);
+      Inc(J, 2);
+    end;
+    J := 0;
+    while J < High(More) do
+    begin
+      if More[J] = N then
+        Exit(More[J + 1]);
+      Inc(J, 2);
+    end;
+  end;
+
+  { the [...] just before a {name} that follows \usepackage or \documentclass }
+  function OptionsBefore(const Name: string): string;
+  var
+    A, B: Integer;
+  begin
+    Result := '';
+    A := Pos(Name, Pre);
+    if A = 0 then
+      Exit;
+    B := A - 1;
+    while (B > 0) and (Pre[B] in [' ', #9, #10, #13]) do
+      Dec(B);
+    if (B = 0) or (Pre[B] <> ']') then
+      Exit;
+    A := B;
+    while (A > 0) and (Pre[A] <> '[') do
+      Dec(A);
+    if A > 0 then
+      Result := Copy(Pre, A + 1, B - A - 1);
+  end;
+
+  { the main language of a comma list of options: main=, else the last that is a language }
+  function MainOf(const L: string): string;
+  var
+    Parts: TStringArray;
+    K: Integer;
+  begin
+    Result := '';
+    Parts := L.Split([',']);
+    for K := 0 to High(Parts) do
+      if Pos('main', LowerCase(Parts[K])) > 0 then
+        if TagOf(Parts[K]) <> '' then
+          Exit(TagOf(Parts[K]));
+    for K := High(Parts) downto 0 do
+      if TagOf(Parts[K]) <> '' then
+        Exit(TagOf(Parts[K]));
+  end;
+
+begin
+  Result := 'en_US';
+  P := Pos('\begin{document}', Tex);
+  if P = 0 then
+    P := Length(Tex) + 1;
+  Pre := Copy(Tex, 1, P - 1);
+  for P0 := Low(Poly) to High(Poly) do
+  begin   { polyglossia: \setmainlanguage[variant=british]{english} }
+    P := Pos(Poly[P0], Pre);
+    if P = 0 then
+      Continue;
+    Q := P + Length(Poly[P0]);
+    Opts := '';
+    if (Q <= Length(Pre)) and (Pre[Q] = '[') then
+    begin
+      I := Q;
+      while (I <= Length(Pre)) and (Pre[I] <> ']') do
+        Inc(I);
+      Opts := LowerCase(Copy(Pre, Q + 1, I - Q - 1));
+      Q := I + 1;
+    end;
+    if (Q <= Length(Pre)) and (Pre[Q] = '{') then
+    begin
+      I := Q;
+      while (I <= Length(Pre)) and (Pre[I] <> '}') do
+        Inc(I);
+      W := Copy(Pre, Q + 1, I - Q - 1);
+      if (Pos('british', Opts) > 0) or (Pos('uk', Opts) > 0) then
+        W := 'british';
+      if TagOf(W) <> '' then
+        Exit(TagOf(W));
+    end;
+  end;
+  if Pos('{babel}', Pre) > 0 then
+  begin
+    W := MainOf(OptionsBefore('{babel}'));
+    if W = '' then
+    begin   { the class's options, which babel takes too }
+      P := Pos('\documentclass', Pre);
+      if P > 0 then
+      begin
+        Q := P + Length('\documentclass');
+        while (Q <= Length(Pre)) and (Pre[Q] in [' ', #9]) do
+          Inc(Q);
+        if (Q <= Length(Pre)) and (Pre[Q] = '[') then
+        begin
+          I := Q;
+          while (I <= Length(Pre)) and (Pre[I] <> ']') do
+            Inc(I);
+          W := MainOf(Copy(Pre, Q + 1, I - Q - 1));
+        end;
+      end;
+    end;
+    if W <> '' then
+      Result := W;
+  end;
+end;
+
+{ the patterns for a language of the system's locale ($LANG, 'de_DE.UTF-8'), US English without one }
+function LocaleLanguage: string;
+begin
+  Result := GetEnvironmentVariable('LANG');
+  if Pos('.', Result) > 0 then
+    Result := Copy(Result, 1, Pos('.', Result) - 1);
+  if Pos('@', Result) > 0 then
+    Result := Copy(Result, 1, Pos('@', Result) - 1);
+  if (Result = '') or (Result = 'C') or (Result = 'POSIX') then
+    Result := 'en_US';
+end;
+
 { a LaTeX file with the files it \input, \include or \subfile put in where it names them (as TeX reads them: beside
   the main file, with .tex when the name has no extension), they in turn theirs; not inside a comment }
 function TexWithInputs(const Src, Dir: string; Depth: Integer; var Budget: Int64): string;
@@ -3013,7 +3223,7 @@ procedure TParadeEdit.LoadFromStream(Stream: TStream; Format: Int32; const FileN
 var
   Ms: TMemoryStream;
   D: Ppd_doc;
-  Base, Tex: string;
+  Base, Tex, Lang: string;
   Budget: Int64;
 begin
   Ms := TMemoryStream.Create;
@@ -3032,6 +3242,14 @@ begin
       if Tex <> '' then
         Ms.WriteBuffer(Tex[1], Length(Tex));
     end;
+    Lang := '';
+    if Format = PD_CONV_LATEX then
+    begin   { hyphenated as TeX would: in the language its preamble names }
+      SetString(Tex, PAnsiChar(Ms.Memory), Ms.Size);
+      Lang := TexLanguage(Tex);
+    end
+    else if Format in [PD_CONV_DOCX, PD_CONV_DOTX] then
+      Lang := LocaleLanguage;   { (only where the file asks for hyphenation: Word's autoHyphenation) }
     if Format = PD_CONV_JDATA then
       ParadeCheck(pd_doc_load(Ms.Memory, Ms.Size, PD_JDATA_AUTO, D), 'load ' + FileName)
     else
@@ -3057,6 +3275,8 @@ begin
   pd_doc_set_font_resolver(FDoc, @ResolveFont, Self);
   pd_doc_set_math_font(FDoc, FMathFont);
   UseFallbackFonts;
+  if Lang <> '' then
+    pd_doc_set_hyphenator(FDoc, '', HyphPatterns(Lang));
   if FTrack then
     pd_doc_set_tracking(FDoc, PAnsiChar(FAuthor));
   ParadeCheck(pd_layout_new(FDoc, FLayout), 'layout');
@@ -18262,6 +18482,7 @@ end;
 
 initialization
   FigureCache := TStringList.Create;
+  HyphCache := TStringList.Create;
 
 finalization
   while FigureCache.Count > 0 do
@@ -18270,5 +18491,6 @@ finalization
     FigureCache.Delete(0);
   end;
   FigureCache.Free;
+  HyphCache.Free;     { (the patterns themselves left to the end of the program: documents may still hold them) }
 
 end.

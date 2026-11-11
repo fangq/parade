@@ -5369,6 +5369,17 @@ static uint32_t cp_at(const char* text, size_t len, uint32_t off) {
     return cp == 0xAD ? 0x2D : (cp == 0xFFFC || cp < 32) ? 0 : cp;
 }
 
+/* what a glyph shows: its text's code point, or a hyphen for the one a line broken inside a word ends with (that
+   hyphen comes from the patterns, not the text: its cluster is the letter after it) */
+static uint32_t shown_cp(const pd_font* f, uint32_t glyph, uint32_t cp) {
+    if (cp && cp != '-' && cp != 0x2010 && cp != 0x2011 && f && glyph &&
+        (glyph == pd_font_glyph_index(f, 0x2010) || glyph == pd_font_glyph_index(f, '-'))) {
+        return '-';
+    }
+
+    return cp;
+}
+
 static pd_sp emit_text(const pd_layout* L, dlist_t* D, const char* text, const pd_style* st, pd_sp x, pd_sp y,
                        pd_block_id block, uint32_t off, int32_t region) {
     pd_params prm;
@@ -6036,7 +6047,7 @@ static pd_sp lay_paras(const pd_layout* L, dlist_t* M, const pj_node* paras, pd_
                     a.y = y + g[i].y;
                     a.w = g[i].advance;
                     a.glyph = g[i].glyph;
-                    a.text = tl ? cp_at(text, tl, g[i].cluster) : 0;
+                    a.text = tl ? shown_cp(gs.font, g[i].glyph, cp_at(text, tl, g[i].cluster)) : 0;
                     a.font = gs.font;
                     a.size = gs.size;
                     a.color = gs.color;
@@ -6271,7 +6282,7 @@ static void emit_label(const pd_layout* L, dlist_t* D, const pj_node* it, pd_sp 
         a.y = y;
         a.w = g[i].advance;
         a.glyph = g[i].glyph;
-        a.text = cp_at(tn->s, tn->len, g[i].cluster);
+        a.text = shown_cp(st.font, g[i].glyph, cp_at(tn->s, tn->len, g[i].cluster));
         a.font = st.font;
         a.size = st.size;
         a.color = st.color;
@@ -7626,7 +7637,7 @@ static void emit_line(const pd_layout* L, dlist_t* D, const ppage* p, const plin
         a.kind = PD_DRAW_GLYPH;
         a.glyph = g[i].glyph;
         a.scale = g[i].scale ? g[i].scale : 65536;
-        a.text = cp_at(b->st.text, b->st.len, g[i].cluster);
+        a.text = shown_cp(ps.font, g[i].glyph, cp_at(b->st.text, b->st.len, g[i].cluster));
         a.font = ps.font;
         a.size = ps.size;
         a.color = ps.color;

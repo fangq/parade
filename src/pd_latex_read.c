@@ -82,6 +82,7 @@ typedef struct {
     int in_para, space_pending, at_start;
     const char* style;
     int32_t role, level, align;     /* align -1: the style's */
+    int ragged;                     /* \raggedright: body text not justified (until its environment ends) */
     /* lists */
     int ldepth;
     int lkind[10];                  /* 1 bullets, 2 numbers, 3 description */
@@ -685,6 +686,10 @@ static void par_begin(lt* L) {
     if (L->align >= 0) {
         L->b->pp.mask |= PD_PP_ALIGN;
         L->b->pp.align = L->align;
+    } else if (!L->ragged && (L->role == PD_ROLE_BODY || L->role == PD_ROLE_QUOTE ||
+                              L->role == PD_ROLE_DEFINITION || L->role == PD_ROLE_CAPTION)) {
+        L->b->pp.mask |= PD_PP_ALIGN;   /* TeX justifies its text */
+        L->b->pp.align = PD_ALIGN_JUSTIFY;
     }
 
     bld_begin_para(L->b);
@@ -1804,6 +1809,7 @@ static void environment(lt* L, const char* s, size_t n, size_t* i) {
     size_t na, nb, ca, ce, after;
     char name[48];
     int32_t align = L->align;
+    int ragged = L->ragged;
     pd_char_props was = L->cp;
 
     if (!read_arg(s, n, i, &na, &nb) || nb - na >= sizeof(name)) {
@@ -2089,6 +2095,7 @@ static void environment(lt* L, const char* s, size_t n, size_t* i) {
     }
 
     L->align = align;
+    L->ragged = ragged;
     L->cp = was;
     apply_format(L);
 }
@@ -2677,6 +2684,11 @@ static void command(lt* L, const char* s, size_t n, size_t* i) {
             out_str(L, buf);
         }
 
+        return;
+    }
+
+    if (IS("raggedright") || IS("RaggedRight") || IS("justifying")) {
+        L->ragged = name[0] != 'j';     /* (ragged2e's \justifying undoes it) */
         return;
     }
 
@@ -3446,6 +3458,7 @@ static void lx_reset(lt* L) {
     L->role = PD_ROLE_BODY;
     L->level = 0;
     L->align = -1;
+    L->ragged = 0;
     L->ldepth = 0;
     L->item_pending = 0;
     memset(&L->cp, 0, sizeof(L->cp));
@@ -3639,5 +3652,6 @@ pd_status pd_latex_import(pd_doc* d, const char* s, size_t n) {
     }
 
     lx_free(&L);
+    pd_doc_set_microtype(d, 1, 0);  /* the margins kerned as microtype's protrusion does, as LaTeX papers mostly are */
     return bld_finish(&b);
 }

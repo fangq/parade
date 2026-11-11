@@ -5556,6 +5556,90 @@ static void doc_text(pd_doc* d, char* all, size_t cap) {
 }
 
 /* the .bib led puts in where \bibliography names it: the cited entries set out, numbered as cited or sorted */
+/* LaTeX's text justified as TeX sets it, its margins kerned; \raggedright, centred and code text not */
+static void test_latex_justified(void) {
+    static const char tex[] =
+        "\\documentclass{article}\\begin{document}\n"
+        "\\section{Intro}\n"
+        "Body text of the paper.\n\n"
+        "\\begin{quote}A quoted line.\\end{quote}\n"
+        "\\begin{center}Centred words.\\end{center}\n"
+        "\\begin{minipage}{3cm}\\raggedright Ragged inside.\\end{minipage}\n\n"
+        "Justified again after it.\n"
+        "\\begin{verbatim}\ncode here\n\\end{verbatim}\n"
+        "\\end{document}\n";
+    pd_doc* d = NULL;
+
+    CHECK(pd_doc_import(tex, sizeof(tex) - 1, PD_CONV_LATEX, &d) == PD_OK && d);
+
+    if (d) {
+        CHECK(para_resolved(d, find_para(d, "Body text")).align == PD_ALIGN_JUSTIFY);
+        CHECK(para_resolved(d, find_para(d, "A quoted")).align == PD_ALIGN_JUSTIFY);
+        CHECK(para_resolved(d, find_para(d, "Centred")).align == PD_ALIGN_CENTER);
+        CHECK(para_resolved(d, find_para(d, "Ragged inside")).align == PD_ALIGN_LEFT);
+        CHECK(para_resolved(d, find_para(d, "Justified again")).align == PD_ALIGN_JUSTIFY);    /* its group over */
+        CHECK(para_resolved(d, find_para(d, "Intro")).align != PD_ALIGN_JUSTIFY);
+        CHECK(para_resolved(d, find_para(d, "code here")).align != PD_ALIGN_JUSTIFY);
+
+        if (have_layout_font()) {   /* protrusion on for the text, not for the code */
+            pd_para* para = NULL;
+            pd_params prm;
+
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+            CHECK(pd_para_new(&para) == PD_OK);
+            CHECK(pd_doc_para_build(d, find_para(d, "Body text"), PD_PT(300), para, &prm) == PD_OK && prm.protrusion == 1);
+            CHECK(pd_doc_para_build(d, find_para(d, "code here"), PD_PT(300), para, &prm) == PD_OK && prm.protrusion == 0);
+            pd_para_free(para);
+        }
+
+        pd_doc_free(d);
+    }
+
+    {   /* long words broken with a hyphen from the patterns: shown, and said, as a hyphen (its cluster is the letter
+           after it, which a PDF's text would otherwise repeat) */
+        char t2[4096];
+        pd_hyph* h = NULL;
+        pd_layout* L = NULL;
+        int n = snprintf(t2, sizeof(t2), "\\documentclass{article}\\begin{document}\n"), k, hyphens = 0, letters = 0;
+        const char* path = "/usr/share/hyphen/hyph_en_US.dic";
+
+        for (k = 0; k < 120; k++) {
+            n += snprintf(t2 + n, sizeof(t2) - (size_t)n, "%s ", k % 2 ? "characterization" : "photoacoustic");
+        }
+
+        n += snprintf(t2 + n, sizeof(t2) - (size_t)n, "end.\n\\end{document}\n");
+
+        if (have_layout_font() && pd_hyph_load_file(path, &h) == PD_OK &&
+            pd_doc_import(t2, (size_t)n, PD_CONV_LATEX, &d) == PD_OK) {
+            int32_t c = 0, i;
+            pd_draw* it;
+
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+            pd_doc_set_hyphenator(d, "", h);
+            CHECK(pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK);
+            pd_layout_page_items(L, 0, NULL, 0, &c);
+            it = (pd_draw*)calloc((size_t)c + 1, sizeof(*it));
+            pd_layout_page_items(L, 0, it, c, &c);
+
+            for (i = 0; i + 1 < c; i++) {
+                if (it[i].kind == PD_DRAW_GLYPH && it[i + 1].kind == PD_DRAW_GLYPH && it[i + 1].y != it[i].y) {
+                    hyphens += it[i].text == '-';
+                    letters += it[i].text >= 'a' && it[i].text <= 'z';
+                }
+            }
+
+            CHECK(hyphens >= 3 && letters >= 1);    /* (not every line broken inside a word) */
+            free(it);
+            pd_layout_free(L);
+            pd_doc_free(d);
+            pd_hyph_free(h);
+        } else {
+            printf("  (no hyphenation patterns at %s: skipped)\n", path);
+            pd_hyph_free(h);
+        }
+    }
+}
+
 static void test_latex_bibtex(void) {
     static const char bib[] =
         "@string{jbo = \"J. Biomed.\"}\n"
@@ -12168,6 +12252,7 @@ int main(void) {
     test_gif_frames();
     test_latex_import();
     test_latex_bibtex();
+    test_latex_justified();
     test_pptx_chart();
     test_pptx_ph_inherit();
     test_pptx_run_props();
