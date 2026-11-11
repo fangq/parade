@@ -92,6 +92,7 @@ type
     a table, a link in a comment's text -- and the host's menu offers each one's commands }
   TParadeContext = record
     Comment: pd_comment_id;     { a comment's balloon under the pointer, or the comment over the caret }
+    ListLabel: Boolean;         { a list's bullet or number, its labels selected }
     Change: Boolean;            { a tracked change at the caret or in the selection, or a change's balloon }
     Shape: string;              { the selected object: 'picture', 'chart', 'equation', 'line', 'textbox', 'shape',
                                   'canvas', 'drawing'; '' none }
@@ -270,6 +271,10 @@ type
     FPlaceKey: string;
     FMultiPage: Boolean;
     FOnZoomChange: TNotifyEvent;
+    { a list's labels selected, as a click on a bullet selects them in Word: the list and the level, shaded }
+    FLabelOn: Boolean;
+    FLabelList: pd_list_id;
+    FLabelLevel: Int32;
     FAuthor: string;               { who tracked changes and comments are by }
     FTrack: Boolean;
     FHasMarkup: Boolean;           { some page has changes or comments: the balloon column shows }
@@ -1020,6 +1025,15 @@ type
     function RemoveLink(const P: pd_pos): Boolean;
     { the selection from A to B, the caret at B }
     procedure SetSelection(const A, B: pd_pos);
+    { the paragraph whose list label (its bullet or number) is at X, Y }
+    function ListLabelAt(X, Y: Integer; out Para: pd_block_id): Boolean;
+    { the labels of a list's level selected, as a click on one does: the caret at the paragraph's start }
+    procedure SelectListLabel(Para: pd_block_id);
+    { a list's labels selected: the list and its level }
+    function ListLabelSelected(out List: pd_list_id; out Level: Int32): Boolean;
+    { the label of the caret paragraph's level -- for the whole list -- a format (PD_NUM_*) and its text: a bullet's
+      character, or a number's template ('%1.' the level's number and a full stop); one step of undo }
+    procedure SetListLabel(AFormat: Integer; const AText: string);
     { the caret at the bookmark named, False when there is none }
     function GoToBookmark(const AName: string): Boolean;
     { the balloons as last drawn, for a check: where each is, and whether a change's (PD_MARK_*) }
@@ -9842,6 +9856,7 @@ end;
 
 procedure TParadeEdit.ContextClick(X, Y: Integer);
 var
+  LP: pd_block_id;
   P, D: pd_pos;
   Page: Integer;
   Info: pd_page_info;
@@ -9849,6 +9864,11 @@ begin
   FDownAt := Point(X, Y);
   if CommentAtPoint(X, Y) <> 0 then
     Exit;     { a comment's balloon: what the menu is for, and the caret where it was }
+  if ListLabelAt(X, Y, LP) then
+  begin   { a bullet: its labels, the menu theirs }
+    SelectListLabel(LP);
+    Exit;
+  end;
   if FShapeOn then
   begin   { the selected drawing, or a shape of it, under the press: kept }
     for Page := 0 to PageCount - 1 do
@@ -9887,6 +9907,8 @@ var
   Page: Integer;
   PI_: pd_page_info;
   Found: Boolean;
+  LL: pd_list_id;
+  LLv: Int32;
 
   function WordAfter(const S, Key: string): string;
   var
@@ -9959,6 +9981,7 @@ begin
 
   A := SelStart;
   B := SelEnd;
+  Result.ListLabel := ListLabelSelected(LL, LLv);
   if Result.Comment = 0 then
     Result.Comment := CommentAt(CaretPos);
   if not Result.Change then
@@ -10170,6 +10193,95 @@ begin
     end;
     B := pd_doc_next_paragraph(FDoc, B);
   end;
+end;
+
+function TParadeEdit.ListLabelAt(X, Y: Integer; out Para: pd_block_id): Boolean;
+var
+  P: pd_pos;
+  Info: pd_block_info;
+  Pg: Int32;
+  CX, Base, Asc, Desc: pd_sp;
+  Buf: array[0..63] of AnsiChar;
+  Page, DX, Step: Integer;
+  SX, SY: Double;
+begin
+  Result := False;
+  Para := 0;
+  Page := PageAt(X, Y);
+  if Page < 0 then
+    Exit;
+  SX := (X - PageLeft(Page)) / PxPerSp;
+  SY := (Y - PageTop(Page)) / PxPerSp;
+  { the paragraph whose label it is: hit where the press is, or -- left of the text, where a text box's label is
+    and the nearest text may be another's -- a little to the right of it, toward its text }
+  Step := Max(2, Round(6 * PD_SP_PER_PT * PxPerSp));
+  DX := 0;
+  while (DX <= Round(120 * PD_SP_PER_PT * PxPerSp)) and not Result do
+  begin
+    if PointToPos(X + DX, Y, P) and (pd_doc_block_info(FDoc, P.block, Info) = PD_OK) and (Info.list <> 0) then
+    begin
+      Buf[0] := #0;
+      if (pd_doc_list_label(FDoc, P.block, @Buf[0], SizeOf(Buf)) = PD_OK) and (Buf[0] <> #0) and
+         (pd_layout_caret(FLayout, PdPos(P.block, 0), Pg, CX, Base, Asc, Desc) = PD_OK) and (Pg = Page) then
+        { left of where its text begins, on its first line: the label }
+        Result := (SX < CX - 0.5 * PD_SP_PER_PT) and (SX > CX - 120 * PD_SP_PER_PT) and (SY >= Base - Asc) and
+                  (SY <= Base + Desc);
+      if Result then
+        Para := P.block;
+    end;
+    Inc(DX, Step);
+  end;
+end;
+
+procedure TParadeEdit.SelectListLabel(Para: pd_block_id);
+var
+  Info: pd_block_info;
+begin
+  if pd_doc_block_info(FDoc, Para, Info) <> PD_OK then
+    Exit;
+  ClearShapeSelection;
+  SetCaret(PdPos(Para, 0), False);
+  FLabelOn := True;
+  FLabelList := Info.list;
+  FLabelLevel := Info.list_level;
+  Invalidate;
+  CheckSelection;
+end;
+
+function TParadeEdit.ListLabelSelected(out List: pd_list_id; out Level: Int32): Boolean;
+var
+  Info: pd_block_info;
+begin
+  { selected while the caret stays at the start of a paragraph of that list and level }
+  Result := FLabelOn and (CaretPos.offset = 0) and not HasSelection and
+            (pd_doc_block_info(FDoc, CaretPos.block, Info) = PD_OK) and (Info.list = FLabelList) and
+            (Info.list_level = FLabelLevel);
+  if not Result then
+    FLabelOn := False;
+  List := FLabelList;
+  Level := FLabelLevel;
+end;
+
+procedure TParadeEdit.SetListLabel(AFormat: Integer; const AText: string);
+var
+  Levels: TParadeListLevels;
+  Level: Integer;
+  Lst: pd_list_id;
+  Lv: Int32;
+  Keep: Boolean;
+  Para: pd_block_id;
+begin
+  if EditBlocked then
+    Exit;
+  Keep := ListLabelSelected(Lst, Lv);
+  Para := CaretPos.block;
+  if not CurrentListLevels(Levels, Level) then
+    Levels := DefaultListLevels(AFormat);
+  Levels[Level].format := AFormat;
+  StrPLCopy(Levels[Level].text, AText, High(Levels[Level].text));
+  ApplyListLevels(Levels, True);
+  if Keep then
+    SelectListLabel(Para);     { the labels stay selected, in their new look }
 end;
 
 function TParadeEdit.BalloonCount: Integer;
@@ -15125,6 +15237,7 @@ var
   P: pd_pos;
   I, Page, TK: Integer;
   Info: pd_page_info;
+  LabelPara: pd_block_id;
 begin
   inherited MouseDown(Button, Shift, X, Y);
   SetFocus;
@@ -15165,6 +15278,16 @@ begin
     pd_doc_marker_set(FDoc, FCaret, PdPos(P.block, Length(ParaText(P.block))));
     FHasDesiredX := False;
     Invalidate;
+    Exit;
+  end;
+  FLabelOn := False;
+  { a bullet or a number: its list's labels at that level, as Word selects them -- before the shape selected is
+    taken for a move (a slide's canvas is selected while its text is edited, and a bullet is inside a text box,
+    away from the handles on its edge) }
+  if (Button = mbLeft) and (Shift * [ssShift, ssCtrl, ssDouble, ssTriple] = []) and ListLabelAt(X, Y, LabelPara) then
+  begin
+    FDragging := False;
+    SelectListLabel(LabelPara);
     Exit;
   end;
   if (Button = mbLeft) and ShapeDragStart(X, Y) then
@@ -15646,6 +15769,55 @@ var
         end;
   end;
 
+  { the selected list labels: each paragraph's of that list and level, its bullet or number -- the glyphs left of
+    where its text begins -- gray behind, as Word shades them }
+  procedure ShadeLabels;
+  var
+    I2, J2: Integer;
+    BInfo: pd_block_info;
+    LPg: Int32;
+    LX, LBase, LAsc, LDesc: pd_sp;
+    LastB: pd_block_id;
+    InList: Boolean;
+    X0, X1: pd_sp;
+  begin
+    LastB := 0;
+    InList := False;
+    LX := 0;
+    I2 := 0;
+    while I2 < N do
+    begin
+      if (Items[I2].kind = PD_DRAW_GLYPH) and (Items[I2].offset = 0) and (Items[I2].region in [0, 3, 4, 5]) then
+      begin
+        if Items[I2].block <> LastB then
+        begin
+          LastB := Items[I2].block;
+          InList := (pd_doc_block_info(FDoc, LastB, BInfo) = PD_OK) and (BInfo.list = FLabelList) and
+                    (BInfo.list_level = FLabelLevel) and
+                    (pd_layout_caret(FLayout, PdPos(LastB, 0), LPg, LX, LBase, LAsc, LDesc) = PD_OK) and
+                    (LPg = Page);
+        end;
+        if InList and (Items[I2].x < LX) then
+        begin   { its label's glyphs, one run of them }
+          X0 := Items[I2].x;
+          X1 := Items[I2].x + Items[I2].w;
+          J2 := I2 + 1;
+          while (J2 < N) and (Items[J2].block = LastB) and (Items[J2].offset = 0) and (Items[J2].x < LX) do
+          begin
+            if Items[J2].x + Items[J2].w > X1 then
+              X1 := Items[J2].x + Items[J2].w;
+            Inc(J2);
+          end;
+          FillRectImg(Img, OX + Floor0((X0 - PD_SP_PER_PT) * PxScale), OY + Round((LBase - LAsc) * PxScale),
+            OX + Round((X1 + PD_SP_PER_PT) * PxScale), OY + Round((LBase + LDesc) * PxScale), $00808080, 90);
+          I2 := J2;
+          Continue;
+        end;
+      end;
+      Inc(I2);
+    end;
+  end;
+
   { comments' ranges, lightly in their authors' colours; the selection over them; the others' selections }
   procedure HighlightAll;
   var
@@ -15661,6 +15833,8 @@ var
         if (pd_doc_comment_get(FDoc, C, Cm) = PD_OK) and (Cm.parent = 0) and (Cm.resolved = 0) and
            (Compare(Cm.range.start, Cm.range.finish) < 0) then
           Highlight(Cm.range.start, Cm.range.finish, pd_doc_author_color(FDoc, Cm.author) and $FFFFFF, 40, False);
+    if FLabelOn then
+      ShadeLabels;
     Flds := SelectedFields;   { a field the caret is in, or selected: gray, as Word shades it }
     for Q := 0 to High(Flds) do
       Highlight(Flds[Q].start, Flds[Q].finish, $00808080, 72, False);

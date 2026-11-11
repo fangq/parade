@@ -3573,6 +3573,124 @@ begin
   Check(E.CurrentSlide = 1, Format('the slide being edited is the box''s: 1 (%d)', [E.CurrentSlide]));
 end;
 
+{ a click on a bullet selects the list's labels at that level, as Word does: the caret at that paragraph's start,
+  no shape selected (in a slide's text box the click took the box), every bullet of the level shaded and the text
+  not; a right click there a label's; a new bullet for the level, every one of its paragraphs' }
+procedure TestListLabelClick(E: TParadeEdit);
+var
+  P: array[0..2] of pd_block_id;
+  I, Sid: Integer;
+  Pt: TPoint;
+  Img0, Img1: TLazIntfImage;
+  Lst: pd_list_id;
+  Lv: Int32;
+  At: pd_pos;
+  Buf: array[0..63] of AnsiChar;
+  C: TParadeContext;
+  Lbl: string;
+
+  function BulletPoint(Para: pd_block_id): TPoint;
+  var
+    Pg: Int32;
+    CX, Base, Asc, Desc: pd_sp;
+  begin
+    Result := Point(-1, -1);
+    E.Repaint;
+    Application.ProcessMessages;
+    if pd_layout_caret(E.Layout, PdPos(Para, 0), Pg, CX, Base, Asc, Desc) = PD_OK then
+      Result := E.PageToClient(Pg, CX / PD_SP_PER_PT - 14, (Base - Asc div 2) / PD_SP_PER_PT);
+  end;
+
+  function Shaded(Para: pd_block_id; TextToo: Boolean): Integer;
+  var
+    Q: TPoint;
+    X, Y, X0, X1: Integer;
+    A, B: TFPColor;
+  begin
+    Result := 0;
+    Q := BulletPoint(Para);
+    if TextToo then
+    begin
+      X0 := Q.X + 30;
+      X1 := Q.X + 80;
+    end
+    else
+    begin
+      X0 := Q.X - 6;
+      X1 := Q.X + 10;
+    end;
+    for Y := Q.Y - 4 to Q.Y + 4 do
+      for X := X0 to X1 do
+        if (X >= 0) and (Y >= 0) and (X < Img0.Width) and (Y < Img0.Height) then
+        begin
+          A := Img0.Colors[X, Y];
+          B := Img1.Colors[X, Y];
+          if (A.red <> B.red) or (A.green <> B.green) or (A.blue <> B.blue) then
+            Inc(Result);
+        end;
+  end;
+
+begin
+  E.NewDocument;
+  E.InsertText('Apples');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Pears');
+  E.ProcessKey(VK_RETURN, []);
+  E.InsertText('Plums');
+  P[0] := pd_doc_next_paragraph(E.Doc, 0);
+  P[1] := pd_doc_next_paragraph(E.Doc, P[0]);
+  P[2] := pd_doc_next_paragraph(E.Doc, P[1]);
+  E.SetSelection(PdPos(P[0], 0), PdPos(P[2], 5));
+  E.ToggleList(PD_NUM_BULLET);
+  E.GoToPos(PdPos(P[2], 5));
+  Img0 := TLazIntfImage.Create(0, 0);
+  Img1 := TLazIntfImage.Create(0, 0);
+  try
+    Pt := BulletPoint(P[1]);
+    E.RenderView(Img0);
+    TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+    E.Repaint;
+    Application.ProcessMessages;
+    E.RenderView(Img1);
+    Check(E.ListLabelSelected(Lst, Lv), 'a click on the second bullet: the list''s labels selected');
+    Check((E.CaretPos.block = P[1]) and (E.CaretPos.offset = 0), 'the caret at its paragraph''s start');
+    Check((Shaded(P[0], False) > 20) and (Shaded(P[2], False) > 20), Format('every bullet of the level shaded (%d, %d)',
+      [Shaded(P[0], False), Shaded(P[2], False)]));
+    Check(Shaded(P[0], True) = 0, Format('and not the text (%d)', [Shaded(P[0], True)]));
+    C := E.ContextAt(Pt.X, Pt.Y);
+    Check(C.ListLabel, 'a right click there: a label''s menu');
+    E.SetListLabel(PD_NUM_BULLET, #$E2#$9C#$93);     { a tick }
+    pd_doc_list_label(E.Doc, P[2], @Buf[0], SizeOf(Buf));
+    Lbl := Buf;
+    Check(Pos(#$E2#$9C#$93, Lbl) > 0, 'a new bullet: every paragraph''s of the level: ' + Lbl);
+    Check(E.ListLabelSelected(Lst, Lv), 'still selected');
+    E.GoToPos(PdPos(P[1], 2));
+    Check(not E.ListLabelSelected(Lst, Lv), 'the caret moved on: not selected');
+  finally
+    Img0.Free;
+    Img1.Free;
+  end;
+
+  { in a slide's text box: the bullet, not the box }
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/slides.pptx');
+  E.Repaint;
+  Application.ProcessMessages;
+  P[0] := 0;
+  for I := 0 to pd_doc_story_count(E.Doc) - 1 do
+    if (P[0] = 0) and (Pos('First point', E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0))) > 0) then
+      P[0] := pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0);
+  Check(P[0] <> 0, 'a bulleted point on the slide');
+  if P[0] <> 0 then
+  begin
+    Pt := BulletPoint(P[0]);
+    TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+    Check(not E.SelectedShape(At, Sid), 'a click on a slide''s bullet: no shape selected');
+    Check(E.ListLabelSelected(Lst, Lv) and (E.CaretPos.block = P[0]), 'its labels selected');
+  end;
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -4912,6 +5030,8 @@ begin
   TestFormatProps(E);
   Step('the slide of a text box being typed in');
   TestSlideOfTextBox(E);
+  Step('a bullet clicked');
+  TestListLabelClick(E);
   Step('slide show');
   TestSlideShow(E);
   TestShowPdf(E);

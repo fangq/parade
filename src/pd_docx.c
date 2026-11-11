@@ -7269,7 +7269,11 @@ static void read_numbering(dxi* X, const char* xml, size_t n) {
             memset(&lc, 0, sizeof(lc));
             rpr_elem(X, &m, t, &lc, NULL, 0);
 
-            if ((lc.mask & PD_CP_FAMILY) && L->format != PD_NUM_BULLET) {   /* a bullet's symbol font: read as Unicode */
+            /* a bullet's symbol font (Symbol, Wingdings ...): its character read as Unicode, in the text's face; a
+               bullet in a face of letters (Arial, Courier New for Word's "o") keeps it */
+            if ((lc.mask & PD_CP_FAMILY) && (L->format != PD_NUM_BULLET ||
+                    !(strstr(lc.family, "Symbol") || strstr(lc.family, "Wingdings") || strstr(lc.family, "Webdings") ||
+                      strstr(lc.family, "Marlett") || strstr(lc.family, "Dingbats")))) {
                 snprintf(L->label_family, sizeof(L->label_family), "%.31s", lc.family);
             }
 
@@ -9675,6 +9679,7 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
     static const char* const styled[] = { "w:pStyle w:val=\"", "w:rStyle w:val=\"", "w:tblStyle w:val=\"" };
     size_t rawn = (size_t)(raw1 - raw0), j;
     int ok = rel_ok && rawn > 0 && rawn < 16u * 1024 * 1024, fb_ok = fb0 && fb1 > fb0, k, first = 1;
+    int from_pptx = rawn > 0 && dw_memmem(raw0, rawn, "urn:parade:pptx", 15) != NULL;
     pd_buf chk;
 
     /* what is checked for its references and prefixes: the XML but the insides of its text boxes, which are written
@@ -9701,9 +9706,13 @@ static void dw_keep_xml(dxi* X, pd_buf* o, const char* raw0, const char* raw1, c
         ok = !chk.err && chk.n > 0;
     }
 
-    /* what the writer numbers afresh (lists, comments, notes) and so cannot keep pointing at: made, not kept */
-    for (j = 0; ok && j < sizeof(renumbered) / sizeof(renumbered[0]); j++) {     /* (anywhere, text boxes too) */
-        ok = dw_memmem(raw0, rawn, renumbered[j], strlen(renumbered[j])) == NULL;
+    /* what the writer numbers afresh (lists, comments, notes) and so cannot keep pointing at: made, not kept --
+       comments and notes anywhere, text boxes too; for a slide's drawing (the PowerPoint reader's, its shapes marked
+       urn:parade:pptx) a list only outside them, a text box's paragraphs being written from its story with the
+       numbering written then -- a slide's bulleted text box kept as it came, its shapes' names and placeholders */
+    for (j = 0; ok && j < sizeof(renumbered) / sizeof(renumbered[0]); j++) {
+        ok = j == 0 && from_pptx ? dw_memmem(chk.p, chk.n, renumbered[j], strlen(renumbered[j])) == NULL :
+             dw_memmem(raw0, rawn, renumbered[j], strlen(renumbered[j])) == NULL;
     }
 
     /* (its pictures loaded when they are not yet: an SVG beside its PNG) */

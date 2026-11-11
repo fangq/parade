@@ -5208,8 +5208,15 @@ static void test_pptx(void) {
 
         t = para_text(d, p, &n);
         found_title |= text_is(d, p, "Hello Slides");
-        found_bullet |= n > 4 && !memcmp(t, "\xE2\x80\xA2\t", 4) && strstr(t, "First point") != NULL;
-        found_sub |= pd_doc_child(d, st, 1) && text_is(d, pd_doc_child(d, st, 1), "\xE2\x80\x93\tA detail");
+        {   /* the bullets list labels, as PowerPoint's are bullets and not text */
+            char lb[16] = "", lb2[16] = "";
+
+            found_bullet |= text_is(d, p, "First point") && pd_doc_list_label(d, p, lb, sizeof(lb)) == PD_OK &&
+                            !strcmp(lb, "\xE2\x80\xA2");
+            found_sub |= pd_doc_child(d, st, 1) && text_is(d, pd_doc_child(d, st, 1), "A detail") &&
+                         pd_doc_list_label(d, pd_doc_child(d, st, 1), lb2, sizeof(lb2)) == PD_OK &&
+                         !strcmp(lb2, "\xE2\x80\x93");
+        }
         found_box |= text_is(d, p, "Box & text");
         found_num |= text_is(d, p, "1");
 
@@ -5340,6 +5347,11 @@ static void bullet_of(const pd_doc* d, const char* needle, char* out, size_t cap
                 snprintf(out, cap, "%.*s", (int)(tab - t), t);
                 return;
             }
+
+            if (n == strlen(needle) && !memcmp(t, needle, n) &&      /* a bullet made a list label */
+                    pd_doc_list_label(d, pd_doc_child(d, st, k), out, (int32_t)cap) == PD_OK && out[0]) {
+                return;
+            }
         }
     }
 }
@@ -5384,11 +5396,18 @@ static void test_pptx_autonum(void) {
         CHECK_STR(buf, want[k][1]);
     }
 
-    {   /* the dash 12 points, in Arial; the text after it 20 */
-        pd_block_id p = story_para_with(d, "-\tdash");
-        pd_char_props a = chars_at(d, p, 0), b = chars_at(d, p, 3);
+    {   /* the dash a list label 12 points, in Arial; the text after it 20 */
+        pd_block_id p = story_para_with(d, "dash");
+        pd_char_props b = chars_at(d, p, 1);
+        pd_block_info bi;
+        pd_list_level lv[9];
+        int32_t nl = 0;
 
-        CHECK(p && a.size == PD_PT(12) && !strcmp(a.family, "Arial") && b.size == PD_PT(20));
+        nl = 9;
+        CHECK(p && pd_doc_block_info(d, p, &bi) == PD_OK && bi.list != 0 &&
+              pd_doc_list_info(d, bi.list, &nl, lv) == PD_OK && bi.list_level < nl &&
+              lv[bi.list_level].label_size == PD_PT(12) && !strcmp(lv[bi.list_level].label_family, "Arial") &&
+              b.size == PD_PT(20));
     }
 
     pd_doc_free(d);

@@ -69,6 +69,12 @@ typedef struct {
                                    a line of the namespaces and mc:Ignorable of its root they need; malloc'ed, or NULL */
     } *rec;
     int nrec, caprec;
+    /* the bullets made list labels: each list's key (its text body, level, character, label's run properties and
+       indents) at the index its numbering id less one has, malloc'ed; numbering.xml made from them */
+    char** numkey;
+    char** numlvl;              /* each one's w:lvl, as written */
+    int nnum, capnum;
+    int nbodies;                /* text bodies so far: a list each, as PowerPoint numbers each body on its own */
 } pptx;
 
 /* a path relative to a part's folder ("../media/a.png" from "ppt/slides/slide1.xml") */
@@ -1042,6 +1048,7 @@ static const char* symbol_bullet(const char* ch, const char* face) {
 typedef struct {
     int n[9];
     char scheme[9][32];
+    int body;                   /* which text body (pptx.nbodies): a bullet's list is its body's */
 } autonum;
 
 /* an autonumbered paragraph's label: number V in scheme S (ST_TextAutonumberScheme) */
@@ -1139,6 +1146,18 @@ static void autonum_label(const char* s, int v, char* out, size_t cap) {
     snprintf(out, cap, "%s%s%s", pre, num, suf);
 }
 
+/* a copy of S, malloc'ed (NULL out of memory) */
+static char* str_dup(const char* s) {
+    size_t n = strlen(s) + 1;
+    char* r = (char*)malloc(n);
+
+    if (r) {
+        memcpy(r, s, n);
+    }
+
+    return r;
+}
+
 static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an) {
     static const char* const types[4] = { "buNone", "buAutoNum", "buChar", "buBlip" };
     static const char* const clrs[2] = { "buClr", "buClrTx" }, *const szs[3] = { "buSzPct", "buSzPts", "buSzTx" };
@@ -1206,9 +1225,6 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
         pb_printf(o, "<w:jc w:val=\"%s\"/>", jc);
     }
 
-    /* the paragraph mark's size: an empty line as tall as its text would be */
-    put_rpr(o, T, d, first_rpr);
-    pb_puts(o, "</w:pPr>");
 
     /* its bullet: as text before it. A number counts on from the last paragraph at its level numbered the same way
        (from startAt, or 1); a paragraph less deep starts the deeper levels' numbers again, and one not numbered
@@ -1276,6 +1292,79 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
             bu_sz = k == 1 ? (long)xd_int(z.d, z.n, "val", 0) : 0;
         }
     }
+
+    /* the paragraph mark's size: an empty line as tall as its text would be */
+    put_rpr(o, T, d, first_rpr);
+    /* a character bullet: a list label, as Word has one -- the paragraph in its text body's list at its level, the
+       label's look (face, colour, size) as the bullet's run would have had it -- rather than the character typed
+       into the text, which could not be clicked, selected or restyled as a bullet.  Numbers (counted here, in
+       PowerPoint's schemes) and picture bullets stay as text */
+    if (bu[0] && which == 2 && !T->P->docx && an->body > 0) {
+        tctx B = *T;
+        pd_buf lv;
+        char key[96];
+        int id = 0, q;
+
+        B.bullet = 1;
+        B.bu_colour = bu_colour;
+        B.bu_scale = bu_scale;
+        B.bu_sz = bu_sz;
+        B.bu_face = bu_face[0] ? bu_face : NULL;
+        memset(&lv, 0, sizeof(lv));
+        pb_printf(&lv, "<w:lvl w:ilvl=\"%d\"><w:start w:val=\"1\"/><w:numFmt w:val=\"bullet\"/><w:lvlText w:val=\"",
+                  lvl);
+        put_esc(&lv, bu);
+        pb_puts(&lv, "\"/><w:lvlJc w:val=\"left\"/><w:pPr>");
+        if (marl || ind) {
+            pb_printf(&lv, "<w:ind w:left=\"%lld\"%s%lld\"/>", marl / 635, ind < 0 ? " w:hanging=\"" :
+                      " w:firstLine=\"", (ind < 0 ? -ind : ind) / 635);
+        }
+        pb_puts(&lv, "</w:pPr>");
+        put_rpr(&lv, &B, d, first_rpr);
+        pb_puts(&lv, "</w:lvl>");
+        snprintf(key, sizeof(key), "%d|%d|", an->body, lvl);
+
+        for (q = 0; q < T->P->nnum && !id; q++) {   /* this body's list, with this level as before */
+            if (!strncmp(T->P->numkey[q], key, strlen(key)) && lv.p && !strcmp(T->P->numlvl[q], lv.p)) {
+                id = q + 1;
+            }
+        }
+
+        if (!id && lv.p) {
+            if (T->P->nnum == T->P->capnum) {
+                int cap = T->P->capnum ? T->P->capnum * 2 : 32;
+                char** k2 = (char**)realloc(T->P->numkey, (size_t)cap * sizeof(char*));
+                char** l2 = k2 ? (char**)realloc(T->P->numlvl, (size_t)cap * sizeof(char*)) : NULL;
+
+                if (k2) {
+                    T->P->numkey = k2;
+                }
+
+                if (l2) {
+                    T->P->numlvl = l2;
+                    T->P->capnum = cap;
+                }
+            }
+
+            if (T->P->nnum < T->P->capnum) {
+                T->P->numkey[T->P->nnum] = str_dup(key);
+                T->P->numlvl[T->P->nnum] = str_dup(lv.p);
+
+                if (T->P->numkey[T->P->nnum] && T->P->numlvl[T->P->nnum]) {
+                    id = ++T->P->nnum;
+                }
+            }
+        }
+
+        pb_free(&lv);
+
+        if (id) {
+            pb_printf(o, "<w:numPr><w:ilvl w:val=\"%d\"/><w:numId w:val=\"%d\"/></w:numPr>", lvl, id);
+            bu[0] = '\0';     /* the label is the list's */
+        }
+    }
+
+    pb_puts(o, "</w:pPr>");
 
     if (bu[0]) {
         tctx B = *T;
@@ -1651,6 +1740,7 @@ static void put_txbody(conv* C, ppart* pt, int sp, int tx, int kind, int lsp, in
     }
 
     memset(&an, 0, sizeof(an));
+    an.body = ++C->P->nbodies;
     pb_puts(C->o, "<wps:txbx><w:txbxContent>");
 
     for (p = d->v[tx].kid; p >= 0; p = d->v[p].next) {
@@ -2216,6 +2306,7 @@ static void put_table(conv* C, ppart* pt, int gf, int tbl) {
             pb_puts(C->o, "</w:tcPr>");
             memset(&T, 0, sizeof(T));
             memset(&an, 0, sizeof(an));
+            an.body = ++C->P->nbodies;
             T.P = C->P;
             T.parts[0] = pt;
             T.parts[2] = C->master;
@@ -3628,6 +3719,29 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
         pb_free(&sty);
     }
 
+    if (P.nnum > 0) {   /* the bullets' lists: one level each, as its paragraphs' bullet looks */
+        pd_buf nb;
+        int q;
+
+        memset(&nb, 0, sizeof(nb));
+        pb_puts(&nb, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering "
+                "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">");
+
+        for (q = 0; q < P.nnum; q++) {
+            pb_printf(&nb, "<w:abstractNum w:abstractNumId=\"%d\"><w:multiLevelType w:val=\"singleLevel\"/>", q);
+            pb_puts(&nb, P.numlvl[q]);
+            pb_puts(&nb, "</w:abstractNum>");
+        }
+
+        for (q = 0; q < P.nnum; q++) {
+            pb_printf(&nb, "<w:num w:numId=\"%d\"><w:abstractNumId w:val=\"%d\"/></w:num>", q + 1, q);
+        }
+
+        pb_puts(&nb, "</w:numbering>");
+        pd_zipw_add(P.zw, "word/numbering.xml", nb.p, nb.n);
+        pb_free(&nb);
+    }
+
     {   /* the font table: what kind each face is, so one not here is stood in for by one like it (a sans for a
            sans: most slides' faces are) */
         pd_buf ft;
@@ -3683,6 +3797,17 @@ pd_status pd_pptx_import(pd_doc* d, const unsigned char* s, size_t n) {
     pd_zipw_finish(P.zw);
     pb_free(&P.doc);
     pb_free(&P.rels);
+    {
+        int q;
+
+        for (q = 0; q < P.nnum; q++) {
+            free(P.numkey[q]);
+            free(P.numlvl[q]);
+        }
+
+        free(P.numkey);
+        free(P.numlvl);
+    }
 
     if (have_ts) {
         part_free(&ts);
