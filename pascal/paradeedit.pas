@@ -1157,6 +1157,7 @@ type
     Img: TLazIntfImage;   { nil: not a picture it could read }
   end;
 
+
   TPicDecoder = class(TThread)
   private
     FLock: TRTLCriticalSection;
@@ -3386,6 +3387,38 @@ begin
   FCaretOn := True;
   EnsureCaretVisible;
   Invalidate;
+end;
+
+{ JSON with no white space outside its strings: a drawing written again by fpjson has '"story" : 12', and what is
+  looked for in it as text ('"story":12') must still be found }
+function CompactJson(const S: string): string;
+var
+  I, N: Integer;
+  InStr, Esc: Boolean;
+begin
+  SetLength(Result, Length(S));
+  N := 0;
+  InStr := False;
+  Esc := False;
+  for I := 1 to Length(S) do
+  begin
+    if InStr then
+    begin
+      if Esc then
+        Esc := False
+      else if S[I] = '\' then
+        Esc := True
+      else if S[I] = '"' then
+        InStr := False;
+    end
+    else if S[I] = '"' then
+      InStr := True
+    else if S[I] in [' ', #9, #10, #13] then
+      Continue;
+    Inc(N);
+    Result[N] := S[I];
+  end;
+  SetLength(Result, N);
 end;
 
 function TParadeEdit.ParaText(Block: pd_block_id): string;
@@ -6817,6 +6850,7 @@ begin
            (StrComp(Mime, 'application/vnd.parade.drawing+json') = 0) then
         begin   { a drawing made from it, or drawing it }
           SetString(S, PAnsiChar(Data), Len);
+          S := CompactJson(S);
           Hit := (Pos('"src":' + Id + ',', S) > 0) or (Pos('"src":' + Id + '}', S) > 0) or
                  (Pos('"img":' + Id + ',', S) > 0) or (Pos('"img":' + Id + '}', S) > 0);
         end;
@@ -6885,6 +6919,7 @@ var
        (StrComp(Mime, 'application/vnd.parade.drawing+json') <> 0) then
       Exit;
     SetString(S, PAnsiChar(Data), Len);
+    S := CompactJson(S);
     for K := 0 to High(Keys) do
     begin
       P := Pos(Keys[K], S);
@@ -6939,6 +6974,7 @@ begin
      (StrComp(Mime, 'application/vnd.parade.drawing+json') <> 0) then
     Exit;
   SetString(S, PAnsiChar(Data), Len);
+  S := CompactJson(S);
   Key := '"img":' + IntToStr(R);
   I := Pos(Key + ',', S);
   if I = 0 then
@@ -7404,6 +7440,7 @@ begin
          (StrComp(Mime, 'application/vnd.parade.drawing+json') = 0) then
       begin
         SetString(S, PAnsiChar(Data), Len);
+        S := CompactJson(S);
         if (Pos(Key + ',', S) > 0) or (Pos(Key + '}', S) > 0) then
         begin
           D := PdPos(B, I - 1);
@@ -8171,6 +8208,8 @@ end;
   already -- unless the click is in its text (a caption: the caret goes there). True when it was one. }
 function TParadeEdit.ClickPage(Page: Integer; SX, SY: pd_sp; Shift: TShiftState): Boolean;
 var
+  Boxes: TParadeShapeBoxes;
+  K: Integer;
   D, HP: pd_pos;
   Info: pd_block_info;
   StoryTop: pd_block_id;
@@ -8225,6 +8264,26 @@ begin
   if (ssShift in Shift) and FShapeOn and (FShapeSid >= 0) and (Sid >= 0) and (FShapeAt.block = D.block) and
      (FShapeAt.offset = D.offset) then
     Exit(ToggleShape(Sid));    { one more shape of the drawing, for a group }
+  if (Sid >= 0) and (Shift * [ssShift, ssCtrl, ssDouble, ssTriple] = []) and (FDrawKind = '') then
+  begin   { inside a text box, off its edge: its text, as PowerPoint and Word put the caret in one -- an empty one
+            has no line a click could fall on (a new slide's title placeholder was selected as a shape instead) }
+    Boxes := DrawingShapes(D);
+    for K := 0 to High(Boxes) do
+      if (Boxes[K].Sid = Sid) and (Boxes[K].Story <> 0) then
+      begin
+        if pd_layout_hit_test(FLayout, Page, SX, SY, HP) <> PD_OK then
+          HP := PdPos(Boxes[K].Story, 0);
+        SetLength(FShapeMore, 0);
+        FShapeOn := True;
+        FShapeAt := D;
+        FShapeSid := Sid;
+        if EnterTextBox(Sid, HP, True, True) then
+        begin
+          Invalidate;
+          Exit(True);
+        end;
+      end;
+  end;
   if (Sid <> FShapeSid) or (FShapeAt.block <> D.block) or (FShapeAt.offset <> D.offset) then
     FNodeOn := False;
   SetLength(FShapeMore, 0);
@@ -8700,9 +8759,11 @@ end;
 function TParadeEdit.ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
 var
   R: pd_res_id;
+  C: string;
 begin
+  C := CompactJson(Json);     { as the reader writes a drawing: no spaces for a search of it to trip on }
   Result := not EditBlocked and
-    (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(Json), Length(Json), R) = PD_OK) and
+    (pd_doc_add_resource(FDoc, 'application/vnd.parade.drawing+json', PAnsiChar(C), Length(C), R) = PD_OK) and
     ReplaceDrawingRes(P, R, Lbl);
 end;
 
@@ -11397,9 +11458,10 @@ begin
   { and what is the slide's own but no placeholder -- pictures, text boxes, shapes -- gone, the last first }
   SetLength(Sids, 0);
   for I := 0 to High(Boxes) do
-    if MarkOf(Xml, Els, SidElement(Els, Boxes[I].Sid), From, Ph, Idx) and (From = 'slide') and
-       (((Ph = '') and (Idx = '')) or (HaveLayout and (MatchPlaceholder(Phs, Ph, Idx) < 0))) then
-    begin   { (a placeholder the layout has none of: not one a new slide on it has, as in PowerPoint) }
+    if MarkOf(Xml, Els, SidElement(Els, Boxes[I].Sid), From, Ph, Idx) and (From = 'slide') and (Ph = '') and
+       (Idx = '') then
+    begin   { (every placeholder the slide has is kept, the layout's or the slide's own: a new slide is as this one is
+              laid out) }
       SetLength(Sids, Length(Sids) + 1);
       Sids[High(Sids)] := Boxes[I].Sid;
     end

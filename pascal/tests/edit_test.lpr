@@ -3751,7 +3751,7 @@ end;
   layout has it }
 procedure TestNewLayoutSlide(E: TParadeEdit; AForm: TForm);
 var
-  N, I, Sid, Gray, Title: Integer;
+  N, I, Sid, Gray, Title, Places, Orange, Body: Integer;
   D, At: pd_pos;
   Boxes: TParadeShapeBoxes;
   Ph, Idx, Names: string;
@@ -3779,6 +3779,16 @@ begin
     if E.PlaceholderOf(D, Boxes[I].Sid, Ph, Idx) and ((Ph = 'title') or (Ph = 'ctrTitle')) then
       Title := I;
   Check(Title >= 0, 'a title placeholder on it');
+  Places := 0;
+  Body := -1;
+  for I := 0 to High(Boxes) do
+    if E.PlaceholderOf(D, Boxes[I].Sid, Ph, Idx) then
+    begin
+      Inc(Places);
+      if (I <> Title) and (Boxes[I].Story <> 0) then
+        Body := I;
+    end;
+  Check(Places >= 2, Format('and its content placeholder, as the slide had (%d placeholders)', [Places]));
   if Title >= 0 then
     Check((Boxes[Title].Story <> 0) and (E.ParaText(pd_doc_child(E.Doc, Boxes[Title].Story, 0)) = ''), 'empty');
   if not E.KeptXml(Xml) then
@@ -3818,6 +3828,43 @@ begin
     end;
   end;
   Check(Gray > 30, Format('its prompt drawn, gray, and gone with the caret in it (%d pixels)', [Gray]));
+  { a click in the middle of the empty title: the caret in its text, not the box selected; typing there, its frame
+    and handles stay, the turning one orange }
+  E.ClearShapeSelection;
+  E.GoToSlide(1);
+  E.SelectedShape(D, Sid);
+  if (Body >= 0) and E.ShapePageBox(D, Boxes[Body].Sid, Pg, X0, Y0, X1, Y1) then
+  begin   { low in the content box, well under its one empty line }
+    with E.PageToClient(Pg, (X0 + X1) / 2 / PD_SP_PER_PT, (Y0 + (Y1 - Y0) * 0.8) / PD_SP_PER_PT) do
+    begin
+      TParadeWheel(E).MouseDown(mbLeft, [], X, Y);
+      TParadeWheel(E).MouseUp(mbLeft, [], X, Y);
+    end;
+    Check(not E.SelectedShape(At, Sid) and (E.CaretPos.block = pd_doc_child(E.Doc, Boxes[Body].Story, 0)),
+      'a click inside the empty content box, under its line: the caret in it');
+    E.GoToPos(PdPos(pd_doc_child(E.Doc, Boxes[Title].Story, 0), 0));    { and in the title, typing }
+    E.ShowSlide(1);
+    E.InsertText('Typed');
+    E.Repaint;
+    Application.ProcessMessages;
+    Bmp := AForm.GetFormImage;
+    Img := Bmp.CreateIntfImage;
+    try
+      Orange := 0;
+      for I := 0 to Img.Height - 1 do
+        for Sid := 0 to Img.Width - 1 do
+        begin
+          C := Img.Colors[Sid, I];
+          if (C.red > $F000) and (C.green > $7800) and (C.green < $A000) and (C.blue < $2000) then
+            Inc(Orange);
+        end;
+    finally
+      Img.Free;
+      Bmp.Free;
+    end;
+    Check(Orange > 20, Format('typing in it: its frame and handles, the turning one orange (%d pixels)', [Orange]));
+    E.Undo;
+  end;
   { moved, then Reset Slide: back }
   if Title >= 0 then
   begin
