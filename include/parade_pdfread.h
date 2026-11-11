@@ -159,6 +159,15 @@ PD_API pd_status pd_pdfr_field_set(pd_pdfr* pdf, int32_t index, const char* utf8
 PD_API pd_status pd_pdfr_replace_text(pd_pdfr* pdf, int32_t page, int32_t from, int32_t to, const char* utf8);
 
 /* ------------------------------------------------------------------ */
+/* undo                                                               */
+/* ------------------------------------------------------------------ */
+
+PD_API int32_t   pd_pdfr_can_undo(const pd_pdfr* pdf);
+PD_API int32_t   pd_pdfr_can_redo(const pd_pdfr* pdf);
+PD_API pd_status pd_pdfr_undo(pd_pdfr* pdf);
+PD_API pd_status pd_pdfr_redo(pd_pdfr* pdf);
+
+/* ------------------------------------------------------------------ */
 /* saving                                                             */
 /* ------------------------------------------------------------------ */
 

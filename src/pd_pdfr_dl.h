@@ -153,6 +153,8 @@ typedef struct {
     pfont* font;
     double fs;
     double tm[6];               /* the text rendering matrix at the character (text space x 1 to the page) */
+    double um[6];               /* the same to user space (the page's base matrix undone) */
+    uint32_t rgb;               /* its fill colour */
 } tchar;
 
 struct ppage_cache {

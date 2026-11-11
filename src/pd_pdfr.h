@@ -135,6 +135,11 @@ struct pd_pdfr {
     size_t imgbytes;
     void* gcache;               /* glyph bitmaps drawn (pd_pdfr_raster.c) */
     size_t gbytes;
+    void* undo;                 /* edits that can be undone and redone (pd_pdfr_edit.c) */
+    int32_t nundo, capundo, nredo;
+    void* fields;               /* the form's fields, listed when first asked for */
+    int32_t nfields, fields_changes;
+    int32_t saved_changes;      /* changes at the last save */
     int32_t* page_lru;          /* pages whose lists are kept, the most recent last */
     int32_t nlru;
     char error[128];
@@ -246,5 +251,6 @@ size_t pf_encode(pfont* f, const char* utf8, unsigned char* out, size_t cap);
 void pd_pages_cache_free(pdoc* d);
 void pd_page_cache_drop(pdoc* d, int32_t page);
 
-/* a content stream run with a resources dictionary into a list of glyph text, for the edit layer */
+/* the edit layer's own (pd_pdfr_edit.c) */
+void pd_edit_free(pdoc* d);
 #endif

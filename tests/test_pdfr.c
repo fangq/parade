@@ -113,6 +113,32 @@ static uint32_t px(const uint8_t* buf, int32_t w, int x, int y) {
     return ((uint32_t)q[0] << 16) | ((uint32_t)q[1] << 8) | q[2];
 }
 
+static int has_bytes(const unsigned char* p, size_t n, const char* s) {
+    size_t k = strlen(s), i;
+
+    for (i = 0; i + k <= n; i++) {
+        if (memcmp(p + i, s, k) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int inked_in(const uint8_t* buf, int32_t w, int x0, int y0, int x1, int y1) {
+    int x, y, n = 0;
+
+    for (y = y0; y < y1; y++) {
+        for (x = x0; x < x1; x++) {
+            if (px(buf, w, x, y) != 0xFFFFFF) {
+                n++;
+            }
+        }
+    }
+
+    return n;
+}
+
 static int dark_in(const uint8_t* buf, int32_t w, int x0, int y0, int x1, int y1) {
     int x, y, n = 0;
 
@@ -528,6 +554,321 @@ static void test_bad(void) {
     free(b.p);
 }
 
+
+/* ---- editing ---- */
+
+static buf_t saved(pd_pdfr* p) {
+    buf_t b = { NULL, 0, 0 };
+
+    CHECK(pd_pdfr_save(p, sink, &b) == PD_OK);
+    return b;
+}
+
+static pd_pdfr* reopen(const buf_t* b, const char* pw) {
+    pd_pdfr* q = NULL;
+
+    CHECK(pd_pdfr_open_memory(b->p, b->n, pw, &q) == PD_OK);
+    return q;
+}
+
+static buf_t hello_pdf(void) {
+    static char* cs;
+    const char* objs[5];
+
+    cs = stream_obj("", content1);
+    objs[0] = "<< /Type /Catalog /Pages 2 0 R >>";
+    objs[1] = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
+    objs[2] = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+              "/Resources << /Font << /F1 5 0 R >> >> >>";
+    objs[3] = cs;
+    objs[4] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+    {
+        buf_t b = make_pdf(objs, 5, 0);
+
+        free(cs);
+        return b;
+    }
+}
+
+static void test_annots(void) {
+    buf_t b = hello_pdf(), out;
+    pd_pdfr* p = NULL, *q;
+    pd_pdfr_char c[16];
+    int32_t n, w, h, i;
+    double quad[8];
+    uint8_t* img;
+    pd_pdfr_annot a;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    pd_pdfr_page_text(p, 0, c, 16, &n);
+    /* a highlight over "Hello" */
+    quad[0] = c[0].x0;
+    quad[1] = c[0].y0;
+    quad[2] = c[4].x1;
+    quad[3] = c[0].y0;
+    quad[4] = c[0].x0;
+    quad[5] = c[0].y1;
+    quad[6] = c[4].x1;
+    quad[7] = c[0].y1;
+    CHECK(pd_pdfr_modified(p) == 0);
+    CHECK(pd_pdfr_add_markup(p, 0, PD_ANNOT_HIGHLIGHT, quad, 1, 0xFFFF00, "hi") == 0);
+    CHECK(pd_pdfr_modified(p) == 1);
+    CHECK(pd_pdfr_annot_count(p, 0) == 1);
+    img = draw(p, 0, &w, &h);
+
+    if (img) {
+        /* yellow over the white between the letters, the letters still dark: multiplied, not painted over */
+        int yellow = 0, x, y;
+
+        for (y = (int)c[0].y0 + 1; y < (int)c[0].y1; y++) {
+            for (x = (int)c[0].x0; x < (int)c[4].x1; x++) {
+                if (px(img, w, x, y) == 0xFFFF00) {
+                    yellow++;
+                }
+            }
+        }
+
+        CHECK(yellow > 100);
+        CHECK(dark_in(img, w, (int)c[0].x0, (int)c[0].y0, (int)c[4].x1, (int)c[0].y1) > 50);
+        CHECK(px(img, w, (int)c[4].x1 + 30, (int)(c[0].y0 + c[0].y1) / 2) == 0xFFFFFF);
+        free(img);
+    }
+
+    /* a square, an ellipse, an arrow, ink, a note, a text box */
+    CHECK(pd_pdfr_add_shape(p, 0, PD_ANNOT_SQUARE, 400, 400, 500, 480, 0xFF0000, 0xFF00FF00, 4) == 1);
+    CHECK(pd_pdfr_add_shape(p, 0, PD_ANNOT_CIRCLE, 100, 600, 200, 700, 0x0000FF, 0, 2) == 2);
+    CHECK(pd_pdfr_add_shape(p, 0, PD_ANNOT_ARROW, 300, 600, 400, 700, 0x000000, 0, 2) == 3);
+    {
+        double pts[] = { 50, 50, 60, 60, 70, 50, 80, 60 };
+        int32_t cnt[] = { 4 };
+
+        CHECK(pd_pdfr_add_ink(p, 0, pts, cnt, 1, 0x00AA00, 3) == 4);
+    }
+    CHECK(pd_pdfr_add_note(p, 0, 550, 30, "A note", 0xFFD700) == 5);
+    CHECK(pd_pdfr_add_text_box(p, 0, 50, 700, 300, 760, "Typed in a box", 14, 0x000080) == 6);
+    CHECK(pd_pdfr_annot_get(p, 0, 3, &a) == PD_OK && a.kind == PD_ANNOT_ARROW);
+    CHECK(pd_pdfr_annot_get(p, 0, 1, &a) == PD_OK && a.kind == PD_ANNOT_SQUARE && a.color == 0xFF0000);
+    CHECK(fabs(a.x0 - 400) < 0.01 && fabs(a.y0 - 400) < 0.01 && fabs(a.x1 - 500) < 0.01);
+    img = draw(p, 0, &w, &h);
+
+    if (img) {
+        CHECK(px(img, w, 402, 440) == 0xFF0000);    /* the border */
+        CHECK(px(img, w, 450, 440) == 0x00FF00);    /* the fill */
+        CHECK(px(img, w, 395, 440) == 0xFFFFFF);
+        CHECK(px(img, w, 65, 56) != 0xFFFFFF);      /* the ink */
+        CHECK(inked_in(img, w, 52, 705, 250, 740) > 20);    /* the box's text */
+        CHECK(inked_in(img, w, 52, 742, 250, 758) == 0);    /* one line of it */
+        free(img);
+    }
+
+    /* saved as an update: the file as it was, then the update */
+    out = saved(p);
+    CHECK(out.n > b.n && memcmp(out.p, b.p, b.n) == 0);
+    CHECK(has_bytes(out.p + b.n, out.n - b.n, "/Prev"));
+    q = reopen(&out, NULL);
+
+    if (q) {
+        CHECK(pd_pdfr_annot_count(q, 0) == 7);
+        CHECK(pd_pdfr_annot_get(q, 0, 0, &a) == PD_OK && a.kind == PD_ANNOT_HIGHLIGHT && strcmp(a.contents, "hi") == 0);
+        CHECK(pd_pdfr_annot_get(q, 0, 5, &a) == PD_OK && a.kind == PD_ANNOT_TEXT && strcmp(a.contents, "A note") == 0);
+        CHECK(pd_pdfr_annot_get(q, 0, 6, &a) == PD_OK && a.kind == PD_ANNOT_FREETEXT);
+        img = draw(q, 0, &w, &h);
+
+        if (img) {
+            CHECK(px(img, w, 450, 440) == 0x00FF00);
+            free(img);
+        }
+
+        /* and a second update on top of the first */
+        CHECK(pd_pdfr_annot_move(q, 0, 1, 20, 10) == PD_OK);
+        CHECK(pd_pdfr_annot_get(q, 0, 1, &a) == PD_OK && fabs(a.x0 - 420) < 0.01 && fabs(a.y0 - 410) < 0.01);
+        {
+            buf_t out2 = saved(q);
+            pd_pdfr* r = reopen(&out2, NULL);
+
+            CHECK(out2.n > out.n && memcmp(out2.p, out.p, out.n) == 0);
+            CHECK(r && pd_pdfr_annot_get(r, 0, 1, &a) == PD_OK && fabs(a.x0 - 420) < 0.01);
+            CHECK(r && pd_pdfr_annot_count(r, 0) == 7);
+            pd_pdfr_free(r);
+            free(out2.p);
+        }
+
+        pd_pdfr_free(q);
+    }
+
+    /* delete, undo, redo */
+    CHECK(pd_pdfr_annot_delete(p, 0, 2) == PD_OK && pd_pdfr_annot_count(p, 0) == 6);
+    CHECK(pd_pdfr_annot_get(p, 0, 2, &a) == PD_OK && a.kind == PD_ANNOT_ARROW);
+    CHECK(pd_pdfr_can_undo(p) && pd_pdfr_undo(p) == PD_OK && pd_pdfr_annot_count(p, 0) == 7);
+    CHECK(pd_pdfr_annot_get(p, 0, 2, &a) == PD_OK && a.kind == PD_ANNOT_CIRCLE);
+    CHECK(pd_pdfr_can_redo(p) && pd_pdfr_redo(p) == PD_OK && pd_pdfr_annot_count(p, 0) == 6);
+
+    for (i = 0; i < 8; i++) {   /* the seven made, the delete redone */
+        CHECK(pd_pdfr_undo(p) == PD_OK);
+    }
+
+    CHECK(pd_pdfr_annot_count(p, 0) == 0);
+    CHECK(!pd_pdfr_can_undo(p));
+    pd_pdfr_free(p);
+    free(out.p);
+    free(b.p);
+}
+
+static void test_forms(void) {
+    char* off = stream_obj("/BBox [0 0 20 20]", "");
+    char* yes = stream_obj("/BBox [0 0 20 20]", "0 0 1 rg 3 3 14 14 re f");
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R 7 0 R] /DA (/Helv 0 Tf 0 g) "
+        "/DR << /Font << /Helv 5 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] /Contents 4 0 R /Annots [6 0 R 7 0 R] >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        "<< /FT /Tx /T (name) /Subtype /Widget /Rect [50 300 250 330] /P 3 0 R /DA (/Helv 14 Tf 0 g) /F 4 >>",
+        "<< /FT /Btn /T (agree) /Subtype /Widget /Rect [50 200 70 220] /P 3 0 R /AS /Off /F 4 "
+        "/AP << /N << /Yes 8 0 R /Off 9 0 R >> >> >>",
+        yes,
+        off
+    };
+    buf_t b = make_pdf(objs, 9, 0), out;
+    pd_pdfr* p = NULL, *q;
+    pd_pdfr_field f;
+    int32_t w, h;
+    uint8_t* img;
+    char opt[64];
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    CHECK(pd_pdfr_field_count(p) == 2);
+    CHECK(pd_pdfr_field_get(p, 0, &f) == PD_OK && f.kind == PD_PDF_FIELD_TEXT && strcmp(f.name, "name") == 0);
+    CHECK(f.page == 0 && fabs(f.x0 - 50) < 0.01 && fabs(f.y0 - 70) < 0.01 && fabs(f.font_size - 14) < 0.01);
+    CHECK(pd_pdfr_field_get(p, 1, &f) == PD_OK && f.kind == PD_PDF_FIELD_CHECK && strcmp(f.value, "Off") == 0);
+    CHECK(f.nopts == 1 && pd_pdfr_field_option(p, 1, 0, opt, sizeof(opt)) == PD_OK && strcmp(opt, "Yes") == 0);
+    CHECK(pd_pdfr_field_at(p, 0, 100, 85) == 0);
+    CHECK(pd_pdfr_field_at(p, 0, 60, 190) == 1);
+    CHECK(pd_pdfr_field_at(p, 0, 300, 300) == -1);
+
+    img = draw(p, 0, &w, &h);
+
+    if (img) {
+        CHECK(dark_in(img, w, 52, 72, 248, 98) == 0);
+        CHECK(px(img, w, 60, 190) == 0xFFFFFF);
+        free(img);
+    }
+
+    CHECK(pd_pdfr_field_set(p, 0, "Ada Lovelace") == PD_OK);
+    CHECK(pd_pdfr_field_set(p, 1, NULL) == PD_OK);
+    CHECK(pd_pdfr_field_get(p, 0, &f) == PD_OK && strcmp(f.value, "Ada Lovelace") == 0);
+    CHECK(pd_pdfr_field_get(p, 1, &f) == PD_OK && strcmp(f.value, "Yes") == 0);
+    img = draw(p, 0, &w, &h);
+
+    if (img) {
+        CHECK(dark_in(img, w, 52, 72, 248, 98) > 40);    /* the text in its box */
+        CHECK(px(img, w, 60, 190) == 0x0000FF);         /* the box ticked */
+        free(img);
+    }
+
+    out = saved(p);
+    q = reopen(&out, NULL);
+
+    if (q) {
+        CHECK(pd_pdfr_field_get(q, 0, &f) == PD_OK && strcmp(f.value, "Ada Lovelace") == 0);
+        CHECK(pd_pdfr_field_get(q, 1, &f) == PD_OK && strcmp(f.value, "Yes") == 0);
+        CHECK(has_bytes(out.p + b.n, out.n - b.n, "/NeedAppearances true"));
+        img = draw(q, 0, &w, &h);
+
+        if (img) {
+            CHECK(px(img, w, 60, 190) == 0x0000FF);
+            free(img);
+        }
+
+        /* unticked again */
+        CHECK(pd_pdfr_field_set(q, 1, "Off") == PD_OK);
+        CHECK(pd_pdfr_field_get(q, 1, &f) == PD_OK && strcmp(f.value, "Off") == 0);
+        img = draw(q, 0, &w, &h);
+
+        if (img) {
+            CHECK(px(img, w, 60, 190) == 0xFFFFFF);
+            free(img);
+        }
+
+        pd_pdfr_free(q);
+    }
+
+    pd_pdfr_free(p);
+    free(out.p);
+    free(b.p);
+    free(off);
+    free(yes);
+}
+
+static void test_replace_text(void) {
+    buf_t b = hello_pdf(), out;
+    pd_pdfr* p = NULL, *q;
+    char* s;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    /* in place: the font has the letters */
+    CHECK(pd_pdfr_replace_text(p, 0, 0, 5, "Howdy") == PD_OK);
+    s = page_text(p, 0);
+    CHECK(strcmp(s, "Howdy PDF") == 0);
+    free(s);
+    /* a letter WinAnsi has not got: covered and written over */
+    CHECK(pd_pdfr_replace_text(p, 0, 6, 9, "\xCE\xA9") == PD_OK);
+    s = page_text(p, 0);
+    CHECK(strstr(s, "Howdy") != NULL && strstr(s, "?") != NULL);
+    free(s);
+    out = saved(p);
+    q = reopen(&out, NULL);
+
+    if (q) {
+        s = page_text(q, 0);
+        CHECK(strstr(s, "Howdy") != NULL);
+        free(s);
+        pd_pdfr_free(q);
+    }
+
+    CHECK(pd_pdfr_undo(p) == PD_OK);
+    s = page_text(p, 0);
+    CHECK(strcmp(s, "Howdy PDF") == 0);
+    free(s);
+    CHECK(pd_pdfr_undo(p) == PD_OK);
+    s = page_text(p, 0);
+    CHECK(strcmp(s, "Hello PDF") == 0);
+    free(s);
+    pd_pdfr_free(p);
+    free(out.p);
+    free(b.p);
+}
+
+/* an encrypted file's update: new strings and streams encrypted as the file is */
+static void test_encrypted_save(void) {
+    pd_pdfr* p = NULL, *q;
+    buf_t out;
+    pd_pdfr_annot a;
+    char* s;
+
+    if (pd_pdfr_open_file("tests/data/enc_rc4_user.pdf", "user", &p) != PD_OK) {
+        CHECK(0);
+        return;
+    }
+
+    CHECK(pd_pdfr_add_note(p, 0, 100, 100, "encrypted note", 0xFFD700) == 0);
+    out = saved(p);
+    CHECK(!has_bytes(out.p, out.n, "encrypted note"));    /* not in the clear */
+    q = reopen(&out, "user");
+
+    if (q) {
+        CHECK(pd_pdfr_annot_get(q, 0, 0, &a) == PD_OK && strcmp(a.contents, "encrypted note") == 0);
+        s = page_text(q, 0);
+        CHECK(strcmp(s, "Secret text here") == 0);
+        free(s);
+        pd_pdfr_free(q);
+    }
+
+    pd_pdfr_free(p);
+    free(out.p);
+}
+
 int main(void) {
     test_basic(0);
     test_basic(1);      /* every offset in the xref wrong: read again by scanning */
@@ -537,6 +878,10 @@ int main(void) {
     test_roundtrip();
     test_encrypted();
     test_bad();
+    test_annots();
+    test_forms();
+    test_replace_text();
+    test_encrypted_save();
     printf("test_pdfr: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

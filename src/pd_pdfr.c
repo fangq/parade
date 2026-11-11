@@ -3736,6 +3736,7 @@ void pd_pdfr_free(pd_pdfr* d) {
 
     pd_pages_cache_free(d);
     pd_glyph_cache_free(d);
+    pd_edit_free(d);
     pf_free_all(d);
     free(d->cache);
     free(d->pages);

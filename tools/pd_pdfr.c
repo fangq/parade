@@ -4,6 +4,8 @@
  *   pd_pdfr text file.pdf page
  *   pd_pdfr info file.pdf
  *   pd_pdfr time file.pdf dpi          (every page drawn, the time each took)
+ *   pd_pdfr annotate in.pdf out.pdf    (a highlight, shapes, ink, a note, a text box on page 1; the first
+ *                                       text field filled: saved as an update)
  */
 
 #include <stdio.h>
@@ -132,6 +134,47 @@ int main(int argc, char** argv) {
 
         printf("\n");
         free(c);
+    } else if (strcmp(argv[1], "annotate") == 0 && argc >= 4) {
+        int32_t n = 0, i;
+        pd_pdfr_char* c;
+        double pw, ph;
+
+        pd_pdfr_page_size(p, 0, &pw, &ph);
+        pd_pdfr_page_text(p, 0, NULL, 0, &n);
+        c = (pd_pdfr_char*)malloc(sizeof(pd_pdfr_char) * (size_t)(n + 1));
+        pd_pdfr_page_text(p, 0, c, n, &n);
+
+        if (n > 12) {
+            double q[8] = { c[0].x0, c[0].y0, c[11].x1, c[0].y0, c[0].x0, c[0].y1, c[11].x1, c[0].y1 };
+
+            printf("highlight %d\n", pd_pdfr_add_markup(p, 0, PD_ANNOT_HIGHLIGHT, q, 1, 0xFFFF00, "Parade"));
+        }
+
+        printf("square %d\n", pd_pdfr_add_shape(p, 0, PD_ANNOT_SQUARE, pw * 0.6, ph * 0.1, pw * 0.9, ph * 0.2, 0xFF0000,
+                                                0x400000FF, 3));
+        printf("arrow %d\n", pd_pdfr_add_shape(p, 0, PD_ANNOT_ARROW, pw * 0.1, ph * 0.5, pw * 0.4, ph * 0.4, 0x0000FF,
+                                               0, 2));
+        {
+            double pts[] = { 50, 300, 70, 320, 90, 300, 110, 320, 130, 300 };
+            int32_t cnt[] = { 5 };
+
+            printf("ink %d\n", pd_pdfr_add_ink(p, 0, pts, cnt, 1, 0x008800, 2.5));
+        }
+        printf("note %d\n", pd_pdfr_add_note(p, 0, pw - 40, 20, "Checked by Parade", 0xFFD700));
+        printf("box %d\n", pd_pdfr_add_text_box(p, 0, pw * 0.55, ph * 0.3, pw * 0.95, ph * 0.38,
+                                                "A text box typed in Parade, long enough to wrap.", 11, 0x000080));
+
+        for (i = 0; i < pd_pdfr_field_count(p); i++) {
+            pd_pdfr_field f;
+
+            if (pd_pdfr_field_get(p, i, &f) == PD_OK && f.kind == PD_PDF_FIELD_TEXT && !f.readonly) {
+                printf("field %s %d\n", f.name, pd_pdfr_field_set(p, i, "Parade"));
+                break;
+            }
+        }
+
+        free(c);
+        printf("saved %d\n", pd_pdfr_save_file(p, argv[3]));
     } else if (strcmp(argv[1], "time") == 0 && argc >= 4) {
         int32_t i;
         double total = now(), worst = 0;

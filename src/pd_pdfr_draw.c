@@ -64,7 +64,8 @@ typedef struct interp {
     int text;                   /* record the text shown */
     int32_t run;
     const unsigned char* src;   /* the stream being run (offsets in it are recorded) */
-    size_t op_start;
+    size_t op_start, op_end;
+    double base_inv[6];         /* the page's base matrix undone */
     size_t str_start[64], str_end[64];
     int nstr;
     int type3_depth;
@@ -682,6 +683,7 @@ static void record_char(interp* I, pfont* f, uint32_t code, const double* trm, d
         t->pub.run = I->run;
         t->stream = I->stream;
         t->op_start = (uint32_t)I->op_start;
+        t->op_end = (uint32_t)I->op_end;
 
         if (I->stream >= 0 && I->bounds) {     /* which stream, and where in it */
             int b = 0;
@@ -692,7 +694,22 @@ static void record_char(interp* I, pfont* f, uint32_t code, const double* trm, d
 
             t->stream = b;
             t->op_start = (uint32_t)(I->op_start - I->bounds[b]);
+            t->op_end = (uint32_t)(I->op_end - I->bounds[b]);
+
+            if (I->op_end > I->bounds[b + 1]) {     /* an operation across two streams: not edited in place */
+                t->stream = -1;
+            }
         }
+
+        if (g->fcs && g->fcs->kind != CS_PATTERN) {
+            double rgb[3];
+
+            pcs_to_rgb(g->fcs, g->fc, rgb);
+            t->rgb = ((uint32_t)(rgb[0] * 255 + 0.5) << 16) | ((uint32_t)(rgb[1] * 255 + 0.5) << 8) |
+                     (uint32_t)(rgb[2] * 255 + 0.5);
+        }
+
+        mat_mul(trm, I->base_inv, t->um);
         t->byte_off = (uint32_t)boff;
         t->byte_len = (uint8_t)blen;
         t->font = f;
@@ -1966,6 +1983,8 @@ static void run_stream(interp* I, const unsigned char* data, size_t len, pv res)
         }
 
         if (v.t == PV_OP) {
+            I->op_end = L.i;
+
             if (v.u.s[0] != '{' && v.u.s[0] != '}' && v.u.s[0] != ']' && v.u.s[0] != '>' && v.u.s[0] != ')') {
                 op(I, v.u.s, &a, &L);
             }
@@ -2257,6 +2276,7 @@ dlist* pd_page_list(pdoc* d, int32_t page) {
     I.d = d;
     I.L = L;
     I.text = 1;
+    mat_inv(base, I.base_inv);
     grow((void**)&I.gs, &I.capgs, 8, sizeof(gstate));
     I.ngs = 1;
     gs_init(&I.gs[0], base, &L->arena);
