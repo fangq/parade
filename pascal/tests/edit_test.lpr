@@ -3522,6 +3522,57 @@ begin
   E.Zoom := Was;
 end;
 
+{ the slide being edited while the caret is in a text box of it: a box's text is a story of its own, in no slide's
+  section, and the slide was none (-1) -- the host, fitting the slide to the view, then showed the first: a click
+  into a box on any slide jumped back to slide 1 (reported on a talk's slides) }
+procedure TestSlideOfTextBox(E: TParadeEdit);
+var
+  I, Sid: Integer;
+  PZ: pd_block_id;
+  Pg: Int32;
+  CX, Base, Asc, Desc: pd_sp;
+  Pt: TPoint;
+  At: pd_pos;
+begin
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + '../../tests/data/slides.pptx');
+  E.Repaint;
+  Application.ProcessMessages;
+  Check(E.SlideCount >= 2, 'two slides');
+  { a text box on the second, with words in it }
+  E.ShowSlide(1);
+  E.Repaint;
+  Application.ProcessMessages;
+  E.ClickAt(1, 30, 30);
+  Check(E.SelectedShape(At, Sid) and E.AddShape('textbox', 100 * PD_SP_PER_PT, 100 * PD_SP_PER_PT,
+    400 * PD_SP_PER_PT, 160 * PD_SP_PER_PT), 'a text box put on the second slide');
+  PZ := pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, pd_doc_story_count(E.Doc) - 1), 0);
+  pd_doc_insert_text(E.Doc, PdPos(PZ, 0), 'Second slide words', 18, 0, nil);
+  E.ClearShapeSelection;
+  E.SaveToFile(ExtractFilePath(ParamStr(0)) + 'edit_slidebox.pptx');      { laid out afresh, as a talk is opened }
+  E.LoadFromFile(ExtractFilePath(ParamStr(0)) + 'edit_slidebox.pptx');
+  E.Repaint;
+  Application.ProcessMessages;
+  PZ := 0;
+  for I := 0 to pd_doc_story_count(E.Doc) - 1 do
+    if (PZ = 0) and (Pos('Second slide words', E.ParaText(pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0))) = 1) then
+      PZ := pd_doc_child(E.Doc, pd_doc_story_at(E.Doc, I), 0);
+  Check((PZ <> 0) and (pd_layout_caret(E.Layout, PdPos(PZ, 2), Pg, CX, Base, Asc, Desc) = PD_OK) and (Pg = 1),
+    'the box''s words on the second slide');
+  if PZ = 0 then
+    Exit;
+  E.ShowSlide(1);
+  E.Repaint;
+  Application.ProcessMessages;
+  Pt := E.PageToClient(Pg, CX / PD_SP_PER_PT + 1, (Base - Asc div 2) / PD_SP_PER_PT);
+  for I := 1 to 2 do
+  begin
+    TParadeWheel(E).MouseDown(mbLeft, [], Pt.X, Pt.Y);
+    TParadeWheel(E).MouseUp(mbLeft, [], Pt.X, Pt.Y);
+  end;
+  Check(E.CaretPos.block = PZ, 'the caret in the box''s text');
+  Check(E.CurrentSlide = 1, Format('the slide being edited is the box''s: 1 (%d)', [E.CurrentSlide]));
+end;
+
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -4859,6 +4910,8 @@ begin
   TestThemesAndStyles(E);
   Step('format properties and lists');
   TestFormatProps(E);
+  Step('the slide of a text box being typed in');
+  TestSlideOfTextBox(E);
   Step('slide show');
   TestSlideShow(E);
   TestShowPdf(E);

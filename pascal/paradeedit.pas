@@ -10489,6 +10489,11 @@ function TParadeEdit.CurrentSlide: Integer;
 var
   Sec: pd_block_id;
   Info: pd_block_info;
+  Pg, CPg: Int32;
+  X, Base, Asc, Desc: pd_sp;
+  I: Integer;
+  P: pd_pos;
+  X0, Y0, X1, Y1: Double;
 begin
   Result := -1;
   if not FCanvasPage then
@@ -10498,7 +10503,16 @@ begin
   else
     Sec := SectionOf(FDoc, CaretPos.block);
   if (Sec <> 0) and (pd_doc_block_info(FDoc, Sec, Info) = PD_OK) then
-    Result := Info.index;
+    Exit(Info.index);
+  { The caret in a text box: its text is a story of its own, in no slide's section -- the slide is the one whose
+    canvas is on the page the caret is laid out on.  Without this it was none, and a host fitting the slide to the
+    view showed the first: a click into a box of any slide went back to slide 1. }
+  if pd_layout_caret(FLayout, CaretPos, CPg, X, Base, Asc, Desc) <> PD_OK then
+    Exit;
+  for I := 0 to SlideCount - 1 do
+    if SectionCanvas(FDoc, pd_doc_child(FDoc, pd_doc_root(FDoc), I), P) and
+       ShapePageBox(P, -1, Pg, X0, Y0, X1, Y1) and (Pg = CPg) then
+      Exit(I);
 end;
 
 function TParadeEdit.GoToSlide(Index: Integer): Boolean;
