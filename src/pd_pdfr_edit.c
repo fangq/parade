@@ -2372,18 +2372,340 @@ static int edit_in_place(pdoc* d, int32_t page, const tchar* first, const tchar*
     return ok;
 }
 
-/* the old text covered in white, the new written over it in the standard font most like the old (a stream added to
-   the page) */
-static int edit_overlay(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, const char* utf8) {
+/* ---- text written anew: wrapped, at the old text's place ---- */
+
+/* the place of text a..z: where its first character begins, the way its lines run, and how they sit */
+typedef struct {
+    double ox, oy;              /* the first character's origin, user space */
+    double ux, uy;              /* along the baseline */
+    double size;                /* the font size in user space */
+    double left, width;         /* along the baseline from the origin: where the lines begin, how far they reach */
+    double leading;             /* from a baseline to the next */
+    int lines, align;           /* 0 left, 1 centred, 2 right */
+    uint32_t rgb;
+} tplace;
+
+static void text_place(const dlist* L, int32_t a, int32_t z, tplace* P) {
     const tchar* f = &L->chars[a];
-    double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30, size;
+    double lo[3] = { 1e30, 1e30, 1e30 }, hi[3] = { -1e30, -1e30, -1e30 }, cur_t = 0, first_t = 0, last_t = 0;
+    double line_l = 1e30, line_r = -1e30, minl = 1e30, maxr = -1e30, r;
+    int32_t i;
+    int nl = 0;
+
+    memset(P, 0, sizeof(*P));
+    P->ox = f->um[4];
+    P->oy = f->um[5];
+    r = atan2(f->um[1], f->um[0]);
+    P->ux = cos(r);
+    P->uy = sin(r);
+    P->size = sqrt(f->um[2] * f->um[2] + f->um[3] * f->um[3]);
+
+    if (!(P->size > 0)) {
+        P->size = f->fs > 0 ? f->fs : 10;
+    }
+
+    P->rgb = f->rgb;
+
+    for (i = a; i <= z + 1; i++) {
+        double s = 0, e = 0, t = 0;
+        int k;
+
+        if (i <= z) {
+            const tchar* c = &L->chars[i];
+            double dx = c->um[4] - P->ox, dy = c->um[5] - P->oy;
+            double ex = dx + c->um[0] * c->w0, ey = dy + c->um[1] * c->w0;
+
+            s = dx * P->ux + dy * P->uy;
+            e = ex * P->ux + ey * P->uy;
+            t = -dx * P->uy + dy * P->ux;
+
+            if (c->pub.cp == ' ') {
+                continue;   /* a space at a line's end is not where it reaches */
+            }
+        }
+
+        /* a new line: the baseline moved across by half the size or more */
+        if (i > z || (nl > 0 && fabs(t - cur_t) > 0.5 * P->size)) {
+            if (nl > 0) {
+                double v[3] = { line_l, (line_l + line_r) / 2, line_r };
+
+                for (k = 0; k < 3; k++) {
+                    lo[k] = v[k] < lo[k] ? v[k] : lo[k];
+                    hi[k] = v[k] > hi[k] ? v[k] : hi[k];
+                }
+
+                minl = line_l < minl ? line_l : minl;
+                maxr = line_r > maxr ? line_r : maxr;
+                last_t = cur_t;
+            }
+
+            if (i > z) {
+                break;
+            }
+
+            line_l = 1e30;
+            line_r = -1e30;
+        }
+
+        if (nl == 0 || fabs(t - cur_t) > 0.5 * P->size) {
+            if (nl == 0) {
+                first_t = t;
+            }
+
+            nl++;
+            cur_t = t;
+        }
+
+        line_l = s < line_l ? s : line_l;
+        line_r = e > line_r ? e : line_r;
+    }
+
+    P->lines = nl > 0 ? nl : 1;
+    P->left = nl > 1 ? minl : 0;
+    P->width = maxr - P->left;
+    P->leading = nl > 1 ? fabs(first_t - last_t) / (nl - 1) : 1.2 * P->size;
+
+    if (nl > 1 && hi[0] - lo[0] > 0.5 * P->size) {
+        P->align = hi[1] - lo[1] <= 0.5 * P->size ? 1 : hi[2] - lo[2] <= 0.5 * P->size ? 2 : 0;
+    }
+}
+
+/* text's codes in the font: its own codes (0 when it has not got every character), or a standard font's */
+static size_t wencode(pfont* pf, int own, const char* utf8, size_t len, unsigned char* out, size_t cap) {
+    char tmp[2048];
+
+    if (len >= sizeof(tmp)) {
+        len = sizeof(tmp) - 1;
+    }
+
+    memcpy(tmp, utf8, len);
+    tmp[len] = 0;
+
+    if (len == 0) {
+        return 0;
+    }
+
+    return own ? pf_encode(pf, tmp, out, cap) : encode_in(pf, tmp, out, cap);
+}
+
+static double wwidth(pfont* pf, const unsigned char* s, size_t n) {
+    size_t i = 0;
+    double w = 0;
+
+    while (i < n) {
+        uint32_t code;
+        int k = pf_next(pf, s + i, n - i, &code);
+
+        if (k <= 0) {
+            break;
+        }
+
+        w += pf_width(pf, code);
+        i += (size_t)k;
+    }
+
+    return w;
+}
+
+static void write_line(pbuf* b, pfont* pf, int own, const tplace* P, const char* s, size_t len, int k) {
+    unsigned char enc[4096];
+    size_t n = wencode(pf, own, s, len, enc, sizeof(enc));
+    double w = wwidth(pf, enc, n) * P->size, off = 0, x, y;
+    double m[6];
+
+    if (P->align == 1) {
+        off = (P->width - w) / 2;
+    } else if (P->align == 2) {
+        off = P->width - w;
+    }
+
+    x = P->ox + P->ux * (P->left + off) + P->uy * (k * P->leading);
+    y = P->oy + P->uy * (P->left + off) - P->ux * (k * P->leading);
+    m[0] = P->ux;
+    m[1] = P->uy;
+    m[2] = -P->uy;
+    m[3] = P->ux;
+    m[4] = x;
+    m[5] = y;
+    nums(b, m, 6);
+    qb_puts(b, "Tm ");
+    pdf_string(b, enc, n);
+    qb_puts(b, " Tj\n");
+}
+
+/* utf8 written at P in the font named fname: wrapped to P's width when it was on more than one line, a '\n' a new
+   line; the lines written */
+static int write_text(pbuf* b, pfont* pf, int own, const char* fname, const tplace* P, const char* utf8) {
+    const char* p = utf8;
+    int k = 0;
+    int wrap = P->lines > 1 && P->width > 0;
+
+    qb_puts(b, "BT /");
+    qb_puts(b, fname);
+    qb_puts(b, " ");
+    qb_num(b, P->size);
+    qb_puts(b, " Tf ");
+    col_op(b, P->rgb, "rg");
+
+    for (;;) {
+        const char* nl = strchr(p, '\n');
+        size_t plen = nl ? (size_t)(nl - p) : strlen(p);
+
+        if (!wrap) {
+            write_line(b, pf, own, P, p, plen, k++);
+        } else {
+            /* the words of the paragraph, as many on a line as fit */
+            size_t ls = 0, le = 0, i = 0;
+
+            while (i <= plen) {
+                size_t ws = i, we;
+                unsigned char enc[4096];
+                double w;
+
+                while (ws < plen && p[ws] == ' ') {
+                    ws++;
+                }
+
+                we = ws;
+
+                while (we < plen && p[we] != ' ') {
+                    we++;
+                }
+
+                if (ws >= plen) {
+                    break;
+                }
+
+                if (le > ls) {
+                    w = wwidth(pf, enc, wencode(pf, own, p + ls, we - ls, enc, sizeof(enc))) * P->size;
+
+                    if (w > P->width * 1.02) {
+                        write_line(b, pf, own, P, p + ls, le - ls, k++);
+                        ls = ws;
+                    }
+                } else {
+                    ls = ws;
+                }
+
+                le = we;
+                i = we;
+            }
+
+            write_line(b, pf, own, P, p + ls, le > ls ? le - ls : 0, k++);
+        }
+
+        if (!nl) {
+            break;
+        }
+
+        p = nl + 1;
+    }
+
+    qb_puts(b, "ET");
+    return k;
+}
+
+/* a name for a font not yet among the page's (each edit's text keeps the font it was written in) */
+static void new_font_name(pdoc* d, int32_t page, char* name, size_t cap) {
+    pv res = pd_get(d, d->pages[page].dict, "Resources"), fonts;
+    int i;
+
+    if (res.t != PV_DICT) {
+        res = d->pages[page].resources;
+    }
+
+    fonts = pd_get(d, res, "Font");
+
+    for (i = 1; i < 10000; i++) {
+        snprintf(name, cap, "PdT%d", i);
+
+        if (fonts.t != PV_DICT || pd_get_raw(fonts, name).t == PV_NULL) {
+            return;
+        }
+    }
+}
+
+/* b added to the page after what it showed (that wrapped in q ... Q), with the font under fname */
+static void append_to_page(pdoc* d, int32_t page, const pbuf* b, const char* fname, pv font) {
+    pv pg = dict_copy(d, d->pages[page].dict), res, fonts, c, arr, list;
+    int32_t num, qs, qe, i;
+
+    res = pd_get(d, pg, "Resources");
+
+    if (res.t != PV_DICT) {
+        res = d->pages[page].resources;
+    }
+
+    res = dict_copy(d, res);
+    fonts = dict_copy(d, pd_get(d, res, "Font"));
+    pd_dict_set(d, &fonts, fname, font);
+    pd_dict_set(d, &res, "Font", fonts);
+    pd_dict_set(d, &pg, "Resources", res);
+    c = pd_get_raw(pg, "Contents");
+    arr = pd_resolve(d, c);
+    num = new_obj(d, make_stream(d, pv_dict(d, 2), b->p, b->n));
+    qs = new_obj(d, make_stream(d, pv_dict(d, 1), (const unsigned char*)"q\n", 2));
+    qe = new_obj(d, make_stream(d, pv_dict(d, 1), (const unsigned char*)"\nQ\n", 3));
+
+    if (arr.t == PV_ARRAY) {
+        list = pv_array(d, arr.n + 3);
+        list.u.a[0] = pv_ref(qs, 0);
+
+        for (i = 0; i < arr.n; i++) {
+            list.u.a[i + 1] = arr.u.a[i];
+        }
+
+        list.u.a[arr.n + 1] = pv_ref(qe, 0);
+        list.u.a[arr.n + 2] = pv_ref(num, 0);
+    } else {
+        list = pv_array(d, 4);
+        list.u.a[0] = pv_ref(qs, 0);
+        list.u.a[1] = c;
+        list.u.a[2] = pv_ref(qe, 0);
+        list.u.a[3] = pv_ref(num, 0);
+    }
+
+    pd_dict_set(d, &pg, "Contents", list);
+    page_store(d, page, pg);
+}
+
+/* the font the new text is written in: the old text's own when it has every character (and is not a Type 3's
+   procedures), else the standard font most like it */
+static pfont* pick_font(pdoc* d, const tchar* f, const char* utf8, int* own, pv* font) {
+    unsigned char enc[4096];
+    char tmp[2048];
+    size_t i, k = 0;
+
+    for (i = 0; utf8[i] && k + 1 < sizeof(tmp); i++) {
+        if (utf8[i] != '\n') {
+            tmp[k++] = utf8[i];
+        }
+    }
+
+    tmp[k] = 0;
+    *own = 0;
+
+    if (f->font && !pf_is_type3(f->font) && !f->vertical && pf_dict(f->font).t == PV_DICT &&
+        (k == 0 || pf_encode(f->font, tmp, enc, sizeof(enc)) > 0)) {
+        *own = 1;
+        *font = pf_dict(f->font);
+        return f->font;
+    }
+
+    *font = std_font(d, pf_std14(f->font));
+    return pf_load(d, *font);
+}
+
+/* the old text covered in white, the new written over it (a stream added to the page) */
+static int edit_overlay(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, const char* utf8) {
+    double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
     int32_t i;
     pbuf b;
-    pv font = std_font(d, pf_std14(f->font)), pg, res, fonts, c, arr;
+    pv font = std_font(d, pf_std14(L->chars[a].font));
     pfont* pf = pf_load(d, font);
-    unsigned char enc[4096];
-    size_t n = encode_in(pf, utf8, enc, sizeof(enc));
     double binv[6];
+    char fname[32];
+    tplace P;
 
     page_inv(d, page, binv);
 
@@ -2406,76 +2728,274 @@ static int edit_overlay(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, c
         }
     }
 
-    size = sqrt(f->um[2] * f->um[2] + f->um[3] * f->um[3]);
-
-    if (!(size > 0)) {
-        size = f->fs > 0 ? f->fs : 10;
+    if (!pf) {
+        return 0;
     }
 
+    text_place(L, a, z, &P);
+    new_font_name(d, page, fname, sizeof(fname));
     memset(&b, 0, sizeof(b));
     qb_puts(&b, "q 1 1 1 rg ");
     rect_op(&b, x0, y0, x1 - x0, y1 - y0, "f");
-    qb_puts(&b, "BT /PdHelv ");
-    qb_num(&b, size);
-    qb_puts(&b, " Tf ");
-    col_op(&b, f->rgb, "rg");
+    write_text(&b, pf, 0, fname, &P, utf8);
+    qb_puts(&b, " Q\n");
+    append_to_page(d, page, &b, fname, font);
+    qb_free(&b);
+    return 1;
+}
 
-    {
-        /* on the first character's baseline, turned as it is */
-        double r = atan2(f->um[1], f->um[0]), m[6] = { cos(r), sin(r), -sin(r), cos(r), f->um[4], f->um[5] };
+/* ---- characters taken out ---- */
 
-        nums(&b, m, 6);
-        qb_puts(&b, "Tm ");
+typedef struct {
+    int32_t stream;
+    uint32_t start, end;
+} topref;
+
+static int topref_cmp(const void* x, const void* y) {
+    const topref* a = (const topref*)x;
+    const topref* b = (const topref*)y;
+
+    if (a->stream != b->stream) {
+        return a->stream < b->stream ? -1 : 1;
     }
 
-    pdf_string(&b, enc, n);
-    qb_puts(&b, " Tj ET Q\n");
+    return a->start > b->start ? -1 : a->start < b->start ? 1 : 0;     /* the last first: offsets before it hold */
+}
 
-    /* the page: its resources its own, with the font; the old contents wrapped in q ... Q, the new after */
-    pg = dict_copy(d, d->pages[page].dict);
-    res = pd_get(d, pg, "Resources");
+/* operation o (the one at start..end of data) written again without characters a..z of it: each string's
+   characters taken out leave a TJ gap of their advance, so what is shown after them stays where it was */
+static int rewrite_op(pdoc* d, const unsigned char* data, uint32_t start, uint32_t end, const dlist* L, int32_t a,
+                      int32_t z, pbuf* b) {
+    plex X;
+    pv ops[8], o;
+    int nops = 0;
+    pv arr;
+    int32_t count, i;
+    uint32_t sidx = 0;
 
-    if (res.t != PV_DICT) {
-        res = d->pages[page].resources;
-    }
+    memset(&X, 0, sizeof(X));
+    X.p = data;
+    X.n = end;
+    X.i = start;
+    X.d = d;
+    X.content = 1;
 
-    res = dict_copy(d, res);
-    fonts = dict_copy(d, pd_get(d, res, "Font"));
-    pd_dict_set(d, &fonts, "PdHelv", font);
-    pd_dict_set(d, &res, "Font", fonts);
-    pd_dict_set(d, &pg, "Resources", res);
-    c = pd_get_raw(pg, "Contents");
-    arr = pd_resolve(d, c);
+    for (;;) {
+        o = pl_read(&X);
 
-    {
-        int32_t num = new_obj(d, make_stream(d, pv_dict(d, 2), b.p, b.n));
-        int32_t qs = new_obj(d, make_stream(d, pv_dict(d, 1), (const unsigned char*)"q\n", 2));
-        int32_t qe = new_obj(d, make_stream(d, pv_dict(d, 1), (const unsigned char*)"\nQ\n", 3));
-        pv list;
-
-        if (arr.t == PV_ARRAY) {
-            list = pv_array(d, arr.n + 3);
-            list.u.a[0] = pv_ref(qs, 0);
-
-            for (i = 0; i < arr.n; i++) {
-                list.u.a[i + 1] = arr.u.a[i];
-            }
-
-            list.u.a[arr.n + 1] = pv_ref(qe, 0);
-            list.u.a[arr.n + 2] = pv_ref(num, 0);
-        } else {
-            list = pv_array(d, 4);
-            list.u.a[0] = pv_ref(qs, 0);
-            list.u.a[1] = c;
-            list.u.a[2] = pv_ref(qe, 0);
-            list.u.a[3] = pv_ref(num, 0);
+        if (o.t == PV_ERR || o.t == PV_OP) {
+            break;
         }
 
-        pd_dict_set(d, &pg, "Contents", list);
+        if (nops < 8) {
+            ops[nops++] = o;
+        }
     }
 
-    page_store(d, page, pg);
-    qb_free(&b);
+    if (o.t != PV_OP || nops == 0) {
+        return 0;
+    }
+
+    if (strcmp(o.u.s, "'") == 0 || strcmp(o.u.s, "\"") == 0) {
+        if (strcmp(o.u.s, "\"") == 0 && nops >= 3) {
+            qb_num(b, ops[nops - 3].t == PV_INT ? (double)ops[nops - 3].u.i : ops[nops - 3].u.r);
+            qb_puts(b, " Tw ");
+            qb_num(b, ops[nops - 2].t == PV_INT ? (double)ops[nops - 2].u.i : ops[nops - 2].u.r);
+            qb_puts(b, " Tc ");
+        }
+
+        qb_puts(b, "T* ");
+    } else if (strcmp(o.u.s, "Tj") != 0 && strcmp(o.u.s, "TJ") != 0) {
+        return 0;
+    }
+
+    arr = ops[nops - 1];
+    count = arr.t == PV_ARRAY ? arr.n : 1;
+    qb_puts(b, "[");
+
+    for (i = 0; i < count; i++) {
+        pv e = arr.t == PV_ARRAY ? arr.u.a[i] : arr;
+
+        if (e.t == PV_STRING) {
+            size_t from = (size_t)-1, to = 0;
+            double gap = 0;
+            int32_t j;
+            int64_t lastoff = -1;
+
+            for (j = a; j <= z; j++) {
+                const tchar* c = &L->chars[j];
+
+                if (c->op_start != start || c->str_start != sidx) {
+                    continue;
+                }
+
+                from = c->byte_off < from ? c->byte_off : from;
+                to = (size_t)c->byte_off + c->byte_len > to ? (size_t)c->byte_off + c->byte_len : to;
+
+                if ((int64_t)c->byte_off != lastoff) {  /* a ligature's characters: one glyph */
+                    int space = c->byte_len == 1 && c->byte_off < (uint32_t)e.n && e.u.s[c->byte_off] == ' ';
+
+                    gap += c->w0 + (c->tc + (space ? c->tw : 0)) / c->fs;
+                    lastoff = c->byte_off;
+                }
+            }
+
+            if (from == (size_t)-1) {
+                pdf_string(b, (const unsigned char*)e.u.s, (size_t)e.n);
+            } else {
+                to = to < (size_t)e.n ? to : (size_t)e.n;
+                from = from < to ? from : to;
+
+                if (from > 0) {
+                    pdf_string(b, (const unsigned char*)e.u.s, from);
+                    qb_puts(b, " ");
+                }
+
+                qb_num(b, -1000 * gap);
+
+                if (to < (size_t)e.n) {
+                    qb_puts(b, " ");
+                    pdf_string(b, (const unsigned char*)e.u.s + to, (size_t)e.n - to);
+                }
+            }
+
+            sidx++;
+        } else if (e.t == PV_INT || e.t == PV_REAL) {
+            qb_num(b, e.t == PV_INT ? (double)e.u.i : e.u.r);
+        }
+
+        qb_puts(b, " ");
+    }
+
+    qb_puts(b, "] TJ");
+    return 1;
+}
+
+/* characters a..z taken out of the page's content streams; 0 (nothing changed) when one of them cannot be: in a
+   form XObject, an operation across two streams, a vertical font */
+static int take_out(pdoc* d, int32_t page, const dlist* L, int32_t a, int32_t z) {
+    topref* ops;
+    int32_t nops = 0, i, j;
+    int ok = 1;
+
+    for (i = a; i <= z; i++) {
+        const tchar* c = &L->chars[i];
+
+        if (c->stream < 0 || !c->font || c->vertical || !(fabs(c->fs) > 0)) {
+            return 0;
+        }
+    }
+
+    ops = (topref*)malloc(sizeof(topref) * (size_t)(z - a + 1));
+
+    if (!ops) {
+        return 0;
+    }
+
+    for (i = a; i <= z; i++) {
+        const tchar* c = &L->chars[i];
+
+        for (j = 0; j < nops; j++) {
+            if (ops[j].stream == c->stream && ops[j].start == c->op_start) {
+                break;
+            }
+        }
+
+        if (j == nops) {
+            ops[nops].stream = c->stream;
+            ops[nops].start = c->op_start;
+            ops[nops].end = c->op_end;
+            nops++;
+        }
+    }
+
+    qsort(ops, (size_t)nops, sizeof(topref), topref_cmp);
+
+    /* each stream once: its operations written again from the last, the bytes before each kept */
+    for (i = 0; i < nops && ok;) {
+        int32_t s = ops[i].stream, k;
+        size_t n;
+        unsigned char* data = content_of(d, page, s, &n);
+        pbuf work;
+
+        if (!data) {
+            ok = 0;
+            break;
+        }
+
+        memset(&work, 0, sizeof(work));
+        qb_put(&work, data, n);
+
+        for (k = i; k < nops && ops[k].stream == s; k++) {
+            pbuf op, next;
+
+            if (ops[k].end > n || ops[k].start >= ops[k].end) {
+                ok = 0;
+                break;
+            }
+
+            memset(&op, 0, sizeof(op));
+
+            if (!rewrite_op(d, data, ops[k].start, ops[k].end, L, a, z, &op)) {
+                qb_free(&op);
+                ok = 0;
+                break;
+            }
+
+            /* work holds data with the later operations done: the bytes after this one's end are where they were
+               less what those changed, so the splice is made from the end of work */
+            memset(&next, 0, sizeof(next));
+            qb_put(&next, work.p, ops[k].start);
+            qb_put(&next, op.p, op.n);
+            qb_put(&next, work.p + ops[k].end, work.n - ops[k].end);
+            qb_free(&work);
+            work = next;
+            qb_free(&op);
+        }
+
+        if (ok) {
+            ok = replace_content(d, page, s, work.p, work.n);
+        }
+
+        qb_free(&work);
+        free(data);
+        i = k;
+    }
+
+    free(ops);
+    return ok;
+}
+
+/* characters a..z taken out and utf8 written where they began, wrapped as they were */
+static int edit_reflow(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, const char* utf8) {
+    tplace P;
+    pv font;
+    int own;
+    pfont* pf;
+    char fname[32];
+    pbuf b;
+
+    text_place(L, a, z, &P);
+    pf = pick_font(d, &L->chars[a], utf8, &own, &font);
+
+    if (!pf) {
+        return 0;
+    }
+
+    if (!take_out(d, page, L, a, z)) {
+        return 0;
+    }
+
+    if (*utf8) {
+        new_font_name(d, page, fname, sizeof(fname));
+        memset(&b, 0, sizeof(b));
+        qb_puts(&b, "q ");
+        write_text(&b, pf, own, fname, &P, utf8);
+        qb_puts(&b, " Q\n");
+        append_to_page(d, page, &b, fname, font);
+        qb_free(&b);
+    }
+
     return 1;
 }
 
@@ -2520,7 +3040,11 @@ pd_status pd_pdfr_replace_text(pd_pdfr* d, int32_t page, int32_t from, int32_t t
     }
 
     edit_begin(d);
-    ok = edit_in_place(d, page, &L->chars[a], &L->chars[z], utf8);
+    ok = !strchr(utf8, '\n') && edit_in_place(d, page, &L->chars[a], &L->chars[z], utf8);
+
+    if (!ok) {
+        ok = edit_reflow(d, page, L, a, z, utf8);
+    }
 
     if (!ok) {
         ok = edit_overlay(d, page, L, a, z, utf8);

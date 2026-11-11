@@ -155,6 +155,9 @@ typedef struct {
     double tm[6];               /* the text rendering matrix at the character (text space x 1 to the page) */
     double um[6];               /* the same to user space (the page's base matrix undone) */
     uint32_t rgb;               /* its fill colour */
+    double w0;                  /* the glyph's advance, glyph space / 1000 */
+    double tc, tw;              /* the character and word spacing it was shown with */
+    uint8_t vertical;           /* in a vertical font */
 } tchar;
 
 struct ppage_cache {

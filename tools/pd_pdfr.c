@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
     pd_status st;
 
     if (argc < 3) {
-        fprintf(stderr, "usage: pd_pdfr render|text|info|time file.pdf ...\n");
+        fprintf(stderr, "usage: pd_pdfr render|text|spans|info|time file.pdf ...\n");
         return 2;
     }
 
@@ -133,6 +133,33 @@ int main(int argc, char** argv) {
         }
 
         printf("\n");
+        free(c);
+    } else if (strcmp(argv[1], "spans") == 0 && argc >= 4) {
+        /* pd_pdfr spans file.pdf PAGE [lines]: the page's blocks (or lines), each its box and its text */
+        int32_t n = 0, ns = 0, i, j, page = atoi(argv[3]) - 1;
+        int32_t level = argc >= 5 && strcmp(argv[4], "lines") == 0 ? PD_PDFR_LINES : PD_PDFR_BLOCKS;
+        pd_pdfr_char* c;
+        pd_pdfr_span* s;
+
+        pd_pdfr_page_text(p, page, NULL, 0, &n);
+        c = (pd_pdfr_char*)malloc(sizeof(pd_pdfr_char) * (size_t)(n + 1));
+        pd_pdfr_page_text(p, page, c, n, &n);
+        pd_pdfr_page_spans(p, page, level, NULL, 0, &ns);
+        s = (pd_pdfr_span*)malloc(sizeof(pd_pdfr_span) * (size_t)(ns + 1));
+        pd_pdfr_page_spans(p, page, level, s, ns, &ns);
+
+        for (i = 0; i < ns; i++) {
+            printf("[%d..%d) %.0f,%.0f %.0fx%.0f size %.1f lines %d align %d: ", s[i].first, s[i].end, s[i].x0,
+                   s[i].y0, s[i].x1 - s[i].x0, s[i].y1 - s[i].y0, s[i].size, s[i].lines, s[i].align);
+
+            for (j = s[i].first; j < s[i].end && j < n; j++) {
+                put_utf8(c[j].cp == '\n' ? ' ' : c[j].cp);
+            }
+
+            printf("\n");
+        }
+
+        free(s);
         free(c);
     } else if (strcmp(argv[1], "annotate") == 0 && argc >= 4) {
         int32_t n = 0, i;

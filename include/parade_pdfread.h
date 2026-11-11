@@ -64,6 +64,22 @@ typedef struct {
 /** a page's characters; the size-query convention of pd_layout_page_items */
 PD_API pd_status pd_pdfr_page_text(pd_pdfr* pdf, int32_t page, pd_pdfr_char* buf, int32_t cap, int32_t* count);
 
+#define PD_PDFR_LINES  0        /**< pd_pdfr_page_spans: the lines of the page's text */
+#define PD_PDFR_BLOCKS 1        /**< its blocks: lines one under another, a paragraph or a column's piece */
+
+/** a stretch of a page's text: characters first..end-1 of pd_pdfr_page_text's, and their box */
+typedef struct {
+    int32_t first, end;
+    float x0, y0, x1, y1;       /**< the box on the page as shown */
+    float size;                 /**< the font size most of it is in (points) */
+    int32_t lines;              /**< the lines in it (1 for a line) */
+    int32_t align;              /**< a block's lines: 0 left, 1 centred, 2 right (as they line up) */
+} pd_pdfr_span;
+
+/** the page's text as lines (PD_PDFR_LINES) or blocks (PD_PDFR_BLOCKS), in its order; the size-query convention */
+PD_API pd_status pd_pdfr_page_spans(pd_pdfr* pdf, int32_t page, int32_t level, pd_pdfr_span* buf, int32_t cap,
+                                    int32_t* count);
+
 /* ------------------------------------------------------------------ */
 /* annotations                                                        */
 /* ------------------------------------------------------------------ */
@@ -155,8 +171,13 @@ PD_API pd_status pd_pdfr_field_set(pd_pdfr* pdf, int32_t index, const char* utf8
 /**
  * Replace characters from..to-1 of a page's text (pd_pdfr_page_text's
  * order) with utf8: in the content stream itself when the text is all of
- * one run and its font has the characters, else by covering it in white
- * and writing the new text over it in a standard font.
+ * one run and its font has the characters. Else the old characters are
+ * taken out of the content streams (what follows them staying where it
+ * was) and the new text written where they began, in their font when it
+ * has the characters, else the standard font most like it; text that was
+ * on more than one line is wrapped to the lines' width, at their spacing
+ * and alignment, a '\n' in utf8 starting a new line. Characters that
+ * cannot be taken out (in a form XObject) are covered in white instead.
  */
 PD_API pd_status pd_pdfr_replace_text(pd_pdfr* pdf, int32_t page, int32_t from, int32_t to, const char* utf8);
 

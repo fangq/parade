@@ -34,6 +34,9 @@ const
   PD_PDFR_CHAR_SPACE = 1;
   PD_PDFR_CHAR_NEWLINE = 2;
 
+  PD_PDFR_LINES = 0;
+  PD_PDFR_BLOCKS = 1;
+
   PD_ANNOT_OTHER = 0;
   PD_ANNOT_TEXT = 1;
   PD_ANNOT_LINK = 2;
@@ -70,6 +73,17 @@ type
     run: Int32;
   end;
   Ppd_pdfr_char = ^pd_pdfr_char;
+
+  { a stretch of a page's text: characters first..end-1 of its text, and their box }
+  pd_pdfr_span = record
+    first, end_: Int32;
+    x0, y0, x1, y1: Single;
+    size: Single;
+    lines: Int32;
+    align: Int32;     { a block's lines: 0 left, 1 centred, 2 right }
+  end;
+  Ppd_pdfr_span = ^pd_pdfr_span;
+  TPdfSpans = array of pd_pdfr_span;
 
   pd_pdfr_annot = record
     kind: Int32;
@@ -111,6 +125,9 @@ function pd_pdfr_info(pdf: Ppd_pdfr; key: PAnsiChar; buf: PAnsiChar; cap: csize_
 function pd_pdfr_render(pdf: Ppd_pdfr; page: Int32; scale: Double; ox, oy: Int32; buf: Pointer;
   width, height, stride, flags: Int32): pd_status; cdecl; PDEXT;
 function pd_pdfr_page_text(pdf: Ppd_pdfr; page: Int32; buf: Ppd_pdfr_char; cap: Int32;
+  out count: Int32): pd_status; cdecl; PDEXT;
+
+function pd_pdfr_page_spans(pdf: Ppd_pdfr; page, level: Int32; buf: Ppd_pdfr_span; cap: Int32;
   out count: Int32): pd_status; cdecl; PDEXT;
 
 function pd_pdfr_annot_count(pdf: Ppd_pdfr; page: Int32): Int32; cdecl; PDEXT;
@@ -156,6 +173,8 @@ function PdfSaveToString(pdf: Ppd_pdfr): RawByteString;
 { a page's text as UTF-8, and its characters }
 function PdfPageChars(pdf: Ppd_pdfr; page: Integer): TPdfChars;
 function PdfCharsText(const C: array of pd_pdfr_char; AFrom, ATo: Integer): UTF8String;
+{ a page's lines (PD_PDFR_LINES) or blocks (PD_PDFR_BLOCKS) }
+function PdfPageSpans(pdf: Ppd_pdfr; page, level: Integer): TPdfSpans;
 
 implementation
 
@@ -189,6 +208,18 @@ begin
   SetLength(Result, N);
   if N > 0 then
     pd_pdfr_page_text(pdf, page, @Result[0], N, N);
+end;
+
+function PdfPageSpans(pdf: Ppd_pdfr; page, level: Integer): TPdfSpans;
+var
+  N: Int32;
+begin
+  Result := nil;
+  N := 0;
+  if pd_pdfr_page_spans(pdf, page, level, nil, 0, N) <> 0 then Exit;
+  SetLength(Result, N);
+  if N > 0 then
+    pd_pdfr_page_spans(pdf, page, level, @Result[0], N, N);
 end;
 
 function PdfCharsText(const C: array of pd_pdfr_char; AFrom, ATo: Integer): UTF8String;

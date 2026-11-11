@@ -712,6 +712,10 @@ static void record_char(interp* I, pfont* f, uint32_t code, const double* trm, d
         t->font = f;
         t->fs = g->fs;
         memcpy(t->tm, trm, sizeof(t->tm));
+        t->w0 = pf_width(f, code);
+        t->tc = g->tc;
+        t->tw = g->tw;
+        t->vertical = (uint8_t)(pf_vertical(f) != 0);
     }
 }
 
@@ -2406,6 +2410,14 @@ int32_t pd_text_build(dlist* L, pd_pdfr_char* buf, int32_t cap, int32_t* map) {
             } else if (c->pub.x0 - prev->pub.x1 > size * 0.18) {
                 flags = PD_PDFR_CHAR_SPACE;
             }
+        } else if (prev && c->pub.cp == ' ') {
+            /* a space where the next line begins (spaces set out a row, from its left) */
+            double mid = (c->pub.y0 + c->pub.y1) / 2, pmid = (prev->pub.y0 + prev->pub.y1) / 2;
+            double size = prev->pub.y1 - prev->pub.y0;
+
+            if (fabs(mid - pmid) > size * 0.6) {
+                flags = PD_PDFR_CHAR_NEWLINE;
+            }
         } else if (prev && prev->pub.cp == ' ') {
             double mid = (c->pub.y0 + c->pub.y1) / 2, pmid = (prev->pub.y0 + prev->pub.y1) / 2;
             double size = c->pub.y1 - c->pub.y0;
@@ -2468,4 +2480,234 @@ pd_status pd_pdfr_page_text(pd_pdfr* d, int32_t page, pd_pdfr_char* buf, int32_t
     n = pd_text_build(L, buf, buf ? cap : 0, NULL);
     *count = n;
     return buf && n > cap ? PD_ERR_RANGE : PD_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* lines and blocks                                                   */
+/* ------------------------------------------------------------------ */
+
+/* the page's text cut into lines: at each line break put in, and at a gap wider than a column's gutter, whether
+   the file leaves it empty or fills it with spaces (two columns side by side, or labels set out along a row, read as
+   one line otherwise) */
+static int32_t text_lines(const pd_pdfr_char* t, int32_t n, pd_pdfr_span* out, int32_t cap) {
+    int32_t i, k = 0, start = 0, last = -1;     /* last: the character before i that is not a space */
+
+    for (i = 0; i <= n; i++) {
+        int32_t end = -1;
+
+        if (i == n) {
+            end = n;
+        } else if (t[i].flags & PD_PDFR_CHAR_NEWLINE) {
+            end = i + 1;
+        } else if (!t[i].flags && t[i].cp != ' ' && last >= 0 && last < i - 1) {
+            /* words are a third of an em apart, a justified line's an em at most */
+            double sz = t[last].size > 0 ? t[last].size : t[last].y1 - t[last].y0;
+
+            if (t[i].x0 - t[last].x1 > 1.5 * (sz > 0 ? sz : 10)) {
+                end = i;
+            }
+        }
+
+        if (i < n && !t[i].flags && t[i].cp != ' ') {
+            last = i;
+        }
+
+        if (end < 0) {
+            continue;
+        }
+
+        {
+            int32_t j, real = 0;
+            double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30, size = 0;
+
+            for (j = start; j < end; j++) {
+                if (t[j].flags || t[j].cp == ' ') {
+                    continue;
+                }
+
+                x0 = t[j].x0 < x0 ? t[j].x0 : x0;
+                y0 = t[j].y0 < y0 ? t[j].y0 : y0;
+                x1 = t[j].x1 > x1 ? t[j].x1 : x1;
+                y1 = t[j].y1 > y1 ? t[j].y1 : y1;
+                size += t[j].size;
+                real++;
+            }
+
+            if (real > 0) {
+                if (out && k < cap) {
+                    pd_pdfr_span* s = &out[k];
+
+                    memset(s, 0, sizeof(*s));
+                    s->first = start;
+                    s->end = end;
+                    s->x0 = (float)x0;
+                    s->y0 = (float)y0;
+                    s->x1 = (float)x1;
+                    s->y1 = (float)y1;
+                    s->size = (float)(size / real);
+                    s->lines = 1;
+                }
+
+                k++;
+            } else if (out && k > 0 && k <= cap) {
+                out[k - 1].end = end;   /* spaces alone: the line before's */
+            }
+
+            start = end;
+        }
+    }
+
+    return k;
+}
+
+/* how a block's lines line up: 0 their left edges, 1 their middles, 2 their right edges (the last line, short, not
+   asked about its right edge) */
+static int32_t lines_align(const pd_pdfr_span* l, int32_t n) {
+    double lo[3] = { 1e30, 1e30, 1e30 }, hi[3] = { -1e30, -1e30, -1e30 }, size = l[0].size > 0 ? l[0].size : 10;
+    int32_t i, k;
+
+    if (n < 2) {
+        return 0;
+    }
+
+    for (i = 0; i < n; i++) {
+        double v[3] = { l[i].x0, (l[i].x0 + l[i].x1) / 2, l[i].x1 };
+
+        for (k = 0; k < 3; k++) {
+            lo[k] = v[k] < lo[k] ? v[k] : lo[k];
+            hi[k] = v[k] > hi[k] ? v[k] : hi[k];
+        }
+    }
+
+    if (hi[0] - lo[0] <= 0.5 * size) {
+        return 0;
+    }
+
+    if (hi[1] - lo[1] <= 0.5 * size) {
+        return 1;
+    }
+
+    if (hi[2] - lo[2] <= 0.5 * size) {
+        return 2;
+    }
+
+    return 0;
+}
+
+/* a list item's mark: a line that begins with one begins a block */
+static int is_bullet(uint32_t cp) {
+    return cp == 0x2022 || cp == 0x25AA || cp == 0x25CF || cp == 0x25E6 || cp == 0x25A0 || cp == 0x25A1 ||
+           cp == 0x2023 || cp == 0x2043 || cp == 0x2013 || cp == 0x2014 || cp == 0x27A2 || cp == 0x2713 ||
+           cp == 0x00B7 || cp == 0xF0B7 || cp == 0xF0A7 || cp == 0xF0D8 || cp == 0xF076 || cp == 0xF0FC ||
+           cp == 0xF06E || cp == 0xF071;
+}
+
+/* a line that goes on the block above it: just under its last line, about the same size, and across the same
+   stretch of the page; not one a list's mark begins */
+static int line_joins(const pd_pdfr_span* prev, const pd_pdfr_span* l, const pd_pdfr_char* t) {
+    double size = prev->size > l->size ? prev->size : l->size, ratio;
+    int32_t i;
+
+    for (i = l->first; i < l->end && (t[i].flags || t[i].cp == ' '); i++) {
+    }
+
+    if (i < l->end && is_bullet(t[i].cp)) {
+        return 0;
+    }
+
+    if (!(size > 0) || !(prev->size > 0) || !(l->size > 0)) {
+        return 0;
+    }
+
+    ratio = l->size / prev->size;
+
+    /* a paragraph's lines are of one size (a sub- or superscript or two aside) */
+    if (ratio < 0.92 || ratio > 1.087) {
+        return 0;
+    }
+
+    if (l->y0 < prev->y0 + 0.3 * size || l->y0 - prev->y1 > 0.75 * size) {
+        return 0;
+    }
+
+    return (l->x1 < prev->x1 ? l->x1 : prev->x1) - (l->x0 > prev->x0 ? l->x0 : prev->x0) > 0;
+}
+
+int32_t pd_text_spans(const pd_pdfr_char* t, int32_t n, int32_t level, pd_pdfr_span* out, int32_t cap);
+
+int32_t pd_text_spans(const pd_pdfr_char* t, int32_t n, int32_t level, pd_pdfr_span* out, int32_t cap) {
+    int32_t nl = text_lines(t, n, NULL, 0), i, k = 0, start = 0;
+    pd_pdfr_span* lines;
+
+    if (level == PD_PDFR_LINES || nl == 0) {
+        return nl > 0 ? text_lines(t, n, out, cap) : 0;
+    }
+
+    lines = (pd_pdfr_span*)malloc(sizeof(pd_pdfr_span) * (size_t)nl);
+
+    if (!lines) {
+        return 0;
+    }
+
+    text_lines(t, n, lines, nl);
+
+    for (i = 1; i <= nl; i++) {
+        if (i < nl && line_joins(&lines[i - 1], &lines[i], t)) {
+            continue;
+        }
+
+        if (out && k < cap) {
+            pd_pdfr_span* s = &out[k];
+            int32_t j;
+
+            *s = lines[start];
+            s->end = lines[i - 1].end;
+            s->lines = i - start;
+
+            for (j = start + 1; j < i; j++) {
+                s->x0 = lines[j].x0 < s->x0 ? lines[j].x0 : s->x0;
+                s->y0 = lines[j].y0 < s->y0 ? lines[j].y0 : s->y0;
+                s->x1 = lines[j].x1 > s->x1 ? lines[j].x1 : s->x1;
+                s->y1 = lines[j].y1 > s->y1 ? lines[j].y1 : s->y1;
+            }
+
+            s->align = lines_align(&lines[start], i - start);
+        }
+
+        k++;
+        start = i;
+    }
+
+    free(lines);
+    return k;
+}
+
+pd_status pd_pdfr_page_spans(pd_pdfr* d, int32_t page, int32_t level, pd_pdfr_span* buf, int32_t cap,
+                             int32_t* count) {
+    dlist* L;
+    pd_pdfr_char* t;
+    int32_t n, k;
+
+    if (!d || !count || (level != PD_PDFR_LINES && level != PD_PDFR_BLOCKS)) {
+        return PD_ERR_ARG;
+    }
+
+    L = pd_page_list(d, page);
+
+    if (!L) {
+        return PD_ERR_RANGE;
+    }
+
+    n = pd_text_build(L, NULL, 0, NULL);
+    t = (pd_pdfr_char*)malloc(sizeof(pd_pdfr_char) * (size_t)(n + 1));
+
+    if (!t) {
+        return PD_ERR_NOMEM;
+    }
+
+    pd_text_build(L, t, n, NULL);
+    k = pd_text_spans(t, n, level, buf, buf ? cap : 0);
+    free(t);
+    *count = k;
+    return buf && k > cap ? PD_ERR_RANGE : PD_OK;
 }

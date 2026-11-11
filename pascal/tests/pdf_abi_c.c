@@ -12,5 +12,7 @@ int main(void) {
     printf("field %zu %zu %zu %zu %zu %zu %zu\n", sizeof(pd_pdfr_field), offsetof(pd_pdfr_field, value),
            offsetof(pd_pdfr_field, page), offsetof(pd_pdfr_field, x0), offsetof(pd_pdfr_field, readonly),
            offsetof(pd_pdfr_field, maxlen), offsetof(pd_pdfr_field, font_size));
+    printf("span %zu %zu %zu %zu %zu\n", sizeof(pd_pdfr_span), offsetof(pd_pdfr_span, x0), offsetof(pd_pdfr_span, size),
+           offsetof(pd_pdfr_span, lines), offsetof(pd_pdfr_span, align));
     return 0;
 }

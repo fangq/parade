@@ -3316,6 +3316,10 @@ size_t pf_encode(pfont* f, const char* utf8, unsigned char* out, size_t cap) {
 
 /* the standard 14 font most like this one (for text written over it): Times, Helvetica or Courier, its weight and
    slant kept */
+pv pf_dict(pfont* f) {
+    return f ? f->dict : pv_null();
+}
+
 const char* pf_std14(pfont* f) {
     static const char* const names[3][4] = {
         { "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique" },

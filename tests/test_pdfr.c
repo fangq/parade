@@ -942,6 +942,150 @@ static void test_replace_in_tj(void) {
     free(b.p);
 }
 
+/* lines and blocks found; a block replaced wrapped to its width, at its place, the old glyphs taken out (no white
+   box over the page) and what followed them on their line where it was */
+static void test_blocks(void) {
+    char* cs = stream_obj("",
+        "0 0 1 rg 0 0 612 792 re f 0 g\n"
+        "BT /F1 20 Tf 72 720 Td (Heading here) Tj ET\n"
+        "BT /F1 12 Tf 14 TL 72 680 Td (The first line of a paragraph) Tj T* (the second line of it) Tj T* "
+        "(and its third line.) Tj ET\n"
+        "BT /F1 12 Tf 14 TL 72 600 Td (Another paragraph begins) Tj T* (and ends here.) Tj ( Tail) Tj ET");
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        "/Resources << /Font << /F1 5 0 R >> >> >>",
+        cs,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+    };
+    buf_t b = make_pdf(objs, 5, 0), out;
+    pd_pdfr* p = NULL;
+    pd_pdfr_span sp[16], ln[16], old2;
+    pd_pdfr_char c[400];
+    int32_t n, nl, nc, i, tail = -1, a = -1, k;
+    float tail_x = 0, tail_x2 = -1;
+    char* s;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    CHECK(pd_pdfr_page_spans(p, 0, PD_PDFR_LINES, ln, 16, &nl) == PD_OK && nl == 6);
+    CHECK(pd_pdfr_page_spans(p, 0, PD_PDFR_BLOCKS, sp, 16, &n) == PD_OK && n == 3);
+    CHECK(pd_pdfr_page_spans(p, 0, 7, sp, 16, &n) == PD_ERR_ARG);
+    pd_pdfr_page_spans(p, 0, PD_PDFR_BLOCKS, sp, 16, &n);
+    CHECK(n == 3 && sp[0].lines == 1 && sp[1].lines == 3 && sp[2].lines == 2);
+    CHECK(fabs(sp[0].size - 20) < 0.5 && fabs(sp[1].size - 12) < 0.5);
+    CHECK(fabs(sp[1].x0 - 72) < 1 && sp[1].y0 > sp[0].y1 && sp[2].y0 > sp[1].y1);
+    CHECK(sp[1].align == 0);
+    old2 = sp[1];
+
+    /* the second block: written again, longer, wrapped to its width */
+    CHECK(pd_pdfr_replace_text(p, 0, sp[1].first, sp[1].end - 1,
+                               "Written anew, this paragraph is long enough that it has to wrap onto further lines "
+                               "at the width the old one had.") == PD_OK);
+    s = page_text(p, 0);
+    CHECK(strstr(s, "first line") == NULL && strstr(s, "third line") == NULL);
+    CHECK(strstr(s, "Written anew") != NULL && strstr(s, "Heading here") != NULL && strstr(s, "Tail") != NULL);
+    free(s);
+    pd_pdfr_page_spans(p, 0, PD_PDFR_LINES, ln, 16, &nl);
+    k = 0;
+
+    for (i = 0; i < nl; i++) {
+        if (ln[i].y0 > old2.y0 - 2 && ln[i].y1 < old2.y1 + 40 && ln[i].x0 < 300) {
+            k++;
+            CHECK(ln[i].x1 <= old2.x1 + 3);            /* within the old width */
+            CHECK(fabs(ln[i].x0 - 72) < 1);             /* from the old left edge */
+        }
+    }
+
+    CHECK(k >= 3);
+    pd_pdfr_page_text(p, 0, c, 400, &nc);
+
+    for (i = 0; i < nc; i++) {
+        if (c[i].cp == 'W' && a < 0) {
+            a = i;
+        }
+    }
+
+    CHECK(a >= 0 && fabs(c[a].y0 - old2.y0) < 1 && fabs(c[a].size - 12) < 0.5);    /* on the old first line */
+
+    /* two lines of the last block taken out, " Tail" after them on the line kept where it was */
+    pd_pdfr_page_spans(p, 0, PD_PDFR_BLOCKS, sp, 16, &n);
+    pd_pdfr_page_text(p, 0, c, 400, &nc);
+
+    for (i = 0; i + 3 < nc; i++) {
+        if (c[i].cp == 'T' && c[i + 1].cp == 'a' && c[i + 2].cp == 'i' && c[i + 3].cp == 'l') {
+            tail = i;
+            tail_x = c[i].x0;
+        }
+    }
+
+    a = -1;
+
+    for (i = 0; i + 1 < nc; i++) {
+        if (c[i].cp == 'A' && c[i + 1].cp == 'n') {
+            a = i;
+        }
+    }
+
+    CHECK(tail > 0 && a >= 0);
+
+    if (tail > 0 && a >= 0) {
+        CHECK(pd_pdfr_replace_text(p, 0, a, tail - 1, "Short") == PD_OK);   /* up to the space before Tail */
+        pd_pdfr_page_text(p, 0, c, 400, &nc);
+
+        for (i = 0; i + 3 < nc; i++) {
+            if (c[i].cp == 'T' && c[i + 1].cp == 'a' && c[i + 2].cp == 'i' && c[i + 3].cp == 'l') {
+                tail_x2 = c[i].x0;
+            }
+        }
+
+        CHECK(fabs(tail_x2 - tail_x) < 0.01);
+        s = page_text(p, 0);
+        CHECK(strstr(s, "Another") == NULL && strstr(s, "ends here") == NULL && strstr(s, "Short") != NULL);
+        free(s);
+    }
+
+    /* no white laid over the page's blue: the old text taken out, not hidden */
+    {
+        int32_t w, h;
+        uint8_t* img = draw(p, 0, &w, &h);
+
+        if (img) {
+            int32_t x, y, white = 0;
+
+            for (y = 0; y < h; y++) {
+                for (x = 0; x < w; x++) {
+                    white += px(img, w, x, y) == 0xFFFFFF;
+                }
+            }
+
+            CHECK(white == 0);
+            free(img);
+        }
+    }
+
+    out = saved(p);
+    {
+        pd_pdfr* q = reopen(&out, NULL);
+
+        if (q) {
+            s = page_text(q, 0);
+            CHECK(strstr(s, "Written anew") != NULL && strstr(s, "first line") == NULL);
+            free(s);
+            pd_pdfr_free(q);
+        }
+    }
+
+    CHECK(pd_pdfr_undo(p) == PD_OK && pd_pdfr_undo(p) == PD_OK);
+    s = page_text(p, 0);
+    CHECK(strstr(s, "The first line of a paragraph") != NULL && strstr(s, "Another paragraph begins") != NULL);
+    free(s);
+    pd_pdfr_free(p);
+    free(out.p);
+    free(cs);
+    free(b.p);
+}
+
 static unsigned char* slurp_file(const char* path, size_t* n) {
     FILE* fp = fopen(path, "rb");
     unsigned char* d;
@@ -1109,6 +1253,7 @@ int main(void) {
     test_forms();
     test_replace_text();
     test_replace_in_tj();
+    test_blocks();
     test_type1();
     CHECK(pd_jbig2_mq_check() == 0);    /* JBIG2's arithmetic decoder, T.88 H.2 */
     test_encrypted_save();
