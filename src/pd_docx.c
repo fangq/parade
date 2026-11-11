@@ -7672,8 +7672,10 @@ static void dw_apply_run(dw* w) {
     cp.font_theme = f->font_theme;      /* kept for the families given (pd_doc_format masks it) */
 
     if (w->rev || w->X->float_rev || w->fmt_rev) {
+        /* in a shape deleted with track changes, everything in it is deleted, as Word has it: an insertion made in
+           it since is deleted with it (a figure's old caption showed its inserted "7", and kept its box's room) */
         cp.mask |= PD_CP_REVISION;
-        cp.revision = w->rev ? w->rev : w->X->float_rev ? w->X->float_rev : w->fmt_rev;
+        cp.revision = w->X->float_rev ? w->X->float_rev : w->rev ? w->rev : w->fmt_rev;
     }
 
     bld_set_format(w->X->b, &cp);

@@ -4692,6 +4692,66 @@ static void test_docx_deleted_inline_picture(void) {
     pd_doc_free(d);
 }
 
+/* A text box deleted with track changes, an insertion inside it: everything in a deleted shape is deleted, as Word
+   has it -- the inserted text too, which was shown (a lone "7" of a figure's old caption) and with it the box's
+   room, an empty block the text wrapped round */
+static void test_docx_deleted_box_insertion(void) {
+    pd_doc* d = docx_doc(
+        "word/document.xml",
+        "<w:document xmlns:w=\"w\" xmlns:wp=\"wp\" xmlns:a=\"a\" xmlns:wps=\"wps\" xmlns:r=\"r\"><w:body>"
+        "<w:p><w:r><w:t xml:space=\"preserve\">Text beside the box, enough to wrap. </w:t></w:r>"
+        "<w:del w:id=\"1\" w:author=\"A\"><w:r><w:drawing><wp:anchor distL=\"114300\" distR=\"114300\">"
+        "<wp:positionH relativeFrom=\"column\"><wp:posOffset>2671445</wp:posOffset></wp:positionH>"
+        "<wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>0</wp:posOffset></wp:positionV>"
+        "<wp:extent cx=\"2540000\" cy=\"1270000\"/><wp:wrapSquare wrapText=\"bothSides\"/><a:graphic><a:graphicData>"
+        "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"1270000\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"/></wps:spPr><wps:txbx><w:txbxContent><w:p>"
+        "<w:del w:id=\"2\" w:author=\"A\"><w:r><w:delText>Fig. 6</w:delText></w:r></w:del>"
+        "<w:ins w:id=\"3\" w:author=\"A\"><w:r><w:t>7</w:t></w:r></w:ins>"
+        "</w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"
+        "</w:r></w:del><w:r><w:t>And on.</w:t></w:r></w:p></w:body></w:document>",
+        NULL);
+    pd_block_id p = 0, q;
+    pd_char_props cp;
+    pd_revision rv;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    for (q = pd_doc_next_paragraph(d, 0); q && !p; q = pd_doc_next_paragraph(d, q)) {
+        uint32_t n;
+        const char* t = para_text(d, q, &n);
+
+        if (n >= 1 && t[n - 1] == '7') {
+            p = q;
+        }
+    }
+
+    if (!p) {
+        p = story_para_with(d, "7");
+    }
+
+    CHECK(p != 0);
+    cp = chars_at(d, p, p ? 0 : 0);
+
+    {   /* the inserted "7": in the deleted box, deleted */
+        uint32_t n, k;
+        const char* t = p ? para_text(d, p, &n) : NULL;
+
+        for (k = 0; t && k < n && t[k] != '7'; k++) {
+        }
+
+        cp = chars_at(d, p, k);
+        CHECK(t && k < n && cp.revision && pd_doc_revision_get(d, cp.revision, &rv) == PD_OK &&
+              rv.kind == PD_REV_DELETE);
+    }
+
+    pd_doc_free(d);
+}
+
 /* within a step or two of an expected colour, channel by channel: Word's own rounding is not quite anyone's */
 static int near_color(uint32_t got, uint32_t want) {
     int k;
@@ -11754,6 +11814,7 @@ int main(void) {
     test_docx_group_textbox_table();
     test_docx_deleted_float();
     test_docx_deleted_inline_picture();
+    test_docx_deleted_box_insertion();
     test_docx_group_turned_shapes();
     test_docx_canvas_3d();
     test_docx_custgeom_paths();
