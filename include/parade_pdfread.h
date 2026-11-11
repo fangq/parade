@@ -181,6 +181,15 @@ PD_API pd_status pd_pdfr_field_set(pd_pdfr* pdf, int32_t index, const char* utf8
  */
 PD_API pd_status pd_pdfr_replace_text(pd_pdfr* pdf, int32_t page, int32_t from, int32_t to, const char* utf8);
 
+/**
+ * Move characters from..to-1 of a page's text by (dx, dy) points on the
+ * page as shown (y down): each glyph drawn again where it was, moved, in its
+ * own font and colour, the old ones taken out (what follows them on their
+ * lines staying put). PD_ERR_FORMAT when they cannot be taken out (text in a
+ * form XObject, a vertical font, a code longer than 4 bytes).
+ */
+PD_API pd_status pd_pdfr_move_text(pd_pdfr* pdf, int32_t page, int32_t from, int32_t to, double dx, double dy);
+
 /* ------------------------------------------------------------------ */
 /* undo                                                               */
 /* ------------------------------------------------------------------ */

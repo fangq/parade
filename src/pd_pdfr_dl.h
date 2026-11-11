@@ -158,6 +158,7 @@ typedef struct {
     double w0;                  /* the glyph's advance, glyph space / 1000 */
     double tc, tw;              /* the character and word spacing it was shown with */
     uint8_t vertical;           /* in a vertical font */
+    unsigned char code[4];      /* the code's bytes in the string (byte_len of them, 4 at most) */
 } tchar;
 
 struct ppage_cache {

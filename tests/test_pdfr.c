@@ -1159,6 +1159,82 @@ static void test_pieces(void) {
     free(b.p);
 }
 
+/* a line moved: every glyph where it was, moved by the amount (its spacing, kerning and scale kept); what followed it
+   on its line where it was; the old glyphs gone from where they were; undone */
+static void test_move_text(void) {
+    char* cs = stream_obj("",
+        "BT /F1 18 Tf 1 Tc 3 Tw 90 Tz 72 700 Td [(Move) -300 (me, please)] TJ 0 Tc 0 Tw 100 Tz ( stay) Tj ET\n"
+        "BT /F1 12 Tf 72 600 Td (Another line) Tj ET");
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        "/Resources << /Font << /F1 5 0 R >> >> >>",
+        cs,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+    };
+    buf_t b = make_pdf(objs, 5, 0);
+    pd_pdfr* p = NULL;
+    pd_pdfr_char c0[64], c1[64];
+    int32_t n0, n1, i, end = -1, stay = -1, ok = 1, stay1 = -1;
+    char* s;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    pd_pdfr_page_text(p, 0, c0, 64, &n0);
+
+    for (i = 0; i + 3 < n0; i++) {
+        if (c0[i].cp == 'e' && c0[i + 1].cp == ' ' && c0[i + 2].cp == 's' && c0[i + 3].cp == 't') {
+            end = i + 1;    /* "Move me, please" */
+            stay = i + 2;
+        }
+    }
+
+    CHECK(end > 0 && pd_pdfr_move_text(p, 0, 0, end, 50, 100) == PD_OK);
+    CHECK(pd_pdfr_move_text(p, 0, 0, 0, 1, 1) == PD_ERR_ARG);
+    pd_pdfr_page_text(p, 0, c1, 64, &n1);
+    s = page_text(p, 0);
+    CHECK(strstr(s, "stay") != NULL && strstr(s, "Another line") != NULL && strstr(s, "please") != NULL);
+    free(s);
+
+    /* the moved glyphs: the same letters, each 50 right and 100 down of where it was */
+    for (i = 0; i < end; i++) {
+        int32_t j, hit = 0;
+
+        if (c0[i].flags || c0[i].cp == ' ') {
+            continue;
+        }
+
+        for (j = 0; j < n1; j++) {
+            if (c1[j].cp == c0[i].cp && fabs(c1[j].x0 - c0[i].x0 - 50) < 0.01 && fabs(c1[j].y0 - c0[i].y0 - 100) < 0.01 &&
+                fabs((c1[j].x1 - c1[j].x0) - (c0[i].x1 - c0[i].x0)) < 0.01) {
+                hit = 1;
+            }
+
+            if (fabs(c1[j].x0 - c0[i].x0) < 0.01 && fabs(c1[j].y0 - c0[i].y0) < 0.01 && c1[j].cp == c0[i].cp) {
+                ok = 0;     /* still where it was */
+            }
+        }
+
+        ok &= hit;
+    }
+
+    CHECK(ok);
+
+    for (i = 0; i < n1; i++) {
+        if (c1[i].cp == 's' && i + 1 < n1 && c1[i + 1].cp == 't') {
+            stay1 = i;
+        }
+    }
+
+    CHECK(stay > 0 && stay1 >= 0 && fabs(c1[stay1].x0 - c0[stay].x0) < 0.01 && fabs(c1[stay1].y0 - c0[stay].y0) < 0.01);
+    CHECK(pd_pdfr_undo(p) == PD_OK);
+    pd_pdfr_page_text(p, 0, c1, 64, &n1);
+    CHECK(n1 == n0 && fabs(c1[0].x0 - c0[0].x0) < 0.01 && fabs(c1[0].y0 - c0[0].y0) < 0.01);
+    pd_pdfr_free(p);
+    free(cs);
+    free(b.p);
+}
+
 static unsigned char* slurp_file(const char* path, size_t* n) {
     FILE* fp = fopen(path, "rb");
     unsigned char* d;
@@ -1328,6 +1404,7 @@ int main(void) {
     test_replace_in_tj();
     test_blocks();
     test_pieces();
+    test_move_text();
     test_type1();
     CHECK(pd_jbig2_mq_check() == 0);    /* JBIG2's arithmetic decoder, T.88 H.2 */
     test_encrypted_save();

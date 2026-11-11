@@ -3191,6 +3191,137 @@ pd_status pd_pdfr_replace_text(pd_pdfr* d, int32_t page, int32_t from, int32_t t
     return ok ? PD_OK : PD_ERR_FORMAT;
 }
 
+/* characters a..z drawn again moved by (ux, uy) in user space: each glyph from its own code, font and colour where it
+   was, with a text matrix of its own (its font at size 1: the matrix carries the size, the scale and the rise) */
+static int edit_move(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, double ux, double uy) {
+    wstyle st[32];
+    int ns = 0, cur = -1, k;
+    uint32_t rgb = 0xFFFFFFFFu;
+    int32_t i, last_op = -1;
+    int64_t last_off = -1;
+    pbuf b;
+
+    for (i = a; i <= z; i++) {
+        const tchar* c = &L->chars[i];
+
+        if (!c->font || c->byte_len == 0 || c->byte_len > 4 || pf_dict(c->font).t != PV_DICT) {
+            return 0;
+        }
+
+        for (k = 0; k < ns && st[k].pf != c->font; k++) {
+        }
+
+        if (k == ns) {
+            if (ns == 32) {
+                return 0;
+            }
+
+            memset(&st[ns], 0, sizeof(st[ns]));
+            st[ns].pf = c->font;
+            st[ns].font = pf_dict(c->font);
+            ns++;
+        }
+    }
+
+    if (!take_out(d, page, L, a, z)) {
+        return 0;
+    }
+
+    new_font_names(d, page, st, ns);
+    memset(&b, 0, sizeof(b));
+    qb_puts(&b, "q BT\n");
+
+    for (i = a; i <= z; i++) {
+        const tchar* c = &L->chars[i];
+        double m[6];
+
+        if ((int64_t)c->byte_off == last_off && (int32_t)c->op_start == last_op) {
+            continue;   /* a ligature's other characters: the one glyph */
+        }
+
+        last_off = c->byte_off;
+        last_op = (int32_t)c->op_start;
+
+        for (k = 0; st[k].pf != c->font; k++) {
+        }
+
+        if (k != cur) {
+            qb_puts(&b, "/");
+            qb_puts(&b, st[k].name);
+            qb_puts(&b, " 1 Tf ");
+            cur = k;
+        }
+
+        if (c->rgb != rgb) {
+            col_op(&b, c->rgb, "rg");
+            qb_puts(&b, " ");
+            rgb = c->rgb;
+        }
+
+        memcpy(m, c->um, sizeof(m));
+        m[4] += ux;
+        m[5] += uy;
+        nums(&b, m, 6);
+        qb_puts(&b, "Tm ");
+        pdf_string(&b, c->code, c->byte_len);
+        qb_puts(&b, " Tj\n");
+    }
+
+    qb_puts(&b, "ET Q\n");
+    append_to_page(d, page, &b, st, ns);
+    qb_free(&b);
+    return 1;
+}
+
+pd_status pd_pdfr_move_text(pd_pdfr* d, int32_t page, int32_t from, int32_t to, double dx, double dy) {
+    dlist* L;
+    int32_t n, *map, a = -1, z = -1, i;
+    double binv[6];
+    int ok;
+
+    if (!valid_page(d, page) || from < 0 || to <= from || !isfinite(dx) || !isfinite(dy)) {
+        return PD_ERR_ARG;
+    }
+
+    L = pd_page_list(d, page);
+
+    if (!L) {
+        return PD_ERR_RANGE;
+    }
+
+    n = pd_text_build(L, NULL, 0, NULL);
+    map = (int32_t*)malloc(sizeof(int32_t) * (size_t)(n + 1));
+
+    if (!map) {
+        return PD_ERR_NOMEM;
+    }
+
+    pd_text_build(L, NULL, n, map);
+
+    for (i = from; i < to && i < n; i++) {
+        if (map[i] >= 0) {
+            if (a < 0) {
+                a = map[i];
+            }
+
+            z = map[i];
+        }
+    }
+
+    free(map);
+
+    if (a < 0) {
+        return PD_ERR_RANGE;
+    }
+
+    /* the move on the page as shown, in user space: the display matrix's inverse, without its offset */
+    page_inv(d, page, binv);
+    edit_begin(d);
+    ok = edit_move(d, page, L, a, z, binv[0] * dx + binv[2] * dy, binv[1] * dx + binv[3] * dy);
+    edit_end(d);
+    return ok ? PD_OK : PD_ERR_FORMAT;
+}
+
 /* ------------------------------------------------------------------ */
 /* writing                                                            */
 /* ------------------------------------------------------------------ */

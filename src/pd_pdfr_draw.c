@@ -633,7 +633,8 @@ static void gk_close(void* u) {
     qb_put(&((gsink*)u)->I->path, &v, sizeof(v));
 }
 
-static void record_char(interp* I, pfont* f, uint32_t code, const double* trm, double w0, size_t boff, int blen) {
+static void record_char(interp* I, pfont* f, uint32_t code, const double* trm, double w0, size_t boff, int blen,
+                        const unsigned char* bytes) {
     uint32_t u[4];
     int n = pf_unicode(f, code, u, 4), k;
     double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30, asc = 0.9, desc = -0.25;
@@ -716,6 +717,7 @@ static void record_char(interp* I, pfont* f, uint32_t code, const double* trm, d
         t->tc = g->tc;
         t->tw = g->tw;
         t->vertical = (uint8_t)(pf_vertical(f) != 0);
+        memcpy(t->code, bytes, blen < 4 ? (size_t)blen : 4);
     }
 }
 
@@ -888,7 +890,7 @@ static void show_string(interp* I, pv s) {
             /* the box in text space units of an em (the character's advance across) */
             mat_mul(tsm, I->tm, box);
             mat_mul(box, g->ctm, box);
-            record_char(I, f, code, box, pf_vertical(f) ? 1 : w0, i, k);
+            record_char(I, f, code, box, pf_vertical(f) ? 1 : w0, i, k, p + i);
         }
 
         if (pf_vertical(f)) {

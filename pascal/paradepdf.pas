@@ -155,6 +155,8 @@ function pd_pdfr_field_set(pdf: Ppd_pdfr; index: Int32; utf8: PAnsiChar): pd_sta
 function pd_pdfr_widget_state(pdf: Ppd_pdfr; page, annot: Int32; buf: PAnsiChar; cap: csize_t): pd_status; cdecl; PDEXT;
 
 function pd_pdfr_replace_text(pdf: Ppd_pdfr; page, from, upto: Int32; utf8: PAnsiChar): pd_status; cdecl; PDEXT;
+{ characters from..upto-1 moved by (dx, dy) points on the page as shown, each glyph as it was }
+function pd_pdfr_move_text(pdf: Ppd_pdfr; page, from, upto: Int32; dx, dy: Double): pd_status; cdecl; PDEXT;
 
 function pd_pdfr_can_undo(pdf: Ppd_pdfr): Int32; cdecl; PDEXT;
 function pd_pdfr_can_redo(pdf: Ppd_pdfr): Int32; cdecl; PDEXT;
