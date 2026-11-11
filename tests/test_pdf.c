@@ -471,15 +471,15 @@ int main(void) {
         /* the catalog's script and a page's entries as long as they are: a document's JavaScript runs to kilobytes */
         {
             static char cat[4096], ext[2048];
-            size_t c;
+            size_t q;
 
             strcpy(cat, "/OpenAction << /S /JavaScript /JS (var a=[");
-            for (c = 0; c < 1500; c++) {
+            for (q = 0; q < 1500; q++) {
                 strcat(cat, "0,");
             }
             strcat(cat, "7];) >>");
             strcpy(ext, "/Dur 0.05 /PieceInfo << /X << /D [");
-            for (c = 0; c < 400; c++) {
+            for (q = 0; q < 400; q++) {
                 strcat(ext, "1 ");
             }
             strcat(ext, "9] >> >>");

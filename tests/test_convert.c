@@ -5252,8 +5252,6 @@ static void test_pptx(void) {
     for (i = 0; i < ns; i++) {     /* the text boxes' text */
         pd_block_id st = pd_doc_story_at(d, i), p = pd_doc_child(d, st, 0);
         pd_block_info bi;
-        uint32_t n;
-        const char* t;
 
         if (pd_doc_block_info(d, p, &bi) != PD_OK || bi.kind != PD_BLOCK_PARAGRAPH) {
             if (bi.kind == PD_BLOCK_TABLE) {
@@ -5267,7 +5265,6 @@ static void test_pptx(void) {
             continue;
         }
 
-        t = para_text(d, p, &n);
         found_title |= text_is(d, p, "Hello Slides");
         {   /* the bullets list labels, as PowerPoint's are bullets and not text */
             char lb[16] = "", lb2[16] = "";
