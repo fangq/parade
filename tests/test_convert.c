@@ -13,6 +13,7 @@
 #include "parade_convert.h"
 #include "parade_layout.h"
 #include "../src/pd_conv.h"
+#include "../src/pd_paint.h"
 
 void pd_doc_format_number(int32_t v, int32_t fmt, char* buf, size_t cap);  /* pd_doc_internal.h */
 
@@ -5499,6 +5500,67 @@ static void test_pptx_picture_bullet(void) {
     CHECK(p && pd_doc_inline_at(d, at(p, 0), &o) == PD_OK && o.kind == PD_INLINE_IMAGE && o.width == PD_PT(20) &&
           o.height == PD_PT(20));
     pd_doc_free(d);
+}
+
+/* PowerPoint's Set Transparent Color (a:clrChange to a colour of alpha 0): the picture's pixels of that colour
+   see-through, the others as they were; the same picture without it left opaque */
+static int keyed_found(const pd_doc* d, int* opaque_white) {
+    pd_res_id r;
+    int found = 0;
+
+    *opaque_white = 0;
+
+    for (r = 1; r < 400; r++) {
+        const char* mime;
+        const void* data;
+        size_t len;
+        int32_t w, h;
+        unsigned char *rgb = NULL, *alpha = NULL;
+
+        if (pd_doc_resource(d, r, &mime, &data, &len) != PD_OK || strcmp(mime, "image/png") != 0) {
+            continue;
+        }
+
+        if (pd_image_decode((const unsigned char*)data, len, &w, &h, &rgb, &alpha) == 0 && w == 2 && h == 1) {
+            if (alpha && alpha[0] == 0 && alpha[1] == 255 && rgb[3] == 255 && rgb[4] == 0 && rgb[5] == 0) {
+                found = 1;
+            }
+
+            if ((!alpha || alpha[0] == 255) && rgb[0] == 255 && rgb[1] == 255 && rgb[2] == 255) {
+                *opaque_white = 1;
+            }
+        }
+
+        free(rgb);
+        free(alpha);
+    }
+
+    return found;
+}
+
+static void test_pptx_transparent_color(void) {
+#define PKPIC(id, x, cc) "<p:pic><p:nvPicPr><p:cNvPr id=\"" id "\" name=\"P\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>" \
+    "<p:blipFill><a:blip r:embed=\"rIdI\">" cc "</a:blip><a:stretch><a:fillRect/></a:stretch></p:blipFill>" \
+    "<p:spPr><a:xfrm><a:off x=\"" x "\" y=\"0\"/><a:ext cx=\"1000000\" cy=\"500000\"/></a:xfrm>" \
+    "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"
+#define PKCC "<a:clrChange><a:clrFrom><a:srgbClr val=\"FFFFFF\"><a:alpha val=\"100000\"/></a:srgbClr></a:clrFrom>" \
+    "<a:clrTo><a:srgbClr val=\"FFFFFF\"><a:alpha val=\"100000\"/><a:alpha val=\"0\"/></a:srgbClr></a:clrTo></a:clrChange>"
+    const char* rels = "<Relationships><Relationship Id=\"rIdI\" Target=\"../media/k.png\"/></Relationships>";
+    pd_doc* d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PKPIC("3", "0", PKCC) PKPIC("4", "2000000", "")),
+                         "ppt/slides/_rels/slide1.xml.rels", rels, "ppt/media/k.png", "tests/data/key2.png", NULL);
+    int white = 0;
+
+    CHECK(d != NULL);
+    CHECK(d && keyed_found(d, &white));     /* the keyed one: white see-through, red kept */
+    CHECK(white);                           /* the other, the same file: as it was */
+    pd_doc_free(d);
+    /* without the clrChange: nothing made transparent */
+    d = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("", PKPIC("3", "0", "")), "ppt/slides/_rels/slide1.xml.rels", rels,
+                 "ppt/media/k.png", "tests/data/key2.png", NULL);
+    CHECK(d && !keyed_found(d, &white) && white);
+    pd_doc_free(d);
+#undef PKPIC
+#undef PKCC
 }
 
 /* an embedded object (a worksheet, here) drawn as the picture its frame keeps of it, from whichever alternative has
@@ -11774,6 +11836,7 @@ int main(void) {
     test_pptx_picture_bullet();
     test_pptx_ole();
     test_pptx_kept_links();
+    test_pptx_transparent_color();
     test_pptx_chart();
     test_pptx_ph_inherit();
     test_pptx_run_props();

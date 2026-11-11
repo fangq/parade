@@ -15,6 +15,11 @@
 #include "pd_dgm.h"
 #include "pd_doc_internal.h"
 #include "pd_xdoc.h"
+#include "pd_paint.h"
+
+/* pd_pdfr_jpeg.c */
+unsigned char* pd_jpeg_decode(const unsigned char* data, size_t n, int32_t* w, int32_t* h, int32_t* comps,
+                              int* adobe_inverted);
 
 /* ---- the package ---- */
 
@@ -202,19 +207,108 @@ static const char* rel_like(const ppart* pt, const char* kind) {
 /* a picture of a part in the .docx: its id there (the file copied in the first time) */
 static void put_esc(pd_buf* o, const char* s);
 
+/* a picture with one colour made transparent (PowerPoint's Set Transparent Color: a:clrChange to alpha 0): its
+   pixels of that colour see-through, as a PNG; NULL when it is not a PNG, GIF or JPEG */
+static unsigned char* keyed_picture(const unsigned char* data, size_t len, uint32_t key, size_t* outlen) {
+    int32_t w = 0, h = 0, comps = 0, i;
+    unsigned char *rgb = NULL, *alpha = NULL, *rgba, *out = NULL;
+    int adobe = 0;
+
+    if (pd_image_decode(data, len, &w, &h, &rgb, &alpha) != 0) {
+        unsigned char* px;
+
+        rgb = NULL;
+        alpha = NULL;
+
+        if (len < 3 || data[0] != 0xFF || data[1] != 0xD8 ||
+            (px = pd_jpeg_decode(data, len, &w, &h, &comps, &adobe)) == NULL) {
+            return NULL;
+        }
+
+        if (w <= 0 || h <= 0 || (comps != 1 && comps != 3)) {
+            free(px);
+            return NULL;
+        }
+
+        rgb = (unsigned char*)malloc((size_t)w * h * 3);
+
+        if (!rgb) {
+            free(px);
+            return NULL;
+        }
+
+        for (i = 0; i < w * h; i++) {
+            rgb[i * 3] = px[i * comps];
+            rgb[i * 3 + 1] = px[i * comps + (comps == 3 ? 1 : 0)];
+            rgb[i * 3 + 2] = px[i * comps + (comps == 3 ? 2 : 0)];
+        }
+
+        free(px);
+    }
+
+    if (w <= 0 || h <= 0 || (int64_t)w * h > 64000000 || (rgba = (unsigned char*)malloc((size_t)w * h * 4)) == NULL) {
+        free(rgb);
+        free(alpha);
+        return NULL;
+    }
+
+    for (i = 0; i < w * h; i++) {
+        unsigned r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+        unsigned a = alpha ? alpha[i] : 255;
+
+        if (((r << 16) | (g << 8) | b) == key) {
+            a = 0;
+        }
+
+        /* premultiplied, as pd_png_encode takes it */
+        rgba[i * 4] = (unsigned char)(r * a / 255);
+        rgba[i * 4 + 1] = (unsigned char)(g * a / 255);
+        rgba[i * 4 + 2] = (unsigned char)(b * a / 255);
+        rgba[i * 4 + 3] = (unsigned char)a;
+    }
+
+    if (pd_png_encode(rgba, w, h, w * 4, &out, outlen) != 0) {
+        out = NULL;
+    }
+
+    free(rgba);
+    free(rgb);
+    free(alpha);
+    return out;
+}
+
+/* the picture of a part's relationship rid as a picture of the .docx, by its id there; key (0x1000000 | RGB, 0 for
+   none) the colour made transparent in it */
+static const char* media_id_keyed(pptx* P, const ppart* pt, const char* rid, uint32_t key);
+
 static const char* media_id(pptx* P, const ppart* pt, const char* rid) {
+    return media_id_keyed(P, pt, rid, 0);
+}
+
+static const char* media_id_keyed(pptx* P, const ppart* pt, const char* rid, uint32_t key) {
     const char* path = rel_of(pt, rid), *name;
     unsigned char* data;
     size_t len = 0;
-    char dst[200];
+    char dst[200], seen[128];
     int k;
 
     if (!path || (!P->zw && !P->docx)) {
         return NULL;
     }
 
+    if (P->docx) {
+        key = 0;    /* the package's own pictures, as they are */
+    }
+
+    /* a picture keyed is another picture: kept apart from the same file shown without the key */
+    if (key) {
+        snprintf(seen, sizeof(seen), "%.100s#%06X", path, (unsigned)(key & 0xFFFFFF));
+    } else {
+        snprintf(seen, sizeof(seen), "%.127s", path);
+    }
+
     for (k = 0; k < P->nmedia; k++) {
-        if (!strcmp(P->media[k], path)) {
+        if (!strcmp(P->media[k], seen)) {
             return P->media_id[k];
         }
     }
@@ -239,10 +333,31 @@ static const char* media_id(pptx* P, const ppart* pt, const char* rid) {
 
     name = strrchr(path, '/');
     name = name ? name + 1 : path;
+
+    if (key) {
+        size_t kn = 0;
+        unsigned char* kd = keyed_picture(data, len, key & 0xFFFFFF, &kn);
+
+        if (kd) {   /* written as a PNG of its own: the colour taken out */
+            free(data);
+            data = kd;
+            len = kn;
+            snprintf(dst, sizeof(dst), "word/media/p%d_key.png", P->nmedia);
+            pd_zipw_add(P->zw, dst, data, len);
+            free(data);
+            snprintf(P->media[P->nmedia], sizeof(P->media[0]), "%s", seen);
+            snprintf(P->media_id[P->nmedia], sizeof(P->media_id[0]), "rIdPm%d", P->nmedia);
+            pb_printf(&P->rels, "<Relationship Id=\"%s\" Type=\"http://schemas.openxmlformats.org/officeDocument/"
+                      "2006/relationships/image\" Target=\"media/p%d_key.png\"/>", P->media_id[P->nmedia],
+                      P->nmedia);
+            return P->media_id[P->nmedia++];
+        }
+    }
+
     snprintf(dst, sizeof(dst), "word/media/p%d_%.100s", P->nmedia, name);
     pd_zipw_add(P->zw, dst, data, len);
     free(data);
-    snprintf(P->media[P->nmedia], sizeof(P->media[0]), "%.127s", path);
+    snprintf(P->media[P->nmedia], sizeof(P->media[0]), "%s", seen);
     snprintf(P->media_id[P->nmedia], sizeof(P->media_id[0]), "rIdPm%d", P->nmedia);
     pb_printf(&P->rels, "<Relationship Id=\"%s\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
               "relationships/image\" Target=\"media/p%d_%s\"/>", P->media_id[P->nmedia], P->nmedia, name);
@@ -1605,6 +1720,87 @@ static void put_renamed(const pptx* P, pd_buf* o, const xdoc* d, int n, const ch
 }
 
 /* an inside with its pictures' ids made the .docx's */
+/* the colour a picture's a:blip makes transparent (its a:clrChange from a colour to one of alpha 0), as 0x1000000 |
+   RGB; 0 for none. s is the blip's markup after its r:embed's value, n what is left of the element it is in */
+static uint32_t blip_key(const char* s, size_t n) {
+    size_t i, end = n;
+    const char* cc = NULL, *v;
+
+    /* to the blip's end: "/>" closes one with nothing in it; else its </a:blip> */
+    for (i = 0; i < n; i++) {
+        if (s[i] == '>') {
+            if (i > 0 && s[i - 1] == '/') {
+                return 0;
+            }
+
+            break;
+        }
+    }
+
+    for (; i + 9 <= n; i++) {
+        if (!memcmp(s + i, "</a:blip>", 9)) {
+            end = i;
+            break;
+        }
+
+        if (!cc && i + 12 <= n && !memcmp(s + i, "<a:clrChange", 12)) {
+            cc = s + i;
+        }
+    }
+
+    if (!cc) {
+        return 0;
+    }
+
+    /* its clrFrom's colour, when it is an RGB one, and its clrTo's alpha 0 */
+    {
+        size_t at = (size_t)(cc - s);
+        const char* from = NULL, *to = NULL;
+        const char* av;
+
+        for (i = at; i + 11 <= end; i++) {
+            if (!from && !memcmp(s + i, "<a:clrFrom>", 11)) {
+                from = s + i;
+            }
+
+            if (!to && i + 9 <= end && !memcmp(s + i, "<a:clrTo>", 9)) {
+                to = s + i;
+            }
+        }
+
+        if (!from || !to) {
+            return 0;
+        }
+
+        v = strstr(from, "<a:srgbClr val=\"");
+
+        if (!v || v > to) {
+            return 0;
+        }
+
+        v += 16;
+
+        /* the target colour see-through: an alpha of 0 in it (PowerPoint writes 100000 then 0: the last counts) */
+        av = NULL;
+
+        for (i = (size_t)(to - s); i + 15 <= end; i++) {
+            if (!memcmp(s + i, "<a:alpha val=\"", 14)) {
+                av = s + i + 14;
+            }
+
+            if (!memcmp(s + i, "</a:clrTo>", 10)) {
+                break;
+            }
+        }
+
+        if (!av || atoi(av) != 0) {
+            return 0;
+        }
+
+        return 0x1000000u | ((uint32_t)strtoul(v, NULL, 16) & 0xFFFFFFu);
+    }
+}
+
 static void put_with_media(pd_buf* o, const conv* C, const ppart* pt, const char* s, size_t n) {
     static const char key[] = "r:embed=\"";
     size_t i = 0;
@@ -1638,7 +1834,7 @@ static void put_with_media(pd_buf* o, const conv* C, const ppart* pt, const char
             }
 
             rid[q] = '\0';
-            m = media_id(C->P, pt, rid);
+            m = media_id_keyed(C->P, pt, rid, blip_key(s + i, n - i));
             pb_puts(o, m ? m : "");
         }
     }
