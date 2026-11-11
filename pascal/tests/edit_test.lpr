@@ -3481,50 +3481,6 @@ begin
     Check(False, 'a header made');
 end;
 
-{ a word typed over with itself, as a paste over the same words leaves it: a deletion of "has " and an insertion of
-  "has " side by side, the text as it was -- no balloon saying "deleted: has", which on a proposal's first page was
-  a column of them for nothing; a word replaced by another keeps its balloon }
-procedure TestSameTextBalloon(E: TParadeEdit);
-var
-  Para: pd_block_id;
-  I, N: Integer;
-
-  function Deletions: Integer;
-  var
-    K: Integer;
-  begin
-    E.Repaint;
-    Application.ProcessMessages;
-    Result := 0;
-    for K := 0 to E.BalloonCount - 1 do
-      if E.BalloonKind(K) = PD_MARK_DELETION then
-        Inc(Result);
-  end;
-
-begin
-  E.NewDocument;
-  E.MarkupMode := PD_MARKUP_BALLOONS;
-  E.InsertText('The system has the potential to help.');
-  Para := pd_doc_next_paragraph(E.Doc, 0);
-  E.TrackChanges := True;
-  E.GoToPos(PdPos(Para, 11));
-  for I := 1 to 4 do
-    E.ProcessKey(VK_RIGHT, [ssShift]);
-  Check(E.SelectedText = 'has ', 'the word to type over: ' + E.SelectedText);
-  E.InsertText('has ');
-  E.TrackChanges := False;
-  N := Deletions;
-  Check(N = 0, Format('typed over with the same: no deletion balloon (%d)', [N]));
-  E.TrackChanges := True;
-  E.GoToPos(PdPos(Para, 0));
-  for I := 1 to 3 do
-    E.ProcessKey(VK_RIGHT, [ssShift]);
-  E.InsertText('Our');
-  E.TrackChanges := False;
-  N := Deletions;
-  Check(N = 1, Format('a word replaced by another: its balloon (%d)', [N]));
-end;
-
 procedure Fail(E: Exception);
 begin
   WriteLn(StdErr, 'exception: ', E.ClassName, ': ', E.Message);
@@ -4871,8 +4827,6 @@ begin
   TestAnimEdit(E);
   Step('balloons in place');
   TestBalloonPlace(E);
-  Step('no balloon for text typed over with itself');
-  TestSameTextBalloon(E);
   Step('fields shaded');
   TestFieldShade(E);
   Step('what a right click is on');

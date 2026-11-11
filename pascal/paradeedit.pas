@@ -16575,32 +16575,6 @@ var
     Segs[High(Segs)] := T;
   end;
 
-  { the deletion Items[K], of text T, has beside it -- just after, or just before -- an insertion of the same text by
-    the same author: a word typed over with itself, or a paste over the same words }
-  function RetypedAs(K: Integer; const T: string): Boolean;
-  var
-    Q: Integer;
-    Ri, Rd: pd_revision;
-    U: string;
-  begin
-    Result := False;
-    if T = '' then
-      Exit;
-    for Q := 0 to N - 1 do
-      if (Items[Q].kind = PD_MARK_INSERTION) and (Items[Q].range.start.block = Items[K].range.start.block) and
-         (Items[Q].range.finish.block = Items[K].range.finish.block) and
-         ((Items[Q].range.start.offset = Items[K].range.finish.offset) or
-          (Items[Q].range.finish.offset = Items[K].range.start.offset)) then
-      begin
-        U := Copy(ParaText(Items[Q].range.start.block), Items[Q].range.start.offset + 1,
-          Items[Q].range.finish.offset - Items[Q].range.start.offset);
-        if (U = T) and (pd_doc_revision_get(FDoc, Items[Q].id, Ri) = PD_OK) and
-           (pd_doc_revision_get(FDoc, Items[K].id, Rd) = PD_OK) and
-           (StrComp(PAnsiChar(@Ri.author[0]), PAnsiChar(@Rd.author[0])) = 0) then
-          Exit(True);
-      end;
-  end;
-
 begin
   if Page >= Length(FMarkCache) then
     SetLength(FMarkCache, Page + 1);
@@ -16642,8 +16616,6 @@ begin
       if It.kind = PD_MARK_DELETION then
       begin
         S := Copy(ParaText(It.range.start.block), It.range.start.offset + 1, It.range.finish.offset - It.range.start.offset);
-        if RetypedAs(I, S) then
-          Continue;   { the same text inserted beside it by the same hand: nothing was changed, nothing to say }
         S := StringReplace(S, #$EF#$BF#$BC, '', [rfReplaceAll]);
         if Length(S) > 400 then
           S := Copy(S, 1, 400) + '...';
