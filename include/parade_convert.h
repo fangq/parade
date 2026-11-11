@@ -56,7 +56,7 @@ typedef enum {
     PD_CONV_TEXT = 0,
     PD_CONV_HTML = 1,
     PD_CONV_MARKDOWN = 2,
-    PD_CONV_LATEX = 3,          /**< export only */
+    PD_CONV_LATEX = 3,          /**< an article, report or book (read for what it means, not typeset as TeX does) */
     PD_CONV_RTF = 4,
     PD_CONV_DOCX = 5,
     PD_CONV_JDATA = 6,          /**< the native format (JData text), for clipboards */

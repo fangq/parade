@@ -1643,7 +1643,7 @@ pd_status pd_doc_import(const void* data, size_t len, pd_conv_format fmt, pd_doc
         fmt = PD_CONV_DOCX;
     }
 
-    if (fmt == PD_CONV_LATEX || (int)fmt < 0 || fmt > PD_CONV_PPTX) {
+    if ((int)fmt < 0 || fmt > PD_CONV_DOTX) {
         return PD_ERR_ARG;
     }
 
@@ -1676,6 +1676,10 @@ pd_status pd_doc_import(const void* data, size_t len, pd_conv_format fmt, pd_doc
 
         case PD_CONV_RTF:
             st = pd_rtf_import(d, s, len);
+            break;
+
+        case PD_CONV_LATEX:
+            st = pd_latex_import(d, s, len);
             break;
 
         case PD_CONV_DOCX:

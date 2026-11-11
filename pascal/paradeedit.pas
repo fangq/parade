@@ -1156,7 +1156,7 @@ function ParadeTailInner(const Xml: string): string;
 implementation
 
 uses
-  FPReadPNG, FPReadJPEG, FPReadGIF, FPReadBMP, FPReadTiff;
+  FPReadPNG, FPReadJPEG, FPReadGIF, FPReadBMP, FPReadTiff, FPWritePNG, paradepdf;
 
 { ---------------- pictures decoded off the screen's thread ---------------- }
 
@@ -2214,12 +2214,68 @@ begin
   Result := 0;
 end;
 
+{ a PDF's first page as a PNG (a LaTeX figure is often a PDF of its own): drawn at about 200 dpi, no more than 2400
+  pixels across; nil when it is not a PDF Parade reads }
+function PdfFigureAsPng(Ms: TMemoryStream): TMemoryStream;
+var
+  Pdf: Ppd_pdfr;
+  W, H, Scale: Double;
+  PW, PH, X, Y: Integer;
+  Px: array of Byte;
+  Img: TFPMemoryImage;
+  Wr: TFPWriterPNG;
+  C: TFPColor;
+begin
+  Result := nil;
+  Pdf := nil;
+  if (Ms.Size < 8) or (pd_pdfr_open_memory(Ms.Memory, Ms.Size, nil, Pdf) <> 0) then
+  begin
+    if Pdf <> nil then pd_pdfr_free(Pdf);
+    Exit;
+  end;
+  try
+    if (pd_pdfr_page_count(Pdf) < 1) or (pd_pdfr_page_size(Pdf, 0, W, H) <> 0) or (W <= 0) or (H <= 0) then
+      Exit;
+    Scale := Min(200 / 72, 2400 / Max(W, H));
+    PW := Max(1, Round(W * Scale));
+    PH := Max(1, Round(H * Scale));
+    SetLength(Px, PW * PH * 4);
+    if pd_pdfr_render(Pdf, 0, Scale, 0, 0, @Px[0], PW, PH, PW * 4, PD_PDFR_NO_ANNOTS) <> 0 then
+      Exit;
+    Img := TFPMemoryImage.Create(PW, PH);
+    Wr := TFPWriterPNG.Create;
+    try
+      for Y := 0 to PH - 1 do
+        for X := 0 to PW - 1 do
+        begin
+          C.Red := Px[(Y * PW + X) * 4] * 257;
+          C.Green := Px[(Y * PW + X) * 4 + 1] * 257;
+          C.Blue := Px[(Y * PW + X) * 4 + 2] * 257;
+          C.Alpha := $FFFF;
+          Img.Colors[X, Y] := C;
+        end;
+      Wr.UseAlpha := False;
+      Result := TMemoryStream.Create;
+      Img.SaveToStream(Result, Wr);
+    finally
+      Wr.Free;
+      Img.Free;
+    end;
+  finally
+    pd_pdfr_free(Pdf);
+  end;
+end;
+
 { a picture by its address, for pd_doc_load_images: a path relative to the document's folder (user
-  points at it, a string) or absolute, or a file:// URL; nothing is fetched from the network }
+  points at it, a string) or absolute, or a file:// URL; nothing is fetched from the network. A name without its
+  extension (LaTeX's \includegraphics{fig}) as the file with one LaTeX would find; a PDF as its first page }
 function FetchFile(user: Pointer; address: PAnsiChar; write: pd_writer; sink: Pointer): cint; cdecl;
+const
+  EXTS: array[0..4] of string = ('.pdf', '.png', '.jpg', '.jpeg', '.gif');
 var
   Path: string;
-  Ms: TMemoryStream;
+  Ms, Png: TMemoryStream;
+  K: Integer;
 begin
   Result := 1;
   Path := StrPas(address);
@@ -2231,13 +2287,30 @@ begin
     Exit;
   if not FilenameIsAbsolute(Path) then
     Path := PString(user)^ + Path;
+  if not FileExists(Path) and (ExtractFileExt(Path) = '') then
+    for K := 0 to High(EXTS) do
+      if FileExists(Path + EXTS[K]) then
+      begin
+        Path := Path + EXTS[K];
+        Break;
+      end;
   if not FileExists(Path) then
     Exit;
   Ms := TMemoryStream.Create;
   try
     try
       Ms.LoadFromFile(Path);
-      if Ms.Size > 0 then
+      if (Ms.Size > 5) and (CompareByte(Ms.Memory^, PAnsiChar('%PDF-')^, 5) = 0) then
+      begin
+        Png := PdfFigureAsPng(Ms);
+        try
+          if Png <> nil then
+            Result := write(sink, Png.Memory, Png.Size);
+        finally
+          Png.Free;
+        end;
+      end
+      else if Ms.Size > 0 then
         Result := write(sink, Ms.Memory, Ms.Size);
     except
       Result := 1;
@@ -2676,17 +2749,110 @@ begin
   end;
 end;
 
+{ a LaTeX file with the files it \input, \include or \subfile put in where it names them (as TeX reads them: beside
+  the main file, with .tex when the name has no extension), they in turn theirs; not inside a comment }
+function TexWithInputs(const Src, Dir: string; Depth: Integer; var Budget: Int64): string;
+const
+  CMDS: array[0..2] of string = ('\input{', '\include{', '\subfile{');
+var
+  I, J, K, E, Hit, Last: Integer;
+  Name, Path, Inner: string;
+  InComment: Boolean;
+  Sl: TStringList;
+begin
+  Result := '';
+  I := 1;
+  Last := 1;    { the text from here to I not yet in Result }
+  InComment := False;
+  while I <= Length(Src) do
+  begin
+    if Src[I] = #10 then
+      InComment := False
+    else if (Src[I] = '%') and ((I = 1) or (Src[I - 1] <> '\')) then
+      InComment := True;
+    Hit := -1;
+    if (not InComment) and (Src[I] = '\') and (Depth < 8) then
+      for K := 0 to High(CMDS) do
+        if Copy(Src, I, Length(CMDS[K])) = CMDS[K] then
+        begin
+          Hit := K;
+          Break;
+        end;
+    if Hit < 0 then
+    begin
+      Inc(I);
+      Continue;
+    end;
+    J := I + Length(CMDS[Hit]);
+    E := J;
+    while (E <= Length(Src)) and (Src[E] <> '}') and (Src[E] <> #10) do
+      Inc(E);
+    if (E > Length(Src)) or (Src[E] <> '}') then
+    begin
+      Inc(I);
+      Continue;
+    end;
+    Result := Result + Copy(Src, Last, I - Last);
+    Name := Trim(Copy(Src, J, E - J));
+    Path := Name;
+    if not FilenameIsAbsolute(Path) then
+      Path := Dir + Path;
+    if not FileExists(Path) and FileExists(Path + '.tex') then
+      Path := Path + '.tex';
+    Inner := '';
+    if (Name <> '') and FileExists(Path) and (Budget > 0) then
+    begin
+      Sl := TStringList.Create;
+      try
+        try
+          Sl.LoadFromFile(Path);
+          Inner := Sl.Text;
+        except
+          Inner := '';
+        end;
+      finally
+        Sl.Free;
+      end;
+      Dec(Budget, Length(Inner));
+      { a \subfile's file is a document of its own: its body, not its preamble }
+      if (Hit = 2) and (Pos('\begin{document}', Inner) > 0) then
+      begin
+        Inner := Copy(Inner, Pos('\begin{document}', Inner) + 16, MaxInt);
+        if Pos('\end{document}', Inner) > 0 then
+          Inner := Copy(Inner, 1, Pos('\end{document}', Inner) - 1);
+      end;
+      Inner := TexWithInputs(Inner, Dir, Depth + 1, Budget);
+      if Hit = 1 then
+        Inner := '\clearpage ' + Inner + LineEnding + '\clearpage ';
+    end;
+    Result := Result + Inner + ' ';
+    I := E + 1;
+    Last := I;
+  end;
+  Result := Result + Copy(Src, Last, MaxInt);
+end;
+
 procedure TParadeEdit.LoadFromStream(Stream: TStream; Format: Int32; const FileName: string);
 var
   Ms: TMemoryStream;
   D: Ppd_doc;
-  Base: string;
+  Base, Tex: string;
+  Budget: Int64;
 begin
   Ms := TMemoryStream.Create;
   try
     Ms.CopyFrom(Stream, Stream.Size - Stream.Position);
     if Format < 0 then
       Format := pd_conv_detect(Ms.Memory, Ms.Size);
+    if (Format = PD_CONV_LATEX) and (FileName <> '') and (Ms.Size > 0) then
+    begin   { the parts it brings in from other files, put in }
+      SetString(Tex, PAnsiChar(Ms.Memory), Ms.Size);
+      Budget := 64 * 1024 * 1024;
+      Tex := TexWithInputs(Tex, ExtractFilePath(ExpandFileName(FileName)), 0, Budget);
+      Ms.Clear;
+      if Tex <> '' then
+        Ms.WriteBuffer(Tex[1], Length(Tex));
+    end;
     if Format = PD_CONV_JDATA then
       ParadeCheck(pd_doc_load(Ms.Memory, Ms.Size, PD_JDATA_AUTO, D), 'load ' + FileName)
     else

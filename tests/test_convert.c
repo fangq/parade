@@ -5535,6 +5535,158 @@ static int keyed_found(const pd_doc* d, int* opaque_white) {
     return found;
 }
 
+/* a LaTeX file read: its parts as what they mean, numbered as LaTeX numbers them, its macros expanded */
+static void test_latex_import(void) {
+    static const char tex[] =
+        "\\documentclass{article}\n"
+        "\\usepackage{amsmath}\n"
+        "\\newcommand{\\R}{\\mathbb{R}}\n"
+        "\\newcommand{\\name}[1]{\\textbf{#1}}\n"
+        "\\DeclareMathOperator{\\tr}{tr}\n"
+        "\\title{A Test \\& More \\LaTeX{} too}\n\\author{Ann One \\and Bob Two}\n\\date{}\n"
+        "\\begin{document}\n\\maketitle\n"
+        "\\begin{abstract}Short.\\end{abstract}\n"
+        "\\section{Intro}\\label{sec:intro}\n"
+        "Caf\\'e na\\\"ive, ``quoted'' -- dash --- em~nbsp \\emph{it} \\name{bold} % a comment\n"
+        "and $x\\in\\R$ and \\tr.\n\n"
+        "See Section~\\ref{sec:two}, Fig.~\\ref{fig:a}, Eq.~\\eqref{eq:e} and \\cite{k2,k1}.\\footnote{A note.}\n"
+        "\\subsection{Sub}\n"
+        "\\begin{itemize}\\item First\\item Second\\end{itemize}\n"
+        "\\begin{enumerate}\\item One\\label{it:one}\\end{enumerate}\n"
+        "\\section{Two}\\label{sec:two}\n"
+        "\\begin{equation}E=mc^2\\label{eq:e}\\end{equation}\n"
+        "\\begin{figure}\\centering\\includegraphics[width=0.5\\textwidth]{pic.png}\\caption{A pic}\\label{fig:a}"
+        "\\end{figure}\n"
+        "\\begin{table}\\caption{Data}\\begin{tabular}{lcr}\\toprule A & B & C\\\\\\midrule 1 & 2 & 3\\\\"
+        "\\multicolumn{2}{c}{wide} & 4\\\\\\bottomrule\\end{tabular}\\end{table}\n"
+        "\\begin{verbatim}\ncode  line\n  two\n\\end{verbatim}\n"
+        "\\href{https://example.com}{a link}\n"
+        "\\begin{thebibliography}{9}\\bibitem{k1} First ref.\\bibitem{k2} Second ref.\\end{thebibliography}\n"
+        "\\end{document}\n";
+    pd_doc* d = NULL;
+    pd_block_id p;
+    char all[8192];
+    size_t w = 0;
+    int title = 0, h1 = 0, h2 = 0, list_items = 0, eq_display = 0, code_lines = 0, caption = 0, tables = 0;
+    int found_eq_inline = 0, found_eq_display = 0, footnotes = 0, links = 0;
+
+    CHECK(pd_doc_import(tex, sizeof(tex) - 1, PD_CONV_LATEX, &d) == PD_OK && d);
+
+    if (!d) {
+        return;
+    }
+
+    for (p = pd_doc_next_paragraph(d, 0); p; p = pd_doc_next_paragraph(d, p)) {
+        pd_block_info bi;
+        uint32_t n, k;
+        const char* t = para_text(d, p, &n);
+
+        if (pd_doc_block_info(d, p, &bi) != PD_OK) {
+            continue;
+        }
+
+        title += bi.role == PD_ROLE_TITLE;
+        h1 += bi.role == PD_ROLE_HEADING && bi.level == 1;
+        h2 += bi.role == PD_ROLE_HEADING && bi.level == 2;
+        caption += bi.role == PD_ROLE_CAPTION;
+        code_lines += bi.role == PD_ROLE_CODE;
+        eq_display += bi.role == PD_ROLE_EQUATION;
+        list_items += bi.list_level >= 0 && bi.list != 0;
+
+        for (k = 0; k + 3 <= n; k++) {
+            if ((unsigned char)t[k] == 0xEF && (unsigned char)t[k + 1] == 0xBF && (unsigned char)t[k + 2] == 0xBC) {
+                pd_inline o;
+
+                if (pd_doc_inline_at(d, at(p, k), &o) == PD_OK) {
+                    if (o.kind == PD_INLINE_EQUATION && o.source_len == 14 &&
+                        !strncmp(o.source, "x\\in\\mathbb{R}", 14)) {
+                        found_eq_inline = 1;
+                    }
+
+                    if (o.kind == PD_INLINE_EQUATION && bi.role == PD_ROLE_EQUATION &&
+                        o.source_len == 6 && !strncmp(o.source, "E=mc^2", 6)) {
+                        found_eq_display = 1;
+                    }
+
+                    footnotes += o.kind == PD_INLINE_FOOTNOTE;
+                    links += o.kind == PD_INLINE_LINK && o.source_len > 0;
+                }
+            }
+        }
+
+        if (w + n + 2 < sizeof(all)) {
+            memcpy(all + w, t, n);
+            w += n;
+            all[w++] = '|';
+        }
+    }
+
+    all[w] = '\0';
+    CHECK(title == 1 && strstr(all, "A Test & More LaTeX too|"));
+    CHECK(strstr(all, "Ann One\nBob Two|") != NULL);
+    CHECK(h1 == 3 && h2 == 1 && strstr(all, "1  Intro|") && strstr(all, "1.1  Sub|") && strstr(all, "2  Two|"));
+    CHECK(strstr(all, "Caf\xC3\xA9 na\xC3\xAFve, \xE2\x80\x9Cquoted\xE2\x80\x9D \xE2\x80\x93 dash \xE2\x80\x94 em\xC2\xA0nbsp it bold and ") != NULL);
+    CHECK(strstr(all, "See Section\xC2\xA0" "2, Fig.\xC2\xA0" "1, Eq.\xC2\xA0(1) and [2, 1].") != NULL);    /* forward refs */
+    CHECK(found_eq_inline);         /* the document's \R expanded in the formula */
+    CHECK(strstr(all, " and \\operatorname{tr}") == NULL);  /* \tr in text: not shown as source */
+    CHECK(found_eq_display && eq_display == 1);
+    CHECK(list_items == 3 && strstr(all, "First|Second|One|"));
+    CHECK(caption == 2 && strstr(all, "Figure 1: A pic|") && strstr(all, "Table 1: Data|"));
+    CHECK(code_lines == 2 && strstr(all, "|code  line|  two|"));
+    CHECK(footnotes == 1 && links == 1 && strstr(all, "a link"));
+    CHECK(strstr(all, "[1] First ref.|[2] Second ref.|") != NULL && strstr(all, "References|"));
+    CHECK(strstr(all, "comment") == NULL && strstr(all, "usepackage") == NULL && strstr(all, "amsmath") == NULL);
+
+    /* the table: three rows, the first the head; the merged cell spans two */
+    {
+        pd_block_id sec = pd_doc_child(d, pd_doc_root(d), 0), b, tbl = 0;
+        pd_block_info si, bi;
+        int32_t k;
+
+        if (pd_doc_block_info(d, sec, &si) == PD_OK) {
+            for (k = 0; k < si.child_count; k++) {
+                b = pd_doc_child(d, sec, k);
+
+                if (pd_doc_block_info(d, b, &bi) == PD_OK && bi.kind == PD_BLOCK_TABLE) {
+                    tbl = b;
+                    tables++;
+                }
+            }
+        }
+
+        CHECK(tables == 1);
+
+        if (tbl) {
+            pd_block_id r0 = pd_doc_child(d, tbl, 0), r2 = pd_doc_child(d, tbl, 2);
+            pd_block_info ti, i0, i2;
+            pd_cell_props cp;
+
+            CHECK(pd_doc_block_info(d, tbl, &ti) == PD_OK && ti.child_count == 3);
+            CHECK(pd_doc_block_info(d, r0, &i0) == PD_OK && i0.child_count == 3);
+            CHECK(pd_doc_block_info(d, r2, &i2) == PD_OK && i2.child_count == 2);
+            CHECK(pd_doc_cell_props(d, pd_doc_child(d, r2, 0), &cp) == PD_OK && cp.col_span == 2);
+        }
+    }
+
+    pd_doc_free(d);
+    /* a part of a document (no \begin{document}): all of it text */
+    CHECK(pd_doc_import("\\section{Only}\nText here.", 25, PD_CONV_LATEX, &d) == PD_OK && d);
+
+    if (d) {
+        p = pd_doc_next_paragraph(d, 0);
+        CHECK(text_is(d, p, "1  Only") && text_is(d, pd_doc_next_paragraph(d, p), "Text here."));
+        pd_doc_free(d);
+    }
+
+    /* a macro that expands for ever: stopped, not hung */
+    {
+        static const char bomb[] = "\\def\\a{\\a\\a}\\a x";
+
+        CHECK(pd_doc_import(bomb, sizeof(bomb) - 1, PD_CONV_LATEX, &d) == PD_OK && d);
+        pd_doc_free(d);
+    }
+}
+
 typedef struct {
     const unsigned char* all;
     int n, same, delay_sum, stop_after;
@@ -11902,6 +12054,7 @@ int main(void) {
     test_pptx_kept_links();
     test_pptx_transparent_color();
     test_gif_frames();
+    test_latex_import();
     test_pptx_chart();
     test_pptx_ph_inherit();
     test_pptx_run_props();
