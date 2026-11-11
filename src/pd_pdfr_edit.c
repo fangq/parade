@@ -959,10 +959,106 @@ int32_t pd_pdfr_annot_count(pd_pdfr* d, int32_t page) {
 
 static int field_index_of(pdoc* d, pv widget);
 
+/* a named destination: from the catalog's /Dests (a name) or its /Names /Dests tree (a string) */
+static pv named_dest(pdoc* d, pv dest) {
+    pv root = pd_get(d, d->trailer, "Root");
+
+    if (dest.t == PV_NAME && pd_get(d, root, "Dests").t == PV_DICT) {
+        return pd_get(d, pd_get(d, root, "Dests"), dest.u.s);
+    }
+
+    if (dest.t == PV_STRING) {
+        pv stack[32];
+        int sp = 0, visits = 0;
+        pv names = pd_get(d, pd_get(d, root, "Names"), "Dests");
+
+        if (names.t == PV_DICT) {
+            stack[sp++] = names;
+        }
+
+        while (sp > 0 && visits++ < 4096) {
+            pv node = stack[--sp], ns = pd_get(d, node, "Names"), kids = pd_get(d, node, "Kids");
+            int32_t i;
+
+            for (i = 0; ns.t == PV_ARRAY && i + 1 < ns.n; i += 2) {
+                pv key = pd_index(d, ns, i);
+
+                if (key.t == PV_STRING && key.n == dest.n && memcmp(key.u.s, dest.u.s, (size_t)dest.n) == 0) {
+                    return pd_index(d, ns, i + 1);
+                }
+            }
+
+            for (i = 0; kids.t == PV_ARRAY && i < kids.n && sp < 32; i++) {
+                stack[sp++] = pd_index(d, kids, i);
+            }
+        }
+    }
+
+    return dest;
+}
+
+/* where a destination (an array, a name, a string; an action's /D) goes: the page (-1 if none) and, when it says,
+   the height on it shown (points from the top; -1 if it does not) */
+static int32_t dest_page(pdoc* d, pv dest, double* top) {
+    pv pg;
+    int32_t i, page = -1;
+
+    *top = -1;
+    dest = named_dest(d, dest);
+
+    if (dest.t == PV_DICT) {
+        dest = pd_get(d, dest, "D");
+    }
+
+    if (dest.t != PV_ARRAY || dest.n < 1) {
+        return -1;
+    }
+
+    pg = dest.u.a[0];
+
+    if (pg.t == PV_INT) {
+        page = pg.u.i >= 0 && pg.u.i < d->npages ? (int32_t)pg.u.i : -1;
+    }
+
+    for (i = 0; pg.t == PV_REF && i < d->npages; i++) {
+        if (d->pages[i].ref.t == PV_REF && d->pages[i].ref.u.i == pg.u.i) {
+            page = i;
+            break;
+        }
+    }
+
+    if (page >= 0 && dest.n >= 2) {
+        pv kind = pd_resolve(d, dest.u.a[1]);
+        double x = 0, y = 0, b[6], sx, sy;
+        int has = 0;
+
+        if (kind.t == PV_NAME) {
+            if (!strcmp(kind.u.s, "XYZ") && dest.n >= 4) {
+                pd_num(d, pd_resolve(d, dest.u.a[2]), &x);
+                has = pd_num(d, pd_resolve(d, dest.u.a[3]), &y);
+            } else if ((!strcmp(kind.u.s, "FitH") || !strcmp(kind.u.s, "FitBH")) && dest.n >= 3) {
+                has = pd_num(d, pd_resolve(d, dest.u.a[2]), &y);
+            } else if (!strcmp(kind.u.s, "FitR") && dest.n >= 6) {
+                pd_num(d, pd_resolve(d, dest.u.a[2]), &x);
+                has = pd_num(d, pd_resolve(d, dest.u.a[5]), &y);
+            }
+        }
+
+        if (has) {
+            pd_page_base(d, page, b);
+            mat_pt(b, x, y, &sx, &sy);
+            *top = sy > 0 ? sy : 0;
+        }
+    }
+
+    return page;
+}
+
 static void link_target(pdoc* d, pv a, char* uri, size_t cap) {
     pv act = pd_get(d, a, "A"), dest = pd_get(d, a, "Dest");
     const char* s = pd_getname(d, act, "S");
-    pv root = pd_get(d, d->trailer, "Root");
+    int32_t page;
+    double top;
 
     if (s && strcmp(s, "URI") == 0) {
         pv u = pd_get(d, act, "URI");
@@ -978,56 +1074,91 @@ static void link_target(pdoc* d, pv a, char* uri, size_t cap) {
         dest = pd_get(d, act, "D");
     }
 
-    if (dest.t == PV_NAME && pd_get(d, root, "Dests").t == PV_DICT) {
-        dest = pd_get(d, pd_get(d, root, "Dests"), dest.u.s);
-    } else if (dest.t == PV_STRING) {    /* a named destination: the name tree looked through */
-        pv stack[32];
-        int sp = 0, found = 0;
-        pv names = pd_get(d, pd_get(d, root, "Names"), "Dests");
+    page = dest_page(d, dest, &top);
 
-        if (names.t == PV_DICT) {
-            stack[sp++] = names;
+    if (page >= 0) {
+        snprintf(uri, cap, "#page=%d", (int)page + 1);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* the outline (bookmarks)                                            */
+/* ------------------------------------------------------------------ */
+
+pd_status pd_pdfr_outline(pd_pdfr* d, pd_pdfr_bookmark* buf, int32_t cap, int32_t* count) {
+    pv root, item;
+    pv stack[64];               /* the next sibling of each level above */
+    int depth = 0;
+    int32_t n = 0, guard = 0;
+
+    if (!d || !count) {
+        return PD_ERR_ARG;
+    }
+
+    *count = 0;
+    root = pd_get(d, d->trailer, "Root");
+    item = pd_get_raw(pd_get(d, root, "Outlines"), "First");
+
+    /* depth first, in order: an item, its children, then its next; a loop (a file's /Next back to itself) ended by
+       counting */
+    while (guard++ < 200000) {
+        pv it = pd_resolve(d, item);
+
+        if (it.t != PV_DICT) {
+            if (depth == 0) {
+                break;
+            }
+
+            item = stack[--depth];
+            continue;
         }
 
-        while (sp > 0 && !found) {
-            pv node = stack[--sp], ns = pd_get(d, node, "Names"), kids = pd_get(d, node, "Kids");
-            int32_t i;
+        if (buf && n < cap) {
+            pd_pdfr_bookmark* b = &buf[n];
+            pv t = pd_get(d, it, "Title"), act = pd_get(d, it, "A"), dest = pd_get(d, it, "Dest");
+            const char* s = pd_getname(d, act, "S");
+            char* text = t.t == PV_STRING ? pd_text_utf8(t, NULL) : NULL;
+            size_t k;
 
-            for (i = 0; ns.t == PV_ARRAY && i + 1 < ns.n; i += 2) {
-                pv key = pd_index(d, ns, i);
+            memset(b, 0, sizeof(*b));
+            b->level = depth + 1;
 
-                if (key.t == PV_STRING && key.n == dest.n && memcmp(key.u.s, dest.u.s, (size_t)dest.n) == 0) {
-                    dest = pd_index(d, ns, i + 1);
-                    found = 1;
-                    break;
+            if (text) {
+                snprintf(b->title, sizeof(b->title), "%s", text);
+                free(text);
+
+                for (k = 0; b->title[k]; k++) {     /* (one line: a title's breaks as spaces) */
+                    if (b->title[k] == '\r' || b->title[k] == '\n' || b->title[k] == '\t') {
+                        b->title[k] = ' ';
+                    }
                 }
             }
 
-            for (i = 0; !found && kids.t == PV_ARRAY && i < kids.n && sp < 32; i++) {
-                stack[sp++] = pd_index(d, kids, i);
+            if (s && strcmp(s, "GoTo") == 0) {
+                dest = pd_get(d, act, "D");
+            } else if (s && strcmp(s, "URI") == 0) {
+                pv u = pd_get(d, act, "URI");
+
+                if (u.t == PV_STRING) {
+                    snprintf(b->uri, sizeof(b->uri), "%.*s", u.n, u.u.s);
+                }
             }
+
+            b->page = dest_page(d, dest, &b->top);
+        }
+
+        n++;
+
+        if (pd_get_raw(it, "First").t != PV_NULL && depth < 64) {
+            stack[depth++] = pd_get_raw(it, "Next");
+            item = pd_get_raw(it, "First");
+        } else {
+            item = pd_get_raw(it, "Next");
         }
     }
 
-    if (dest.t == PV_DICT) {
-        dest = pd_get(d, dest, "D");
-    }
-
-    if (dest.t == PV_ARRAY && dest.n >= 1) {
-        pv pg = dest.u.a[0];
-        int32_t i;
-
-        if (pg.t == PV_INT) {
-            snprintf(uri, cap, "#page=%d", (int)pg.u.i + 1);
-        }
-
-        for (i = 0; pg.t == PV_REF && i < d->npages; i++) {
-            if (d->pages[i].ref.t == PV_REF && d->pages[i].ref.u.i == pg.u.i) {
-                snprintf(uri, cap, "#page=%d", (int)i + 1);
-                break;
-            }
-        }
-    }
+    *count = n;
+    return buf && n > cap ? PD_ERR_RANGE : PD_OK;
 }
 
 pd_status pd_pdfr_annot_get(pd_pdfr* d, int32_t page, int32_t index, pd_pdfr_annot* out) {

@@ -81,6 +81,21 @@ PD_API pd_status pd_pdfr_page_spans(pd_pdfr* pdf, int32_t page, int32_t level, p
                                     int32_t* count);
 
 /* ------------------------------------------------------------------ */
+/* the outline (bookmarks)                                            */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int32_t level;              /**< 1 at the top, 2 inside one of those, ... */
+    int32_t page;               /**< the page it goes to (from 0), -1 if none */
+    double top;                 /**< the height there it goes to (points from the top as shown), -1 if it says none */
+    char title[256];            /**< UTF-8 (cut short if longer) */
+    char uri[256];              /**< a bookmark to a web address: it ("" else) */
+} pd_pdfr_bookmark;
+
+/** the file's bookmarks, depth first in their order; the size-query convention */
+PD_API pd_status pd_pdfr_outline(pd_pdfr* pdf, pd_pdfr_bookmark* buf, int32_t cap, int32_t* count);
+
+/* ------------------------------------------------------------------ */
 /* annotations                                                        */
 /* ------------------------------------------------------------------ */
 

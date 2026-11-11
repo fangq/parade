@@ -85,6 +85,15 @@ type
   Ppd_pdfr_span = ^pd_pdfr_span;
   TPdfSpans = array of pd_pdfr_span;
 
+  pd_pdfr_bookmark = record
+    level, page: Int32;
+    top: Double;
+    title: array[0..255] of AnsiChar;
+    uri: array[0..255] of AnsiChar;
+  end;
+  Ppd_pdfr_bookmark = ^pd_pdfr_bookmark;
+  TPdfBookmarks = array of pd_pdfr_bookmark;
+
   pd_pdfr_annot = record
     kind: Int32;
     x0, y0, x1, y1: Double;
@@ -130,6 +139,8 @@ function pd_pdfr_page_text(pdf: Ppd_pdfr; page: Int32; buf: Ppd_pdfr_char; cap: 
 function pd_pdfr_page_spans(pdf: Ppd_pdfr; page, level: Int32; buf: Ppd_pdfr_span; cap: Int32;
   out count: Int32): pd_status; cdecl; PDEXT;
 
+function pd_pdfr_outline(pdf: Ppd_pdfr; buf: Ppd_pdfr_bookmark; cap: Int32; out count: Int32): pd_status; cdecl;
+  PDEXT;
 function pd_pdfr_annot_count(pdf: Ppd_pdfr; page: Int32): Int32; cdecl; PDEXT;
 function pd_pdfr_annot_get(pdf: Ppd_pdfr; page, index: Int32; out a: pd_pdfr_annot): pd_status; cdecl; PDEXT;
 function pd_pdfr_annot_at(pdf: Ppd_pdfr; page: Int32; x, y: Double): Int32; cdecl; PDEXT;
@@ -184,8 +195,22 @@ function PdfPageChars(pdf: Ppd_pdfr; page: Integer): TPdfChars;
 function PdfCharsText(const C: array of pd_pdfr_char; AFrom, ATo: Integer): UTF8String;
 { a page's lines (PD_PDFR_LINES) or blocks (PD_PDFR_BLOCKS) }
 function PdfPageSpans(pdf: Ppd_pdfr; page, level: Integer): TPdfSpans;
+{ the file's bookmarks, in their order }
+function PdfOutline(pdf: Ppd_pdfr): TPdfBookmarks;
 
 implementation
+
+function PdfOutline(pdf: Ppd_pdfr): TPdfBookmarks;
+var
+  N: Int32;
+begin
+  Result := nil;
+  N := 0;
+  if pd_pdfr_outline(pdf, nil, 0, N) <> 0 then Exit;
+  SetLength(Result, N);
+  if N > 0 then
+    pd_pdfr_outline(pdf, @Result[0], N, N);
+end;
 
 function SaveSink(user: Pointer; data: Pointer; len: csize_t): cint; cdecl;
 var

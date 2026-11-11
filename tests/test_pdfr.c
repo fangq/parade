@@ -961,6 +961,57 @@ static void test_insert_image(void) {
     }
 }
 
+/* bookmarks: nested, in order, to pages and heights, a name, a loop ended */
+static void test_outline(void) {
+    char* cs = stream_obj("", "");
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R /Dests << /far [4 0 R /FitH 300] >> >>",
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 5 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 5 0 R >>",
+        cs,
+        "<< /Type /Outlines /First 7 0 R /Last 9 0 R /Count 3 >>",
+        "<< /Title (Introduction) /Parent 6 0 R /Next 9 0 R /First 8 0 R /Last 8 0 R /Dest [3 0 R /XYZ 0 700 0] >>",
+        "<< /Title <FEFF004200610063006B00670072006F0075006E0064> /Parent 7 0 R "
+        "/A << /S /GoTo /D /far >> >>",
+        "<< /Title (Results\\nand more) /Parent 6 0 R /Prev 7 0 R /Next 7 0 R /Dest [4 0 R /Fit] >>"
+    };
+    buf_t b = make_pdf(objs, 9, 0);
+    pd_pdfr* p = NULL;
+    pd_pdfr_bookmark bm[8];
+    int32_t n = -1;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+
+    if (p) {
+        CHECK(pd_pdfr_outline(p, NULL, 0, &n) == PD_OK && n > 3);    /* the loop: counted, not for ever */
+        n = 0;
+        CHECK(pd_pdfr_outline(p, bm, 3, &n) == PD_ERR_RANGE);
+        CHECK(pd_pdfr_outline(p, bm, 8, &n) == PD_ERR_RANGE || n <= 8);
+        CHECK(strcmp(bm[0].title, "Introduction") == 0 && bm[0].level == 1 && bm[0].page == 0 &&
+              fabs(bm[0].top - 100) < 0.01);
+        CHECK(strcmp(bm[1].title, "Background") == 0 && bm[1].level == 2 && bm[1].page == 1 &&
+              fabs(bm[1].top - 500) < 0.01);      /* a named destination, through a GoTo */
+        CHECK(strcmp(bm[2].title, "Results and more") == 0 && bm[2].level == 1 && bm[2].page == 1 &&
+              bm[2].top == -1);
+        pd_pdfr_free(p);
+    }
+
+    free(cs);
+    free(b.p);
+
+    /* none: none */
+    b = hello_pdf();
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+
+    if (p) {
+        CHECK(pd_pdfr_outline(p, NULL, 0, &n) == PD_OK && n == 0);
+        pd_pdfr_free(p);
+    }
+
+    free(b.p);
+}
+
 static void test_forms(void) {
     char* off = stream_obj("/BBox [0 0 20 20]", "");
     char* yes = stream_obj("/BBox [0 0 20 20]", "0 0 1 rg 3 3 14 14 re f");
@@ -1600,6 +1651,7 @@ int main(void) {
     test_bad();
     test_annots();
     test_insert_image();
+    test_outline();
     test_forms();
     test_replace_text();
     test_replace_in_tj();

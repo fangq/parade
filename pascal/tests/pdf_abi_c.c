@@ -14,5 +14,7 @@ int main(void) {
            offsetof(pd_pdfr_field, maxlen), offsetof(pd_pdfr_field, font_size));
     printf("span %zu %zu %zu %zu %zu\n", sizeof(pd_pdfr_span), offsetof(pd_pdfr_span, x0), offsetof(pd_pdfr_span, size),
            offsetof(pd_pdfr_span, lines), offsetof(pd_pdfr_span, align));
+    printf("bookmark %zu %zu %zu %zu %zu\n", sizeof(pd_pdfr_bookmark), offsetof(pd_pdfr_bookmark, page),
+           offsetof(pd_pdfr_bookmark, top), offsetof(pd_pdfr_bookmark, title), offsetof(pd_pdfr_bookmark, uri));
     return 0;
 }

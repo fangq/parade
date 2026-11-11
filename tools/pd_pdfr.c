@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
     pd_status st;
 
     if (argc < 3) {
-        fprintf(stderr, "usage: pd_pdfr render|text|spans|info|time file.pdf ...\n");
+        fprintf(stderr, "usage: pd_pdfr render|text|spans|outline|info|time file.pdf ...\n");
         return 2;
     }
 
@@ -134,6 +134,26 @@ int main(int argc, char** argv) {
 
         printf("\n");
         free(c);
+    } else if (strcmp(argv[1], "outline") == 0) {
+        /* pd_pdfr outline file.pdf: the bookmarks, indented by level, each the page (and height) it goes to */
+        int32_t n = 0, i;
+        pd_pdfr_bookmark* b;
+
+        pd_pdfr_outline(p, NULL, 0, &n);
+        b = (pd_pdfr_bookmark*)malloc(sizeof(pd_pdfr_bookmark) * (size_t)(n + 1));
+        pd_pdfr_outline(p, b, n, &n);
+
+        for (i = 0; i < n; i++) {
+            printf("%*s%s  -> %d", 2 * (b[i].level - 1), "", b[i].title, b[i].page + 1);
+
+            if (b[i].top >= 0) {
+                printf(" @%.0f", b[i].top);
+            }
+
+            printf("%s%s\n", b[i].uri[0] ? " " : "", b[i].uri);
+        }
+
+        free(b);
     } else if (strcmp(argv[1], "spans") == 0 && argc >= 4) {
         /* pd_pdfr spans file.pdf PAGE [lines]: the page's blocks (or lines), each its box and its text */
         int32_t n = 0, ns = 0, i, j, page = atoi(argv[3]) - 1;
