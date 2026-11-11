@@ -142,6 +142,8 @@ PD_API pd_status pd_pdfr_field_get(pd_pdfr* pdf, int32_t index, pd_pdfr_field* o
 PD_API pd_status pd_pdfr_field_option(pd_pdfr* pdf, int32_t index, int32_t i, char* buf, size_t cap);
 /** the field a page's widget at a point belongs to, or -1 */
 PD_API int32_t   pd_pdfr_field_at(pd_pdfr* pdf, int32_t page, double x, double y);
+/** the on state of a page's widget annotation (a radio button's own; "" if it has none) */
+PD_API pd_status pd_pdfr_widget_state(pd_pdfr* pdf, int32_t page, int32_t annot, char* buf, size_t cap);
 /** a text or choice field's value; a check box or radio button's state ("Off" or one of its on states, NULL or ""
     for its first on state) */
 PD_API pd_status pd_pdfr_field_set(pd_pdfr* pdf, int32_t index, const char* utf8);

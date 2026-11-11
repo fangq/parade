@@ -746,6 +746,8 @@ static void test_forms(void) {
     CHECK(pd_pdfr_field_at(p, 0, 100, 85) == 0);
     CHECK(pd_pdfr_field_at(p, 0, 60, 190) == 1);
     CHECK(pd_pdfr_field_at(p, 0, 300, 300) == -1);
+    CHECK(pd_pdfr_widget_state(p, 0, 1, opt, sizeof(opt)) == PD_OK && strcmp(opt, "Yes") == 0);
+    CHECK(pd_pdfr_widget_state(p, 0, 0, opt, sizeof(opt)) == PD_OK && opt[0] == 0);
 
     img = draw(p, 0, &w, &h);
 

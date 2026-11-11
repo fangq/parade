@@ -142,6 +142,11 @@ pascal: $(BUILD)/pascal/lib/libparade.a
 	./$(BUILD)/pascal/abi_c > $(BUILD)/pascal/abi_c.txt
 	./$(BUILD)/pascal/abi_test > $(BUILD)/pascal/abi_pas.txt
 	diff $(BUILD)/pascal/abi_c.txt $(BUILD)/pascal/abi_pas.txt && echo "ABI match"
+	$(CC) $(PD_CFLAGS) pascal/tests/pdf_abi_c.c -o $(BUILD)/pascal/pdf_abi_c
+	$(FPC) -O2 -Fupascal -Fl$(BUILD)/pascal/lib -FU$(BUILD)/pascal/units -FE$(BUILD)/pascal pascal/tests/pdf_abi_test.pas
+	./$(BUILD)/pascal/pdf_abi_c > $(BUILD)/pascal/pdf_abi_c.txt
+	./$(BUILD)/pascal/pdf_abi_test > $(BUILD)/pascal/pdf_abi_pas.txt
+	diff $(BUILD)/pascal/pdf_abi_c.txt $(BUILD)/pascal/pdf_abi_pas.txt && echo "PDF ABI match"
 	$(ulimit_cmd) && ./$(BUILD)/pascal/api_test
 
 # the editor control driven headless on a private Xvfb; renders PNGs into build/pascal

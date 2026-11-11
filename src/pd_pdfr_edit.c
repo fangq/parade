@@ -1941,6 +1941,35 @@ int32_t pd_pdfr_field_at(pd_pdfr* d, int32_t page, double x, double y) {
     return -1;
 }
 
+pd_status pd_pdfr_widget_state(pd_pdfr* d, int32_t page, int32_t annot, char* buf, size_t cap) {
+    pv a, nap;
+    int32_t ne, k;
+    pkv* e;
+
+    if (!d || !buf || !cap || page < 0 || page >= d->npages) {
+        return PD_ERR_ARG;
+    }
+
+    buf[0] = 0;
+    a = pd_index(d, annots_of(d, page), annot);
+
+    if (a.t != PV_DICT) {
+        return PD_ERR_RANGE;
+    }
+
+    nap = pd_get(d, pd_get(d, a, "AP"), "N");
+    e = pv_entries(nap, &ne);
+
+    for (k = 0; k < ne; k++) {
+        if (strcmp(e[k].key, "Off") != 0) {
+            snprintf(buf, cap, "%s", e[k].key);
+            break;
+        }
+    }
+
+    return PD_OK;
+}
+
 /* a text field's widget appearance: its text in the font its DA names, inside its border */
 static pv text_ap(pdoc* d, pv widget, const fld* f, const char* utf8) {
     double r[4], w, h, size = 0;
