@@ -842,6 +842,59 @@ static void test_replace_text(void) {
     free(b.p);
 }
 
+/* a word in the middle of a TJ: that word changed, the others as they were */
+static void test_replace_in_tj(void) {
+    char* cs = stream_obj("", "BT /F1 20 Tf 72 700 Td [(alpha)-250(beta)-250(gamma)] TJ ET");
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        "/Resources << /Font << /F1 5 0 R >> >> >>",
+        cs,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+    };
+    buf_t b = make_pdf(objs, 5, 0);
+    pd_pdfr* p = NULL;
+    char* s;
+    pd_pdfr_char c[32];
+    int32_t n, i, at = -1;
+    float x_gamma = 0, x_gamma2 = 0;
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    s = page_text(p, 0);
+    CHECK(strcmp(s, "alpha beta gamma") == 0);
+    free(s);
+    pd_pdfr_page_text(p, 0, c, 32, &n);
+
+    for (i = 0; i < n; i++) {
+        if (c[i].cp == 'b' && at < 0) {
+            at = i;
+        }
+
+        if (c[i].cp == 'g') {
+            x_gamma = c[i].x0;
+        }
+    }
+
+    CHECK(at > 0 && pd_pdfr_replace_text(p, 0, at, at + 4, "BETA") == PD_OK);
+    s = page_text(p, 0);
+    CHECK(strcmp(s, "alpha BETA gamma") == 0);
+    free(s);
+    pd_pdfr_page_text(p, 0, c, 32, &n);
+
+    for (i = 0; i < n; i++) {
+        if (c[i].cp == 'g') {
+            x_gamma2 = c[i].x0;
+        }
+    }
+
+    /* the words after it moved by what the new one is wider, the kerning kept */
+    CHECK(x_gamma2 > x_gamma);
+    pd_pdfr_free(p);
+    free(cs);
+    free(b.p);
+}
+
 /* an encrypted file's update: new strings and streams encrypted as the file is */
 static void test_encrypted_save(void) {
     pd_pdfr* p = NULL, *q;
@@ -883,6 +936,7 @@ int main(void) {
     test_annots();
     test_forms();
     test_replace_text();
+    test_replace_in_tj();
     test_encrypted_save();
     printf("test_pdfr: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

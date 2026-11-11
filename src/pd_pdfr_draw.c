@@ -69,6 +69,7 @@ typedef struct interp {
     size_t str_start[64], str_end[64];
     int nstr;
     int type3_depth;
+    int str_index;              /* which string of the text-showing operation is being shown (of a TJ's) */
     size_t* bounds;             /* the page's content streams run as one: where each starts in it */
     int nbounds;
 } interp;
@@ -711,6 +712,7 @@ static void record_char(interp* I, pfont* f, uint32_t code, const double* trm, d
 
         mat_mul(trm, I->base_inv, t->um);
         t->byte_off = (uint32_t)boff;
+        t->str_start = (uint32_t)I->str_index;
         t->byte_len = (uint8_t)blen;
         t->font = f;
         t->fs = g->fs;
@@ -1876,6 +1878,7 @@ static void op(interp* I, const char* o, ops_t* a, plex* L) {
                 case 'j':
                     if (a->n >= 1) {
                         I->nstr = 1;
+                        I->str_index = 0;
                         show_string(I, a->v[a->n - 1]);
                         I->run++;
                     }
@@ -1887,11 +1890,14 @@ static void op(interp* I, const char* o, ops_t* a, plex* L) {
                         pv arr = a->v[a->n - 1];
                         int32_t k;
 
+                        I->str_index = 0;
+
                         for (k = 0; k < arr.n; k++) {
                             pv e = arr.u.a[k];
 
                             if (e.t == PV_STRING) {
                                 show_string(I, e);
+                                I->str_index++;
                             } else if (e.t == PV_INT || e.t == PV_REAL) {
                                 double v = e.t == PV_INT ? (double)e.u.i : e.u.r;
                                 double t[6] = { 1, 0, 0, 1, 0, 0 };
@@ -1923,6 +1929,7 @@ static void op(interp* I, const char* o, ops_t* a, plex* L) {
                 memcpy(I->tm, I->tlm, sizeof(I->tm));
 
                 if (a->n >= 1) {
+                    I->str_index = 0;
                     show_string(I, a->v[a->n - 1]);
                 }
 
@@ -1939,6 +1946,7 @@ static void op(interp* I, const char* o, ops_t* a, plex* L) {
                 g->tc = num(a, a->n - 2);
                 mat_mul(t, I->tlm, I->tlm);
                 memcpy(I->tm, I->tlm, sizeof(I->tm));
+                I->str_index = 0;
                 show_string(I, a->v[a->n - 1]);
                 I->run++;
             }
