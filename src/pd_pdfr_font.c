@@ -2739,6 +2739,26 @@ static uint32_t cid_of(pfont* f, uint32_t code) {
     return f->identity || !f->ncmap ? code : 0;
 }
 
+static void null_move(void* u, double x, double y) {
+    (void)u;
+    (void)x;
+    (void)y;
+}
+
+static void null_cubic(void* u, double a, double b, double c, double d, double x, double y) {
+    (void)u;
+    (void)a;
+    (void)b;
+    (void)c;
+    (void)d;
+    (void)x;
+    (void)y;
+}
+
+static void null_close(void* u) {
+    (void)u;
+}
+
 double pf_width(pfont* f, uint32_t code) {
     if (f->kind == FT_TYPE0) {
         uint32_t cid = cid_of(f, code);
@@ -2778,13 +2798,20 @@ double pf_width(pfont* f, uint32_t code) {
                 return rd16(f, f->hmtx + 4 * i) / (double)f->upem;
             }
 
-            if (f->prog == PG_T1) {
+            if (f->prog == PG_T1 && g < f->nt1) {
+                /* the advance hsbw (or sbw) gives, the outline itself drawn into nothing */
                 t1run R;
                 pf_sink z;
 
                 memset(&R, 0, sizeof(R));
-                memset(&z, 0, sizeof(z));
-                (void)z;
+                z.move = null_move;
+                z.line = null_move;
+                z.cubic = null_cubic;
+                z.close = null_close;
+                R.f = f;
+                R.sink = &z;
+                t1_glyph(&R, f->t1[g].data, f->t1[g].len, 1);
+                return R.wx * f->fm[0] / 1000;
             }
         }
     }

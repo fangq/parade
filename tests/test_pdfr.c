@@ -895,6 +895,130 @@ static void test_replace_in_tj(void) {
     free(b.p);
 }
 
+static unsigned char* slurp_file(const char* path, size_t* n) {
+    FILE* fp = fopen(path, "rb");
+    unsigned char* d;
+    long len;
+
+    if (!fp) {
+        return NULL;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    d = (unsigned char*)malloc((size_t)len + 1);
+
+    if (d && fread(d, 1, (size_t)len, fp) != (size_t)len) {
+        free(d);
+        d = NULL;
+    }
+
+    fclose(fp);
+    *n = (size_t)len;
+    return d;
+}
+
+/* the advance an AFM gives a code */
+static int afm_width(const char* path, int code) {
+    FILE* fp = fopen(path, "r");
+    char line[512];
+    int w = -1;
+
+    while (fp && fgets(line, sizeof(line), fp)) {
+        int c, wx;
+
+        if (sscanf(line, "C %d ; WX %d", &c, &wx) == 2 && c == code) {
+            w = wx;
+            break;
+        }
+    }
+
+    if (fp) {
+        fclose(fp);
+    }
+
+    return w;
+}
+
+/* an embedded Type 1 font (a PFB), no Widths: drawn from its charstrings, each glyph as wide as they say */
+static void test_type1(void) {
+    const char* pfb = "/usr/share/fonts/type1/texlive-fonts-recommended/putr8a.pfb";
+    const char* afm = "/usr/share/fonts/type1/texlive-fonts-recommended/putr8a.afm";
+    size_t fn;
+    unsigned char* font = slurp_file(pfb, &fn);
+    buf_t b = { NULL, 0, 0 };
+    const char* content = "BT /F1 40 Tf 50 700 Td (iMiM) Tj ET";
+    long off[8], xref;
+    char tmp[256];
+    int i;
+    pd_pdfr* p = NULL;
+    pd_pdfr_char c[8];
+    int32_t n, w, h;
+    uint8_t* img;
+
+    if (!font || afm_width(afm, 'i') <= 0) {
+        printf("no Utopia Type 1 font: skipped\n");
+        free(font);
+        return;
+    }
+
+    puts_(&b, "%PDF-1.4\n");
+    off[1] = (long)b.n;
+    puts_(&b, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    off[2] = (long)b.n;
+    puts_(&b, "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    off[3] = (long)b.n;
+    puts_(&b, "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+          "/Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+    off[4] = (long)b.n;
+    snprintf(tmp, sizeof(tmp), "4 0 obj\n<< /Length %zu >>\nstream\n", strlen(content));
+    puts_(&b, tmp);
+    puts_(&b, content);
+    puts_(&b, "\nendstream\nendobj\n");
+    off[5] = (long)b.n;
+    puts_(&b, "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Utopia-Regular /FontDescriptor 6 0 R >>\nendobj\n");
+    off[6] = (long)b.n;
+    puts_(&b, "6 0 obj\n<< /Type /FontDescriptor /FontName /Utopia-Regular /Flags 34 /FontFile 7 0 R >>\nendobj\n");
+    off[7] = (long)b.n;
+    snprintf(tmp, sizeof(tmp), "7 0 obj\n<< /Length %zu >>\nstream\n", fn);
+    puts_(&b, tmp);
+    put(&b, font, fn);
+    puts_(&b, "\nendstream\nendobj\n");
+    xref = (long)b.n;
+    puts_(&b, "xref\n0 8\n0000000000 65535 f \n");
+
+    for (i = 1; i <= 7; i++) {
+        snprintf(tmp, sizeof(tmp), "%010ld 00000 n \n", off[i]);
+        puts_(&b, tmp);
+    }
+
+    snprintf(tmp, sizeof(tmp), "trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n%ld\n%%%%EOF\n", xref);
+    puts_(&b, tmp);
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+
+    if (p) {
+        CHECK(pd_pdfr_page_text(p, 0, c, 8, &n) == PD_OK && n == 4);
+        /* each advance the AFM's, at 40 points */
+        CHECK(fabs((c[0].x1 - c[0].x0) - afm_width(afm, 'i') * 0.04) < 0.2);
+        CHECK(fabs((c[1].x1 - c[1].x0) - afm_width(afm, 'M') * 0.04) < 0.2);
+        CHECK(fabs(c[2].x0 - c[1].x1) < 0.01);
+        img = draw(p, 0, &w, &h);
+
+        if (img) {
+            /* the M's strokes inked, the space above the letters not */
+            CHECK(dark_in(img, w, (int)c[1].x0, 62, (int)c[1].x1, 92) > 200);
+            CHECK(dark_in(img, w, (int)c[0].x0, 20, (int)c[3].x1, 50) == 0);
+            free(img);
+        }
+
+        pd_pdfr_free(p);
+    }
+
+    free(font);
+    free(b.p);
+}
+
 /* an encrypted file's update: new strings and streams encrypted as the file is */
 static void test_encrypted_save(void) {
     pd_pdfr* p = NULL, *q;
@@ -937,6 +1061,7 @@ int main(void) {
     test_forms();
     test_replace_text();
     test_replace_in_tj();
+    test_type1();
     test_encrypted_save();
     printf("test_pdfr: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
