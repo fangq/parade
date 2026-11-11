@@ -1086,6 +1086,79 @@ static void test_blocks(void) {
     free(b.p);
 }
 
+/* an address's lines (each short of the width, the first bold) written again a paragraph a line: each paragraph in
+   its line's font, centred as they were */
+static void test_pieces(void) {
+    char* cs = stream_obj("",
+        "BT /F2 14 Tf 250 700 Td (Ann Author, PhD) Tj ET\n"
+        "BT /F1 14 Tf 174 683 Td (Department of Examples, Some University) Tj ET\n"
+        "BT /F1 14 Tf 251.5 666 Td (Boston, MA, USA) Tj ET");
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        "/Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>",
+        cs,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"
+    };
+    buf_t b = make_pdf(objs, 6, 0);
+    pd_pdfr* p = NULL;
+    pd_pdfr_span sp[8], ln[8];
+    pd_pdfr_char c[200];
+    int32_t n, nl, nc, i;
+    float w_first = 0, w_second = 0, mid[3] = { 0, 0, 0 };
+
+    CHECK(pd_pdfr_open_memory(b.p, b.n, NULL, &p) == PD_OK);
+    CHECK(pd_pdfr_page_spans(p, 0, PD_PDFR_BLOCKS, sp, 8, &n) == PD_OK && n == 1 && sp[0].lines == 3);
+    CHECK(sp[0].align == 1);
+    CHECK(pd_pdfr_replace_text(p, 0, sp[0].first, sp[0].end, "AAAA\nAAAA AAAA\nAAAA") == PD_OK);
+    pd_pdfr_page_text(p, 0, c, 200, &nc);
+    pd_pdfr_page_spans(p, 0, PD_PDFR_LINES, ln, 8, &nl);
+    CHECK(nl == 3);
+
+    for (i = 0; i < nc; i++) {
+        if (c[i].cp == 'A' && w_first == 0 && i < ln[0].end) {
+            w_first = c[i].x1 - c[i].x0;
+        }
+
+        if (c[i].cp == 'A' && w_second == 0 && nl > 1 && i >= ln[1].first) {
+            w_second = c[i].x1 - c[i].x0;
+        }
+    }
+
+    CHECK(w_first > w_second * 1.05);     /* Helvetica-Bold's A (722) is wider than Helvetica's (667) */
+
+    for (i = 0; i < nl && i < 3; i++) {
+        mid[i] = (ln[i].x0 + ln[i].x1) / 2;
+    }
+
+    CHECK(nl == 3 && fabs(mid[0] - mid[1]) < 1 && fabs(mid[1] - mid[2]) < 1);     /* centred as they were */
+    CHECK(nl == 3 && fabs(ln[0].y0 - sp[0].y0) < 1.5);
+
+    /* two paragraphs: the address's two pieces (its first line short, its other two the full width), each's style */
+    CHECK(pd_pdfr_undo(p) == PD_OK);
+    pd_pdfr_page_spans(p, 0, PD_PDFR_BLOCKS, sp, 8, &n);
+    CHECK(pd_pdfr_replace_text(p, 0, sp[0].first, sp[0].end, "AAAA\nAAAA") == PD_OK);
+    pd_pdfr_page_text(p, 0, c, 200, &nc);
+    w_first = w_second = 0;
+
+    for (i = 0; i < nc; i++) {
+        if (c[i].cp == 'A' && i < 4) {
+            w_first = c[i].x1 - c[i].x0;
+        }
+
+        if (c[i].cp == 'A' && i > 5) {
+            w_second = c[i].x1 - c[i].x0;
+        }
+    }
+
+    CHECK(w_first > w_second * 1.05);
+    pd_pdfr_free(p);
+    free(cs);
+    free(b.p);
+}
+
 static unsigned char* slurp_file(const char* path, size_t* n) {
     FILE* fp = fopen(path, "rb");
     unsigned char* d;
@@ -1254,6 +1327,7 @@ int main(void) {
     test_replace_text();
     test_replace_in_tj();
     test_blocks();
+    test_pieces();
     test_type1();
     CHECK(pd_jbig2_mq_check() == 0);    /* JBIG2's arithmetic decoder, T.88 H.2 */
     test_encrypted_save();

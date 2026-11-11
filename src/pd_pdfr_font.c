@@ -2030,6 +2030,22 @@ static int has_word(const char* s, const char* w) {
     return 0;
 }
 
+/* a sans serif family by its name: one a file marks as serif (its flags often wrong) taken at its name */
+static int sans_name(const char* b) {
+    static const char* const names[] = { "Sans", "Arial", "Helvetica", "Lato", "Calibri", "Segoe", "Roboto", "Verdana",
+                                         "Tahoma", "Gill", "Futura", "Myriad", "Ubuntu", "Carlito", "Aptos", "Candara",
+                                         "Corbel", "Frutiger", "Univers", "Montserrat" };
+    size_t i;
+
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (has_word(b, names[i])) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 /* a file in the host's folders whose name is the font's, spaces and dashes aside */
 static unsigned char* find_named(pdoc* d, const char* base, size_t* n) {
     static const char* const ext[] = { ".ttf", ".otf", ".TTF", ".OTF", ".ttc" };
@@ -2070,7 +2086,7 @@ static void load_system(pfont* f, pv desc) {
     } else if (has_word(b, "Times") || has_word(b, "Roman") || has_word(b, "Serif") || has_word(b, "Georgia") ||
                has_word(b, "Garamond") || has_word(b, "Cambria") || has_word(b, "Palatino") ||
                has_word(b, "Book") || has_word(b, "Minion") || has_word(b, "Century") ||
-               ((flags & 2) && !has_word(b, "Sans") && !has_word(b, "Arial") && !has_word(b, "Helvetica"))) {
+               ((flags & 2) && !sans_name(b))) {
         fam = 1;
     } else {
         fam = 0;
@@ -3349,7 +3365,7 @@ const char* pf_std14(pfont* f) {
     } else if (has_word(b, "Times") || has_word(b, "Roman") || has_word(b, "Serif") || has_word(b, "Georgia") ||
                has_word(b, "Garamond") || has_word(b, "Cambria") || has_word(b, "Palatino") || has_word(b, "Book") ||
                has_word(b, "Minion") || has_word(b, "CMR") || has_word(b, "Century") ||
-               ((flags & 2) && !has_word(b, "Sans") && !has_word(b, "Arial") && !has_word(b, "Helvetica"))) {
+               ((flags & 2) && !sans_name(b))) {
         fam = 1;
     }
 

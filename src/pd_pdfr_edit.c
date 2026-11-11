@@ -2507,11 +2507,23 @@ static double wwidth(pfont* pf, const unsigned char* s, size_t n) {
     return w;
 }
 
-static void write_line(pbuf* b, pfont* pf, int own, const tplace* P, const char* s, size_t len, int k) {
+/* how a paragraph of the new text is written: its font (its own codes or a standard font's), name, size and colour */
+typedef struct {
+    pfont* pf;
+    int own;
+    pv font;
+    char name[32];
+    double size;
+    uint32_t rgb;
+} wstyle;
+
+static void write_line(pbuf* b, const wstyle* W, const tplace* P, const char* s, size_t len, int k, double y) {
     unsigned char enc[4096];
-    size_t n = wencode(pf, own, s, len, enc, sizeof(enc));
-    double w = wwidth(pf, enc, n) * P->size, off = 0, x, y;
+    size_t n = wencode(W->pf, W->own, s, len, enc, sizeof(enc));
+    double w = wwidth(W->pf, enc, n) * W->size, off = 0, x, yy;
     double m[6];
+
+    (void)k;
 
     if (P->align == 1) {
         off = (P->width - w) / 2;
@@ -2519,40 +2531,50 @@ static void write_line(pbuf* b, pfont* pf, int own, const tplace* P, const char*
         off = P->width - w;
     }
 
-    x = P->ox + P->ux * (P->left + off) + P->uy * (k * P->leading);
-    y = P->oy + P->uy * (P->left + off) - P->ux * (k * P->leading);
+    x = P->ox + P->ux * (P->left + off) + P->uy * y;
+    yy = P->oy + P->uy * (P->left + off) - P->ux * y;
     m[0] = P->ux;
     m[1] = P->uy;
     m[2] = -P->uy;
     m[3] = P->ux;
     m[4] = x;
-    m[5] = y;
+    m[5] = yy;
     nums(b, m, 6);
     qb_puts(b, "Tm ");
     pdf_string(b, enc, n);
     qb_puts(b, " Tj\n");
 }
 
-/* utf8 written at P in the font named fname: wrapped to P's width when it was on more than one line, a '\n' a new
-   line; the lines written */
-static int write_text(pbuf* b, pfont* pf, int own, const char* fname, const tplace* P, const char* utf8) {
+/* utf8 written at P: each paragraph (a '\n' starts one) in its style (the last style for any after), wrapped to P's
+   width when the old text was on more than one line; the lines written */
+static int write_text(pbuf* b, const wstyle* styles, int nstyles, const tplace* P, const char* utf8) {
     const char* p = utf8;
-    int k = 0;
+    int k = 0, para = 0, cur = -1;
     int wrap = P->lines > 1 && P->width > 0;
+    double y = 0;   /* down from the first baseline */
 
-    qb_puts(b, "BT /");
-    qb_puts(b, fname);
-    qb_puts(b, " ");
-    qb_num(b, P->size);
-    qb_puts(b, " Tf ");
-    col_op(b, P->rgb, "rg");
+    qb_puts(b, "BT ");
 
     for (;;) {
         const char* nl = strchr(p, '\n');
         size_t plen = nl ? (size_t)(nl - p) : strlen(p);
+        const wstyle* W = &styles[para < nstyles ? para : nstyles - 1];
+        double lead = P->leading * (W->size / (styles[0].size > 0 ? styles[0].size : 1));
+
+        if (W - styles != cur) {
+            cur = (int)(W - styles);
+            qb_puts(b, "/");
+            qb_puts(b, W->name);
+            qb_puts(b, " ");
+            qb_num(b, W->size);
+            qb_puts(b, " Tf ");
+            col_op(b, W->rgb, "rg");
+            qb_puts(b, "\n");
+        }
 
         if (!wrap) {
-            write_line(b, pf, own, P, p, plen, k++);
+            write_line(b, W, P, p, plen, k++, y);
+            y += lead;
         } else {
             /* the words of the paragraph, as many on a line as fit */
             size_t ls = 0, le = 0, i = 0;
@@ -2577,10 +2599,11 @@ static int write_text(pbuf* b, pfont* pf, int own, const char* fname, const tpla
                 }
 
                 if (le > ls) {
-                    w = wwidth(pf, enc, wencode(pf, own, p + ls, we - ls, enc, sizeof(enc))) * P->size;
+                    w = wwidth(W->pf, enc, wencode(W->pf, W->own, p + ls, we - ls, enc, sizeof(enc))) * W->size;
 
                     if (w > P->width * 1.02) {
-                        write_line(b, pf, own, P, p + ls, le - ls, k++);
+                        write_line(b, W, P, p + ls, le - ls, k++, y);
+                        y += lead;
                         ls = ws;
                     }
                 } else {
@@ -2591,7 +2614,8 @@ static int write_text(pbuf* b, pfont* pf, int own, const char* fname, const tpla
                 i = we;
             }
 
-            write_line(b, pf, own, P, p + ls, le > ls ? le - ls : 0, k++);
+            write_line(b, W, P, p + ls, le > ls ? le - ls : 0, k++, y);
+            y += lead;
         }
 
         if (!nl) {
@@ -2599,16 +2623,17 @@ static int write_text(pbuf* b, pfont* pf, int own, const char* fname, const tpla
         }
 
         p = nl + 1;
+        para++;
     }
 
     qb_puts(b, "ET");
     return k;
 }
 
-/* a name for a font not yet among the page's (each edit's text keeps the font it was written in) */
-static void new_font_name(pdoc* d, int32_t page, char* name, size_t cap) {
+/* names for fonts not yet among the page's (each edit's text keeps the font it was written in), n of them */
+static void new_font_names(pdoc* d, int32_t page, wstyle* styles, int n) {
     pv res = pd_get(d, d->pages[page].dict, "Resources"), fonts;
-    int i;
+    int i = 1, k;
 
     if (res.t != PV_DICT) {
         res = d->pages[page].resources;
@@ -2616,17 +2641,20 @@ static void new_font_name(pdoc* d, int32_t page, char* name, size_t cap) {
 
     fonts = pd_get(d, res, "Font");
 
-    for (i = 1; i < 10000; i++) {
-        snprintf(name, cap, "PdT%d", i);
+    for (k = 0; k < n; k++) {
+        for (; i < 100000; i++) {
+            snprintf(styles[k].name, sizeof(styles[k].name), "PdT%d", i);
 
-        if (fonts.t != PV_DICT || pd_get_raw(fonts, name).t == PV_NULL) {
-            return;
+            if (fonts.t != PV_DICT || pd_get_raw(fonts, styles[k].name).t == PV_NULL) {
+                i++;
+                break;
+            }
         }
     }
 }
 
-/* b added to the page after what it showed (that wrapped in q ... Q), with the font under fname */
-static void append_to_page(pdoc* d, int32_t page, const pbuf* b, const char* fname, pv font) {
+/* b added to the page after what it showed (that wrapped in q ... Q), with the styles' fonts under their names */
+static void append_to_page(pdoc* d, int32_t page, const pbuf* b, const wstyle* styles, int n) {
     pv pg = dict_copy(d, d->pages[page].dict), res, fonts, c, arr, list;
     int32_t num, qs, qe, i;
 
@@ -2638,7 +2666,11 @@ static void append_to_page(pdoc* d, int32_t page, const pbuf* b, const char* fna
 
     res = dict_copy(d, res);
     fonts = dict_copy(d, pd_get(d, res, "Font"));
-    pd_dict_set(d, &fonts, fname, font);
+
+    for (i = 0; i < n; i++) {
+        pd_dict_set(d, &fonts, styles[i].name, styles[i].font);
+    }
+
     pd_dict_set(d, &res, "Font", fonts);
     pd_dict_set(d, &pg, "Resources", res);
     c = pd_get_raw(pg, "Contents");
@@ -2669,31 +2701,40 @@ static void append_to_page(pdoc* d, int32_t page, const pbuf* b, const char* fna
     page_store(d, page, pg);
 }
 
-/* the font the new text is written in: the old text's own when it has every character (and is not a Type 3's
-   procedures), else the standard font most like it */
-static pfont* pick_font(pdoc* d, const tchar* f, const char* utf8, int* own, pv* font) {
+/* the style text of character f is written in: its font when that has every character of utf8 (and is not a Type
+   3's procedures), else the standard font most like it; its size and colour */
+static int pick_style(pdoc* d, const tchar* f, const char* utf8, size_t len, wstyle* W) {
     unsigned char enc[4096];
     char tmp[2048];
     size_t i, k = 0;
 
-    for (i = 0; utf8[i] && k + 1 < sizeof(tmp); i++) {
+    for (i = 0; i < len && utf8[i] && k + 1 < sizeof(tmp); i++) {
         if (utf8[i] != '\n') {
             tmp[k++] = utf8[i];
         }
     }
 
     tmp[k] = 0;
-    *own = 0;
+    memset(W, 0, sizeof(*W));
+    W->size = sqrt(f->um[2] * f->um[2] + f->um[3] * f->um[3]);
+
+    if (!(W->size > 0)) {
+        W->size = f->fs > 0 ? f->fs : 10;
+    }
+
+    W->rgb = f->rgb;
 
     if (f->font && !pf_is_type3(f->font) && !f->vertical && pf_dict(f->font).t == PV_DICT &&
         (k == 0 || pf_encode(f->font, tmp, enc, sizeof(enc)) > 0)) {
-        *own = 1;
-        *font = pf_dict(f->font);
-        return f->font;
+        W->own = 1;
+        W->font = pf_dict(f->font);
+        W->pf = f->font;
+        return 1;
     }
 
-    *font = std_font(d, pf_std14(f->font));
-    return pf_load(d, *font);
+    W->font = std_font(d, pf_std14(f->font));
+    W->pf = pf_load(d, W->font);
+    return W->pf != NULL;
 }
 
 /* the old text covered in white, the new written over it (a stream added to the page) */
@@ -2701,10 +2742,8 @@ static int edit_overlay(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, c
     double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
     int32_t i;
     pbuf b;
-    pv font = std_font(d, pf_std14(L->chars[a].font));
-    pfont* pf = pf_load(d, font);
     double binv[6];
-    char fname[32];
+    wstyle W;
     tplace P;
 
     page_inv(d, page, binv);
@@ -2728,18 +2767,27 @@ static int edit_overlay(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, c
         }
     }
 
-    if (!pf) {
+    {
+        tchar std = L->chars[a];
+
+        std.font = NULL;    /* a standard font: the old one could not be used here */
+        pick_style(d, &std, "", 0, &W);
+        W.font = std_font(d, pf_std14(L->chars[a].font));
+        W.pf = pf_load(d, W.font);
+    }
+
+    if (!W.pf) {
         return 0;
     }
 
     text_place(L, a, z, &P);
-    new_font_name(d, page, fname, sizeof(fname));
+    new_font_names(d, page, &W, 1);
     memset(&b, 0, sizeof(b));
     qb_puts(&b, "q 1 1 1 rg ");
     rect_op(&b, x0, y0, x1 - x0, y1 - y0, "f");
-    write_text(&b, pf, 0, fname, &P, utf8);
+    write_text(&b, &W, 1, &P, utf8);
     qb_puts(&b, " Q\n");
-    append_to_page(d, page, &b, fname, font);
+    append_to_page(d, page, &b, &W, 1);
     qb_free(&b);
     return 1;
 }
@@ -2966,20 +3014,109 @@ static int take_out(pdoc* d, int32_t page, const dlist* L, int32_t a, int32_t z)
     return ok;
 }
 
-/* characters a..z taken out and utf8 written where they began, wrapped as they were */
+/* the pieces of text a..z that its lines' short ends cut it into: a line that stops where the next one's first
+   word would have fitted on it ends a piece (an address's lines, a heading over its text), or, every, each line
+   does; each piece's first character in firsts (up to cap); how many */
+static int text_pieces(const dlist* L, int32_t a, int32_t z, const tplace* P, int every, int32_t* firsts, int cap) {
+    int32_t i, line_first = a;
+    double cur_t = 0, l = 1e30, r = -1e30;
+    int n = 0, started = 0;
+
+    if (cap > 0) {
+        firsts[n] = a;
+    }
+
+    n = 1;
+
+    for (i = a; i <= z; i++) {
+        const tchar* c = &L->chars[i];
+        double dx = c->um[4] - P->ox, dy = c->um[5] - P->oy;
+        double s = dx * P->ux + dy * P->uy, e = s + (c->um[0] * P->ux + c->um[1] * P->uy) * c->w0;
+        double t = -dx * P->uy + dy * P->ux;
+
+        if (c->pub.cp == ' ') {
+            continue;
+        }
+
+        if (started && fabs(t - cur_t) > 0.5 * P->size) {
+            /* a new line at i: the first word on it */
+            int32_t j = i;
+            double we = e;
+
+            while (j + 1 <= z && L->chars[j + 1].pub.cp != ' ' &&
+                   fabs((-(L->chars[j + 1].um[4] - P->ox) * P->uy + (L->chars[j + 1].um[5] - P->oy) * P->ux) - t) <=
+                       0.5 * P->size) {
+                const tchar* q = &L->chars[++j];
+                double qx = q->um[4] - P->ox, qy = q->um[5] - P->oy;
+
+                we = qx * P->ux + qy * P->uy + (q->um[0] * P->ux + q->um[1] * P->uy) * q->w0;
+            }
+
+            if (every || (r - l) + 0.3 * P->size + (we - s) <= P->width * 0.98) {
+                if (n < cap) {
+                    firsts[n] = i;
+                }
+
+                n++;
+            }
+
+            line_first = i;
+            l = 1e30;
+            r = -1e30;
+        }
+
+        (void)line_first;
+        started = 1;
+        cur_t = t;
+        l = s < l ? s : l;
+        r = e > r ? e : r;
+    }
+
+    return n;
+}
+
+/* characters a..z taken out and utf8 written where they began, wrapped as they were; when the new text has as many
+   paragraphs as the old has lines, or pieces (text_pieces), each written in its line's or piece's font, size and
+   colour */
 static int edit_reflow(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, const char* utf8) {
     tplace P;
-    pv font;
-    int own;
-    pfont* pf;
-    char fname[32];
+    wstyle styles[16];
+    int32_t firsts[16];
+    int npieces, npara = 1, ns, i;
+    const char* p;
     pbuf b;
 
     text_place(L, a, z, &P);
-    pf = pick_font(d, &L->chars[a], utf8, &own, &font);
 
-    if (!pf) {
-        return 0;
+    for (p = utf8; *p; p++) {
+        npara += *p == '\n';
+    }
+
+    /* a paragraph a line of the old: each line's style; else a paragraph a piece */
+    npieces = P.lines > 1 && npara == P.lines ? text_pieces(L, a, z, &P, 1, firsts, 16) : 0;
+
+    if (npieces != npara) {
+        npieces = P.lines > 1 ? text_pieces(L, a, z, &P, 0, firsts, 16) : 1;
+    }
+
+    ns = npieces == npara && npieces > 1 && npieces <= 16 ? npieces : 1;
+
+    if (ns == 1) {
+        firsts[0] = a;
+    }
+
+    /* each paragraph's style, from its piece's first character, its font asked whether it has the paragraph's */
+    p = utf8;
+
+    for (i = 0; i < ns; i++) {
+        const char* nl = strchr(p, '\n');
+        size_t len = ns == 1 ? strlen(utf8) : nl ? (size_t)(nl - p) : strlen(p);
+
+        if (!pick_style(d, &L->chars[firsts[i]], ns == 1 ? utf8 : p, len, &styles[i])) {
+            return 0;
+        }
+
+        p = nl ? nl + 1 : p + strlen(p);
     }
 
     if (!take_out(d, page, L, a, z)) {
@@ -2987,12 +3124,12 @@ static int edit_reflow(pdoc* d, int32_t page, dlist* L, int32_t a, int32_t z, co
     }
 
     if (*utf8) {
-        new_font_name(d, page, fname, sizeof(fname));
+        new_font_names(d, page, styles, ns);
         memset(&b, 0, sizeof(b));
         qb_puts(&b, "q ");
-        write_text(&b, pf, own, fname, &P, utf8);
+        write_text(&b, styles, ns, &P, utf8);
         qb_puts(&b, " Q\n");
-        append_to_page(d, page, &b, fname, font);
+        append_to_page(d, page, &b, styles, ns);
         qb_free(&b);
     }
 
