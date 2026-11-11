@@ -5535,6 +5535,73 @@ static int keyed_found(const pd_doc* d, int* opaque_white) {
     return found;
 }
 
+typedef struct {
+    const unsigned char* all;
+    int n, same, delay_sum, stop_after;
+} gif_seen;
+
+static int gif_each(void* user, int32_t index, const uint8_t* rgba, int32_t delay_ms) {
+    gif_seen* v = (gif_seen*)user;
+
+    v->same += memcmp(rgba, v->all + (size_t)index * 256, 256) == 0;
+    v->delay_sum += delay_ms;
+    v->n++;
+    return v->stop_after && v->n >= v->stop_after;
+}
+
+/* an animated GIF's frames as they are shown: kept, cleared to see-through, put back as they were (disposals 1, 2,
+   3), see-through pixels over the frame before, interlaced; the delays (0 shown as 100 ms); a run of them from the
+   middle the same as the same frames of the whole. What Pillow shows for the same file */
+static void test_gif_frames(void) {
+    FILE* fp = fopen("tests/data/anim.gif", "rb");
+    unsigned char data[8192], all[4 * 8 * 8 * 4], part[2 * 8 * 8 * 4];
+    size_t n = fp ? fread(data, 1, sizeof(data), fp) : 0;
+    int32_t w = 0, h = 0, k = 0, loops = -2, delays[4], d2[2];
+    static const struct { int f, x, y; uint32_t rgba; } want[] = {
+        { 0, 0, 0, 0xFF0000FF }, { 0, 6, 6, 0xFF0000FF },
+        { 1, 0, 0, 0x00FF00FF }, { 1, 6, 0, 0xFF0000FF }, { 1, 0, 6, 0x00FF00FF },
+        { 2, 0, 0, 0 }, { 2, 6, 0, 0xFF0000FF }, { 2, 0, 6, 0x0000FFFF }, { 2, 7, 7, 0x0000FFFF },
+        { 3, 0, 0, 0 }, { 3, 0, 6, 0 }, { 3, 6, 6, 0xFF0000FF }, { 3, 7, 7, 0x00FF00FF }
+    };
+    size_t i;
+
+    if (fp) {
+        fclose(fp);
+    }
+
+    CHECK(n > 100 && pd_gif_info(data, n, &w, &h, &k, &loops) == PD_OK && w == 8 && h == 8 && k == 4 && loops == 0);
+    CHECK(pd_gif_info("GIF89", 5, &w, &h, &k, &loops) == PD_ERR_FORMAT);
+    CHECK(pd_gif_frames(data, n, 0, 4, all, delays) == PD_OK);
+    CHECK(delays[0] == 50 && delays[1] == 100 && delays[2] == 200 && delays[3] == 100);
+
+    for (i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        const unsigned char* q = all + ((size_t)want[i].f * 64 + (size_t)want[i].y * 8 + (size_t)want[i].x) * 4;
+        uint32_t got = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8) | q[3];
+
+        if (want[i].rgba == 0) {
+            got &= 0xFF;    /* see-through: its colour is no matter */
+        }
+
+        CHECK(got == want[i].rgba);
+    }
+
+    CHECK(pd_gif_frames(data, n, 2, 2, part, d2) == PD_OK && memcmp(part, all + 2 * 256, sizeof(part)) == 0 &&
+          d2[0] == 200);
+    CHECK(pd_gif_frames(data, n, 3, 2, part, NULL) == PD_ERR_RANGE);
+    CHECK(pd_gif_frames(data, n / 2, 0, 1, all, NULL) == PD_OK);    /* cut short: the frames before the cut */
+    /* in one pass: the same frames and delays */
+    {
+        gif_seen v;
+
+        memset(&v, 0, sizeof(v));
+        v.all = all;
+        CHECK(pd_gif_each_frame(data, n, gif_each, &v) == PD_OK && v.n == 4 && v.same == 4 && v.delay_sum == 450);
+        v.n = v.same = v.delay_sum = 0;
+        v.stop_after = 2;
+        CHECK(pd_gif_each_frame(data, n, gif_each, &v) == PD_OK && v.n == 2);   /* stopped */
+    }
+}
+
 static void test_pptx_transparent_color(void) {
 #define PKPIC(id, x, cc) "<p:pic><p:nvPicPr><p:cNvPr id=\"" id "\" name=\"P\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>" \
     "<p:blipFill><a:blip r:embed=\"rIdI\">" cc "</a:blip><a:stretch><a:fillRect/></a:stretch></p:blipFill>" \
@@ -11834,6 +11901,7 @@ int main(void) {
     test_pptx_ole();
     test_pptx_kept_links();
     test_pptx_transparent_color();
+    test_gif_frames();
     test_pptx_chart();
     test_pptx_ph_inherit();
     test_pptx_run_props();

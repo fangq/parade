@@ -183,10 +183,16 @@ type
     FBandX0, FBandX1: array of Integer;  { what has changed of the frame since TakeChanged: each band's columns }
     FWhole: Boolean;                     { the frame is new: all of it written, none compared }
     FFinished: Boolean;
+    { animated GIFs: the time on the slide (ms from when it began) its pictures were drawn at, when the next of them
+      changes frame there (the prepared slide's and the other's; High(Int64) none), and when the slide began }
+    FBuildClock: Int64;
+    FAnimAt, FAAnimAt: Int64;
+    FSlideStart: Int64;
     function KeepItem(const Item: pd_draw; Index: Integer): Boolean;
     function TargetFor(T: TShowTiming; Index: Integer): Integer;
     procedure Prepare(APos: Integer);
     procedure Build(APos: Integer);
+    procedure BuildRuns(APos: Integer);
     procedure SwapPrepared;
     procedure PrepareAhead(APos: Integer);
     procedure RenderPlain(APos: Integer; var Px: array of UInt32);
@@ -1245,6 +1251,8 @@ var
 begin
   inherited Create;
   FEdit := AEdit;
+  FAnimAt := High(Int64);
+  FAAnimAt := High(Int64);
   FFrame := TLazIntfImage.Create(0, 0);
   for I := 0 to AEdit.SlideCount - 1 do
     if not AEdit.SlideHidden(I) or (I = FromSlide) then
@@ -1400,6 +1408,7 @@ var
   Fe: array of Boolean;
   It: TParadeDrawItems;
   Po: array of Integer;
+  Ck: Int64;
 begin   { (the arrays' references, nothing copied) }
   SwapInt(FPrepared, FAPrepared);
   SwapInt(FBaseHi, FABaseHi);
@@ -1409,6 +1418,7 @@ begin   { (the arrays' references, nothing copied) }
   Fe := FFirstEntr; FFirstEntr := FAFirstEntr; FAFirstEntr := Fe;
   It := FItems; FItems := FAItems; FAItems := It;
   Po := FParaOf; FParaOf := FAParaOf; FAParaOf := Po;
+  Ck := FAnimAt; FAnimAt := FAAnimAt; FAAnimAt := Ck;
 end;
 
 { the slide at APos made ready to show: the one prepared, or the other kept (the slide before, the one made ready
@@ -1437,9 +1447,27 @@ begin
   Result := (FPrepared = ShowIndex) or (FAPrepared = ShowIndex);
 end;
 
+{ the slide drawn ready (BuildRuns), its animated pictures at FBuildClock, and when the next of them changes noted }
+procedure TParadeShow.Build(APos: Integer);
+var
+  Was: Int64;
+begin
+  if FPrepared = APos then
+    Exit;
+  Was := FEdit.AnimClock;
+  FEdit.AnimClock := FBuildClock;
+  FEdit.ResetAnimNext;
+  try
+    BuildRuns(APos);
+  finally
+    FAnimAt := FEdit.AnimNext;
+    FEdit.AnimClock := Was;
+  end;
+end;
+
 { the slide's runs drawn: the first (when it is not animated) on the paper, the others each over black and over
   white, so that where they cover, and how much, is known exactly }
-procedure TParadeShow.Build(APos: Integer);
+procedure TParadeShow.BuildRuns(APos: Integer);
 var
   T: TShowTiming;
   Pg, I, J, K, L, X, Y, X0, Y0, X1, Y1, A: Integer;
@@ -2394,6 +2422,7 @@ begin
   end;
   T := Timing(APos);
   FPos := APos;
+  FSlideStart := Now;   { (its animated pictures from their first frame) }
   if WithTrans and (T <> nil) and T.Trans.Present and (T.Trans.Dur > 0) then
   begin
     Move(FCur[0], FFrom[0], Length(FCur) * 4);
@@ -2454,6 +2483,21 @@ begin
         Enter(FPos + 1, Now, True)
       else if Now - FIdleSince >= 300 then
         PrepareAhead(FPos + 1);   { (while nothing plays: the next slide, ready for the click to it) }
+  end;
+  { an animated picture on the slide changing frame: the slide drawn again at the time on it (only what changed of
+    the frame goes to the screen) }
+  if (FPhase in [spIdle, spPlay]) and (FPrepared = FPos) and (FAnimAt <> High(Int64)) and
+     (Now - FSlideStart >= FAnimAt) then
+  begin
+    FBuildClock := Now - FSlideStart;
+    FPrepared := -1;
+    Build(FPos);
+    FBuildClock := 0;
+    if FPhase = spPlay then
+      Compose(FPos, FDone, Now - FStart, FCur)
+    else
+      Compose(FPos, FDone, -1, FCur);
+    ToFrame(FCur);
   end;
   Result := FChanged;
   FChanged := False;

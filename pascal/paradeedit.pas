@@ -247,6 +247,10 @@ type
     FDecoder: TObject;             { the thread decoding pictures off the screen's thread (TPicDecoder) }
     FPicGen: Integer;              { counts ClearPictures: a picture decoded for a document since gone is dropped }
     FPicWait: array of Byte;       { per resource: 0 not asked, 1 with the decoder, 2 not a picture it reads }
+    FAnims: array of TObject;      { per resource: an animated GIF's frames (TPicAnim), nil for a still picture }
+    FAnimClock: Int64;             { the time animated pictures are drawn at off the screen (ms; -1 their first frame) }
+    FAnimNext: Int64;              { when one drawn last changes frame (High(Int64): none drawn) }
+    FAnimTimer: TTimer;            { the view drawn again when it does }
     FOrder: array of Int32;        { block id -> reading-order index, -1 = not in the main flow }
     FOrderRev: UInt64;
     FDragging: Boolean;
@@ -332,6 +336,7 @@ type
     procedure ScrollBarChange(Sender: TObject);
     procedure ClearGlyphCache;
     procedure ClearPictures;
+    procedure AnimTick(Sender: TObject);
     { a picture at W x H; Wait false (the screen): one not decoded yet is asked for and nil comes back (its frame
       drawn), the page drawn again when it is ready }
     function GetPicture(Res: pd_res_id; W, H: Integer; Wait: Boolean = True): TLazIntfImage;
@@ -735,6 +740,12 @@ type
     { A page drawn into Img (sized by the caller) from its corner, PxScale pixels a sp, as a slide show shows it:
       on Paper, without the page's frame, the selection, marks or carets; only the items Filter keeps (nil: all).
       Pictures are decoded before it returns. }
+    { animated GIFs drawn off the screen (RenderSlide, a slide show) are at this time (ms from when they began; -1
+      their first frame, as a printed or exported page has them); AnimNext: when one drawn since ResetAnimNext next
+      changes frame, High(Int64) when none was }
+    property AnimClock: Int64 read FAnimClock write FAnimClock;
+    property AnimNext: Int64 read FAnimNext;
+    procedure ResetAnimNext;
     procedure RenderSlide(Img: TLazIntfImage; Page: Integer; PxScale: Double; Paper: TColor;
       Filter: TParadeItemFilter = nil);
     function SetSlideHidden(Index: Integer; Hidden: Boolean): Boolean;
@@ -1160,10 +1171,23 @@ type
     Data: TBytes;
   end;
 
+  { an animated GIF: its frames as they are shown, in the page's pixel layout, and how long each stays }
+  TPicAnim = class
+    Frames: array of TLazIntfImage;
+    Delays: array of Integer;     { ms }
+    Total: Int64;                 { one time through }
+    Sized: TLazIntfImage;         { the frame last drawn, at the size it was drawn }
+    SizedFrame, SizedW, SizedH: Integer;
+    destructor Destroy; override;
+    { the frame shown at T ms (looping), and when the next begins }
+    function FrameAt(T: Int64; out NextAt: Int64): Integer;
+  end;
+
   TPicDone = record
     Res: pd_res_id;
     Gen: Integer;
     Img: TLazIntfImage;   { nil: not a picture it could read }
+    Anim: TPicAnim;       { an animated GIF's frames, else nil }
   end;
 
 
@@ -1174,7 +1198,7 @@ type
     FJobs: array of TPicJob;
     FDone: array of TPicDone;
     FWorking: Boolean;
-    function Decode(const J: TPicJob): TLazIntfImage;
+    function Decode(const J: TPicJob; out Anim: TPicAnim): TLazIntfImage;
   protected
     procedure Execute; override;
   public
@@ -1192,6 +1216,38 @@ begin
   Result := (Pos('image/png', M) = 1) or (Pos('image/jpeg', M) = 1) or (Pos('image/gif', M) = 1) or
     (Pos('image/bmp', M) = 1) or (Pos('image/tiff', M) = 1);
 end;
+
+destructor TPicAnim.Destroy;
+var
+  I: Integer;
+begin
+  for I := 0 to High(Frames) do
+    Frames[I].Free;
+  Sized.Free;
+  inherited Destroy;
+end;
+
+function TPicAnim.FrameAt(T: Int64; out NextAt: Int64): Integer;
+var
+  At, Acc: Int64;
+begin
+  Result := 0;
+  NextAt := High(Int64);
+  if (Length(Frames) < 2) or (Total <= 0) then
+    Exit;
+  if T < 0 then
+    Exit;     { (a printed page: the first frame) }
+  At := T mod Total;
+  Acc := 0;
+  while (Result < High(Frames)) and (Acc + Delays[Result] <= At) do
+  begin
+    Inc(Acc, Delays[Result]);
+    Inc(Result);
+  end;
+  NextAt := T - At + Acc + Delays[Result];
+end;
+
+function DecodeGifAnim(const Data: TBytes): TPicAnim; forward;
 
 constructor TPicDecoder.Create;
 begin
@@ -1296,13 +1352,25 @@ begin
   end;
 end;
 
-function TPicDecoder.Decode(const J: TPicJob): TLazIntfImage;
+function TPicDecoder.Decode(const J: TPicJob; out Anim: TPicAnim): TLazIntfImage;
 var
   Reader: TFPCustomImageReader;
   Ms: TMemoryStream;
   Desc: TRawImageDescription;
 begin
   Result := nil;
+  Anim := nil;
+  if Pos('image/gif', J.Mime) = 1 then
+  begin   { animated: its frames, the first of them the picture }
+    Anim := DecodeGifAnim(J.Data);
+    if Anim <> nil then
+    begin
+      Result := TLazIntfImage.Create(0, 0);
+      Result.DataDescription := Anim.Frames[0].DataDescription;
+      Result.CopyPixels(Anim.Frames[0]);
+      Exit;
+    end;
+  end;
   if Pos('image/png', J.Mime) = 1 then Reader := TFPReaderPNG.Create
   else if Pos('image/jpeg', J.Mime) = 1 then Reader := TFPReaderJPEG.Create
   else if Pos('image/gif', J.Mime) = 1 then Reader := TFPReaderGif.Create
@@ -1358,7 +1426,7 @@ begin
     end;
     D.Res := J.Res;
     D.Gen := J.Gen;
-    D.Img := Decode(J);
+    D.Img := Decode(J, D.Anim);
     EnterCriticalSection(FLock);
     try
       SetLength(FDone, Length(FDone) + 1);
@@ -1988,6 +2056,89 @@ begin
   FillRectImg(Result, 0, 0, W, H, Col, 255);
 end;
 
+{ an animated GIF's frames (Parade's pd_gif_each_frame: each the whole screen as it is shown, in one pass) in the
+  page's pixel layout; nil for a GIF of one frame, or not a GIF. Kept to about 24 million pixels: a longer one shown
+  with every second (third, ...) frame, each for the frames' time together, so it still takes as long }
+type
+  TGifCollect = record
+    Anim: TPicAnim;
+    W, H, Step: Integer;
+  end;
+  PGifCollect = ^TGifCollect;
+
+function CollectGifFrame(user: Pointer; index: Int32; rgba: PByte; delay_ms: Int32): cint; cdecl;
+var
+  C: PGifCollect;
+  K, X, Y: Integer;
+  Img: TLazIntfImage;
+  Px: PPixel;
+  Src: PByte;
+begin
+  Result := 0;
+  C := PGifCollect(user);
+  K := index div C^.Step;
+  if K > High(C^.Anim.Frames) then
+    Exit(1);
+  Inc(C^.Anim.Delays[K], delay_ms);
+  Inc(C^.Anim.Total, delay_ms);
+  if index mod C^.Step <> 0 then
+    Exit;
+  Img := NewImage(C^.W, C^.H, 0);
+  for Y := 0 to C^.H - 1 do
+  begin
+    Px := PPixel(Img.GetDataLineStart(Y));
+    Src := rgba + PtrUInt(Y) * PtrUInt(C^.W) * 4;
+    for X := 0 to C^.W - 1 do
+    begin
+      Px^.R := Src[0];
+      Px^.G := Src[1];
+      Px^.B := Src[2];
+      Px^.A := Src[3];
+      Inc(Px);
+      Inc(Src, 4);
+    end;
+  end;
+  C^.Anim.Frames[K] := Img;
+end;
+
+function DecodeGifAnim(const Data: TBytes): TPicAnim;
+const
+  BUDGET = 24000000;
+var
+  N, Loops, K: Integer;
+  C: TGifCollect;
+begin
+  Result := nil;
+  if (Length(Data) < 13) or (pd_gif_info(@Data[0], Length(Data), C.W, C.H, N, Loops) <> PD_OK) or (N < 2) or
+     (C.W <= 0) or (C.H <= 0) or (Int64(C.W) * C.H > 16000000) then
+    Exit;
+  C.Step := Max(1, Integer((Int64(N) * C.W * C.H + BUDGET - 1) div BUDGET));
+  C.Anim := TPicAnim.Create;
+  C.Anim.SizedFrame := -1;
+  SetLength(C.Anim.Frames, (N + C.Step - 1) div C.Step);
+  SetLength(C.Anim.Delays, Length(C.Anim.Frames));
+  if (pd_gif_each_frame(@Data[0], Length(Data), @CollectGifFrame, @C) <> PD_OK) or (C.Anim.Total <= 0) then
+  begin
+    C.Anim.Free;
+    Exit;
+  end;
+  { a file cut short: the frames it had }
+  K := 0;
+  while (K <= High(C.Anim.Frames)) and (C.Anim.Frames[K] <> nil) do
+    Inc(K);
+  if K < 2 then
+  begin
+    C.Anim.Free;
+    Exit;
+  end;
+  SetLength(C.Anim.Frames, K);
+  SetLength(C.Anim.Delays, K);
+  C.Anim.Total := 0;
+  for K := 0 to High(C.Anim.Delays) do
+    Inc(C.Anim.Total, C.Anim.Delays[K]);
+  Result := C.Anim;
+end;
+
 function TColorToRGB(C: TColor): UInt32;
 var
   V: LongInt;
@@ -2217,6 +2368,8 @@ constructor TParadeEdit.Create(AOwner: TComponent);
 begin
   FSnapShapes := True;
   inherited Create(AOwner);
+  FAnimClock := -1;
+  FAnimNext := High(Int64);
   FHybridDefault := True;
   FShapeDrag := -1;
   FShapeFillDef := $00C47244;    { Office's blue (4472C4), outlined darker (2F528F) }
@@ -2946,6 +3099,9 @@ begin
     FPics[I].Free;
     FPicSized[I].Free;
   end;
+  for I := 0 to High(FAnims) do
+    FAnims[I].Free;
+  FAnims := nil;
   FPics := nil;
   FPicSized := nil;
   FPicDoc := nil;
@@ -3023,12 +3179,19 @@ begin
     if (D.Gen = FPicGen) and (FPicDoc = FDoc) and (I < Length(FPics)) and (FPics[I] = nil) then
     begin
       FPics[I] := D.Img;
+      if I >= Length(FAnims) then
+        SetLength(FAnims, I + 1);
+      FAnims[I].Free;
+      FAnims[I] := D.Anim;
       if I < Length(FPicWait) then
         FPicWait[I] := IfThen(D.Img = nil, 2, 0);
       Result := Result or (D.Img <> nil);
     end
     else
+    begin
       D.Img.Free;
+      D.Anim.Free;
+    end;
   end;
 end;
 
@@ -3109,6 +3272,7 @@ var
   X, Y, I: Integer;
   Px: PPixel;
   C: TFPColor;
+  Bytes: TBytes;
 begin
   Result := False;
   if Res = 0 then
@@ -3172,14 +3336,37 @@ begin
     end;
     if FPics[I] = nil then
       Exit;
+    if (Pos('image/gif', StrPas(Mime)) = 1) and (Len > 0) then
+    begin   { animated: its frames, for a show }
+      SetLength(Bytes, Len);
+      Move(Data^, Bytes[0], Len);
+      if I >= Length(FAnims) then
+        SetLength(FAnims, I + 1);
+      FAnims[I].Free;
+      FAnims[I] := DecodeGifAnim(Bytes);
+    end;
   end;
   Result := True;
 end;
 
 { a resource of the document as a picture W x H pixels, nil if it is not one the LCL reads }
+procedure TParadeEdit.ResetAnimNext;
+begin
+  FAnimNext := High(Int64);
+end;
+
+{ an animated picture in view changing frame: the view drawn again (only what changed goes to the screen) }
+procedure TParadeEdit.AnimTick(Sender: TObject);
+begin
+  FAnimTimer.Enabled := False;
+  FBackSig := '';
+  Invalidate;
+end;
+
 function TParadeEdit.GetPicture(Res: pd_res_id; W, H: Integer; Wait: Boolean): TLazIntfImage;
 var
-  I: Integer;
+  I, K: Integer;
+  NextAt: Int64;
 begin
   Result := nil;
   if (Res = 0) or (W <= 0) or (H <= 0) or (W > 8000) or (H > 8000) then
@@ -3197,6 +3384,27 @@ begin
   else if not DecodePicture(Res) then
     Exit;
   I := Integer(Res) - 1;
+  { an animated GIF: the frame of the time (the screen's clock on the screen, AnimClock off it), scaled when it
+    changes, and when the next is due noted }
+  if (I < Length(FAnims)) and (FAnims[I] <> nil) then
+    with TPicAnim(FAnims[I]) do
+    begin
+      if Wait then
+        K := FrameAt(FAnimClock, NextAt)
+      else
+        K := FrameAt(GetTickCount64, NextAt);
+      if NextAt < FAnimNext then
+        FAnimNext := NextAt;
+      if (Sized = nil) or (SizedFrame <> K) or (SizedW <> W) or (SizedH <> H) then
+      begin
+        Sized.Free;
+        Sized := ScalePicture(Frames[K], W, H);
+        SizedFrame := K;
+        SizedW := W;
+        SizedH := H;
+      end;
+      Exit(Sized);
+    end;
   { scaled once per size, the page being redrawn far more often than it is zoomed: smaller by the mean of the
     pixels each covers (a thin line in a photo stays a line, as other viewers show it), larger by the nearest }
   if (FPicSized[I] = nil) or (FPicSized[I].Width <> W) or (FPicSized[I].Height <> H) then
@@ -16790,7 +16998,20 @@ begin
     Exit;
   Img := NewImage(W, H, TColorToRGB(Color));
   SetLength(FBalloons, 0);
+  FAnimNext := High(Int64);
   DrawView(Img, 0, H, True);
+  { an animated picture in view: drawn again when its frame changes }
+  if FAnimNext <> High(Int64) then
+  begin
+    if FAnimTimer = nil then
+    begin
+      FAnimTimer := TTimer.Create(Self);
+      FAnimTimer.OnTimer := @AnimTick;
+    end;
+    FAnimTimer.Enabled := False;
+    FAnimTimer.Interval := Max(15, Integer(Min(Int64(2000), FAnimNext - Int64(GetTickCount64))));
+    FAnimTimer.Enabled := True;
+  end;
 
   Full := (FBack = nil) or (FBackImg = nil) or (FBackImg.Width <> W) or (FBackImg.Height <> H);
   RowBytes := W * 4;

@@ -633,6 +633,31 @@ PD_API pd_status pd_doc_control_at(const pd_doc* doc, pd_pos pos, pd_pos* start,
  */
 PD_API void pd_doc_image_display_size(const pd_doc* doc, const pd_inline* image, pd_sp* width, pd_sp* height);
 
+/**
+ * A GIF's screen size, its frames and its loop count (NETSCAPE2.0's: 0 for
+ * ever, -1 when it has none); PD_ERR_FORMAT when it is not a GIF.
+ */
+PD_API pd_status pd_gif_info(const void* data, size_t len, int32_t* width, int32_t* height, int32_t* frames,
+                             int32_t* loops);
+
+/**
+ * Frames first..first+count-1 of a GIF as they are shown, each the whole
+ * screen with the frames before drawn under it and their disposal done:
+ * count of them one after another in rgba (width x height x 4 bytes each,
+ * R G B A, alpha not premultiplied; cleared and see-through pixels alpha 0),
+ * each one's delay in milliseconds in delays_ms (NULL: not wanted; 0 or
+ * 10 ms shown as 100, as browsers do).
+ */
+PD_API pd_status pd_gif_frames(const void* data, size_t len, int32_t first, int32_t count, uint8_t* rgba,
+                               int32_t* delays_ms);
+
+/** what pd_gif_each_frame hands each frame to: the screen as it is shown (width x height RGBA, valid during the
+    call); nonzero stops it */
+typedef int (*pd_gif_frame_fn)(void* user, int32_t index, const uint8_t* rgba, int32_t delay_ms);
+
+/** each frame of a GIF in turn, as pd_gif_frames makes them, in one pass through the file */
+PD_API pd_status pd_gif_each_frame(const void* data, size_t len, pd_gif_frame_fn fn, void* user);
+
 /** embed binary data (image bytes, ...); the document copies it */
 PD_API pd_status pd_doc_add_resource(pd_doc* doc, const char* mime, const void* data, size_t len, pd_res_id* out);
 PD_API pd_status pd_doc_resource(const pd_doc* doc, pd_res_id res, const char** mime, const void** data,
