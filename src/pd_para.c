@@ -1591,6 +1591,18 @@ pd_status pd_para_caret(const pd_para* p, uint32_t off, int32_t* line, pd_sp* x,
 
         if (best >= 0) {    /* the logical start of a character: its left edge, or its right edge in RTL */
             cx = (lv[best] & 1) ? st[best].x + st[best].advance : st[best].x;
+        } else {
+            /* past every character: after the last of them -- the spaces a paragraph ends with hang past its
+               measure, so the line's width leaves them out, and a space typed at the end did not move the caret */
+            for (k = 0; k < n; k++) {
+                if (st[k].cluster < off) {
+                    if (rtl_para && st[k].x < cx) {
+                        cx = st[k].x;
+                    } else if (!rtl_para && st[k].x + st[k].advance > cx) {
+                        cx = st[k].x + st[k].advance;
+                    }
+                }
+            }
         }
     }
 

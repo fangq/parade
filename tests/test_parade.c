@@ -491,6 +491,24 @@ static void test_special_chars(const pd_font* f) {
     CHECK(L.ascent > 0);    /* the empty line still has height */
     pd_para_free(p);
 
+    /* a space typed at the paragraph's end moves the caret, a space's width a space: the spaces a paragraph ends
+       with hang past its measure, but the caret after them is after them, as a word processor shows it */
+    {
+        pd_sp c0 = 0, c1 = 0, c2 = 0, b;
+        int32_t ln;
+
+        p = make_para(f, "word", PD_PT(10));
+        CHECK(pd_para_break(p, &prm, &info) == PD_OK && pd_para_caret(p, 4, &ln, &c0, &b) == PD_OK);
+        pd_para_free(p);
+        p = make_para(f, "word ", PD_PT(10));
+        CHECK(pd_para_break(p, &prm, &info) == PD_OK && pd_para_caret(p, 5, &ln, &c1, &b) == PD_OK);
+        pd_para_free(p);
+        p = make_para(f, "word  ", PD_PT(10));
+        CHECK(pd_para_break(p, &prm, &info) == PD_OK && pd_para_caret(p, 6, &ln, &c2, &b) == PD_OK);
+        pd_para_free(p);
+        CHECK(c1 > c0 + PD_PT(1) && c2 > c1 + PD_PT(1));   /* a space on, and another */
+    }
+
     /* spaces after a forced break are the line's indentation, as code in a <pre> has it, and stay; after a break
        the breaker chose they vanish, as ever */
     {
