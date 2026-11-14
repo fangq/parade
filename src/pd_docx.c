@@ -9989,11 +9989,11 @@ static int dw_arrow_type(const char* v) {
 
 /* A custom geometry as read: each path's commands in its own space (m, l, c, z: arcs and quadratic curves made
    cubics), with its own size, fill and outline, so each is drawn as it says */
-#define DW_CG_MAXCMD 2048
+#define DW_CG_MAXCMD (1 << 20)    /* (a freeform of that many commands: the rest left out) */
 #define DW_CG_MAXPATH 16
 typedef struct {
-    pd_preset_cmd c[DW_CG_MAXCMD];
-    int nc;
+    pd_preset_cmd* c;           /* as many as it has (text made shapes: thousands) */
+    int nc, capc;
     struct {
         int start, n;
         double w, h;        /* its coordinate space (0: the shape's own) */
@@ -10008,12 +10008,27 @@ typedef struct {
 } dw_cust;
 
 static void dw_cust_put(dw_cust* C, char op, const double* p, int np) {
-    if (C->np > 0 && C->nc < DW_CG_MAXCMD) {
+    if (C->np > 0 && C->nc >= C->capc && C->capc < DW_CG_MAXCMD) {
+        int cap = C->capc ? C->capc * 2 : 256;
+        pd_preset_cmd* g = (pd_preset_cmd*)realloc(C->c, (size_t)cap * sizeof(pd_preset_cmd));
+
+        if (g) {
+            C->c = g;
+            C->capc = cap;
+        }
+    }
+
+    if (C->np > 0 && C->nc < C->capc) {
         C->c[C->nc].op = op;
         memcpy(C->c[C->nc].p, p, (size_t)np * sizeof(double));
         C->nc++;
         C->path[C->np - 1].n++;
     }
+}
+
+/* the points path I of a custom geometry flattens to, at most (for a buffer of its own) */
+static int dw_cust_flat_cap(const dw_cust* C, int i) {
+    return C->path[i].n * 13 + 8;
 }
 
 /* path I of a custom geometry as points in its own space, curves as 12 chords each, NAN pairs between its rings;
@@ -10962,9 +10977,12 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         uint32_t pln = cg->path[i].stroke ? l : 0;
                         int np, closed;
 
-                        np = dw_cust_flat(cg, i, cg_xy, 2048, &closed);
+                        double* fxy = (double*)malloc((size_t)dw_cust_flat_cap(cg, i) * 2 * sizeof(double));
+
+                        np = fxy ? dw_cust_flat(cg, i, fxy, dw_cust_flat_cap(cg, i), &closed) : 0;
 
                         if ((!pfl && !pln) || np < 2) {
+                            free(fxy);
                             continue;
                         }
 
@@ -10972,13 +10990,15 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                         pb_puts(&o, "{\"path\":[");
 
                         for (k = 0; k < np; k++) {
-                            if (isnan(cg_xy[2 * k])) {
+                            if (isnan(fxy[2 * k])) {
                                 pb_printf(&o, "%s%d,%d", k ? "," : "", (int)INT32_MIN, (int)INT32_MIN);
                             } else {
-                                fr_pt(&sm, bx0 + cg_xy[2 * k] * gx, by0 + cg_xy[2 * k + 1] * gy, &qx, &qy);
+                                fr_pt(&sm, bx0 + fxy[2 * k] * gx, by0 + fxy[2 * k + 1] * gy, &qx, &qy);
                                 pb_printf(&o, "%s%d,%d", k ? "," : "", (int)emu_sp(qx), (int)emu_sp(qy));
                             }
                         }
+
+                        free(fxy);
 
                         pb_printf(&o, "],\"closed\":%d,\"fill\":%u,\"line\":%u,\"lw\":%d%s%s%s", closed, (unsigned)pfl,
                                   (unsigned)pln, (int)emu_sp(lwd), pfl && !strcmp(cg->path[i].fill, "norm") ? fx : "",
@@ -11995,6 +12015,10 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
 
     pb_free(&o);
     pb_free(&text);
+    if (cg) {
+        free(cg->c);
+    }
+
     free(cg);
 }
 
