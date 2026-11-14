@@ -1371,7 +1371,9 @@ static void put_paragraph(pd_buf* o, tctx* T, const xdoc* d, int p, autonum* an)
         }
     }
 
-    if (any && which >= 1) {
+    /* an empty paragraph's character bullet: in its body's list too (as a label, which on an empty line is not
+       drawn), so that what is typed there is an item, and an empty placeholder's prompt shows its bullet */
+    if ((any && which >= 1) || (!any && which == 2 && !T->P->docx && an->body > 0)) {
         xref f = ppr_first(T, d, ppr, faces, 2, &k);
 
         if (k == 0) {

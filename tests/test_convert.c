@@ -7172,6 +7172,10 @@ static void test_pptx_layout_slide(void) {
     CHECK(js && strstr(js, "<a:off x=\\\"838200\\\" y=\\\"1825625\\\"/><a:ext cx=\\\"10515600\\\" cy=\\\"4351338\\\"/>"));
     /* each with an empty paragraph, formatted: the title 44 points, the content 28 */
     CHECK(js && strstr(js, "<w:sz w:val=\\\"88\\\"/>") && strstr(js, "<w:sz w:val=\\\"56\\\"/>"));
+    /* the content's empty paragraph an item of its bulleted list (what is typed there a bullet point, its prompt with
+       a bullet), with no bullet typed into it; the title's no list's */
+    CHECK(js && count_of(js, "<w:numPr>") == 1 && strstr(js, "<w:numPr>") > strstr(js, "idx=\\\"1\\\"") &&
+          !strstr(js, "\xE2\x80\xA2</w:t>"));
     /* the master's picture, its bytes a resource of d's */
     CHECK(js && strstr(js, "from=\\\"master\\\""));
     {

@@ -13587,6 +13587,12 @@ var
   X, Y, W, H, JW, JH: Double;
   CX, Base, Asc, Desc: pd_sp;
   L, R, TopY, Bot, TX, TW: Integer;
+  Lab: string;
+  LX: Integer;
+  Buf: array[0..63] of AnsiChar;
+  Info: pd_block_info;
+  Levels: array[0..8] of pd_list_level;
+  NL: Int32;
 begin
   if not FCanvasPage or FPresent then
     Exit;
@@ -13625,7 +13631,27 @@ begin
       Canvas.Brush.Style := bsClear;
       TW := Canvas.TextWidth(Txt);
       TX := PageLeft(CPg) + Round(CX * PxPerSp);
-      if Abs(TX - (L + R) div 2) < (R - L) div 10 then
+      { a list paragraph (a body's): its bullet before the prompt, hanging where the layout hangs it }
+      Lab := '';
+      Buf[0] := #0;
+      if (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.list <> 0) and
+         (pd_doc_list_label(FDoc, B, @Buf[0], SizeOf(Buf)) = PD_OK) then
+        Lab := Trim(string(PAnsiChar(@Buf[0])));
+      NL := 0;
+      if (Lab <> '') and (pd_doc_list_info(FDoc, Info.list, @NL, @Levels[0]) = PD_OK) and
+         (Info.list_level >= 0) and (Info.list_level < NL) then
+      begin
+        { a symbol font's letter (Wingdings' "l", Symbol's #$B7) means a bullet: the bullet, as any font has it }
+        if (Pos('wingding', LowerCase(string(Levels[Info.list_level].label_family))) > 0) or
+           (Pos('symbol', LowerCase(string(Levels[Info.list_level].label_family))) > 0) or
+           (Length(Lab) = 1) and (Ord(Lab[1]) >= $80) then
+          Lab := #$E2#$80#$A2;
+        LX := TX - Round(Levels[Info.list_level].hanging * PxPerSp);
+        if LX + Canvas.TextWidth(Lab) > TX then
+          LX := TX - Canvas.TextWidth(Lab + ' ');
+        Canvas.TextOut(LX, TopY + (Bot - TopY - Canvas.TextHeight(Lab)) div 2, Lab);
+      end
+      else if Abs(TX - (L + R) div 2) < (R - L) div 10 then
         TX := TX - TW div 2           { a centred line: the prompt centred }
       else if R - TX < (R - L) div 10 then
         TX := TX - TW;                { a right-aligned one: to its end }
