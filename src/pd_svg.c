@@ -8,6 +8,7 @@
  * Parade's rasterizer. User units are points, y down, as on the page.
  */
 
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -607,6 +608,341 @@ pd_status pd_layout_write_svg_part(const pd_layout* layout, int32_t page, pd_sp 
     sv_doc(pd_layout_doc(layout), it, m, x, y, w, h, &o, 1);
     free(it);
     st = o.err ? PD_ERR_NOMEM : m == 0 ? PD_ERR_RANGE : pb_flush(&o, fn, user);
+    pb_free(&o);
+    return st;
+}
+
+/* ---- a text box's text as shapes: its letters' outlines, DrawingML freeforms ---- */
+
+typedef struct {
+    char k;                     /* 'M', 'L', 'Q' (quadBezTo: control, end), 'C' (two controls, end), 'Z' */
+    double x[3], y[3];          /* EMU */
+} tseg;
+
+typedef struct {
+    uint32_t color;
+    long line;                  /* the line it is on (its baseline, turned back, in half points); rules: LONG_MIN */
+    tseg* s;
+    int n, cap;
+} tpath;
+
+typedef struct {
+    tpath* p;
+    int n, cap;
+    int err;
+    /* the glyph being taken: font units x 64, y up, to EMU */
+    double px, py, sc, hs, c, sn, ox, oy, kx, ky;
+    tpath* cur;
+} tshapes;
+
+static void ts_add(tshapes* T, char k, const double* xy, int npt) {
+    tpath* P = T->cur;
+    int i;
+
+    if (!P || T->err) {
+        return;
+    }
+
+    if (P->n >= P->cap) {
+        int cap = P->cap ? P->cap * 2 : 64;
+        tseg* g = (tseg*)realloc(P->s, (size_t)cap * sizeof(tseg));
+
+        if (!g) {
+            T->err = 1;
+            return;
+        }
+
+        P->s = g;
+        P->cap = cap;
+    }
+
+    P->s[P->n].k = k;
+
+    for (i = 0; i < npt; i++) {
+        P->s[P->n].x[i] = xy[2 * i];
+        P->s[P->n].y[i] = xy[2 * i + 1];
+    }
+
+    P->n++;
+}
+
+/* a point of the glyph (font units x 64, y up) into EMU: scaled, turned about the pen, put where the pen is */
+static void ts_map(const tshapes* T, int32_t fx, int32_t fy, double* out) {
+    double gx = fx * T->sc * T->hs, gy = -fy * T->sc;
+    double x = T->px + gx * T->c - gy * T->sn, y = T->py + gx * T->sn + gy * T->c;
+
+    out[0] = (x - T->ox) * T->kx;
+    out[1] = (y - T->oy) * T->ky;
+}
+
+static void ts_move(void* u, int32_t x, int32_t y) {
+    double p[2];
+
+    ts_map((tshapes*)u, x, y, p);
+    ts_add((tshapes*)u, 'M', p, 1);
+}
+
+static void ts_line(void* u, int32_t x, int32_t y) {
+    double p[2];
+
+    ts_map((tshapes*)u, x, y, p);
+    ts_add((tshapes*)u, 'L', p, 1);
+}
+
+static void ts_quad(void* u, int32_t cx, int32_t cy, int32_t x, int32_t y) {
+    double p[4];
+
+    ts_map((tshapes*)u, cx, cy, p);
+    ts_map((tshapes*)u, x, y, p + 2);
+    ts_add((tshapes*)u, 'Q', p, 2);
+}
+
+static void ts_cubic(void* u, int32_t c1x, int32_t c1y, int32_t c2x, int32_t c2y, int32_t x, int32_t y) {
+    double p[6];
+
+    ts_map((tshapes*)u, c1x, c1y, p);
+    ts_map((tshapes*)u, c2x, c2y, p + 2);
+    ts_map((tshapes*)u, x, y, p + 4);
+    ts_add((tshapes*)u, 'C', p, 3);
+}
+
+static void ts_close(void* u) {
+    ts_add((tshapes*)u, 'Z', NULL, 0);
+}
+
+/* the freeform of that colour on that line, made the first time */
+static tpath* ts_path(tshapes* T, uint32_t color, long line) {
+    int i;
+
+    for (i = 0; i < T->n; i++) {
+        if (T->p[i].color == color && T->p[i].line == line) {
+            return &T->p[i];
+        }
+    }
+
+    if (T->n >= T->cap) {
+        int cap = T->cap ? T->cap * 2 : 16;
+        tpath* g = (tpath*)realloc(T->p, (size_t)cap * sizeof(tpath));
+
+        if (!g) {
+            T->err = 1;
+            return NULL;
+        }
+
+        T->p = g;
+        T->cap = cap;
+    }
+
+    memset(&T->p[T->n], 0, sizeof(tpath));
+    T->p[T->n].color = color;
+    T->p[T->n].line = line;
+    return &T->p[T->n++];
+}
+
+/* the story a block is in (the top of its parents) */
+static pd_block_id ts_story(const pd_doc* d, pd_block_id b) {
+    pd_block_info bi;
+    int guard = 0;
+
+    while (b && pd_doc_block_info(d, b, &bi) == PD_OK && bi.parent && guard++ < 64) {
+        b = bi.parent;
+    }
+
+    return b;
+}
+
+static void ts_colour(pd_buf* o, uint32_t c) {
+    unsigned a = c >> 24;
+
+    pb_printf(o, "<a:srgbClr val=\"%06X\"", (unsigned)(c & 0xFFFFFFu));
+
+    if (a && a < 255) {
+        pb_printf(o, "><a:alpha val=\"%u\"/></a:srgbClr>", a * 100000u / 255);
+    } else {
+        pb_puts(o, "/>");
+    }
+}
+
+static long long ts_emu(double v) {
+    return v > 2e12 ? (long long)2e12 : v < -2e12 ? (long long)-2e12 : (long long)floor(v + 0.5);
+}
+
+pd_status pd_layout_text_shapes(const pd_layout* layout, int32_t page, pd_block_id story, pd_sp ox, pd_sp oy,
+                                double kx, double ky, pd_writer fn, void* user) {
+    const pd_doc* d;
+    pd_draw* it;
+    int32_t n = 0, i, k;
+    tshapes T;
+    pd_buf o;
+    pd_status st;
+    double gx0 = 1e300, gy0 = 1e300, gx1 = -1e300, gy1 = -1e300;
+    int id = 0;
+
+    if (!layout || !fn || !story || kx <= 0 || ky <= 0 || pd_layout_page_items(layout, page, NULL, 0, &n) != PD_OK) {
+        return PD_ERR_ARG;
+    }
+
+    if (!(it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw)))) {
+        return PD_ERR_NOMEM;
+    }
+
+    pd_layout_page_items(layout, page, it, n, &n);
+    d = pd_layout_doc(layout);
+    memset(&T, 0, sizeof(T));
+    T.ox = ox;
+    T.oy = oy;
+    T.kx = kx;
+    T.ky = ky;
+
+    for (i = 0; i < n && !T.err; i++) {
+        const pd_draw* a = &it[i];
+
+        if (!a->block || ts_story(d, a->block) != story) {
+            continue;
+        }
+
+        if (a->kind == PD_DRAW_GLYPH && a->font && a->size > 0 && (a->color >> 24)) {
+            pd_font_metrics fm;
+            pd_outline_sink sink = { ts_move, ts_line, ts_quad, ts_cubic, ts_close };
+            double r = a->rotation / 60000.0 * 3.14159265358979323846 / 180;
+            long line;
+
+            if (pd_font_get_metrics(a->font, &fm) != PD_OK || fm.units_per_em <= 0) {
+                continue;
+            }
+
+            T.c = cos(r);
+            T.sn = sin(r);
+            T.px = a->x;
+            T.py = a->y;
+            T.sc = (double)a->size / fm.units_per_em / 64;
+            T.hs = a->scale > 0 ? a->scale / 65536.0 : 1;
+            line = (long)floor((-a->x * T.sn + a->y * T.c) / 32768.0 + 0.5);     /* (half points) */
+            T.cur = ts_path(&T, a->color, line);
+            pd_font_glyph_outline(a->font, a->glyph, &sink, &T);
+        } else if (a->kind == PD_DRAW_RULE && a->w > 0 && a->h > 0 && (a->color >> 24)) {
+            double q[8];    /* an underline, a strike, a highlight: its rectangle */
+
+            q[0] = (a->x - ox) * kx;
+            q[1] = (a->y - oy) * ky;
+            q[2] = (a->x + a->w - ox) * kx;
+            q[3] = q[1];
+            q[4] = q[2];
+            q[5] = (a->y + a->h - oy) * ky;
+            q[6] = q[0];
+            q[7] = q[5];
+            T.cur = ts_path(&T, a->color, LONG_MIN);
+            ts_add(&T, 'M', q, 1);
+            ts_add(&T, 'L', q + 2, 1);
+            ts_add(&T, 'L', q + 4, 1);
+            ts_add(&T, 'L', q + 6, 1);
+            ts_add(&T, 'Z', NULL, 0);
+        } else if (a->kind == PD_DRAW_PATH && a->points && a->npoints >= 3 && (a->fill >> 24)) {
+            int32_t q;  /* a rule drawn turned (with turned text): its polygon */
+
+            T.cur = ts_path(&T, a->fill, LONG_MIN);
+
+            for (q = 0; q < a->npoints; q++) {
+                double p[2];
+
+                if (a->points[2 * q] == PD_PATH_BREAK || a->points[2 * q] == PD_PATH_CUBIC) {
+                    continue;
+                }
+
+                p[0] = (a->points[2 * q] - ox) * kx;
+                p[1] = (a->points[2 * q + 1] - oy) * ky;
+                ts_add(&T, q == 0 ? 'M' : 'L', p, 1);
+            }
+
+            ts_add(&T, 'Z', NULL, 0);
+        }
+    }
+
+    free(it);
+    memset(&o, 0, sizeof(o));
+
+    for (i = 0; i < T.n; i++) {     /* the group: round all of them */
+        for (k = 0; k < T.p[i].n; k++) {
+            int np = T.p[i].s[k].k == 'C' ? 3 : T.p[i].s[k].k == 'Q' ? 2 : T.p[i].s[k].k == 'Z' ? 0 : 1, q;
+
+            for (q = 0; q < np; q++) {
+                gx0 = T.p[i].s[k].x[q] < gx0 ? T.p[i].s[k].x[q] : gx0;
+                gy0 = T.p[i].s[k].y[q] < gy0 ? T.p[i].s[k].y[q] : gy0;
+                gx1 = T.p[i].s[k].x[q] > gx1 ? T.p[i].s[k].x[q] : gx1;
+                gy1 = T.p[i].s[k].y[q] > gy1 ? T.p[i].s[k].y[q] : gy1;
+            }
+        }
+    }
+
+    if (!T.err && gx1 > gx0) {
+        long long ext_x = ts_emu(gx1 - gx0) > 0 ? ts_emu(gx1 - gx0) : 1, ext_y = ts_emu(gy1 - gy0) > 0 ? ts_emu(gy1 - gy0) : 1;
+
+        pb_printf(&o, "<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" "
+                  "cy=\"%lld\"/><a:chOff x=\"%lld\" y=\"%lld\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm></wpg:grpSpPr>",
+                  ts_emu(gx0), ts_emu(gy0), ext_x, ext_y, ts_emu(gx0), ts_emu(gy0), ext_x, ext_y);
+
+        for (i = 0; i < T.n; i++) {
+            const tpath* P = &T.p[i];
+            double x0 = 1e300, y0 = 1e300, x1 = -1e300, y1 = -1e300;
+            long long cx, cy;
+
+            for (k = 0; k < P->n; k++) {
+                int np = P->s[k].k == 'C' ? 3 : P->s[k].k == 'Q' ? 2 : P->s[k].k == 'Z' ? 0 : 1, q;
+
+                for (q = 0; q < np; q++) {
+                    x0 = P->s[k].x[q] < x0 ? P->s[k].x[q] : x0;
+                    y0 = P->s[k].y[q] < y0 ? P->s[k].y[q] : y0;
+                    x1 = P->s[k].x[q] > x1 ? P->s[k].x[q] : x1;
+                    y1 = P->s[k].y[q] > y1 ? P->s[k].y[q] : y1;
+                }
+            }
+
+            if (x1 < x0) {
+                continue;
+            }
+
+            cx = ts_emu(x1 - x0) > 0 ? ts_emu(x1 - x0) : 1;
+            cy = ts_emu(y1 - y0) > 0 ? ts_emu(y1 - y0) : 1;
+            pb_printf(&o, "<wps:wsp><wps:cNvPr id=\"%%ID%d%%\" name=\"Text as shape %%ID%d%%\"/><wps:cNvSpPr/><wps:spPr>"
+                      "<a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:custGeom><a:avLst/>"
+                      "<a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"l\" t=\"t\" r=\"r\" b=\"b\"/><a:pathLst><a:path w=\"%lld\" "
+                      "h=\"%lld\" stroke=\"0\">", id, id, ts_emu(x0), ts_emu(y0), cx, cy, cx, cy);
+            id++;
+
+            for (k = 0; k < P->n; k++) {
+                const tseg* g = &P->s[k];
+                int np = g->k == 'C' ? 3 : g->k == 'Q' ? 2 : g->k == 'Z' ? 0 : 1, q;
+                const char* el = g->k == 'M' ? "moveTo" : g->k == 'L' ? "lnTo" : g->k == 'Q' ? "quadBezTo" :
+                                 g->k == 'C' ? "cubicBezTo" : NULL;
+
+                if (!el) {
+                    pb_puts(&o, "<a:close/>");
+                    continue;
+                }
+
+                pb_printf(&o, "<a:%s>", el);
+
+                for (q = 0; q < np; q++) {
+                    pb_printf(&o, "<a:pt x=\"%lld\" y=\"%lld\"/>", ts_emu(g->x[q] - x0), ts_emu(g->y[q] - y0));
+                }
+
+                pb_printf(&o, "</a:%s>", el);
+            }
+
+            pb_puts(&o, "</a:path></a:pathLst></a:custGeom><a:solidFill>");
+            ts_colour(&o, P->color);
+            pb_puts(&o, "</a:solidFill><a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>");
+        }
+
+        pb_puts(&o, "</wpg:wgp>");
+    }
+
+    for (i = 0; i < T.n; i++) {
+        free(T.p[i].s);
+    }
+
+    free(T.p);
+    st = T.err || o.err ? PD_ERR_NOMEM : id == 0 ? PD_ERR_RANGE : pb_flush(&o, fn, user);
     pb_free(&o);
     return st;
 }

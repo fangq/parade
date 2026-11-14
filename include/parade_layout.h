@@ -302,6 +302,13 @@ PD_API pd_status pd_layout_write_svg(const pd_layout* layout, int32_t page, pd_w
     the box; w or h 0: the box round what is drawn for those shapes (nshapes > 0). PD_ERR_RANGE when nothing is */
 PD_API pd_status pd_layout_write_svg_part(const pd_layout* layout, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
                                           const int32_t* shapes, int32_t nshapes, pd_writer fn, void* user);
+/** the text a story shows on a page (a drawing's text box, as laid out) as DrawingML freeforms, to edit as shapes:
+    one group (wpg:wgp) of a freeform for each line and colour, its letters' outlines from their fonts (curves kept,
+    turned and scaled as drawn), underlines, strikes and highlights as bars; filled, no line. Its points in EMU:
+    (page sp - ox, oy) * kx, ky. Each freeform's id is written %ID0%, %ID1%, ... PD_ERR_RANGE when the story shows
+    nothing there */
+PD_API pd_status pd_layout_text_shapes(const pd_layout* layout, int32_t page, pd_block_id story, pd_sp ox, pd_sp oy,
+                                       double kx, double ky, pd_writer fn, void* user);
 
 /** a drawing resource (application/vnd.parade.drawing+json) as SVG, width by height; PD_ERR_ARG if it is none.
     Its text boxes' stories, laid out with the page, are not in it */

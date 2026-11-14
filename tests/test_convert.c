@@ -5944,6 +5944,340 @@ static void test_svg_shapes(void) {
     pd_doc_free(d);
 }
 
+/* the first (or the n-th) story a drawing's text boxes have, 0 none */
+static pd_block_id drawing_story(const pd_doc* d, pd_res_id r, int nth) {
+    const char* mime;
+    const void* data;
+    size_t len;
+    const char* q;
+
+    if (pd_doc_resource(d, r, &mime, &data, &len) != PD_OK) {
+        return 0;
+    }
+
+    for (q = (const char*)data; (q = strstr(q, "\"story\":")) != NULL; q += 8) {
+        if (nth-- == 0) {
+            return (pd_block_id)atoi(q + 8);
+        }
+    }
+
+    return 0;
+}
+
+/* a canvas of an SVG's shapes in a new document, laid out: its document, layout, story n's text as shapes */
+typedef struct {
+    pd_doc* d;
+    pd_layout* L;
+    pd_res_id cv;
+    pd_sp x, y, w, h;
+} canvas_page;
+
+static int canvas_page_of(canvas_page* c, const char* group, pd_sp w, pd_sp h) {
+    pd_block_id p;
+    pd_inline o;
+    int32_t pg = -1;
+    pd_sp cx = 0, base = 0, asc = 0, desc = 0;
+
+    memset(c, 0, sizeof(*c));
+    pd_doc_new(&c->d);
+    c->cv = svg_shapes_canvas(c->d, group, w, h);
+    p = pd_doc_child(c->d, pd_doc_child(c->d, pd_doc_root(c->d), 0), 0);
+    memset(&o, 0, sizeof(o));
+    o.kind = PD_INLINE_IMAGE;
+    o.resource = c->cv;
+    o.width = w;
+    o.height = h;
+    c->w = w;
+    c->h = h;
+
+    if (!c->cv || pd_doc_insert_inline(c->d, at(p, 0), &o, NULL) != PD_OK) {
+        return 0;
+    }
+
+    pd_doc_set_font_resolver(c->d, layout_resolver, NULL);
+
+    if (pd_layout_new(c->d, &c->L) != PD_OK || pd_layout_update(c->L, NULL) != PD_OK ||
+            pd_layout_caret(c->L, at(p, 0), &pg, &cx, &base, &asc, &desc) != PD_OK) {
+        return 0;
+    }
+
+    c->x = cx;
+    c->y = base - h;
+    return 1;
+}
+
+static void canvas_page_free(canvas_page* c) {
+    pd_layout_free(c->L);
+    pd_doc_free(c->d);
+}
+
+/* page 0 drawn at 2 px a point: what its paths cover (alpha), or what its glyphs of a story cover (their fonts'
+   own rendering), width by height pixels */
+static void cover_of(const pd_layout* L, const pd_doc* d, pd_block_id story, int glyphs, uint8_t* cov, int w, int h) {
+    pd_draw* it;
+    int32_t n = 0, i;
+
+    memset(cov, 0, (size_t)w * h);
+    pd_layout_page_items(L, 0, NULL, 0, &n);
+    it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+    pd_layout_page_items(L, 0, it, n, &n);
+
+    if (!glyphs) {
+        uint8_t* px = (uint8_t*)calloc((size_t)w * h, 4);
+        int32_t m = 0;
+
+        for (i = 0; i < n; i++) {
+            if (it[i].kind == PD_DRAW_PATH) {
+                it[m++] = it[i];
+            }
+        }
+
+        pd_draw_render(it, m, 0, 0, 2 * 65536, px, w, h, w * 4);
+
+        for (i = 0; i < w * h; i++) {
+            cov[i] = px[4 * i + 3];
+        }
+
+        free(px);
+    } else {
+        for (i = 0; i < n; i++) {
+            pd_glyph_image gi;
+            uint8_t* g;
+            pd_block_id b = it[i].block;
+            pd_block_info bi;
+            double fx;
+            int px0, py0, xx, yy, sub;
+
+            while (b && pd_doc_block_info(d, b, &bi) == PD_OK && bi.parent) {
+                b = bi.parent;
+            }
+
+            if (it[i].kind != PD_DRAW_GLYPH || !it[i].font || b != story) {
+                continue;
+            }
+
+            fx = it[i].x * 2.0 / 65536;
+            sub = (int)((fx - floor(fx)) * 256);
+
+            if (pd_font_glyph_render(it[i].font, it[i].glyph, it[i].size * 2, sub, NULL, 0, &gi) != PD_OK ||
+                    gi.width <= 0 || gi.height <= 0) {
+                continue;
+            }
+
+            g = (uint8_t*)malloc((size_t)gi.width * gi.height);
+            pd_font_glyph_render(it[i].font, it[i].glyph, it[i].size * 2, sub, g, gi.width * gi.height, &gi);
+            px0 = (int)floor(fx) + gi.left;
+            py0 = (int)floor(it[i].y * 2.0 / 65536 + 0.5) - gi.top;
+
+            for (yy = 0; yy < gi.height; yy++) {
+                for (xx = 0; xx < gi.width; xx++) {
+                    int X = px0 + xx, Y = py0 + yy;
+
+                    if (X >= 0 && Y >= 0 && X < w && Y < h && g[yy * gi.width + xx] > cov[Y * w + X]) {
+                        cov[Y * w + X] = g[yy * gi.width + xx];
+                    }
+                }
+            }
+
+            free(g);
+        }
+    }
+
+    free(it);
+}
+
+static void first_move(void* u, int32_t x, int32_t y) {
+    int32_t* p = (int32_t*)u;
+
+    if (!p[2]) {
+        p[0] = x;
+        p[1] = y;
+        p[2] = 1;
+    }
+}
+
+/* the first point of the first letter a story shows on page 0, turned and placed as drawn, in EMU from (ox, oy) */
+static int story_first_point(const pd_layout* L, const pd_doc* d, pd_block_id story, pd_sp ox, pd_sp oy, double* ex,
+                             double* ey) {
+    pd_draw* it;
+    int32_t n = 0, i, got = 0;
+
+    pd_layout_page_items(L, 0, NULL, 0, &n);
+    it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw));
+    pd_layout_page_items(L, 0, it, n, &n);
+
+    for (i = 0; i < n && !got; i++) {
+        pd_block_id b = it[i].block;
+        pd_block_info bi;
+        pd_font_metrics fm;
+        pd_outline_sink sink = { first_move, NULL, NULL, NULL, NULL };
+        int32_t fp[3] = { 0, 0, 0 };
+
+        while (b && pd_doc_block_info(d, b, &bi) == PD_OK && bi.parent) {
+            b = bi.parent;
+        }
+
+        if (it[i].kind == PD_DRAW_GLYPH && it[i].font && b == story && pd_font_get_metrics(it[i].font, &fm) == PD_OK &&
+                pd_font_glyph_outline(it[i].font, it[i].glyph, &sink, fp) == PD_OK && fp[2]) {
+            double r = it[i].rotation / 60000.0 * 3.14159265358979 / 180, sc = (double)it[i].size / fm.units_per_em / 64;
+            double gx = fp[0] * sc, gy = -fp[1] * sc;
+
+            *ex = (it[i].x + gx * cos(r) - gy * sin(r) - ox) * 12700.0 / 65536;
+            *ey = (it[i].y + gx * sin(r) + gy * cos(r) - oy) * 12700.0 / 65536;
+            got = 1;
+        }
+    }
+
+    free(it);
+    return got;
+}
+
+/* the first point of a group's first freeform (its offset and its first moveTo), EMU */
+static int xml_first_point(const char* x, double* ex, double* ey) {
+    const char* w = strstr(x, "<wps:wsp>"), *o = w ? strstr(w, "<a:off x=\"") : NULL, *m = w ? strstr(w, "<a:moveTo><a:pt x=\"") : NULL;
+    long long offx, offy, px, py;
+
+    if (!o || !m || sscanf(o, "<a:off x=\"%lld\" y=\"%lld\"", &offx, &offy) != 2 ||
+            sscanf(m, "<a:moveTo><a:pt x=\"%lld\" y=\"%lld\"", &px, &py) != 2) {
+        return 0;
+    }
+
+    *ex = (double)(offx + px);
+    *ey = (double)(offy + py);
+    return 1;
+}
+
+/* a text box's text as shapes: a freeform a line and colour, the letters' outlines -- drawn, what the letters
+   cover; turned text turned; an empty story nothing */
+static void test_text_shapes(void) {
+    static const char up[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"120\">"
+                             "<text x=\"10\" y=\"50\" font-size=\"40\" fill=\"#000080\">Shapes Ag</text>"
+                             "<text x=\"10\" y=\"100\" font-size=\"30\" fill=\"#cc0000\">red</text></svg>";
+    static const char turned[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"200\">"
+                                 "<text x=\"60\" y=\"60\" font-size=\"40\" fill=\"#000000\" transform=\"rotate(30 60 60)\">"
+                                 "Turned</text></svg>";
+    pd_doc* t = NULL;
+    buf_t g = { NULL, 0 }, x = { NULL, 0 };
+    pd_sp w = 0, h = 0;
+    canvas_page a, b;
+    pd_block_id st;
+    const double k = 12700.0 / 65536;
+    const char* c;
+    int n = 0;
+
+    if (!have_layout_font()) {
+        return;
+    }
+
+    pd_doc_new(&t);
+    CHECK(pd_svg_to_shapes(t, up, sizeof(up) - 1, to_buf, &g, &w, &h) == PD_OK && g.p);
+    CHECK(g.p && canvas_page_of(&a, g.p, w, h));
+    st = a.cv ? drawing_story(a.d, a.cv, 0) : 0;
+    CHECK(st != 0);
+    CHECK(a.L && pd_layout_text_shapes(a.L, 0, st, a.x, a.y, k, k, to_buf, &x) == PD_OK && x.p);
+
+    for (c = x.p ? x.p : ""; (c = strstr(c, "<wps:wsp>")) != NULL; c++) {
+        n++;
+    }
+
+    CHECK(x.p && !strncmp(x.p, "<wpg:wgp>", 9) && n == 1);     /* one line, one colour: one freeform */
+    CHECK(x.p && strstr(x.p, "<a:quadBezTo>") && strstr(x.p, "<a:srgbClr val=\"000080\"/>") &&
+          strstr(x.p, "stroke=\"0\"") && strstr(x.p, "%ID0%") && !strstr(x.p, "%ID1%"));
+
+    if (x.p) {  /* drawn: its paths cover what the letters do, pixel for pixel */
+        int W = (int)(pd_layout_page_count(a.L) > 0 ? 612 * 2 : 0), H = 400, i, ink_a = 0, ink_b = 0, off = 0;
+        uint8_t* ca = (uint8_t*)malloc((size_t)W * H), *cb = (uint8_t*)malloc((size_t)W * H);
+        canvas_page e;
+
+        CHECK(canvas_page_of(&b, x.p, w, h));
+        CHECK(canvas_page_of(&e, "<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr/></wpg:wgp>", w, h));    /* (none) */
+        cover_of(b.L, b.d, 0, 0, ca, W, H);
+        cover_of(e.L, e.d, 0, 0, cb, W, H);
+
+        for (i = 0; i < W * H; i++) {   /* the canvas's own paths (none here): the letters' only */
+            ca[i] = ca[i] > cb[i] ? ca[i] : 0;
+        }
+
+        cover_of(a.L, a.d, st, 1, cb, W, H);
+
+        for (i = 0; i < W * H; i++) {
+            ink_a += ca[i] > 127;
+            ink_b += cb[i] > 127;
+            off += abs((int)ca[i] - (int)cb[i]) > 192;  /* (where one is in and the other out: edges' shading aside) */
+        }
+
+        CHECK(ink_b > 1000 && abs(ink_a - ink_b) < ink_b / 50 && off < ink_b / 50);   /* the same letters, there */
+        canvas_page_free(&b);
+        canvas_page_free(&e);
+        free(ca);
+        free(cb);
+    }
+
+    free(x.p);
+    x.p = NULL;
+    x.n = 0;
+    st = a.cv ? drawing_story(a.d, a.cv, 1) : 0;    /* the red line: its own colour */
+    CHECK(st && pd_layout_text_shapes(a.L, 0, st, a.x, a.y, k, k, to_buf, &x) == PD_OK && x.p &&
+          strstr(x.p, "val=\"CC0000\""));
+    free(x.p);
+    x.p = NULL;
+    x.n = 0;
+    CHECK(pd_layout_text_shapes(a.L, 0, 999999, a.x, a.y, k, k, to_buf, &x) == PD_ERR_RANGE);
+    canvas_page_free(&a);
+    free(g.p);
+    g.p = NULL;
+    g.n = 0;
+
+    /* turned: the letters' outlines turned as they are drawn -- a line going down to the right, not level */
+    CHECK(pd_svg_to_shapes(t, turned, sizeof(turned) - 1, to_buf, &g, &w, &h) == PD_OK && g.p);
+
+    if (g.p && canvas_page_of(&a, g.p, w, h)) {
+        int W = 612 * 2, H = 600, i, X, Y;
+        long sx = 0, sy = 0, sxx = 0, sxy = 0, m = 0;
+        uint8_t* ca = (uint8_t*)malloc((size_t)W * H);
+
+        st = drawing_story(a.d, a.cv, 0);
+        CHECK(st && pd_layout_text_shapes(a.L, 0, st, a.x, a.y, k, k, to_buf, &x) == PD_OK && x.p);
+
+        if (x.p && canvas_page_of(&b, x.p, w, h)) {
+            double slope;
+
+            cover_of(b.L, b.d, 0, 0, ca, W, H);
+
+            for (i = 0; i < W * H; i++) {   /* the slope of the ink: its least-squares line */
+                if (ca[i] > 127) {
+                    X = i % W;
+                    Y = i / W;
+                    sx += X;
+                    sy += Y;
+                    sxx += (long)X * X;
+                    sxy += (long)X * Y;
+                    m++;
+                }
+            }
+
+            slope = m > 10 ? ((double)m * sxy - (double)sx * sy) / ((double)m * sxx - (double)sx * sx) : 0;
+            CHECK(m > 500 && fabs(slope - tan(30 * 3.14159265358979 / 180)) < 0.12);   /* 30 degrees, near enough */
+            {   /* and each letter turned with it: its first letter's first point where the font, turned, puts it */
+                double ax = 0, ay = 0, bx = 0, by = 0;
+
+                CHECK(story_first_point(a.L, a.d, st, a.x, a.y, &ax, &ay) && xml_first_point(x.p, &bx, &by) &&
+                      fabs(ax - bx) < 2 && fabs(ay - by) < 2 && fabs(ax) + fabs(ay) > 0);
+            }
+            canvas_page_free(&b);
+        }
+
+        free(ca);
+        canvas_page_free(&a);
+    } else {
+        CHECK(0);
+    }
+
+    free(x.p);
+    free(g.p);
+    pd_doc_free(t);
+}
+
 static void test_svg(void) {
     pd_doc* d = NULL, *x = NULL;
     pd_res_id r = 0, src;
@@ -12856,6 +13190,7 @@ int main(void) {
     test_svg();
     test_pptx_text_pictures();
     test_svg_shapes();
+    test_text_shapes();
     test_latex_indent();
     test_pptx_chart();
     test_pptx_ph_inherit();

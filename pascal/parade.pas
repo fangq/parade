@@ -1162,6 +1162,8 @@ function pd_layout_write_pdf_show(layout: Ppd_layout; options: Ppd_pdf_options; 
 function pd_layout_write_svg(layout: Ppd_layout; page: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 function pd_layout_write_svg_part(layout: Ppd_layout; page: Int32; x, y, w, h: pd_sp; shapes: PInt32;
   nshapes: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+function pd_layout_text_shapes(layout: Ppd_layout; page: Int32; story: pd_block_id; ox, oy: pd_sp; kx, ky: Double;
+  fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 function pd_drawing_to_svg(doc: Ppd_doc; res: pd_res_id; width, height: pd_sp; fn: pd_writer;
   user: Pointer): pd_status; cdecl; PDEXT;
 function pd_svg_to_shapes(doc: Ppd_doc; svg: Pointer; len: csize_t; fn: pd_writer; user: Pointer;
