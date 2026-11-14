@@ -2987,7 +2987,9 @@ static void put_shape(conv* C, ppart* pt, int n, int skip_ph) {
             put_renamed(C->P, C->o, sty.d, sty.n, "wps:style");
         }
 
-        if (tx >= 0 && has_text(d, tx)) {
+        /* text; or a placeholder of the slide's with none yet: its empty paragraph, formatted as its layout has
+           it, for the prompt to show in and what is typed there to take its look */
+        if (tx >= 0 && (has_text(d, tx) || (isph && xd_kid(d, tx, "p") >= 0))) {
             put_txbody(C, pt, n, tx, isph ? kind : 0, lsp, msp);
         }
 

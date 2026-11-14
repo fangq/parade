@@ -96,6 +96,25 @@ PD_API pd_status pd_pptx_slide_timing(const pd_doc* doc, pd_block_id section, ch
  * (pd_section_props.timing) made it.
  */
 PD_API pd_status pd_pptx_set_slide_timing(pd_doc* doc, pd_block_id section, const char* xml, int32_t len);
+/**
+ * A new slide's canvas on one of the layouts a presentation read from PowerPoint's came with (layout: its part,
+ * "ppt/slideLayouts/slideLayout2.xml", as pd_pptx_slide_layout and the kept parts name it): the layout's
+ * placeholders, empty, where it and its master have them, formatted as they say, with its master's and its own
+ * shapes -- what PowerPoint's New Slide makes. *out is a drawing resource of doc (its pictures copied to doc, its
+ * text boxes new stories) for a canvas the size of the page. PD_ERR_ARG when doc has no such layout.
+ */
+PD_API pd_status pd_pptx_layout_slide(pd_doc* doc, const char* layout, pd_res_id* out);
+/**
+ * The layout a slide made since it was read was put on (pd_pptx_set_slide_layout), into buf; PD_ERR_RANGE when
+ * none was (the slide is on the layout it was read with, or the one before it's) or buf is too small.
+ */
+PD_API pd_status pd_pptx_slide_layout(const pd_doc* doc, pd_block_id section, char* buf, int32_t cap);
+/**
+ * The slide (its section) on that layout, for the PowerPoint export to write it so: a new resource of doc, the
+ * latest of its kind holding every slide's so set; not a step of undo (a slide undone leaves a line that names no
+ * slide).
+ */
+PD_API pd_status pd_pptx_set_slide_layout(pd_doc* doc, pd_block_id section, const char* layout);
 /** Office's preset shapes (DrawingML prstGeom): how many, and the name of each (NULL past the last) */
 PD_API int pd_preset_count(void);
 PD_API const char* pd_preset_name(int i);

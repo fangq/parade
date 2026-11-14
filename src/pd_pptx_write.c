@@ -2897,6 +2897,14 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
                 kept_first_layout(P, layout, sizeof(layout));
             }
 
+            {   /* made on a layout chosen for it (New Slide's): that one */
+                char chosen[256];
+
+                if (pd_pptx_slide_layout(d, sec, chosen, sizeof(chosen)) == PD_OK && chosen[0]) {
+                    snprintf(layout, sizeof(layout), "%s", chosen);
+                }
+            }
+
             snprintf(prev_layout, sizeof(prev_layout), "%s", layout);
         } else {
             pb_printf(&slide, "<p:sld %s%s%s>", NS, tns.p ? tns.p : "", hidden_attr);
@@ -3137,4 +3145,614 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     pd_layout_free(P->L);
     free(P);
     return err || out->err ? (out->err ? PD_ERR_NOMEM : PD_ERR_FORMAT) : PD_OK;
+}
+
+/* ---- a new slide on a layout the presentation came with ---- */
+
+#define PD_PPTX_LAYOUTS_MIME "application/vnd.parade.pptx-layouts"
+
+/* where needle is in the n bytes at hay, NULL nowhere */
+static const char* dw_memmem_s(const char* hay, size_t n, const char* needle) {
+    size_t k = strlen(needle), i;
+
+    for (i = 0; k && i + k <= n; i++) {
+        if (hay[i] == needle[0] && !memcmp(hay + i, needle, k)) {
+            return hay + i;
+        }
+    }
+
+    return NULL;
+}
+
+/* an entry of the kept parts (PD_PPTX_KEEP_MIME): name, content type, source, extra, its bytes */
+typedef struct {
+    const char* name, *ctype, *src, *extra;
+    const unsigned char* data;
+    uint32_t len;
+} kent;
+
+static int kent_next(const unsigned char* b, size_t n, size_t* pos, kent* e) {
+    size_t p = *pos;
+    const char* f[4];
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        const unsigned char* z = p < n ? (const unsigned char*)memchr(b + p, 0, n - p) : NULL;
+
+        if (!z) {
+            return 0;
+        }
+
+        f[i] = (const char*)b + p;
+        p = (size_t)(z - b) + 1;
+    }
+
+    if (p + 4 > n) {
+        return 0;
+    }
+
+    e->len = (uint32_t)b[p] | ((uint32_t)b[p + 1] << 8) | ((uint32_t)b[p + 2] << 16) | ((uint32_t)b[p + 3] << 24);
+    p += 4;
+
+    if (e->len > n - p) {
+        return 0;
+    }
+
+    e->name = f[0];
+    e->ctype = f[1];
+    e->src = f[2];
+    e->extra = f[3];
+    e->data = b + p;
+    *pos = p + e->len;
+    return 1;
+}
+
+/* the latest resource of d of that type, 0 none */
+static pd_res_id latest_res(const pd_doc* d, const char* want, const unsigned char** data, size_t* len) {
+    const char* mime;
+    const void* p;
+    size_t n;
+    pd_res_id r, got = 0;
+
+    for (r = 1; pd_doc_resource(d, r, &mime, &p, &n) == PD_OK; r++) {
+        if (!strcmp(mime, want)) {
+            got = r;
+            *data = (const unsigned char*)p;
+            *len = n;
+        }
+    }
+
+    return got;
+}
+
+/* the kept entry of that name, 0 none */
+static int kent_find(const unsigned char* b, size_t n, const char* name, kent* e) {
+    size_t pos = 0;
+
+    while (kent_next(b, n, &pos, e)) {
+        if (!strcmp(e->name, name)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* a relationship's target, as a part's name: from the part's folder ("ppt/slideLayouts/"), "../" taken back */
+static void rel_resolve(const char* part, const char* target, char* out, size_t cap) {
+    char buf[512];
+    const char* slash = strrchr(part, '/');
+    size_t n;
+
+    if (target[0] == '/') {
+        snprintf(out, cap, "%s", target + 1);
+        return;
+    }
+
+    snprintf(buf, sizeof(buf), "%.*s%s", slash ? (int)(slash - part + 1) : 0, part, target);
+
+    for (;;) {  /* "a/b/../c" -> "a/c" */
+        char* up = strstr(buf, "/../");
+        char* back;
+
+        if (!up) {
+            break;
+        }
+
+        *up = '\0';
+        back = strrchr(buf, '/');
+        n = strlen(up + 4);
+        memmove(back ? back + 1 : buf, up + 4, n + 1);
+    }
+
+    snprintf(out, cap, "%s", buf);
+}
+
+/* the target of the first relationship in rels whose type ends in "/kind" -- or, with no type said, whose target
+   names it ("../slideMasters/...") -- "" none */
+static void rel_of_kind(const char* rels, size_t n, const char* kind, char* out, size_t cap) {
+    const char* p = rels, *e = rels + n;
+    char want[64];
+
+    out[0] = '\0';
+    snprintf(want, sizeof(want), "/%s\"", kind);
+
+    while (p < e && (p = dw_memmem_s(p, (size_t)(e - p), "<Relationship ")) != NULL) {
+        const char* end = memchr(p, '>', (size_t)(e - p));
+        const char* t, *q;
+
+        if (!end) {
+            break;
+        }
+
+        if ((t = dw_memmem_s(p, (size_t)(end - p), "Target=\"")) != NULL &&
+                (q = memchr(t + 8, '"', (size_t)(end - t - 8))) != NULL &&
+                (dw_memmem_s(p, (size_t)(end - p), want) ||
+                 (!dw_memmem_s(p, (size_t)(end - p), "Type=\"") && dw_memmem_s(t, (size_t)(q - t), kind)))) {
+            snprintf(out, cap, "%.*s", (int)(q - t - 8), t + 8);
+            return;
+        }
+
+        p = end;
+    }
+}
+
+/* s without its element <name ...>...</name> (or <name .../>), the first one */
+static void strip_el(pd_buf* s, const char* name) {
+    char open[64], close[64];
+    char* a, *b;
+    size_t ol;
+
+    snprintf(open, sizeof(open), "<%s", name);
+    snprintf(close, sizeof(close), "</%s>", name);
+    ol = strlen(open);
+
+    if (!s->p || (a = (char*)dw_memmem_s(s->p, s->n, open)) == NULL || !(a[ol] == ' ' || a[ol] == '>' || a[ol] == '/')) {
+        return;
+    }
+
+    b = memchr(a, '>', s->n - (size_t)(a - s->p));
+
+    if (!b) {
+        return;
+    }
+
+    if (b[-1] != '/') {
+        b = (char*)dw_memmem_s(b, s->n - (size_t)(b - s->p), close);
+
+        if (!b) {
+            return;
+        }
+
+        b += strlen(close) - 1;
+    }
+
+    memmove(a, b + 1, s->n - (size_t)(b + 1 - s->p));
+    s->n -= (size_t)(b + 1 - a);
+}
+
+/* a node of a parsed JSON value written again */
+static void pj_copy(pj_writer* w, const pj_node* v) {
+    const pj_node* c;
+    char key[256];
+
+    switch (v->type) {
+    case PJ_BOOL:
+        pj_bool(w, (int)v->i);
+        break;
+    case PJ_INT:
+        pj_int(w, v->i);
+        break;
+    case PJ_UINT:
+        pj_int(w, (int64_t)v->u);
+        break;
+    case PJ_FLOAT:
+        pj_int(w, (int64_t)(v->f < 0 ? v->f - 0.5 : v->f + 0.5));
+        break;
+    case PJ_STR:
+        pj_str(w, v->s, v->len);
+        break;
+    case PJ_BYTES:
+        pj_bytes(w, v->s, v->len);
+        break;
+    case PJ_ARR:
+        pj_arr_begin(w);
+
+        for (c = v->child; c; c = c->next) {
+            pj_copy(w, c);
+        }
+
+        pj_arr_end(w);
+        break;
+    case PJ_OBJ:
+        pj_obj_begin(w);
+
+        for (c = v->child; c; c = c->next) {
+            snprintf(key, sizeof(key), "%.*s", (int)c->keylen, c->key);
+            pj_key(w, key);
+            pj_copy(w, c);
+        }
+
+        pj_obj_end(w);
+        break;
+    default:
+        pj_null(w);
+    }
+}
+
+static int to_buf(void* user, const void* data, size_t len) {
+    pb_put((pd_buf*)user, data, len);
+    return 0;
+}
+
+/* the slide XML of a new slide on a layout: the layout's placeholders, empty (not its date, footer, number) */
+static int layout_slide_xml(const unsigned char* lay, size_t ln, pd_buf* o) {
+    xdoc x;
+    char* s = (char*)malloc(ln + 1);
+    int tree, k, id = 2;
+
+    if (!s) {
+        return 0;
+    }
+
+    memcpy(s, lay, ln);
+    s[ln] = '\0';
+
+    if (!xd_parse(&x, s, ln)) {     /* (it owns s now) */
+        xd_free(&x);
+        return 0;
+    }
+
+    pb_printf(o, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<p:sld %s><p:cSld><p:spTree>"
+              "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>", NS);
+    tree = xd_find(&x, "spTree");
+
+    for (k = tree >= 0 ? x.v[tree].kid : -1; k >= 0; k = x.v[k].next) {
+        int ph = xd_path(&x, k, "nvSpPr/nvPr/ph"), cn = xd_path(&x, k, "nvSpPr/cNvPr");
+        char type[32] = "", idx[24] = "", orient[24] = "", sz[24] = "", name[160] = "";
+
+        if (strcmp(x.v[k].name, "sp") || ph < 0) {
+            continue;
+        }
+
+        xd_attr(&x, ph, "type", type, sizeof(type));
+
+        if (!strcmp(type, "dt") || !strcmp(type, "ftr") || !strcmp(type, "sldNum") || !strcmp(type, "hdr")) {
+            continue;   /* (PowerPoint puts these on a new slide only when Header and Footer says to) */
+        }
+
+        xd_attr(&x, ph, "idx", idx, sizeof(idx));
+        xd_attr(&x, ph, "orient", orient, sizeof(orient));
+        xd_attr(&x, ph, "sz", sz, sizeof(sz));
+
+        if (cn >= 0) {
+            xd_attr(&x, cn, "name", name, sizeof(name));
+        }
+
+        pb_printf(o, "<p:sp><p:nvSpPr><p:cNvPr id=\"%d\" name=\"%s\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr>"
+                  "<p:nvPr><p:ph", id++, name);
+
+        if (type[0]) {
+            pb_printf(o, " type=\"%s\"", type);
+        }
+
+        if (orient[0]) {
+            pb_printf(o, " orient=\"%s\"", orient);
+        }
+
+        if (sz[0]) {
+            pb_printf(o, " sz=\"%s\"", sz);
+        }
+
+        if (idx[0]) {
+            pb_printf(o, " idx=\"%s\"", idx);
+        }
+
+        pb_puts(o, "/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang=\"en-US\"/>"
+                "</a:p></p:txBody></p:sp>");
+    }
+
+    pb_puts(o, "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>");
+    xd_free(&x);
+    return !o->err;
+}
+
+pd_status pd_pptx_layout_slide(pd_doc* d, const char* layout, pd_res_id* out) {
+    const unsigned char* kb = NULL;
+    size_t kn = 0, pos = 0;
+    kent e, lay, lrels, pres;
+    char rn[512], mtarget[512], master[512], lt[520];
+    pd_buf zip, ct, prels, slide, srels, pb, js;
+    void* z;
+    pd_doc* t = NULL;
+    pd_status st = PD_ERR_FORMAT;
+    const char* slash;
+
+    if (!d || !layout || !out) {
+        return PD_ERR_ARG;
+    }
+
+    *out = 0;
+
+    if (!latest_res(d, PD_PPTX_KEEP_MIME, &kb, &kn) || !kent_find(kb, kn, layout, &lay)) {
+        return PD_ERR_ARG;  /* not a presentation read from PowerPoint's, or no such layout */
+    }
+
+    slash = strrchr(layout, '/');
+    snprintf(rn, sizeof(rn), "%.*s_rels/%s.rels", slash ? (int)(slash - layout + 1) : 0, layout, slash ? slash + 1 : layout);
+
+    if (!kent_find(kb, kn, rn, &lrels)) {
+        return PD_ERR_FORMAT;
+    }
+
+    rel_of_kind((const char*)lrels.data, lrels.len, "slideMaster", mtarget, sizeof(mtarget));
+
+    if (!mtarget[0]) {
+        return PD_ERR_FORMAT;
+    }
+
+    rel_resolve(layout, mtarget, master, sizeof(master));
+    memset(&zip, 0, sizeof(zip));
+    memset(&ct, 0, sizeof(ct));
+    memset(&prels, 0, sizeof(prels));
+    memset(&slide, 0, sizeof(slide));
+    memset(&srels, 0, sizeof(srels));
+    memset(&pb, 0, sizeof(pb));
+    memset(&js, 0, sizeof(js));
+
+    if (!layout_slide_xml(lay.data, lay.len, &slide) || (z = pd_zipw_new(&zip)) == NULL) {
+        pb_free(&slide);
+        return PD_ERR_NOMEM;
+    }
+
+    /* a package of one slide: the parts the presentation's masters reach, as they were kept */
+    pb_puts(&ct, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Types xmlns=\"http://schemas."
+            "openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/"
+            "vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+            "<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slides/slide1.xml\" ContentType="
+            "\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>");
+
+    while (kent_next(kb, kn, &pos, &e)) {
+        if (!strcmp(e.src, "map") || !strcmp(e.src, "tail") || !strcmp(e.src, "pres") || !strchr(e.name, '/')) {
+            continue;
+        }
+
+        pd_zipw_add(z, e.name, e.data, e.len);
+
+        if (e.ctype[0] && !strstr(e.name, "_rels/")) {
+            pb_printf(&ct, "<Override PartName=\"/%s\" ContentType=\"%s\"/>", e.name, e.ctype);
+        }
+    }
+
+    pb_puts(&ct, "</Types>");
+    pd_zipw_add(z, "[Content_Types].xml", ct.p, ct.n);
+
+    /* presentation.xml as it came (its size, its default text style), on the layout's master and the one slide */
+    if (kent_find(kb, kn, "ppt/presentation.xml", &pres)) {
+        char* gt;
+
+        pb_put(&pb, pres.data, pres.len);
+        strip_el(&pb, "p:sldMasterIdLst");
+        strip_el(&pb, "p:notesMasterIdLst");
+        strip_el(&pb, "p:handoutMasterIdLst");
+        strip_el(&pb, "p:sldIdLst");
+        strip_el(&pb, "p:embeddedFontLst");
+        gt = pb.p ? (char*)dw_memmem_s(pb.p, pb.n, "<p:presentation") : NULL;
+        gt = gt ? memchr(gt, '>', pb.n - (size_t)(gt - pb.p)) : NULL;
+
+        if (gt) {
+            static const char lists[] = "<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rIdPdM\"/>"
+                                        "</p:sldMasterIdLst><p:sldIdLst><p:sldId id=\"256\" r:id=\"rIdPdS\"/></p:sldIdLst>";
+            size_t at = (size_t)(gt - pb.p) + 1, ll = sizeof(lists) - 1;
+
+            pb_put(&pb, lists, ll);     /* (room for it) ... */
+            memmove(pb.p + at + ll, pb.p + at, pb.n - ll - at);
+            memcpy(pb.p + at, lists, ll);
+        }
+    }
+
+    if (!pb.n || pb.err) {
+        pd_section_props sp;
+        long long cx = 12192000, cy = 6858000;
+
+        if (pd_doc_section_props(d, pd_doc_child(d, pd_doc_root(d), 0), &sp) == PD_OK && sp.page_width > 0) {
+            cx = (long long)sp.page_width * 12700 / 65536;
+            cy = (long long)sp.page_height * 12700 / 65536;
+        }
+
+        pb.n = 0;
+        pb.err = 0;
+        pb_printf(&pb, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<p:presentation %s>"
+                  "<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rIdPdM\"/></p:sldMasterIdLst><p:sldIdLst>"
+                  "<p:sldId id=\"256\" r:id=\"rIdPdS\"/></p:sldIdLst><p:sldSz cx=\"%lld\" cy=\"%lld\"/>"
+                  "<p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>", NS, cx, cy);
+    }
+
+    pd_zipw_add(z, "ppt/presentation.xml", pb.p, pb.n);
+    pb_printf(&prels, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://"
+              "schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdPdM\" Type=\"%sslideMaster\" "
+              "Target=\"/%s\"/><Relationship Id=\"rIdPdS\" Type=\"%sslide\" Target=\"slides/slide1.xml\"/>"
+              "</Relationships>", REL, master, REL);
+    pd_zipw_add(z, "ppt/_rels/presentation.xml.rels", prels.p, prels.n);
+    pd_zipw_add(z, "ppt/slides/slide1.xml", slide.p, slide.n);
+    snprintf(lt, sizeof(lt), "/%s", layout);
+    pb_printf(&srels, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://"
+              "schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"%sslideLayout\" "
+              "Target=\"%s\"/></Relationships>", REL, lt);
+    pd_zipw_add(z, "ppt/slides/_rels/slide1.xml.rels", srels.p, srels.n);
+    {
+        static const char root[] = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns="
+                                   "\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship "
+                                   "Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+                                   "relationships/officeDocument\" Target=\"ppt/presentation.xml\"/></Relationships>";
+
+        pd_zipw_add(z, "_rels/.rels", root, sizeof(root) - 1);
+    }
+    pd_zipw_finish(z);
+
+    /* read as any presentation is, into a document of its own; its slide's drawing made one of d's: the
+       pictures it names copied over, its text boxes new stories of d's */
+    if (!zip.err && pd_doc_new(&t) == PD_OK && pd_pptx_import(t, (const unsigned char*)zip.p, zip.n) == PD_OK) {
+        pd_block_id sec = pd_doc_child(t, pd_doc_root(t), 0);
+        pd_block_id fl = sec ? pd_doc_child(t, sec, 0) : 0;
+        pd_block_id para = fl ? pd_doc_child(t, fl, 0) : 0;
+        pd_pos at;
+        pd_inline o;
+        const char* mime;
+        const void* data;
+        size_t dlen;
+        pj_doc* jd;
+
+        at.block = para;
+        at.offset = 0;
+
+        if (para && pd_doc_inline_at(t, at, &o) == PD_OK && o.resource &&
+                pd_doc_resource(t, o.resource, &mime, &data, &dlen) == PD_OK &&
+                !strcmp(mime, "application/vnd.parade.drawing+json") && (jd = pj_parse(data, dlen, 0, NULL)) != NULL) {
+            const pj_node* root = pj_root(jd), *m, *xml = pj_get(root, "xml");
+            pj_writer w;
+            pd_res_id base = 0;
+
+            pj_init(&w, 0, to_buf, &js);
+            w.compact = 1;
+            pj_obj_begin(&w);
+
+            for (m = root && root->type == PJ_OBJ ? root->child : NULL; m; m = m->next) {
+                char key[64];
+
+                snprintf(key, sizeof(key), "%.*s", (int)m->keylen, m->key);
+
+                if (!strcmp(key, "items")) {
+                    continue;   /* (what it drew, t's stories: made again from the XML) */
+                }
+
+                pj_key(&w, key);
+
+                if (!strcmp(key, "rels") && m->type == PJ_OBJ) {
+                    const pj_node* r;
+
+                    pj_obj_begin(&w);
+
+                    for (r = m->child; r; r = r->next) {
+                        const char* rm;
+                        const void* rd;
+                        size_t rl;
+                        pd_res_id nr = 0;
+
+                        if (pd_doc_resource(t, (pd_res_id)pj_int_or(r, 0), &rm, &rd, &rl) == PD_OK &&
+                                pd_doc_add_resource(d, rm, rd, rl, &nr) == PD_OK) {
+                            snprintf(key, sizeof(key), "%.*s", (int)r->keylen, r->key);
+                            pj_key(&w, key);
+                            pj_int(&w, (int64_t)nr);
+                        }
+                    }
+
+                    pj_obj_end(&w);
+                } else {
+                    pj_copy(&w, m);
+                }
+            }
+
+            pj_obj_end(&w);
+
+            if (!pj_finish(&w) && !js.err && xml && xml->type == PJ_STR &&
+                    pd_doc_add_resource(d, "application/vnd.parade.drawing+json", js.p, js.n, &base) == PD_OK) {
+                st = pd_docx_drawing_rebuild(d, base, xml->s, xml->len, out);
+            }
+
+            pj_free(jd);
+        }
+    }
+
+    if (t) {
+        pd_doc_free(t);
+    }
+
+    pb_free(&zip);
+    pb_free(&ct);
+    pb_free(&prels);
+    pb_free(&slide);
+    pb_free(&srels);
+    pb_free(&pb);
+    pb_free(&js);
+    return st;
+}
+
+/* the layouts chosen for slides made since (PD_PPTX_LAYOUTS_MIME): a line each, section TAB layout */
+pd_status pd_pptx_slide_layout(const pd_doc* d, pd_block_id section, char* buf, int32_t cap) {
+    const unsigned char* b = NULL;
+    size_t n = 0;
+    char key[24];
+    const char* s, *end;
+    size_t kl;
+
+    if (!d || !section || !buf || cap <= 0) {
+        return PD_ERR_ARG;
+    }
+
+    buf[0] = '\0';
+
+    if (!latest_res(d, PD_PPTX_LAYOUTS_MIME, &b, &n)) {
+        return PD_ERR_RANGE;
+    }
+
+    snprintf(key, sizeof(key), "%u\t", (unsigned)section);
+    kl = strlen(key);
+
+    for (s = (const char*)b, end = s + n; s < end;) {
+        const char* nl = memchr(s, '\n', (size_t)(end - s));
+        const char* le = nl ? nl : end;
+
+        if ((size_t)(le - s) > kl && !memcmp(s, key, kl)) {
+            if ((int32_t)(le - s - kl) >= cap) {
+                return PD_ERR_RANGE;
+            }
+
+            snprintf(buf, (size_t)cap, "%.*s", (int)(le - s - kl), s + kl);
+            return PD_OK;
+        }
+
+        s = le + 1;
+    }
+
+    return PD_ERR_RANGE;
+}
+
+pd_status pd_pptx_set_slide_layout(pd_doc* d, pd_block_id section, const char* layout) {
+    const unsigned char* b = NULL;
+    size_t n = 0;
+    pd_buf o;
+    char key[24];
+    const char* s, *end;
+    size_t kl;
+    pd_res_id r;
+    pd_status st;
+
+    if (!d || !section || !layout || strchr(layout, '\n') || strchr(layout, '\t')) {
+        return PD_ERR_ARG;
+    }
+
+    memset(&o, 0, sizeof(o));
+    snprintf(key, sizeof(key), "%u\t", (unsigned)section);
+    kl = strlen(key);
+
+    if (latest_res(d, PD_PPTX_LAYOUTS_MIME, &b, &n)) {     /* the others' as they are */
+        for (s = (const char*)b, end = s + n; s < end;) {
+            const char* nl = memchr(s, '\n', (size_t)(end - s));
+            const char* le = nl ? nl : end;
+
+            if (le > s && !((size_t)(le - s) >= kl && !memcmp(s, key, kl))) {
+                pb_put(&o, s, (size_t)(le - s));
+                pb_puts(&o, "\n");
+            }
+
+            s = le + 1;
+        }
+    }
+
+    pb_printf(&o, "%s%s\n", key, layout);
+    st = o.err ? PD_ERR_NOMEM : pd_doc_add_resource(d, PD_PPTX_LAYOUTS_MIME, o.p, o.n, &r);
+    pb_free(&o);
+    return st;
 }

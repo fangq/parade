@@ -7087,6 +7087,137 @@ static void test_pptx_ph_inherit(void) {
     pd_doc_free(d);
 }
 
+/* a presentation of its own parts, presentation.xml among them, ..., NULL */
+static pd_doc* pptx_parts(const char* first, ...) {
+    va_list ap;
+    pd_doc* d;
+
+    va_start(ap, first);
+    d = parts_doc(PD_CONV_PPTX, NULL, 0, first, ap);
+    va_end(ap);
+    return d;
+}
+
+/* PowerPoint's New Slide on a layout: the layout's placeholders (not its date), empty, where the master has them,
+   formatted as its styles say; the master's picture copied into the document; the layout chosen written by the
+   export; a layout there is not refused */
+static void test_pptx_layout_slide(void) {
+    pd_doc* d = pptx_parts(
+                    "ppt/presentation.xml", "<p:presentation xmlns:p=\"p\" xmlns:r=\"r\"><p:sldMasterIdLst><p:sldMasterId "
+                    "id=\"2147483648\" r:id=\"rIdM\"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id=\"256\" r:id=\"rIdS1\"/>"
+                    "</p:sldIdLst><p:sldSz cx=\"12192000\" cy=\"6858000\"/></p:presentation>",
+                    "ppt/_rels/presentation.xml.rels", "<Relationships><Relationship Id=\"rIdM\" "
+                    "Target=\"slideMasters/slideMaster1.xml\"/><Relationship Id=\"rIdS1\" Target=\"slides/slide1.xml\"/>"
+                    "</Relationships>",
+                    "ppt/slides/slide1.xml", PSLD("", "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"T\"/><p:cNvSpPr/><p:nvPr>"
+                            "<p:ph type=\"ctrTitle\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>"
+                            PP("Deck") "</p:txBody></p:sp>"),
+                    "ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                    "Target=\"../slideLayouts/slideLayout1.xml\"/></Relationships>",
+                    "ppt/slideLayouts/slideLayout1.xml", "<p:sldLayout xmlns:p=\"p\" xmlns:a=\"a\"><p:cSld name=\"Title Slide\">"
+                    "<p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title 1\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"ctrTitle\"/>"
+                    "</p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr algn=\"ctr\"><a:defRPr "
+                    "sz=\"6000\"/></a:lvl1pPr></a:lstStyle><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:sldLayout>",
+                    "ppt/slideLayouts/_rels/slideLayout1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                    "Target=\"../slideMasters/slideMaster1.xml\"/></Relationships>",
+                    "ppt/slideLayouts/slideLayout2.xml", "<p:sldLayout xmlns:p=\"p\" xmlns:a=\"a\"><p:cSld name=\"Title and "
+                    "Content\"><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title 1\"/><p:cNvSpPr/><p:nvPr><p:ph "
+                    "type=\"title\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"
+                    "<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content 2\"/><p:cNvSpPr/><p:nvPr><p:ph idx=\"1\"/></p:nvPr>"
+                    "</p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"
+                    "<p:sp><p:nvSpPr><p:cNvPr id=\"4\" name=\"Date 3\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"dt\" sz=\"half\" "
+                    "idx=\"10\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"
+                    "</p:spTree></p:cSld></p:sldLayout>",
+                    "ppt/slideLayouts/_rels/slideLayout2.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                    "Target=\"../slideMasters/slideMaster1.xml\"/></Relationships>",
+                    "ppt/slideMasters/slideMaster1.xml", "<p:sldMaster xmlns:p=\"p\" xmlns:a=\"a\" xmlns:r=\"r\"><p:cSld>"
+                    "<p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"title\"/>"
+                    "</p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"365125\"/><a:ext cx=\"10515600\" "
+                    "cy=\"1325563\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"
+                    "<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Body\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/>"
+                    "</p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"1825625\"/><a:ext cx=\"10515600\" "
+                    "cy=\"4351338\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"
+                    "<p:sp><p:nvSpPr><p:cNvPr id=\"4\" name=\"Date\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"dt\" sz=\"half\" "
+                    "idx=\"10\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"6356350\"/><a:ext "
+                    "cx=\"2743200\" cy=\"365125\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>"
+                    "</p:sp><p:pic><p:nvPicPr><p:cNvPr id=\"9\" name=\"Logo\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill>"
+                    "<a:blip r:embed=\"rIdL\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off "
+                    "x=\"11000000\" y=\"6000000\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm><a:prstGeom prst=\"rect\">"
+                    "<a:avLst/></a:prstGeom></p:spPr></p:pic></p:spTree></p:cSld><p:txStyles><p:titleStyle><a:lvl1pPr>"
+                    "<a:defRPr sz=\"4400\"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr marL=\"228600\" "
+                    "indent=\"-228600\"><a:buChar char=\"&#8226;\"/><a:defRPr sz=\"2800\"/></a:lvl1pPr></p:bodyStyle>"
+                    "</p:txStyles></p:sldMaster>",
+                    "ppt/slideMasters/_rels/slideMaster1.xml.rels", "<Relationships><Relationship Id=\"rId1\" "
+                    "Target=\"../slideLayouts/slideLayout1.xml\"/><Relationship Id=\"rId2\" "
+                    "Target=\"../slideLayouts/slideLayout2.xml\"/><Relationship Id=\"rIdL\" Target=\"../media/logo.png\"/>"
+                    "</Relationships>",
+                    "ppt/media/logo.png", "tests/data/rgba.png", NULL);
+    pd_res_id r = 0, bad = 0;
+    char* js = NULL, lay[128];
+    pd_block_id sec = d ? pd_doc_child(d, pd_doc_root(d), 0) : 0;
+    buf_t out;
+
+    CHECK(d != NULL);
+
+    if (!d) {
+        return;
+    }
+
+    CHECK(pd_pptx_layout_slide(d, "ppt/slideLayouts/slideLayout9.xml", &bad) == PD_ERR_ARG && bad == 0);
+    CHECK(pd_pptx_layout_slide(d, "ppt/slideLayouts/slideLayout2.xml", &r) == PD_OK && r != 0);
+    js = r ? drawing_json(d, r) : NULL;
+    /* its title and its content, where the master has them; not the date */
+    CHECK(js && strstr(js, "ph=\\\"title\\\"") && strstr(js, "idx=\\\"1\\\"") && !strstr(js, "ph=\\\"dt\\\"") &&
+          !strstr(js, "idx=\\\"10\\\""));
+    CHECK(js && strstr(js, "<a:off x=\\\"838200\\\" y=\\\"1825625\\\"/><a:ext cx=\\\"10515600\\\" cy=\\\"4351338\\\"/>"));
+    /* each with an empty paragraph, formatted: the title 44 points, the content 28 */
+    CHECK(js && strstr(js, "<w:sz w:val=\\\"88\\\"/>") && strstr(js, "<w:sz w:val=\\\"56\\\"/>"));
+    /* the master's picture, its bytes a resource of d's */
+    CHECK(js && strstr(js, "from=\\\"master\\\""));
+    {
+        const char* mime;
+        const void* data;
+        size_t len;
+        pd_res_id k;
+        int found = 0;
+        FILE* f = fopen("tests/data/rgba.png", "rb");
+        unsigned char png[4096];
+        size_t pn = f ? fread(png, 1, sizeof(png), f) : 0;
+
+        if (f) {
+            fclose(f);
+        }
+
+        const char* rl = js ? strstr(js, "\"rels\":{") : NULL;
+        const char* colon = rl ? strchr(rl + 8, ':') : NULL;
+
+        /* (the picture the drawing names: equal bytes are kept once, so it may be the one slide 1 has) */
+        k = colon && rl[8] != '}' ? (pd_res_id)atoi(colon + 1) : 0;
+        found = k > 0 && pd_doc_resource(d, k, &mime, &data, &len) == PD_OK && len == pn && pn &&
+                !memcmp(data, png, pn) && !strcmp(mime, "image/png");
+        CHECK(found);
+    }
+    /* the layout set for a slide, read back, and the export writing the slide on it */
+    CHECK(pd_pptx_slide_layout(d, sec, lay, sizeof(lay)) == PD_ERR_RANGE);
+    CHECK(pd_pptx_set_slide_layout(d, sec, "ppt/slideLayouts/slideLayout2.xml") == PD_OK);
+    CHECK(pd_pptx_set_slide_layout(d, sec + 1000, "ppt/slideLayouts/slideLayout1.xml") == PD_OK);
+    CHECK(pd_pptx_slide_layout(d, sec, lay, sizeof(lay)) == PD_OK && !strcmp(lay, "ppt/slideLayouts/slideLayout2.xml"));
+    CHECK(pd_pptx_set_slide_layout(d, sec, "bad\tname") == PD_ERR_ARG);
+    {
+        pd_doc* back = pptx_again(d, &out);
+        size_t n = 0;
+        char* x = out.p ? (char*)pd_zip_get((const unsigned char*)out.p, out.n, "ppt/slides/_rels/slide1.xml.rels", &n)
+                  : NULL;
+
+        CHECK(x && strstr(x, "slideLayout2.xml") && !strstr(x, "slideLayout1.xml"));
+        free(x);
+        pd_doc_free(back);
+        free(out.p);
+    }
+    free(js);
+    pd_doc_free(d);
+}
+
 /* a run's capitals and small capitals, its letter spacing, its East Asian face, its highlight; a link to an address
    a link of the document's */
 static void test_pptx_run_props(void) {
@@ -13194,6 +13325,7 @@ int main(void) {
     test_latex_indent();
     test_pptx_chart();
     test_pptx_ph_inherit();
+    test_pptx_layout_slide();
     test_pptx_run_props();
     test_pptx_math();
     test_pptx_table_style();
