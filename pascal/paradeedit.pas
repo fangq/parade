@@ -9046,6 +9046,8 @@ var
   WasOn: Boolean;
   WasAt: pd_pos;
   WasSid: Integer;
+  Pts: array[0..4] of TPoint;
+  K: Integer;
 begin
   if FShapeOn or not CaretTextBox(D, Sid) or (Sid < 0) or not DrawingPlace(D, Pg, X, Y, W, H, JW, JH) or
      (JW <= 0) or (JH <= 0) then
@@ -9061,11 +9063,6 @@ begin
       Canvas.Brush.Style := bsClear;
       Canvas.Pen.Color := $00D77800;
       Canvas.Pen.Width := 1;
-      Canvas.Pen.Style := psDash;
-      Canvas.Rectangle(L - 1, T - 1, R + 2, B + 2);
-      Canvas.Pen.Style := psSolid;
-      { and, as Word and PowerPoint show the box being typed in, its handles: to size it and to turn it }
-      PaintSizeHandles(L, T, R, B);
       WasOn := FShapeOn;
       WasAt := FShapeAt;
       WasSid := FShapeSid;
@@ -9073,6 +9070,30 @@ begin
       FShapeAt := D;
       FShapeSid := Sid;
       try
+        if TurnedSelection(G, M) then
+        begin   { turned: its own frame dashed, as it is turned, and its handles on it -- where a press takes them }
+          for K := 0 to 4 do
+            Pts[K] := TurnedHandle(M, G, (K * 2) mod 8, 0, 0, G.W, G.H);
+          Canvas.Pen.Style := psDash;
+          Canvas.Polyline(Pts);
+          Canvas.Pen.Style := psSolid;
+          Canvas.Brush.Style := bsSolid;
+          Canvas.Brush.Color := clWhite;
+          for K := 0 to 7 do
+          begin
+            P := TurnedHandle(M, G, K, 0, 0, G.W, G.H);
+            Canvas.Rectangle(P.X - HandleHalf, P.Y - HandleHalf, P.X + HandleHalf + 1, P.Y + HandleHalf + 1);
+          end;
+          Canvas.Brush.Style := bsClear;
+        end
+        else
+        begin
+          Canvas.Pen.Style := psDash;
+          Canvas.Rectangle(L - 1, T - 1, R + 2, B + 2);
+          Canvas.Pen.Style := psSolid;
+          { and, as Word and PowerPoint show the box being typed in, its handles: to size it and to turn it }
+          PaintSizeHandles(L, T, R, B);
+        end;
         if ShapeGeom(Sid, G) and DrawMap(M) and RotHandle(M, G, G.Rot, TP, P) then
         begin
           Canvas.Pen.Color := $00D77800;
