@@ -186,6 +186,9 @@ type
     FShapeAt: pd_pos;              { the drawing: its object in the text }
     FShapeSid: Integer;            { the shape (its sid), -1 the whole drawing }
     FShapeMore: array of Integer;  { more shapes of the drawing, added with Shift+click }
+    FDropOn: Boolean;              { the next picture shape centred at FDropX, FDropY (the drawing's units), as
+                                     dropped there; else in the drawing's middle }
+    FDropX, FDropY: Double;
     FDrawKind: string;             { a shape to draw by dragging in the selected canvas; '' none }
     FDrawCursor: TCursor;          { the cursor before drawing began }
     FShapeDrag: Integer;           { a drag of the shape: -1 none, 0..7 a handle (corners and sides), 8 the shape,
@@ -899,6 +902,11 @@ type
     function InsertPicture(const FileName: string): Boolean;
     { a picture's bytes (Mime '' to know it by them): PNG, JPEG, GIF, BMP, TIFF; SVG, EMF and WMF as drawings }
     function InsertPictureData(const Mime: string; Data: Pointer; Len: SizeInt; const Alt: string): Boolean;
+    { a file InsertPicture takes, by its name }
+    class function IsPictureFile(const FileName: string): Boolean;
+    { picture files dropped at X, Y (client pixels): on a slide, pictures of it centred there; on a page, in the
+      text where they fell, one after another; the count put in }
+    function DropPictureFiles(const Files: array of string; X, Y: Integer): Integer;
     { a link to URL around the selection, or Text (the URL when empty) inserted as a link }
     procedure InsertLink(const URL, AText: string);
     { a page (PD_BREAK_PAGE), column (PD_BREAK_COLUMN) break or a horizontal rule (PD_BREAK_RULE) at the caret }
@@ -5627,6 +5635,77 @@ begin
   Result := True;
 end;
 
+class function TParadeEdit.IsPictureFile(const FileName: string): Boolean;
+begin
+  case LowerCase(ExtractFileExt(FileName)) of
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.svg', '.emf', '.wmf': Result := True;
+  else
+    Result := False;
+  end;
+end;
+
+function TParadeEdit.DropPictureFiles(const Files: array of string; X, Y: Integer): Integer;
+var
+  Page, I: Integer;
+  SX, SY: pd_sp;
+  D, P: pd_pos;
+  Pg: Int32;
+  PX, PY, DW, DH, JW, JH: Double;
+begin
+  Result := 0;
+  JW := 0;
+  JH := 0;
+  if EditBlocked then
+    Exit;
+  Page := PageAt(X, Y);
+  if Page >= 0 then
+  begin
+    SX := Round((X - PageLeft(Page)) / PxPerSp);
+    SY := Round((Y - PageTop(Page)) / PxPerSp);
+    if FCanvasPage and DrawingAt(Page, SX, SY, D) then
+    begin   { on a slide: that slide, the pictures centred where they fell }
+      FShapeOn := True;
+      FShapeAt := D;
+      FShapeSid := -1;
+      SetLength(FShapeMore, 0);
+      FNodeOn := False;
+      if CanvasSelected and DrawingPlace(D, Pg, PX, PY, DW, DH, JW, JH) then
+      begin
+        SetCaret(D, False);
+        FDropOn := True;
+        FDropX := (SX - PX) * JW / DW;
+        FDropY := (SY - PY) * JH / DH;
+      end
+      else
+        ClearShapeSelection;
+    end
+    else if PointToPos(X, Y, P) then
+    begin   { on a page: in the text where they fell }
+      if FShapeOn then
+        ClearShapeSelection;
+      SetCaret(P, False);
+    end;
+  end;
+  try
+    for I := 0 to High(Files) do
+    begin
+      if FDropOn then
+        FShapeSid := -1;    { (each into the slide, not the picture before it) }
+      if IsPictureFile(Files[I]) and InsertPicture(Files[I]) then
+      begin
+        Inc(Result);
+        if FDropOn then
+        begin   { the next a little down and to the right of it, as a stack }
+          FDropX := FDropX + JW / 40;
+          FDropY := FDropY + JH / 40;
+        end;
+      end;
+    end;
+  finally
+    FDropOn := False;
+  end;
+end;
+
 function TParadeEdit.InsertPicture(const FileName: string): Boolean;
 var
   Data: TMemoryStream;
@@ -5667,6 +5746,8 @@ var
   O: pd_inline;
   W, H, Room: pd_sp;
   M: PAnsiChar;
+  D, Was: pd_pos;
+  Sid: Integer;
 begin
   Result := False;
   if EditBlocked or (Data = nil) or (Len <= 0) then
@@ -5685,6 +5766,23 @@ begin
   { its own size, 96 dpi; no wider than the text }
   pd_doc_image_display_size(FDoc, O, W, H);
   EnsureCanvas;
+  if not FShapeOn and CaretTextBox(D, Sid) then
+  begin   { typing in a slide's text box: a picture of the slide, as PowerPoint puts one (a slide's text holds
+            none); a Word text box's text keeps it in its line }
+    Was := CaretPos;
+    FShapeOn := True;
+    FShapeAt := D;
+    FShapeSid := -1;
+    SetLength(FShapeMore, 0);
+    if CanvasSelected then
+    begin
+      SetCaret(D, False);
+      Result := AddPictureShape(Res, W, H);
+      Exit;
+    end;
+    FShapeOn := False;
+    SetCaret(Was, False);
+  end;
   if FShapeOn and CanvasSelected then
   begin   { a canvas selected: a picture of the canvas, in its middle, no bigger than it }
     Result := AddPictureShape(Res, W, H);
@@ -14579,7 +14677,7 @@ function TParadeEdit.AddPictureShape(Res: pd_res_id; W, H: pd_sp): Boolean;
 var
   J: TJSONObject;
   Pg: Int32;
-  PX, PY, DW, DH, JW, JH, K: Double;
+  PX, PY, DW, DH, JW, JH, K, OX, OY: Double;
   Rid: string;
 begin
   Result := False;
@@ -14587,6 +14685,16 @@ begin
      not DrawingPlace(FShapeAt, Pg, PX, PY, DW, DH, JW, JH) then
     Exit;
   K := Min(1, Min(JW * 0.9 / W, JH * 0.9 / H));
+  if FDropOn then
+  begin   { centred where it was dropped, on the slide }
+    OX := Max(0, Min(JW - W * K, FDropX - W * K / 2));
+    OY := Max(0, Min(JH - H * K, FDropY - H * K / 2));
+  end
+  else
+  begin
+    OX := (JW - W * K) / 2;
+    OY := (JH - H * K) / 2;
+  end;
   Rid := 'rIdPd' + IntToStr(Res);
   PushShapeStep('Insert picture', FShapeAt);
   Inc(FStepDepth);
@@ -14607,8 +14715,8 @@ begin
     end;
     Result := PutShapeXml('<pic:pic><pic:nvPicPr><pic:cNvPr id="%ID%" name="Picture %ID%"/><pic:cNvPicPr/>' +
       '</pic:nvPicPr><pic:blipFill><a:blip r:embed="' + Rid + '"/><a:stretch><a:fillRect/></a:stretch>' +
-      '</pic:blipFill><pic:spPr><a:xfrm><a:off x="' + IntToStr(Round((JW - W * K) / 2 / EmuD)) + '" y="' +
-      IntToStr(Round((JH - H * K) / 2 / EmuD)) + '"/><a:ext cx="' + IntToStr(Round(W * K / EmuD)) + '" cy="' +
+      '</pic:blipFill><pic:spPr><a:xfrm><a:off x="' + IntToStr(Round(OX / EmuD)) + '" y="' +
+      IntToStr(Round(OY / EmuD)) + '"/><a:ext cx="' + IntToStr(Round(W * K / EmuD)) + '" cy="' +
       IntToStr(Round(H * K / EmuD)) + '"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
       '</pic:pic>', 'Insert picture');
   finally
