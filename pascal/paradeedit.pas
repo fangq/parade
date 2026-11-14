@@ -467,6 +467,7 @@ type
     procedure OnlyShape;
     function ApplyKeptXml(const Xml: string; const Lbl: string; NewSid: Integer): Boolean;
     procedure AddShapePictures;
+    function ShapesSvg(const Sids: TIntegerArray; Page: Integer; Dest: TStream): Boolean;
     { the selected shapes' XML changed by one of the format edits (Op), one step of undo }
     function ShapeFormatOp(Op: Integer; const S1, S2, S3, S4: string; N1, N2: Double; C1, C2: TColor;
       const Lbl: string): Boolean;
@@ -550,6 +551,9 @@ type
       JData when Binary); leaves Modified alone }
     procedure SaveToStream(Stream: TStream; Format: Int32; Binary: Boolean = False);
     procedure ExportPDF(const FileName: string; JpegQuality: Integer = 0);   { (1..100: photographs as JPEGs) }
+    { the pages as SVG: the first to FileName, the others beside it as name-2.svg, name-3.svg, ...; the count
+      written }
+    function ExportSVG(const FileName: string): Integer;
 
     { editing, also usable for automation }
     procedure InsertText(const S: string);
@@ -627,6 +631,14 @@ type
     { a picture (a resource of the document, W by H sp) put into the selected canvas, in its middle and no bigger
       than it; selected, one step of undo (InsertPicture does this with a canvas selected) }
     function AddPictureShape(Res: pd_res_id; W, H: pd_sp): Boolean;
+    { an SVG as shapes of the selected canvas (pd_svg_to_shapes): one group, its own size (no bigger than the
+      canvas), in the canvas's middle or where it was dropped; one step of undo. False when it draws nothing }
+    function AddSvgShapes(Data: Pointer; Len: SizeInt): Boolean;
+    function RelateSvgPictures(const Sh: string): Boolean;
+    { the selected shape is a picture made from an SVG: the SVG }
+    function SelectedSvg(out Svg: RawByteString): Boolean;
+    { the selected picture made from an SVG made the SVG's shapes, a group in its place and size; one step of undo }
+    function ConvertToShapes: Boolean;
     { the selected shapes taken out of their drawing at once: one step of undo }
     function DeleteShapes: Boolean;
     { whether the clipboard has shapes copied from a drawing }
@@ -3508,6 +3520,36 @@ begin
   end;
 end;
 
+function TParadeEdit.ExportSVG(const FileName: string): Integer;
+var
+  Fs: TFileStream;
+  Fresh: Ppd_layout;
+  Pg: Integer;
+  PageFile: string;
+begin
+  Result := 0;
+  ParadeCheck(pd_layout_new(FDoc, Fresh), 'layout');
+  try
+    ParadeCheck(pd_layout_update(Fresh, nil), 'layout');
+    for Pg := 0 to pd_layout_page_count(Fresh) - 1 do
+    begin
+      if Pg = 0 then
+        PageFile := FileName
+      else
+        PageFile := ChangeFileExt(FileName, '') + '-' + IntToStr(Pg + 1) + ExtractFileExt(FileName);
+      Fs := TFileStream.Create(PageFile, fmCreate);
+      try
+        ParadeCheck(pd_layout_write_svg(Fresh, Pg, @WriteToStream, Fs), 'SVG ' + PageFile);
+      finally
+        Fs.Free;
+      end;
+      Inc(Result);
+    end;
+  finally
+    pd_layout_free(Fresh);
+  end;
+end;
+
 { ---------------- geometry ---------------- }
 
 function TParadeEdit.PxPerSp: Double;
@@ -5748,6 +5790,8 @@ var
   M: PAnsiChar;
   D, Was: pd_pos;
   Sid: Integer;
+  OnCanvas, InBox, IsSvg: Boolean;
+  Head: string;
 begin
   Result := False;
   if EditBlocked or (Data = nil) or (Len <= 0) then
@@ -5756,6 +5800,33 @@ begin
     M := nil
   else
     M := PAnsiChar(Mime);
+  SetString(Head, PAnsiChar(Data), Min(Len, 4096));
+  IsSvg := (Mime = 'image/svg+xml') or ((Mime = '') and (Pos('<svg', Head) > 0));
+  EnsureCanvas;
+  InBox := False;
+  if not FShapeOn and CaretTextBox(D, Sid) then
+  begin   { typing in a slide's text box: a picture of the slide, as PowerPoint puts one (a slide's text holds
+            none); a Word text box's text keeps it in its line }
+    Was := CaretPos;
+    FShapeOn := True;
+    FShapeAt := D;
+    FShapeSid := -1;
+    SetLength(FShapeMore, 0);
+    InBox := CanvasSelected;
+    if InBox then
+      SetCaret(D, False)
+    else
+    begin
+      FShapeOn := False;
+      SetCaret(Was, False);
+    end;
+  end;
+  OnCanvas := FShapeOn and CanvasSelected;
+  if not OnCanvas and TextLocked then
+    Exit;   { a slide's or a canvas page's text outside its text boxes: none, nor pictures in it }
+  { an SVG on a canvas: its shapes, to edit one by one (one group, as PowerPoint's Convert to Shape makes) }
+  if OnCanvas and IsSvg and AddSvgShapes(Data, Len) then
+    Exit(True);
   if pd_doc_add_picture(FDoc, M, Data, Len, Res) <> PD_OK then
     Exit;
   FillChar(O, SizeOf(O), 0);
@@ -5765,25 +5836,7 @@ begin
   O.alt_len := Length(Alt);
   { its own size, 96 dpi; no wider than the text }
   pd_doc_image_display_size(FDoc, O, W, H);
-  EnsureCanvas;
-  if not FShapeOn and CaretTextBox(D, Sid) then
-  begin   { typing in a slide's text box: a picture of the slide, as PowerPoint puts one (a slide's text holds
-            none); a Word text box's text keeps it in its line }
-    Was := CaretPos;
-    FShapeOn := True;
-    FShapeAt := D;
-    FShapeSid := -1;
-    SetLength(FShapeMore, 0);
-    if CanvasSelected then
-    begin
-      SetCaret(D, False);
-      Result := AddPictureShape(Res, W, H);
-      Exit;
-    end;
-    FShapeOn := False;
-    SetCaret(Was, False);
-  end;
-  if FShapeOn and CanvasSelected then
+  if OnCanvas then
   begin   { a canvas selected: a picture of the canvas, in its middle, no bigger than it }
     Result := AddPictureShape(Res, W, H);
     Exit;
@@ -8502,7 +8555,7 @@ var
   {$ENDIF}
 begin
   Result := False;
-  if EditBlocked or TextLocked then
+  if EditBlocked then   { (on a slide or a canvas page: onto it, as InsertPictureData puts one) }
     Exit;
   for K := Low(Kinds) to High(Kinds) do
   begin
@@ -8564,7 +8617,7 @@ var
   K: Integer;
 begin
   Result := False;
-  if EditBlocked or TextLocked then
+  if EditBlocked then
     Exit;
   if not ReadClip(RegisterClipboardFormat('text/uri-list'), S) and
      not ReadClip(RegisterClipboardFormat('x-special/gnome-copied-files'), S) then
@@ -13867,6 +13920,51 @@ end;
 { the selected shapes as pictures other programs paste: a PNG of the drawing cut to the box round them (two pixels
   a point, transparent where nothing is drawn), and with all its shapes selected an SVG of it; into the clipboard
   that is open }
+{ the page's items for those shapes of the selected canvas (each one's top-level shape, by its DrawingML id, as
+  the layout tags what it draws) as SVG into Dest, the box round them its size; False when none is drawn }
+function TParadeEdit.ShapesSvg(const Sids: TIntegerArray; Page: Integer; Dest: TStream): Boolean;
+var
+  Xml: string;
+  Els: TXmlEls;
+  Ids: array of Int32;
+  I, E, P, Q, L, K: Integer;
+  V: Int32;
+  Dup: Boolean;
+begin
+  Result := False;
+  if (Length(Sids) = 0) or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  Ids := nil;
+  for I := 0 to High(Sids) do
+  begin
+    E := SidElement(Els, Sids[I]);
+    if E < 0 then
+      Continue;
+    while (Els[E].Parent >= 0) and (Els[Els[E].Parent].Name <> 'wpc:wpc') do
+      E := Els[E].Parent;
+    P := PosEx('cNvPr ', Xml, Els[E].A);   { its id: the first in it }
+    if (P = 0) or (P >= Els[E].B) then
+      Continue;
+    Q := PosEx('id="', Xml, P);
+    L := PosEx('"', Xml, Q + 4);
+    if (Q = 0) or (L = 0) or (L >= Els[E].B) then
+      Continue;
+    V := StrToIntDef(Copy(Xml, Q + 4, L - Q - 4), 0);
+    Dup := V = 0;
+    for K := 0 to High(Ids) do
+      Dup := Dup or (Ids[K] = V);
+    if not Dup then
+    begin
+      SetLength(Ids, Length(Ids) + 1);
+      Ids[High(Ids)] := V;
+    end;
+  end;
+  if Length(Ids) = 0 then
+    Exit;
+  Result := pd_layout_write_svg_part(FLayout, Page, 0, 0, 0, 0, @Ids[0], Length(Ids), @WriteToStream, Dest) = PD_OK;
+end;
+
 procedure TParadeEdit.AddShapePictures;
 var
   O: pd_inline;
@@ -13939,8 +14037,22 @@ begin
     Ms.Position := 0;
     Clipboard.AddFormat(RegisterClipboardFormat('PNG'), Ms);
     {$ENDIF}
-    if Length(Sids) >= Length(Boxes) then
-    begin   { all of it: as SVG too }
+    { as SVG too: what is drawn for the shapes copied (their text with them; a shape in a group: the group), the box
+      round them its size }
+    Ms.Clear;
+    if Length(Sids) = 0 then    { the whole drawing selected: all its shapes }
+    begin
+      SetLength(Sids, Length(Boxes));
+      for I := 0 to High(Boxes) do
+        Sids[I] := Boxes[I].Sid;
+    end;
+    if ShapesSvg(Sids, Pg, Ms) then
+    begin
+      Ms.Position := 0;
+      Clipboard.AddFormat(RegisterClipboardFormat('image/svg+xml'), Ms);
+    end
+    else if Length(Sids) >= Length(Boxes) then
+    begin   { (a drawing that is no canvas: all of it, as it draws) }
       Ms.Clear;
       if pd_drawing_to_svg(FDoc, O.resource, Round(W), Round(H), @WriteToStream, Ms) = PD_OK then
       begin
@@ -14719,6 +14831,198 @@ begin
       IntToStr(Round(OY / EmuD)) + '"/><a:ext cx="' + IntToStr(Round(W * K / EmuD)) + '" cy="' +
       IntToStr(Round(H * K / EmuD)) + '"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>' +
       '</pic:pic>', 'Insert picture');
+  finally
+    pd_doc_end_group(FDoc);
+    Dec(FStepDepth);
+  end;
+end;
+
+{ the pictures shapes made from an SVG name (r:embed="rIdPd<res>"): related in the drawing, as AddPictureShape
+  relates its own }
+function TParadeEdit.RelateSvgPictures(const Sh: string): Boolean;
+var
+  J, Rels: TJSONObject;
+  P, L: Integer;
+  Rid: string;
+  Any: Boolean;
+begin
+  Result := True;
+  if Pos('r:embed="rIdPd', Sh) = 0 then
+    Exit;
+  J := DrawingJson(FDoc, FShapeAt);
+  if J = nil then
+    Exit(False);
+  try
+    if not (J.Find('rels') is TJSONObject) then
+      J.Add('rels', TJSONObject.Create);
+    Rels := TJSONObject(J.Find('rels'));
+    Any := False;
+    P := Pos('r:embed="rIdPd', Sh);
+    while P > 0 do
+    begin
+      L := PosEx('"', Sh, P + 9);
+      Rid := Copy(Sh, P + 9, L - P - 9);
+      if Rels.Find(Rid) = nil then
+      begin
+        Rels.Add(Rid, StrToIntDef(Copy(Rid, 6, MaxInt), 0));
+        Any := True;
+      end;
+      P := PosEx('r:embed="rIdPd', Sh, L);
+    end;
+    if Any then
+      Result := ReplaceDrawing(FShapeAt, J.AsJSON, 'Insert picture');
+  finally
+    J.Free;
+  end;
+end;
+
+function TParadeEdit.AddSvgShapes(Data: Pointer; Len: SizeInt): Boolean;
+var
+  Ms: TMemoryStream;
+  Sh: string;
+  W, H: pd_sp;
+  Pg: Int32;
+  PX, PY, DW, DH, JW, JH, K, OX, OY: Double;
+begin
+  Result := False;
+  if EditBlocked or not FShapeOn or not CanvasSelected or (Data = nil) or (Len <= 0) or
+     not DrawingPlace(FShapeAt, Pg, PX, PY, DW, DH, JW, JH) then
+    Exit;
+  Ms := TMemoryStream.Create;
+  try
+    if (pd_svg_to_shapes(FDoc, Data, Len, @WriteToStream, Ms, W, H) <> PD_OK) or (Ms.Size = 0) or (W <= 0) or
+       (H <= 0) then
+      Exit;
+    SetString(Sh, PAnsiChar(Ms.Memory), Ms.Size);
+  finally
+    Ms.Free;
+  end;
+  K := Min(1, Min(JW * 0.9 / W, JH * 0.9 / H));
+  if FDropOn then
+  begin
+    OX := Max(0, Min(JW - W * K, FDropX - W * K / 2));
+    OY := Max(0, Min(JH - H * K, FDropY - H * K / 2));
+  end
+  else
+  begin
+    OX := (JW - W * K) / 2;
+    OY := (JH - H * K) / 2;
+  end;
+  SetXfrm(Sh, Round(OX / EmuD), Round(OY / EmuD), Max(1, Round(W * K / EmuD)), Max(1, Round(H * K / EmuD)));
+  PushShapeStep('Insert SVG', FShapeAt);
+  Inc(FStepDepth);
+  pd_doc_begin_group(FDoc, 'Insert SVG');
+  try
+    if not RelateSvgPictures(Sh) then
+      Exit;
+    Result := PutShapeXml(Sh, 'Insert SVG');
+  finally
+    pd_doc_end_group(FDoc);
+    Dec(FStepDepth);
+  end;
+end;
+
+function TParadeEdit.SelectedSvg(out Svg: RawByteString): Boolean;
+var
+  Xml, Part, Rid: string;
+  Els: TXmlEls;
+  E, P, L: Integer;
+  J: TJSONObject;
+  R, Src: pd_res_id;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+begin
+  Result := False;
+  Svg := '';
+  if not FShapeOn or (FShapeSid < 0) or not CanvasSelected or not KeptXml(Xml) then
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  if (E < 0) or (Els[E].Name <> 'pic:pic') then
+    Exit;
+  Part := Copy(Xml, Els[E].A, Els[E].B - Els[E].A);
+  J := DrawingJson(FDoc, FShapeAt);
+  if J = nil then
+    Exit;
+  try
+    P := Pos('r:embed="', Part);   { its picture, or the SVG beside it (asvg:svgBlip) }
+    while (P > 0) and not Result do
+    begin
+      L := PosEx('"', Part, P + 9);
+      Rid := Copy(Part, P + 9, L - P - 9);
+      if (J.Find('rels') is TJSONObject) and (TJSONObject(J.Find('rels')).Find(Rid) <> nil) then
+      begin
+        R := TJSONObject(J.Find('rels')).Integers[Rid];
+        Src := pd_doc_picture_source(FDoc, R);
+        if Src <> 0 then
+          R := Src;
+        if (pd_doc_resource(FDoc, R, @Mime, @Data, @Len) = PD_OK) and (StrComp(Mime, 'image/svg+xml') = 0) then
+        begin
+          SetString(Svg, PAnsiChar(Data), Len);
+          Result := True;
+        end;
+      end;
+      P := PosEx('r:embed="', Part, L);
+    end;
+  finally
+    J.Free;
+  end;
+end;
+
+function TParadeEdit.ConvertToShapes: Boolean;
+var
+  Svg: RawByteString;
+  Ms: TMemoryStream;
+  Sh, Xml, T: string;
+  Els: TXmlEls;
+  W, H: pd_sp;
+  E, P, L, Id, K: Integer;
+  X, Y, CX, CY: Int64;
+begin
+  Result := False;
+  if EditBlocked or not SelectedSvg(Svg) then
+    Exit;
+  Ms := TMemoryStream.Create;
+  try
+    if (pd_svg_to_shapes(FDoc, @Svg[1], Length(Svg), @WriteToStream, Ms, W, H) <> PD_OK) or (Ms.Size = 0) then
+      Exit;
+    SetString(Sh, PAnsiChar(Ms.Memory), Ms.Size);
+  finally
+    Ms.Free;
+  end;
+  PushShapeStep('Convert to shapes', FShapeAt);
+  Inc(FStepDepth);
+  pd_doc_begin_group(FDoc, 'Convert to shapes');
+  try
+    if not RelateSvgPictures(Sh) or not KeptXml(Xml) then
+      Exit;
+    Els := XmlElements(Xml);
+    E := SidElement(Els, FShapeSid);
+    if (E < 0) or (Els[E].Name <> 'pic:pic') or
+       not XfrmOf(Copy(Xml, Els[E].A, Els[E].B - Els[E].A), X, Y, CX, CY) then
+      Exit;
+    SetXfrm(Sh, X, Y, Max(1, CX), Max(1, CY));    { where the picture was, as big }
+    Id := 1;    { ids none of the drawing's shapes has }
+    P := Pos('id="', Xml);
+    while P > 0 do
+    begin
+      L := PosEx('"', Xml, P + 4);
+      if L > 0 then
+        Id := Max(Id, StrToIntDef(Copy(Xml, P + 4, L - P - 4), 0) + 1);
+      P := PosEx('id="', Xml, P + 4);
+    end;
+    T := Sh;
+    K := 0;
+    while Pos('%ID' + IntToStr(K) + '%', T) > 0 do
+    begin
+      T := StringReplace(T, '%ID' + IntToStr(K) + '%', IntToStr(Id + K), [rfReplaceAll]);
+      Inc(K);
+    end;
+    P := Els[E].A;
+    Delete(Xml, P, Els[E].B - Els[E].A);
+    Insert(T, Xml, P);
+    Result := ApplyKeptXml(Xml, 'Convert to shapes', SidAt(XmlElements(Xml), P));
   finally
     pd_doc_end_group(FDoc);
     Dec(FStepDepth);
