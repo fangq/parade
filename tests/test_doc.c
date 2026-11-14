@@ -1773,6 +1773,81 @@ static void test_deflate(void) {
 /* Resources the same -- type and bytes -- are one: added again, the one there; a different type, or none (a drawing
    still to be made is empty), another. A file holding two copies keeps both places, the second saved as "SameAs"
    the first, not its bytes again, and loaded back as they were. */
+/* the pictures saved after the text (a reader that streams, or a person, meets the text first); a file with
+   them before it, as Parade wrote them until now, read just the same */
+static void test_resource_order(void) {
+    pd_doc* d = NULL, *x = NULL;
+    pd_block_id p;
+    pd_res_id res;
+    pd_inline im;
+    pd_pos c;
+    buf_t b;
+    static const unsigned char pic[] = "\x89PNG\r\n\x1a\n picture bytes";
+
+    pd_doc_new(&d);
+    p = first_para(d);
+    pd_doc_insert_text(d, at(p, 0), "The words.", 10, PD_FORMAT_INHERIT, NULL);
+    CHECK(pd_doc_add_resource(d, "image/png", pic, sizeof(pic) - 1, &res) == PD_OK);
+    memset(&im, 0, sizeof(im));
+    im.kind = PD_INLINE_IMAGE;
+    im.resource = res;
+    im.width = im.height = PD_PT(10);
+    CHECK(pd_doc_insert_inline(d, at(p, 10), &im, &c) == PD_OK);
+    b = save(d, PD_JDATA_TEXT);
+
+    if (b.p) {
+        char* s = (char*)b.p, *r, *doc;
+        const char* mime;
+        const void* data;
+        size_t len, tail;
+
+        b.p[b.n] = 0;
+        r = strstr(s, "\"Resources\":");
+        doc = strstr(s, "\"Document\":");
+        CHECK(r && doc && r > doc && strstr(s, "\"Stories\":") < r);
+        CHECK(r && strchr(r, ']') && strstr(r, "\"Document\"") == NULL);    /* (nothing of the text after it) */
+
+        if (r && doc && r > doc && r[-1] == ',') {   /* the order of old: Resources before Document */
+            size_t n = b.n, at_r = (size_t)(r - 1 - s), at_doc = (size_t)(doc - s);
+            char* old = (char*)malloc(n + 2);
+
+            tail = n - 1 - at_r;    /* ",\"Resources\":[...]" up to the closing brace */
+            memcpy(old, s, at_doc);
+            memcpy(old + at_doc, r, tail - 1);
+            old[at_doc + tail - 1] = ',';
+            memcpy(old + at_doc + tail, s + at_doc, at_r - at_doc);
+            memcpy(old + at_doc + tail + (at_r - at_doc), "}", 1);
+            n = at_doc + tail + (at_r - at_doc) + 1;
+            old[n] = 0;
+            CHECK(strstr(old, "\"Resources\":") < strstr(old, "\"Document\":"));
+            CHECK(pd_doc_load(old, n, PD_JDATA_TEXT, &x) == PD_OK && x);
+
+            if (x) {
+                pd_inline got;
+
+                CHECK(pd_doc_resource(x, res, &mime, &data, &len) == PD_OK && len == sizeof(pic) - 1 &&
+                      !memcmp(data, pic, len) && !strcmp(mime, "image/png"));
+                CHECK(pd_doc_inline_at(x, at(first_para(x), 10), &got) == PD_OK && got.resource == res);
+                pd_doc_free(x);
+                x = NULL;
+            }
+
+            free(old);
+        }
+
+        CHECK(pd_doc_load(b.p, b.n, PD_JDATA_TEXT, &x) == PD_OK && x);   /* and the new order */
+
+        if (x) {
+            CHECK(pd_doc_resource(x, res, &mime, &data, &len) == PD_OK && len == sizeof(pic) - 1 &&
+                  !memcmp(data, pic, len));
+            pd_doc_free(x);
+        }
+    }
+
+    free(b.p);
+    pd_doc_free(d);
+}
+
 static void test_resource_dedup(void) {
     pd_doc* d, *e = NULL;
     pd_res_id a, b, c, z1, z2;
@@ -1939,6 +2014,7 @@ int main(void) {
     test_basics();
     test_resource_zip();
     test_resource_dedup();
+    test_resource_order();
     test_deflate();
     printf("format, split, merge, markers\n");
     test_format_split_merge();

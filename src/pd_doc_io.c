@@ -8,12 +8,13 @@
  *   "Styles": [ {"Name","Kind","Parent","Para":{...},"Char":{...}} | null ],
  *   "Formats": [ {"Style": id, "Char": {...}} ],
  *   "Lists": [ {"Levels": [ {"Format","Start","Text","Indent","Hanging","RestartAfter","Label*"} ]} ],
- *   "Resources": [ {"_ByteStream_": {"_DataInfo_": {"MediaType","ByteLength"}, "Data": bytes}} ],
  *   "Revisions": [ {"Kind": "insert"|"delete"|"format", "Author", "Date", "Move", "Old"} ],     (tracked changes;
  *                formats' "Revision"; Move: a moved text's number, Old: a formatting change's old character props)
  *   "Comments": [ {"Author","Date","Text","Parent","Resolved","Start":[block,offset],"End":[block,offset]} ],
  *   "Document": {"_TreeNode_(root)": {"ID": 1}, "_TreeChildren_": [ ... ]},
- *   "Stories": [ {"_TreeNode_(story)": {...}, "_TreeChildren_": [...]} ]
+ *   "Stories": [ {"_TreeNode_(story)": {...}, "_TreeChildren_": [...]} ],
+ *   "Resources": [ {"_ByteStream_": {"_DataInfo_": {"MediaType","ByteLength"}, "Data": bytes}} ]
+ *                (last, after the text; read in any order)
  * }
  * Ids are positions: style i is Styles[i-1], format i is Formats[i-1].
  * Property objects carry only the fields that are set, so a key's
@@ -1483,6 +1484,29 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
 
     pj_arr_end(&w);
 
+    if (d->meta_len) {
+        pj_key(&w, "Metadata");
+        pj_str(&w, d->meta, d->meta_len);
+    }
+
+    if (theme_saved(d)) {
+        pj_key(&w, "Theme");
+        save_theme(&w, &d->theme);
+    }
+
+    pj_key(&w, "Document");
+    save_block(&w, &sv, d->tab[PD_ROOT_ID]);
+
+    pj_key(&w, "Stories");
+    pj_arr_begin(&w);
+
+    for (i = 0; i < sr->nkids; i++) {
+        save_block(&w, &sv, d->tab[sr->kids[i]]);
+    }
+
+    pj_arr_end(&w);
+    save_comments(&w, d, exact);
+    /* the pictures and files last: the text first for a reader that streams, and for anyone opening a .jdoc */
     pj_key(&w, "Resources");
     pj_arr_begin(&w);
 
@@ -1527,29 +1551,6 @@ static pd_status save_doc(const pd_doc* d, pd_jdata_format format, pd_writer fn,
     }
 
     pj_arr_end(&w);
-
-    if (d->meta_len) {
-        pj_key(&w, "Metadata");
-        pj_str(&w, d->meta, d->meta_len);
-    }
-
-    if (theme_saved(d)) {
-        pj_key(&w, "Theme");
-        save_theme(&w, &d->theme);
-    }
-
-    pj_key(&w, "Document");
-    save_block(&w, &sv, d->tab[PD_ROOT_ID]);
-
-    pj_key(&w, "Stories");
-    pj_arr_begin(&w);
-
-    for (i = 0; i < sr->nkids; i++) {
-        save_block(&w, &sv, d->tab[sr->kids[i]]);
-    }
-
-    pj_arr_end(&w);
-    save_comments(&w, d, exact);
     pj_obj_end(&w);
     st = pj_finish(&w) ? PD_ERR_IO : PD_OK;
     free(sv.fmap);
