@@ -226,6 +226,9 @@ type
     FDragIdx: Integer;             { a drag of an adjustment or a point: which }
     FDragGeom: TParadeShapeGeom;   { the shape as the drag found it }
     FDragMap: TParadeDrawMap;
+    FTurnDrag: Boolean;            { the drag is of a turned shape: sized along its own sides (FTurnBox) }
+    FTurnBox: array[0..3] of Double;   { its box as the drag would leave it: left, top, right, bottom in its own
+                                         frame as the drag found it (drawing units from that frame's top left) }
     FRotFrom, FRotNew: Double;     { a turn: the press's angle from the centre (radians), the turn as dragged (degrees) }
     FAdjNew: string;               { the adjustments as a handle's drag leaves them ("adj1=... adj2=...") }
     FNodeX, FNodeY: Double;        { a point as dragged (its path's units) }
@@ -488,6 +491,12 @@ type
     function GeomToClient(const M: TParadeDrawMap; const G: TParadeShapeGeom; U, V, Rot: Double): TPoint;
     procedure ClientToGeom(const M: TParadeDrawMap; const G: TParadeShapeGeom; PX, PY: Integer; out U, V: Double);
     function RotHandle(const M: TParadeDrawMap; const G: TParadeShapeGeom; Rot: Double; out ATop, P: TPoint): Boolean;
+    { the one shape selected is turned: its geometry, and the map to the control (its handles on its own sides) }
+    function TurnedSelection(out G: TParadeShapeGeom; out M: TParadeDrawMap): Boolean;
+    { a sizing handle (0..7, as the upright box's) of a turned shape whose box is L, T, R, B in its own frame }
+    function TurnedHandle(const M: TParadeDrawMap; const G: TParadeShapeGeom; I: Integer; L, T, R, B: Double): TPoint;
+    { a turned shape's frame, as the drag found it, given the box L, T, R, B of that frame: its offset and size }
+    function ResizeTurned(L, T, R, B: Double): Boolean;
     function ShapeHandleAt(X, Y: Integer; out Idx: Integer): Integer;
     procedure PaintShapeExtras;
     procedure HoverCursor(C: TCursor);
@@ -9609,6 +9618,9 @@ end;
 { the selection's box and handles, over the drawn page (not into it: the view's pixels stay as they are) }
 procedure TParadeEdit.PaintShapeSelection;
 var
+  TG: TParadeShapeGeom;
+  TM: TParadeDrawMap;
+  Pts: array[0..4] of TPoint;
   M: TParadeDrawMap;
   CX1, CY1, CX2, CY2: Double;
   P0: TPoint;
@@ -9665,13 +9677,48 @@ begin
   Canvas.Pen.Color := $00D77800;
   Canvas.Pen.Width := 1;
   Canvas.Pen.Style := psSolid;
-  if not (FCanvasPage and (FShapeSid < 0)) then     { (the canvas page's own canvas: no box, no handles) }
-    Canvas.Rectangle(L, T, R + 1, B + 1);
-  if not (FCanvasPage and (FShapeSid < 0)) then
-    PaintSizeHandles(L, T, R, B);
+  if TurnedSelection(TG, TM) then
+  begin   { turned: its own frame, as it is turned, and its handles on it }
+    for I := 0 to 4 do
+      Pts[I] := TurnedHandle(TM, TG, (I * 2) mod 8, 0, 0, TG.W, TG.H);
+    Canvas.Polyline(Pts);
+    Canvas.Brush.Style := bsSolid;
+    Canvas.Brush.Color := clWhite;
+    for I := 0 to 7 do
+    begin
+      P0 := TurnedHandle(TM, TG, I, 0, 0, TG.W, TG.H);
+      Canvas.Rectangle(P0.X - HandleHalf, P0.Y - HandleHalf, P0.X + HandleHalf + 1, P0.Y + HandleHalf + 1);
+    end;
+    Canvas.Brush.Style := bsClear;
+  end
+  else
+  begin
+    if not (FCanvasPage and (FShapeSid < 0)) then     { (the canvas page's own canvas: no box, no handles) }
+      Canvas.Rectangle(L, T, R + 1, B + 1);
+    if not (FCanvasPage and (FShapeSid < 0)) then
+      PaintSizeHandles(L, T, R, B);
+  end;
   PaintShapeExtras;
   PaintDrawPath;
-  if (FShapeDrag in [0..9]) and not ((FShapeDrag = 9) and (FDrawKind = 'scribble')) and ShapeClientRect(FShapeNew, Rc) then
+  if FTurnDrag and (FShapeDrag in [0..8]) then
+  begin   { a turned shape: where the drag would put its frame, as it is turned }
+    TG := FDragGeom;
+    if FShapeDrag = 8 then
+    begin
+      TG.CX := TG.CX + FShapeNew[0] - FShapeOld[0];
+      TG.CY := TG.CY + FShapeNew[1] - FShapeOld[1];
+      for I := 0 to 4 do
+        Pts[I] := TurnedHandle(FDragMap, TG, (I * 2) mod 8, 0, 0, TG.W, TG.H);
+    end
+    else
+      for I := 0 to 4 do
+        Pts[I] := TurnedHandle(FDragMap, TG, (I * 2) mod 8, FTurnBox[0], FTurnBox[1], FTurnBox[2], FTurnBox[3]);
+    Canvas.Brush.Style := bsClear;
+    Canvas.Pen.Style := psDash;
+    Canvas.Polyline(Pts);
+    Canvas.Pen.Style := psSolid;
+  end
+  else if (FShapeDrag in [0..9]) and not ((FShapeDrag = 9) and (FDrawKind = 'scribble')) and ShapeClientRect(FShapeNew, Rc) then
   begin   { where the drag would put it }
     Canvas.Brush.Style := bsClear;
     Canvas.Pen.Style := psDash;
@@ -15627,6 +15674,68 @@ begin
   P := Point(ATop.X + Round(DX * 22), ATop.Y + Round(DY * 22));
 end;
 
+function TParadeEdit.TurnedSelection(out G: TParadeShapeGeom; out M: TParadeDrawMap): Boolean;
+begin
+  Result := FShapeOn and (FShapeSid >= 0) and (Length(FShapeMore) = 0) and not FNodeOn and
+    ShapeGeom(FShapeSid, G) and DrawMap(M) and (Abs(G.Rot) > 0.01) and (G.W > 0) and (G.H > 0);
+end;
+
+function TParadeEdit.TurnedHandle(const M: TParadeDrawMap; const G: TParadeShapeGeom; I: Integer;
+  L, T, R, B: Double): TPoint;
+begin
+  case I of
+    0: Result := GeomToClient(M, G, L, T, G.Rot);
+    1: Result := GeomToClient(M, G, (L + R) / 2, T, G.Rot);
+    2: Result := GeomToClient(M, G, R, T, G.Rot);
+    3: Result := GeomToClient(M, G, R, (T + B) / 2, G.Rot);
+    4: Result := GeomToClient(M, G, R, B, G.Rot);
+    5: Result := GeomToClient(M, G, (L + R) / 2, B, G.Rot);
+    6: Result := GeomToClient(M, G, L, B, G.Rot);
+  else
+    Result := GeomToClient(M, G, L, (T + B) / 2, G.Rot);
+  end;
+end;
+
+function TParadeEdit.ResizeTurned(L, T, R, B: Double): Boolean;
+var
+  G: TParadeShapeGeom;
+  J: TJSONObject;
+  Xml: string;
+  NL, NT, NR, NB, NW, NH, DU, DV, C, S, DCX, DCY: Double;
+begin
+  Result := False;
+  G := FDragGeom;
+  NL := Min(L, R); NR := Max(L, R);
+  NT := Min(T, B); NB := Max(T, B);
+  NW := NR - NL;
+  NH := NB - NT;
+  if (NW < 1) or (NH < 1) or (G.W <= 0) or (G.H <= 0) or (G.KX <= 0) or (G.KY <= 0) then
+    Exit;
+  { the middle moved along the shape's own sides (as it is flipped), then turned into the drawing's }
+  DU := (NL + NR) / 2 - G.W / 2;
+  DV := (NT + NB) / 2 - G.H / 2;
+  if G.FlipH then DU := -DU;
+  if G.FlipV then DV := -DV;
+  C := Cos(G.Rot * Pi / 180);
+  S := Sin(G.Rot * Pi / 180);
+  DCX := DU * C - DV * S;
+  DCY := DU * S + DV * C;
+  J := DrawingJson(FDoc, FShapeAt);
+  if J = nil then
+    Exit;
+  try
+    if (J.Find('xml') = nil) or (J.Find('xml').JSONType <> jtString) then
+      Exit;
+    Xml := J.Strings['xml'];
+  finally
+    J.Free;
+  end;
+  { its offset (the frame's top left before the turn) by the middle's move less half the growth, its extent
+    scaled; the drawing made again from it, so what is drawn is the frame turned }
+  PatchKeptXml(Xml, FShapeSid, (DCX - (NW - G.W) / 2) / G.KX, (DCY - (NH - G.H) / 2) / G.KY, NW / G.W, NH / G.H);
+  Result := ApplyKeptXml(MarkTextBoxes(Xml), 'Shape', FShapeSid);
+end;
+
 { what of the selected shape is under a point of the control: 0..7 a sizing handle, 8 the shape (to move), 10 the
   turning handle, 11 an adjustment's (Idx), 12 a point (Idx, Edit Points); -1 none }
 function TParadeEdit.ShapeHandleAt(X, Y: Integer; out Idx: Integer): Integer;
@@ -15702,6 +15811,19 @@ begin
         Exit(11);
       end;
     end;
+  end;
+  if TurnedSelection(G, M) then
+  begin   { turned: its handles on its own sides, its inside to move it }
+    for I := 0 to 7 do
+    begin
+      P := TurnedHandle(M, G, I, 0, 0, G.W, G.H);
+      if (Abs(X - P.X) <= HandleHalf + 2) and (Abs(Y - P.Y) <= HandleHalf + 2) then
+        Exit(I);
+    end;
+    ClientToGeom(M, G, X, Y, U, V);
+    if (U >= 0) and (U <= G.W) and (V >= 0) and (V <= G.H) then
+      Exit(8);
+    Exit;
   end;
   if (FShapeSid < 0) and FCanvasPage then
     Exit;     { the canvas page: its corner, not the canvas's handles }
@@ -15914,12 +16036,7 @@ begin
       end;
     Exit;
   end;
-  if Abs(G.Rot) > 0.01 then
-  begin   { turned: its own box, as it is turned }
-    Canvas.Pen.Style := psDot;
-    Box(G, G.Rot);
-  end;
-  Rot := G.Rot;
+  Rot := G.Rot;     { (turned: its own frame is the selection's box, PaintShapeSelection's) }
   if FShapeDrag = 10 then
   begin   { where the turn would put it }
     Rot := FRotNew;
@@ -16691,6 +16808,11 @@ begin
   end
   else if not ShapeBox(FShapeSid, FShapeOld[0], FShapeOld[1], FShapeOld[2], FShapeOld[3]) then
     Exit;
+  FTurnDrag := (K in [0..8]) and TurnedSelection(FDragGeom, FDragMap);
+  if FTurnDrag then
+  begin
+    FTurnBox[0] := 0; FTurnBox[1] := 0; FTurnBox[2] := FDragGeom.W; FTurnBox[3] := FDragGeom.H;
+  end;
   FShapeNew := FShapeOld;
   FShapeDrag := K;
   FShapeFrom := Point(X, Y);
@@ -16742,6 +16864,30 @@ begin
     ClientToGeom(FDragMap, FDragGeom, X, Y, DX, DY);
     if FDragGeom.W > 0 then FNodeX := DX * FDragPW / FDragGeom.W else FNodeX := 0;
     if FDragGeom.H > 0 then FNodeY := DY * FDragPH / FDragGeom.H else FNodeY := 0;
+    Invalidate;
+    Exit;
+  end;
+  if FTurnDrag and (FShapeDrag in [0..7]) then
+  begin   { a turned shape: its sides moved along themselves, the other sides kept (Shift: a corner keeps the
+            proportions) }
+    ClientToGeom(FDragMap, FDragGeom, X, Y, DX, DY);
+    FTurnBox[0] := 0; FTurnBox[1] := 0; FTurnBox[2] := FDragGeom.W; FTurnBox[3] := FDragGeom.H;
+    if FShapeDrag in [0, 6, 7] then FTurnBox[0] := DX;
+    if FShapeDrag in [2, 3, 4] then FTurnBox[2] := DX;
+    if FShapeDrag in [0, 1, 2] then FTurnBox[1] := DY;
+    if FShapeDrag in [4, 5, 6] then FTurnBox[3] := DY;
+    if (ssShift in Shift) and (FShapeDrag in [0, 2, 4, 6]) then
+    begin
+      K := Max((FTurnBox[2] - FTurnBox[0]) / FDragGeom.W, (FTurnBox[3] - FTurnBox[1]) / FDragGeom.H);
+      if FShapeDrag in [0, 6] then
+        FTurnBox[0] := FTurnBox[2] - FDragGeom.W * K
+      else
+        FTurnBox[2] := FTurnBox[0] + FDragGeom.W * K;
+      if FShapeDrag in [0, 2] then
+        FTurnBox[1] := FTurnBox[3] - FDragGeom.H * K
+      else
+        FTurnBox[3] := FTurnBox[1] + FDragGeom.H * K;
+    end;
     Invalidate;
     Exit;
   end;
@@ -17718,6 +17864,8 @@ begin
     end
     else if Moved and (D = 8) and (Length(FShapeMore) > 0) then
       MoveShapes(FShapeNew[0] - FShapeOld[0], FShapeNew[1] - FShapeOld[1])   { all selected, together }
+    else if Moved and FTurnDrag and (D in [0..7]) then
+      ResizeTurned(FTurnBox[0], FTurnBox[1], FTurnBox[2], FTurnBox[3])     { turned: along its own sides }
     else if Moved then     { moved: the shape takes its box }
       SetShapeBox(FShapeSid, Min(FShapeNew[0], FShapeNew[2]), Min(FShapeNew[1], FShapeNew[3]),
         Max(FShapeNew[0], FShapeNew[2]), Max(FShapeNew[1], FShapeNew[3]))
