@@ -37,7 +37,10 @@ static int to_buf(void* user, const void* data, size_t len) {
         return 1;
     }
 
-    memcpy(p + b->n, data, len);
+    if (len) {
+        memcpy(p + b->n, data, len);
+    }
+
     b->p = p;
     b->n += len;
     b->p[b->n] = '\0';
@@ -5579,6 +5582,142 @@ static int svg_px(const uint8_t* px, int x, int y, int c) {
 static int svg_drawn(const pd_doc* d, pd_res_id r, uint8_t* px) {
     memset(px, 0, 100 * 100 * 4);
     return pd_drawing_render(d, r, PD_PT(75), PD_PT(75), 65536 * 4 / 3, px, 100, 100, 400) == PD_OK;
+}
+
+/* a text slide's pictures in its lines (a slide's text holds none): each a picture of the slide where the line
+   puts it, a gap left in the text for it; a drawing as a picture of it; and without fonts to lay it out, still
+   there */
+static void test_pptx_text_pictures(void) {
+    int fonts;
+
+    for (fonts = 1; fonts >= 0; fonts--) {
+        pd_doc* d = NULL, *x = NULL;
+        pd_block_id sec, p1, p2;
+        pd_res_id png, svg = 0, drw = 0;
+        pd_inline o;
+        const char* mime;
+        const void* data;
+        size_t len;
+        buf_t b = { NULL, 0 };
+        unsigned char* part;
+        int pics = 0, k;
+        const char* c;
+
+        if (fonts && !have_layout_font()) {
+            continue;
+        }
+
+        pd_doc_new(&d);
+        sec = pd_doc_child(d, pd_doc_root(d), 0);
+        p1 = pd_doc_child(d, sec, 0);
+        text(d, p1, "Words before ");
+        pd_doc_add_resource(d, "image/png", png1x1, sizeof(png1x1), &png);
+        memset(&o, 0, sizeof(o));
+        o.kind = PD_INLINE_IMAGE;
+        o.resource = png;
+        o.width = PD_PT(60);
+        o.height = PD_PT(40);
+        pd_doc_insert_inline(d, end_of(d, p1), &o, NULL);
+        text(d, p1, " and after.");
+        p2 = para(d, sec, NULL, 0, 0, "");
+        CHECK(pd_doc_add_picture(d, NULL, svg_doc, sizeof(svg_doc) - 1, &svg) == PD_OK && svg);
+
+        if (pd_doc_resource(d, svg, &mime, &data, &len) == PD_OK) {    /* a drawing made of nothing else (bytes of
+                                                                              its own: not taken for the same) */
+            char* j = (char*)malloc(len + 2), *src_key;
+
+            memcpy(j, data, len);
+            j[len] = ' ';
+            j[len + 1] = '\0';
+
+            if ((src_key = strstr(j, "\"src\":")) != NULL && (size_t)(src_key - j) < len) {  /* (nor the SVG's) */
+                memcpy(src_key, "\"srx\":", 6);
+            }
+            pd_doc_add_resource(d, mime, j, len + 1, &drw);
+            free(j);
+        }
+
+        CHECK(drw && !pd_doc_picture_source(d, drw));
+        o.resource = drw;
+        o.width = PD_PT(50);
+        o.height = PD_PT(50);
+        pd_doc_insert_inline(d, at(p2, 0), &o, NULL);
+        para(d, sec, NULL, 0, 0, "The end.");
+
+        if (fonts) {
+            pd_doc_set_font_resolver(d, layout_resolver, NULL);
+        }
+
+        CHECK(pd_doc_export(d, PD_CONV_PPTX, to_buf, &b) == PD_OK);
+        part = b.p ? pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide1.xml", &len) : NULL;
+        CHECK(part != NULL);
+
+        for (c = part ? (const char*)part : ""; (c = strstr(c, "<p:pic>")) != NULL; c++) {
+            pics++;
+        }
+
+        CHECK(pics == 2);   /* both pictures, on the slide */
+        CHECK(part && strstr((char*)part, "<a:t>Words before </a:t>") && strstr((char*)part, "<a:t> and after.</a:t>"));
+        CHECK(part && strstr((char*)part, " spc=\"5750\""));     /* the gap: 60 pt, less a quarter of the 10 pt text */
+
+        if (fonts && part) {    /* where the layout puts them */
+            pd_layout* L = NULL;
+            int32_t n = 0, i, hit = 0;
+            pd_draw* it = NULL;
+
+            if (pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+                    pd_layout_page_items(L, 0, NULL, 0, &n) == PD_OK && n > 0 &&
+                    (it = (pd_draw*)malloc((size_t)n * sizeof(pd_draw))) != NULL &&
+                    pd_layout_page_items(L, 0, it, n, &n) == PD_OK) {
+                for (i = 0; i < n; i++) {
+                    char want[96];
+
+                    if (it[i].kind == PD_DRAW_IMAGE && it[i].block == p1) {
+                        snprintf(want, sizeof(want), "<a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"762000\" cy=\"508000\"/>",
+                                 (long long)it[i].x * 12700 / 65536, (long long)it[i].y * 12700 / 65536);
+                        hit += strstr((char*)part, want) != NULL;
+                    }
+                }
+            }
+
+            CHECK(hit == 1);
+
+            {   /* the drawing (drawn as shapes, not a picture): standing on its line's baseline */
+                int32_t pg = -1;
+                pd_sp cx = 0, base = 0, asc = 0, desc = 0;
+                char want[96];
+
+                CHECK(pd_layout_caret(L, at(p2, 0), &pg, &cx, &base, &asc, &desc) == PD_OK && pg == 0);
+                snprintf(want, sizeof(want), "<a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"635000\" cy=\"635000\"/>",
+                         (long long)cx * 12700 / 65536, (long long)(base - PD_PT(50)) * 12700 / 65536);
+                CHECK(strstr((char*)part, want) != NULL);
+            }
+            free(it);
+            pd_layout_free(L);
+        }
+
+        free(part);
+
+        for (k = 1, pics = 0; k <= 4; k++) {    /* the PNG, and a picture of the drawing */
+            char name[64];
+
+            snprintf(name, sizeof(name), "ppt/media/image%d.png", k);
+            part = b.p ? pd_zip_get((const unsigned char*)b.p, b.n, name, &len) : NULL;
+            pics += part && len > 8 && !memcmp(part, "\x89PNG", 4);
+            free(part);
+        }
+
+        CHECK(pics == 2);
+        CHECK(b.p && pd_doc_import(b.p, b.n, PD_CONV_PPTX, &x) == PD_OK && x);
+
+        if (x && fonts) {
+            CHECK(count_draws(x, PD_DRAW_IMAGE, 0) >= 2);     /* read back: the slide shows them */
+        }
+
+        pd_doc_free(x);
+        pd_doc_free(d);
+        free(b.p);
+    }
 }
 
 static void test_svg(void) {
@@ -12491,6 +12630,7 @@ int main(void) {
     test_latex_bibtex();
     test_latex_justified();
     test_svg();
+    test_pptx_text_pictures();
     test_latex_indent();
     test_pptx_chart();
     test_pptx_ph_inherit();

@@ -15,6 +15,7 @@
 #include "pd_conv.h"
 #include "pd_json.h"
 #include "pd_xdoc.h"
+#include "parade_layout.h"
 
 #define EMU(sp) ((long long)(sp) * 12700 / 65536 + (((long long)(sp) * 12700 % 65536) * 2 >= 65536 ? 1 : 0))
 #define MAX_MEDIA 256
@@ -72,6 +73,17 @@ typedef struct {
         char rid[64], link[512];    /* the workbook's relationship id in the part, a linked one's file */
     } charts[64];
     int ncharts;
+    /* a text slide's pictures in its lines (DrawingML text has none): pictures of their own where the layout
+       puts them */
+    struct {
+        pd_block_id block;
+        uint32_t offset;
+        pd_res_id res;
+        pd_sp w, h;
+        int32_t crop[4];
+    } inl[256];
+    int ninl, text_slide, no_layout;
+    pd_layout* L;               /* made the first time a text slide has one */
 } pw;
 
 /* ---- small things ---- */
@@ -176,6 +188,46 @@ static int pic_rel(pw* P, pd_res_id res) {
               P->media[m].name);
     P->srel_res[P->nsrel] = P->media[m].res;
     P->srel_png[P->nsrel] = P->media[m].png;
+    P->srel_id[P->nsrel++] = P->nrel;
+    return P->nrel;
+}
+
+/* the slide's relationship to a picture of a drawing (one drawn here, as PNG), 0 when there is none */
+static int png_rel(pw* P, pd_res_id res) {
+    int m, i;
+
+    for (m = 0; m < P->nmedia; m++) {
+        if (P->media[m].res == res && P->media[m].png) {
+            break;
+        }
+    }
+
+    if (m == P->nmedia) {
+        if (P->nmedia >= MAX_MEDIA) {
+            return 0;
+        }
+
+        P->media[m].res = res;
+        P->media[m].png = 1;
+        snprintf(P->media[m].name, sizeof(P->media[0].name), "%simage%d.png", P->pfx, m + 1);
+        P->nmedia++;
+    }
+
+    for (i = 0; i < P->nsrel; i++) {
+        if (P->srel_res[i] == res && P->srel_png[i]) {
+            return P->srel_id[i];
+        }
+    }
+
+    if (P->nsrel >= MAX_MEDIA) {
+        return 0;
+    }
+
+    P->nrel++;
+    pb_printf(&P->rels, "<Relationship Id=\"rId%d\" Type=\"%simage\" Target=\"../media/%s\"/>", P->nrel, REL,
+              P->media[m].name);
+    P->srel_res[P->nsrel] = res;
+    P->srel_png[P->nsrel] = 1;
     P->srel_id[P->nsrel++] = P->nrel;
     return P->nrel;
 }
@@ -928,6 +980,28 @@ static int put_span(void* user, const pd_span* s) {
             put_rpr(P, &s->cp, "rPr");
             pb_puts(o, "<a:t>\t</a:t></a:r>");
             R->any = 1;
+        } else if (ob->kind == PD_INLINE_IMAGE && ob->resource && P->text_slide) {
+            /* a gap in the text as wide as the picture (a no-break space spaced out), the picture over it */
+            pd_char_props cp = s->cp;
+            long long sz = cp.size > 0 ? cp.size : 12 * 65536, gap = (long long)ob->width - sz / 4;
+
+            cp.letter_space = (pd_sp)(gap < 0 ? 0 : gap > 4000LL * 65536 ? 4000LL * 65536 : gap);
+            cp.underline = 0;
+            cp.strike = 0;
+            pb_puts(o, "<a:r>");
+            put_rpr(P, &cp, "rPr");
+            pb_puts(o, "<a:t>\xC2\xA0</a:t></a:r>");
+            R->any = 1;
+
+            if (P->ninl < (int)(sizeof(P->inl) / sizeof(P->inl[0]))) {
+                P->inl[P->ninl].block = R->para;
+                P->inl[P->ninl].offset = s->offset;
+                P->inl[P->ninl].res = ob->resource;
+                P->inl[P->ninl].w = ob->width;
+                P->inl[P->ninl].h = ob->height;
+                memcpy(P->inl[P->ninl].crop, ob->crop, sizeof(ob->crop));
+                P->ninl++;
+            }
         } else if (ob->kind == PD_INLINE_LINK) {
             P->link[0] = '\0';
 
@@ -1041,6 +1115,26 @@ static const char* autonum(int32_t fmt, const char* text) {
     }
 }
 
+typedef struct {
+    pd_sp h, size;              /* the tallest picture in the line's text; the text's size */
+} tall_ctx;
+
+static int tall_span(void* user, const pd_span* s) {
+    tall_ctx* T = (tall_ctx*)user;
+
+    if (s->cp.hidden) {
+        return 0;
+    }
+
+    if (s->is_object && s->obj.kind == PD_INLINE_IMAGE && s->obj.resource) {
+        T->h = s->obj.height > T->h ? s->obj.height : T->h;
+    } else if (!s->is_object && s->cp.size > T->size) {
+        T->size = s->cp.size;
+    }
+
+    return 0;
+}
+
 static void put_para(pw* P, pd_block_id p) {
     pd_buf* o = P->o;
     pd_para_props pp;
@@ -1098,8 +1192,25 @@ static void put_para(pw* P, pd_block_id p) {
         pb_printf(o, "<a:lnSpc><a:spcPct val=\"%d\"/></a:lnSpc>", (int)pp.line_spacing * 100);
     }
 
-    if (pp.space_before > 0) {
-        pb_printf(o, "<a:spcBef><a:spcPts val=\"%ld\"/></a:spcBef>", (long)(pp.space_before * 100LL / 65536));
+    {   /* a picture in its text taller than the text: its line as tall, the room above the text (the line
+           of PowerPoint's text is as tall as the text) */
+        long long before = pp.space_before > 0 ? pp.space_before : 0;
+
+        if (P->text_slide) {
+            tall_ctx T = { 0, 0 };
+
+            pd_conv_spans(P->d, p, tall_span, &T);
+            T.size = T.size > 0 ? T.size : 12 * 65536;
+
+            if (T.h > T.size * 21 / 20) {
+                before += T.h - T.size * 21 / 20;
+            }
+        }
+
+        if (before > 0) {
+            before = before * 100LL / 65536;
+            pb_printf(o, "<a:spcBef><a:spcPts val=\"%ld\"/></a:spcBef>", (long)(before > 158400 ? 158400 : before));
+        }
     }
 
     pb_printf(o, "<a:spcAft><a:spcPts val=\"%ld\"/></a:spcAft>", (long)(pp.space_after > 0 ?
@@ -2221,6 +2332,20 @@ static int chart_of(pw* P, const pj_node* root) {
 
 /* what else a canvas page holds, in front of its canvas: charts and pictures placed from the page's corner, each
    where it is (a chart a graphic frame of its part, as PowerPoint has it) */
+/* a chart (chart_of's number) in a frame on the slide */
+static void put_chart_frame(pw* P, int no, long long x, long long y, long long cx, long long cy) {
+    P->nrel++;
+    pb_printf(&P->rels, "<Relationship Id=\"rId%d\" Type=\"%schart\" Target=\"../charts/%schart%d.xml\"/>",
+              P->nrel, REL, P->pfx, no);
+    pb_printf(P->o, "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"%d\" name=\"Chart %d\"/>"
+              "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"%lld\" y=\"%lld\"/>"
+              "<a:ext cx=\"%lld\" cy=\"%lld\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas."
+              "openxmlformats.org/drawingml/2006/chart\"><c:chart xmlns:c=\"http://schemas.openxmlformats.org/"
+              "drawingml/2006/chart\" r:id=\"rId%d\"/></a:graphicData></a:graphic></p:graphicFrame>", P->next_id,
+              P->next_id, x, y, cx, cy, P->nrel);
+    P->next_id++;
+}
+
 static void put_floats(pw* P, pd_block_id sec) {
     pd_block_info si, bi;
     int32_t k;
@@ -2265,16 +2390,7 @@ static void put_floats(pw* P, pd_block_id sec) {
                 continue;
             }
 
-            P->nrel++;
-            pb_printf(&P->rels, "<Relationship Id=\"rId%d\" Type=\"%schart\" Target=\"../charts/%schart%d.xml\"/>",
-                      P->nrel, REL, P->pfx, no);
-            pb_printf(P->o, "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"%d\" name=\"Chart %d\"/>"
-                      "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"%lld\" y=\"%lld\"/>"
-                      "<a:ext cx=\"%lld\" cy=\"%lld\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas."
-                      "openxmlformats.org/drawingml/2006/chart\"><c:chart xmlns:c=\"http://schemas.openxmlformats.org/"
-                      "drawingml/2006/chart\" r:id=\"rId%d\"/></a:graphicData></a:graphic></p:graphicFrame>", P->next_id,
-                      P->next_id, x, y, cx, cy, P->nrel);
-            P->next_id++;
+            put_chart_frame(P, no, x, y, cx, cy);
         } else {
             int rid = pic_rel(P, ob.resource);
 
@@ -2291,6 +2407,121 @@ static void put_floats(pw* P, pd_block_id sec) {
             P->next_id++;
         }
     }
+}
+
+/* the pictures in a text slide's lines, each a picture of its own over the gap left for it in the text, where
+   the layout sets it (a later page of the section's below the first's, as the text box's text runs on) */
+static void put_text_pictures(pw* P, pd_block_id sec, const pd_section_props* sp) {
+    int32_t first = -1, np = 0, pg, k, i;
+    pd_sp body_h = sp->page_height - sp->margin_top - sp->margin_bottom, below = sp->margin_top;
+
+    if (!P->ninl) {
+        return;
+    }
+
+    if (!P->L && !P->no_layout && (pd_layout_new(P->d, &P->L) != PD_OK || pd_layout_update(P->L, NULL) != PD_OK)) {
+        pd_layout_free(P->L);   /* (no fonts to lay it out with: the pictures down its left margin) */
+        P->L = NULL;
+        P->no_layout = 1;
+    }
+
+    np = P->L ? pd_layout_page_count(P->L) : 0;
+
+    for (pg = 0; pg < np; pg++) {
+        pd_page_info pi;
+
+        if (pd_layout_page_info(P->L, pg, &pi) == PD_OK && pi.section == sec) {
+            first = pg;
+            break;
+        }
+    }
+
+    for (k = 0; k < P->ninl; k++) {
+        pd_pos at;
+        int32_t page = first, n = 0;
+        pd_sp x = sp->margin_left, base = 0, asc = 0, desc = 0, y = below;
+        long long ox, oy;
+        int rid;
+        pd_draw* items = NULL;
+        int found = 0;
+
+        at.block = P->inl[k].block;
+        at.offset = P->inl[k].offset;
+
+        if (first >= 0 && pd_layout_caret(P->L, at, &page, &x, &base, &asc, &desc) == PD_OK && page >= first) {
+            y = base - P->inl[k].h;
+
+            /* the picture as drawn, where the layout lists it (the caret is where it starts on its line) */
+            if (pd_layout_page_items(P->L, page, NULL, 0, &n) == PD_OK && n > 0 &&
+                    (items = (pd_draw*)malloc((size_t)n * sizeof(pd_draw))) != NULL &&
+                    pd_layout_page_items(P->L, page, items, n, &n) == PD_OK) {
+                for (i = 0; i < n && !found; i++) {
+                    if (items[i].kind == PD_DRAW_IMAGE && items[i].block == at.block &&
+                            items[i].offset == at.offset) {
+                        x = items[i].x;
+                        y = items[i].y;
+                        found = 1;
+                    }
+                }
+            }
+
+            free(items);
+        } else {
+            page = first = 0;
+            x = sp->margin_left;
+            y = below;
+            below += P->inl[k].h;
+        }
+
+        ox = EMU(x);
+        oy = EMU(y) + (long long)(page - first) * EMU(body_h);
+
+        {   /* a drawing: a chart as one, else a picture of it */
+            const char* mime;
+            const void* data;
+            size_t len;
+
+            if (pd_doc_resource(P->d, P->inl[k].res, &mime, &data, &len) != PD_OK) {
+                continue;
+            }
+
+            rid = pic_rel(P, P->inl[k].res);
+
+            if (!rid && !strcmp(mime, PD_DRAWING_MIME)) {
+                pj_doc* jd = pj_parse(data, len, 0, NULL);
+                int no = jd ? chart_of(P, pj_root(jd)) : 0;
+
+                pj_free(jd);
+
+                if (no) {
+                    put_chart_frame(P, no, ox, oy, EMU(P->inl[k].w), EMU(P->inl[k].h));
+                    continue;
+                }
+
+                rid = png_rel(P, P->inl[k].res);
+            }
+        }
+
+        if (!rid) {
+            continue;
+        }
+
+        pb_printf(P->o, "<p:pic><p:nvPicPr><p:cNvPr id=\"%d\" name=\"Picture %d\"/><p:cNvPicPr><a:picLocks "
+                  "noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill>", P->next_id, P->next_id);
+        put_pic_blip(P, P->o, P->inl[k].res, rid);
+
+        if (P->inl[k].crop[0] || P->inl[k].crop[1] || P->inl[k].crop[2] || P->inl[k].crop[3]) {
+            pb_printf(P->o, "<a:srcRect l=\"%d\" t=\"%d\" r=\"%d\" b=\"%d\"/>", (int)P->inl[k].crop[0],
+                      (int)P->inl[k].crop[1], (int)P->inl[k].crop[2], (int)P->inl[k].crop[3]);
+        }
+
+        pb_printf(P->o, "<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x=\"%lld\" "
+                  "y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/>"
+                  "</a:prstGeom></p:spPr></p:pic>", ox, oy, EMU(P->inl[k].w), EMU(P->inl[k].h));
+        P->next_id++;
+    }
+
+    P->ninl = 0;
 }
 
 /* a section that is no canvas: one text box inside its margins with its text */
@@ -2317,13 +2548,17 @@ static void put_text_slide(pw* P, pd_block_id sec) {
               "tIns=\"0\" rIns=\"0\" bIns=\"0\" rtlCol=\"0\"><a:noAutofit/></a:bodyPr><a:lstStyle/>", P->next_id,
               P->next_id, x, y, w, h);
     P->next_id++;
+    P->ninl = 0;
+    P->text_slide = 1;
     put_blocks(P, sec, &np);
+    P->text_slide = 0;
 
     if (!np) {
         pb_puts(P->o, "<a:p><a:endParaRPr lang=\"en-US\" dirty=\"0\"/></a:p>");
     }
 
     pb_puts(P->o, "</p:txBody></p:sp>");
+    put_text_pictures(P, sec, &sp);
 }
 
 static void zadd(void* z, const char* name, const pd_buf* b, int* err) {
@@ -2899,6 +3134,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
     pb_free(&ct);
     pd_zipw_finish(z);
     pd_numbers_free(&P->nb);
+    pd_layout_free(P->L);
     free(P);
     return err || out->err ? (out->err ? PD_ERR_NOMEM : PD_ERR_FORMAT) : PD_OK;
 }

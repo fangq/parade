@@ -344,9 +344,8 @@ int main(int argc, char** argv) {
 
     oext = ext_of(argv[2]);
 
-    if (!strcmp(oext, "pdf") || !strcmp(oext, "svg")) {
-        pd_layout* L;
-        pd_layout_info info;
+    if (!strcmp(oext, "pdf") || !strcmp(oext, "svg") || !strcmp(oext, "pptx")) {
+        /* fonts, to lay it out (a .pptx too: the pictures in its text's lines go where the lines put them) */
         const pd_font* fb[2];
         int nfb = 0;
 
@@ -375,6 +374,11 @@ int main(int argc, char** argv) {
         if (nfb) {
             pd_doc_set_fallback_fonts(d, fb, nfb);
         }
+    }
+
+    if (!strcmp(oext, "pdf") || !strcmp(oext, "svg")) {
+        pd_layout* L;
+        pd_layout_info info;
 
         pd_layout_new(d, &L);
         pd_layout_set_comments(L, PD_LAYOUT_COMMENTS_MARGIN);  /* as Word prints a document with comments */
