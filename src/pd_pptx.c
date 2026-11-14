@@ -2738,7 +2738,24 @@ static void put_blip_shape(conv* C, ppart* pt, int sp, int lsp, int msp) {
 
     pb_puts(C->o, "<pic:pic><pic:nvPicPr>");
     put_nvpr(C, d, sp, "nvSpPr/cNvPr", "pic:cNvPr");
-    pb_printf(C->o, "<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"%s\"/>", m);
+    pb_printf(C->o, "<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"%s\"", m);
+    {   /* the SVG the picture is (an icon's), when it has one: shown instead of the picture made of it */
+        int ext = xd_kid(d, xd_kid(d, bl, "extLst"), "ext"), sv = -1;
+        char srid[64];
+        const char* sm;
+
+        for (; ext >= 0 && sv < 0; ext = d->v[ext].next) {
+            sv = xd_kid(d, ext, "svgBlip");
+        }
+
+        if (sv >= 0 && xd_attr(d, sv, "r:embed", srid, sizeof(srid)) && (sm = media_id(C->P, pt, srid)) != NULL) {
+            pb_printf(C->o, "><a:extLst><a:ext uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\"><asvg:svgBlip "
+                      "xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\" r:embed=\"%s\"/>"
+                      "</a:ext></a:extLst></a:blip>", sm);
+        } else {
+            pb_puts(C->o, "/>");
+        }
+    }
 
     if (src >= 0) {
         xd_raw(C->o, d, src);

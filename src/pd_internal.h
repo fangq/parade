@@ -232,6 +232,12 @@ int pd_doc_res_origin(const pd_doc* d, pd_res_id r, pd_res_id* src, pd_res_id* l
 int pd_doc_res_fill(pd_doc* d, pd_res_id r, const void* data, size_t len);
 /* the drawing of resource r made again from the metafile it was made from (pd_emf.c); 0 when it is */
 int pd_metafile_remake(pd_doc* d, pd_res_id r);
+/* pictures made drawings (pd_emf.c, pd_svgread.c): metafile kind (1 EMF, 2 WMF, 0 none), whether bytes are an SVG,
+   the drawing made from a source resource (0 if none) */
+int pd_metafile_kind(const unsigned char* p, size_t n);
+pd_res_id pd_metafile_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src);
+int pd_svg_is(const unsigned char* p, size_t n);
+pd_res_id pd_svg_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src);
 
 /* zlib streams (pd_zlib.c): 0 on success, *out malloc'ed */
 int pd_deflate(const void* data, size_t n, int zlib, unsigned char** out, size_t* outlen);

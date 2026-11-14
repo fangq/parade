@@ -5333,8 +5333,8 @@ static void emit_path(dlist_t* D, const pd_sp* xy, int32_t n, int closed, uint32
     a.kind = PD_DRAW_PATH;
     a.x = x0;
     a.y = y0;
-    a.w = x1 - x0;
-    a.h = y1 - y0;
+    a.w = (int64_t)x1 - x0 > INT32_MAX ? INT32_MAX : x1 - x0;     /* (points far off: a box as wide as it can be) */
+    a.h = (int64_t)y1 - y0 > INT32_MAX ? INT32_MAX : y1 - y0;
     a.points = (const pd_sp*)(intptr_t)D->npts;    /* an index for now */
     a.npoints = n;
     a.path_flags = closed ? PD_PATH_CLOSED : 0;

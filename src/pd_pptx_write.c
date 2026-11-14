@@ -34,6 +34,7 @@ static const char* const SLOT[12] = { "dk1", "lt1", "dk2", "lt2", "accent1", "ac
 typedef struct {
     pd_res_id res;
     char name[32];              /* in ppt/media */
+    int png;                    /* a picture of the drawing res (one made from an SVG), for Office's blip */
 } pmedia;
 
 typedef struct {
@@ -43,6 +44,7 @@ typedef struct {
     int nrel;
     pd_res_id srel_res[MAX_MEDIA];  /* its pictures: their relationship ids, rId(srel_id) */
     int srel_id[MAX_MEDIA], nsrel;
+    int srel_png[MAX_MEDIA];    /* (the picture of a drawing, not the drawing's SVG) */
     pmedia media[MAX_MEDIA];
     int nmedia;
     int slide_no, next_id, nfld;
@@ -102,6 +104,23 @@ static int media_of(pw* P, pd_res_id res) {
     size_t len;
     int i;
 
+    if (pd_svg_source(P->d, res)) {     /* a drawing made from an SVG: a picture of it (the SVG goes beside it) */
+        for (i = 0; i < P->nmedia; i++) {
+            if (P->media[i].res == res && P->media[i].png) {
+                return i;
+            }
+        }
+
+        if (P->nmedia >= MAX_MEDIA) {
+            return -1;
+        }
+
+        P->media[P->nmedia].res = res;
+        P->media[P->nmedia].png = 1;
+        snprintf(P->media[P->nmedia].name, sizeof(P->media[0].name), "%simage%d.png", P->pfx, P->nmedia + 1);
+        return P->nmedia++;
+    }
+
     if (pd_doc_resource(P->d, res, &mime, &data, &len) == PD_OK && !strcmp(mime, PD_DRAWING_MIME)) {
         pj_doc* jd = pj_parse(data, len, 0, NULL);  /* a metafile played into a drawing: the metafile */
 
@@ -110,7 +129,7 @@ static int media_of(pw* P, pd_res_id res) {
     }
 
     for (i = 0; i < P->nmedia; i++) {
-        if (P->media[i].res == res) {
+        if (P->media[i].res == res && !P->media[i].png) {
             return i;
         }
     }
@@ -121,13 +140,14 @@ static int media_of(pw* P, pd_res_id res) {
 
     ext = strstr(mime, "png") ? "png" : strstr(mime, "jpeg") || strstr(mime, "jpg") ? "jpeg" : strstr(mime, "gif") ?
           "gif" : strstr(mime, "emf") ? "emf" : strstr(mime, "wmf") ? "wmf" : strstr(mime, "bmp") ? "bmp" :
-          strstr(mime, "tif") ? "tiff" : NULL;
+          strstr(mime, "tif") ? "tiff" : strstr(mime, "svg") ? "svg" : NULL;
 
     if (!ext) {
         return -1;
     }
 
     P->media[P->nmedia].res = res;
+    P->media[P->nmedia].png = 0;
     snprintf(P->media[P->nmedia].name, sizeof(P->media[0].name), "%simage%d.%s", P->pfx, P->nmedia + 1,
              ext);
     return P->nmedia++;
@@ -142,7 +162,7 @@ static int pic_rel(pw* P, pd_res_id res) {
     }
 
     for (i = 0; i < P->nsrel; i++) {
-        if (P->srel_res[i] == P->media[m].res) {
+        if (P->srel_res[i] == P->media[m].res && P->srel_png[i] == P->media[m].png) {
             return P->srel_id[i];
         }
     }
@@ -155,8 +175,27 @@ static int pic_rel(pw* P, pd_res_id res) {
     pb_printf(&P->rels, "<Relationship Id=\"rId%d\" Type=\"%simage\" Target=\"../media/%s\"/>", P->nrel, REL,
               P->media[m].name);
     P->srel_res[P->nsrel] = P->media[m].res;
+    P->srel_png[P->nsrel] = P->media[m].png;
     P->srel_id[P->nsrel++] = P->nrel;
     return P->nrel;
+}
+
+/* a picture's a:blip: its relationship, and the SVG it was made from beside it */
+static void put_pic_blip(pw* P, pd_buf* o, pd_res_id res, int rid) {
+    pd_res_id svg = pd_svg_source(P->d, res);
+    char a[24], b[24] = "";
+
+    snprintf(a, sizeof(a), "rId%d", rid);
+
+    if (svg) {
+        int sr = pic_rel(P, svg);
+
+        if (sr) {
+            snprintf(b, sizeof(b), "rId%d", sr);
+        }
+    }
+
+    pd_put_blip(o, a, b, NULL);
 }
 
 static void put_colour(pd_buf* o, uint32_t c, uint32_t ref) {
@@ -1477,6 +1516,35 @@ static void put_copy(pw* P, int n, const char* el) {
     }
 
     pb_put(o, d->s + at, d->v[n].ib - at);
+
+    if (!strcmp(d->v[n].name, "blip")) {    /* (its extensions are left out, but for the SVG it is) */
+        int ext = xd_kid(d, xd_kid(d, n, "extLst"), "ext"), sv = -1;
+        char srid[64];
+        const pj_node* r;
+
+        for (; ext >= 0 && sv < 0; ext = d->v[ext].next) {
+            sv = xd_kid(d, ext, "svgBlip");
+        }
+
+        if (sv >= 0 && xd_attr(d, sv, "r:embed", srid, sizeof(srid)) && P->krels && (r = pj_get(P->krels, srid)) != NULL) {
+            pd_res_id res = (pd_res_id)pj_int_or(r, 0), svg = pd_svg_source(P->d, res);
+            const char* mime;
+            const void* data;
+            size_t len;
+            int id;
+
+            if (!svg && pd_doc_resource(P->d, res, &mime, &data, &len) == PD_OK && !strcmp(mime, "image/svg+xml")) {
+                svg = res;
+            }
+
+            if (svg && (id = pic_rel(P, svg)) != 0) {
+                pb_printf(o, "<a:extLst><a:ext uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\"><asvg:svgBlip "
+                          "xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\" r:embed=\"rId%d\"/>"
+                          "</a:ext></a:extLst>", id);
+            }
+        }
+    }
+
     pb_printf(o, "</%s>", el);
 }
 
@@ -1843,7 +1911,8 @@ static void put_items(pw* P, const pj_node* items) {
             }
 
             pb_printf(o, "<p:pic><p:nvPicPr><p:cNvPr id=\"%d\" name=\"Picture %d\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>"
-                      "<p:blipFill><a:blip r:embed=\"rId%d\"/>", P->next_id, P->next_id, rid);
+                      "<p:blipFill>", P->next_id, P->next_id);
+            put_pic_blip(P, o, (pd_res_id)jn(it, "img"), rid);
             P->next_id++;
 
             if (crop && crop->n == 4) {
@@ -2214,10 +2283,11 @@ static void put_floats(pw* P, pd_block_id sec) {
             }
 
             pb_printf(P->o, "<p:pic><p:nvPicPr><p:cNvPr id=\"%d\" name=\"Picture %d\"/><p:cNvPicPr/><p:nvPr/>"
-                      "</p:nvPicPr><p:blipFill><a:blip r:embed=\"rId%d\"/><a:stretch><a:fillRect/></a:stretch>"
+                      "</p:nvPicPr><p:blipFill>", P->next_id, P->next_id);
+            put_pic_blip(P, P->o, ob.resource, rid);
+            pb_printf(P->o, "<a:stretch><a:fillRect/></a:stretch>"
                       "</p:blipFill><p:spPr><a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
-                      "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>", P->next_id,
-                      P->next_id, rid, x, y, cx, cy);
+                      "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>", x, y, cx, cy);
             P->next_id++;
         }
     }
@@ -2493,6 +2563,7 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
             "<Default Extension=\"wmf\" ContentType=\"image/x-wmf\"/>"
             "<Default Extension=\"bmp\" ContentType=\"image/bmp\"/>"
             "<Default Extension=\"tiff\" ContentType=\"image/tiff\"/>"
+            "<Default Extension=\"svg\" ContentType=\"image/svg+xml\"/>"
             "<Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml."
             "sheet\"/>"
             "<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument."
@@ -2691,7 +2762,17 @@ pd_status pd_pptx_export(const pd_doc* d, pd_buf* out) {
 
         snprintf(name, sizeof(name), "ppt/media/%s", P->media[i].name);
 
-        if (pd_doc_resource(d, P->media[i].res, &mime, &data, &len) != PD_OK || pd_zipw_add(z, name, data, len)) {
+        if (P->media[i].png) {  /* a picture of a drawing made from an SVG */
+            pd_buf png;
+
+            memset(&png, 0, sizeof(png));
+
+            if (!pd_svg_fallback_png(d, P->media[i].res, &png) || pd_zipw_add(z, name, png.p, png.n)) {
+                err = 1;
+            }
+
+            pb_free(&png);
+        } else if (pd_doc_resource(d, P->media[i].res, &mime, &data, &len) != PD_OK || pd_zipw_add(z, name, data, len)) {
             err = 1;
         }
     }

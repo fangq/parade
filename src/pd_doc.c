@@ -5167,6 +5167,28 @@ static int to_ibuf(void* user, const void* data, size_t len) {
     return 0;
 }
 
+/* a drawing description's own size ("w" and "h" at its start), 1 if both are there */
+static int drawing_size(const char* j, size_t n, pd_sp* w, pd_sp* h) {
+    const char* a = NULL, *b = NULL;
+    size_t i;
+
+    for (i = 0; i + 5 < n && i < 256 && (!a || !b); i++) {
+        if (!memcmp(j + i, "\"w\":", 4)) {
+            a = j + i + 4;
+        } else if (!memcmp(j + i, "\"h\":", 4)) {
+            b = j + i + 4;
+        }
+    }
+
+    if (!a || !b) {
+        return 0;
+    }
+
+    *w = (pd_sp)atol(a);
+    *h = (pd_sp)atol(b);
+    return *w > 0 && *h > 0;
+}
+
 static int32_t load_images_in(pd_doc* d, blk* b, pd_image_fetch fetch, void* user) {
     int32_t i, n = 0;
 
@@ -5191,9 +5213,34 @@ static int32_t load_images_in(pd_doc* d, blk* b, pd_image_fetch fetch, void* use
 
         memset(&data, 0, sizeof(data));
 
-        if (fetch(user, o->source, to_ibuf, &data) == 0 && !data.err && data.n > 0 &&
-                (mime = pd_doc_image_info(data.p, data.n, &w, &h)) != NULL &&
-                pd_doc_add_resource(d, mime, data.p, data.n, &rid) == PD_OK) {
+        if (fetch(user, o->source, to_ibuf, &data) == 0 && !data.err && data.n > 0 && pd_svg_is(data.p, data.n) &&
+                pd_doc_add_picture(d, "image/svg+xml", data.p, data.n, &rid) == PD_OK) {
+            const char* dm = NULL;
+            const void* dj = NULL;
+            size_t dn = 0;
+            pd_sp nw, nh;
+
+            o->resource = rid;  /* an SVG: drawn as a drawing, as large as it says (in a page's terms) */
+
+            if ((o->width <= 0 || o->height <= 0) && pd_doc_resource(d, rid, &dm, &dj, &dn) == PD_OK &&
+                    drawing_size((const char*)dj, dn, &nw, &nh)) {
+                if (o->width > 0) {
+                    nh = (pd_sp)((int64_t)nh * o->width / nw);
+                    nw = o->width;
+                } else if (o->height > 0) {
+                    nw = (pd_sp)((int64_t)nw * o->height / nh);
+                    nh = o->height;
+                }
+
+                o->width = nw;
+                o->height = nh;
+            }
+
+            touch(d, PD_CHANGE_TEXT, b->id, 0);
+            n++;
+        } else if (data.n > 0 && !data.err && !pd_svg_is(data.p, data.n) &&
+                   (mime = pd_doc_image_info(data.p, data.n, &w, &h)) != NULL &&
+                   pd_doc_add_resource(d, mime, data.p, data.n, &rid) == PD_OK) {
             o->resource = rid;
 
             if (w > 0 && h > 0 && (o->width <= 0 || o->height <= 0)) {     /* at 96 dpi; one side given: keep the shape */

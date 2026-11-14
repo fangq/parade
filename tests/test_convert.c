@@ -5557,6 +5557,193 @@ static void doc_text(pd_doc* d, char* all, size_t cap) {
 
 /* the .bib led puts in where \bibliography names it: the cited entries set out, numbered as cited or sorted */
 /* LaTeX's text justified as TeX sets it, its margins kerned; \raggedright, centred and code text not */
+/* SVG pictures: drawn as Parade draws them (checked by the pixels: a class's colour from a style sheet, an
+   even-odd hole, a gradient's way, text), kept through .pdoc, and written to and read from a .docx as Office has
+   them (a PNG of it in the blip, the SVG in asvg:svgBlip) */
+static const char svg_doc[] =
+    "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 200 200\">"
+    "<style>.g { fill: #00ff00 }</style>"
+    "<defs><linearGradient id=\"lg\"><stop offset=\"0\" stop-color=\"black\"/><stop offset=\"1\" stop-color=\"white\"/>"
+    "</linearGradient></defs>"
+    "<rect x=\"0\" y=\"0\" width=\"100\" height=\"100\" fill=\"#ff0000\"/>"
+    "<circle class=\"g\" cx=\"150\" cy=\"50\" r=\"40\"/>"
+    "<g transform=\"translate(0 100)\"><rect width=\"100\" height=\"100\" fill=\"url(#lg)\"/></g>"
+    "<path d=\"M100 100 h100 v100 h-100 Z M130 130 h40 v40 h-40 Z\" fill=\"blue\" fill-rule=\"evenodd\"/>"
+    "<text x=\"10\" y=\"90\" font-size=\"20\" fill=\"#123456\">Hi &amp; bye</text>"
+    "</svg>";
+
+static int svg_px(const uint8_t* px, int x, int y, int c) {
+    return px[(y * 100 + x) * 4 + c];
+}
+
+static int svg_drawn(const pd_doc* d, pd_res_id r, uint8_t* px) {
+    memset(px, 0, 100 * 100 * 4);
+    return pd_drawing_render(d, r, PD_PT(75), PD_PT(75), 65536 * 4 / 3, px, 100, 100, 400) == PD_OK;
+}
+
+static void test_svg(void) {
+    pd_doc* d = NULL, *x = NULL;
+    pd_res_id r = 0, src;
+    const char* mime;
+    const void* data;
+    size_t len;
+    uint8_t* px = (uint8_t*)malloc(100 * 100 * 4);
+    buf_t b = { NULL, 0 };
+
+    pd_doc_new(&d);
+    CHECK(pd_doc_add_picture(d, NULL, svg_doc, sizeof(svg_doc) - 1, &r) == PD_OK && r);   /* known by its bytes */
+    CHECK(pd_doc_resource(d, r, &mime, &data, &len) == PD_OK && !strcmp(mime, "application/vnd.parade.drawing+json"));
+    src = pd_doc_picture_source(d, r);
+    CHECK(src && pd_doc_resource(d, src, &mime, &data, &len) == PD_OK && !strcmp(mime, "image/svg+xml") &&
+          len == sizeof(svg_doc) - 1);
+    CHECK(pd_doc_resource(d, r, &mime, &data, &len) == PD_OK && strstr((const char*)data, "\"label\":\"Hi & bye\"") &&
+          strstr((const char*)data, "\"c\":4279383126"));     /* its text, its colour (0xFF123456) */
+    CHECK(pd_doc_resource(d, r, &mime, &data, &len) == PD_OK && strstr((const char*)data, "\"w\":4915200"));  /* 100 px */
+
+    if (px && svg_drawn(d, r, px)) {
+        CHECK(svg_px(px, 25, 25, 0) > 240 && svg_px(px, 25, 25, 1) < 15);     /* red, top left */
+        CHECK(svg_px(px, 75, 25, 1) > 240 && svg_px(px, 75, 25, 0) < 15);     /* the style sheet's green */
+        CHECK(svg_px(px, 2, 25, 3) > 240);
+        CHECK(svg_px(px, 60, 60, 2) > 240 && svg_px(px, 60, 60, 3) > 240);    /* the ring blue */
+        CHECK(svg_px(px, 75, 75, 3) < 10);      /* its hole clear: even-odd, though both rings turn the same way */
+        CHECK(svg_px(px, 5, 75, 0) < 40 && svg_px(px, 45, 75, 0) > 200);     /* dark to light, left to right */
+        CHECK(svg_px(px, 0, 99, 3) > 240 && svg_px(px, 99, 0, 3) < 10);      /* (nothing past the circle) */
+    }
+
+    /* the native file: the SVG kept, the drawing made again from it */
+    CHECK(pd_doc_save(d, PD_JDATA_BINARY, to_buf, &b) == PD_OK);
+    CHECK(pd_doc_load(b.p, b.n, PD_JDATA_BINARY, &x) == PD_OK && x);
+
+    if (x) {
+        const void* d1, *d2;
+        size_t l1, l2;
+
+        CHECK(pd_doc_picture_source(x, r) == src);
+        CHECK(pd_doc_resource(d, r, &mime, &d1, &l1) == PD_OK && pd_doc_resource(x, r, &mime, &d2, &l2) == PD_OK &&
+              l1 == l2 && !memcmp(d1, d2, l1));
+        pd_doc_free(x);
+        x = NULL;
+    }
+
+    free(b.p);
+    b.p = NULL;
+    b.n = 0;
+
+    {   /* in a .docx: the SVG beside a PNG of it, and read back as the SVG */
+        pd_block_id p = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0);
+        pd_inline o;
+        pd_pos c;
+        unsigned char* part;
+        size_t pn;
+
+        memset(&o, 0, sizeof(o));
+        o.kind = PD_INLINE_IMAGE;
+        o.resource = r;
+        o.width = o.height = PD_PT(75);
+        CHECK(pd_doc_insert_inline(d, at(p, 0), &o, &c) == PD_OK);
+        CHECK(pd_doc_export(d, PD_CONV_DOCX, to_buf, &b) == PD_OK);
+        part = pd_zip_get((const unsigned char*)b.p, b.n, "word/document.xml", &pn);
+        CHECK(part && strstr((char*)part, "<asvg:svgBlip") && strstr((char*)part, "<a:blip r:embed=\"rIdm1\">"));
+        free(part);
+        part = pd_zip_get((const unsigned char*)b.p, b.n, "word/media/image1.png", &pn);
+        CHECK(part && pn > 8 && !memcmp(part, "\x89PNG", 4));      /* the picture Word shows without SVG */
+        free(part);
+        part = pd_zip_get((const unsigned char*)b.p, b.n, "word/media/image2.svg", &pn);
+        CHECK(part && pn == sizeof(svg_doc) - 1 && !memcmp(part, svg_doc, pn));   /* the SVG as it came */
+        free(part);
+        part = pd_zip_get((const unsigned char*)b.p, b.n, "[Content_Types].xml", &pn);
+        CHECK(part && strstr((char*)part, "Extension=\"svg\" ContentType=\"image/svg+xml\""));
+        free(part);
+        CHECK(pd_doc_import(b.p, b.n, PD_CONV_DOCX, &x) == PD_OK && x);
+
+        if (x) {
+            pd_block_id q = pd_doc_next_paragraph(x, 0);
+            pd_inline got;
+
+            CHECK(pd_doc_inline_at(x, at(q, 0), &got) == PD_OK && got.kind == PD_INLINE_IMAGE);
+            src = pd_doc_picture_source(x, got.resource);
+            CHECK(src && pd_doc_resource(x, src, &mime, &data, &len) == PD_OK && !strcmp(mime, "image/svg+xml"));
+
+            if (px && svg_drawn(x, got.resource, px)) {
+                CHECK(svg_px(px, 75, 25, 1) > 240 && svg_px(px, 75, 75, 3) < 10);   /* drawn from the SVG again */
+            }
+
+            pd_doc_free(x);
+            x = NULL;
+        }
+
+        free(b.p);
+        b.p = NULL;
+        b.n = 0;
+    }
+
+    {   /* a slide's picture as PowerPoint has one (a PNG, its SVG in asvg:svgBlip): drawn from the SVG, and written
+           back with both */
+        pd_doc* pp = pptx_doc(1, "ppt/slides/slide1.xml", PSLD("",
+                              "<p:pic><p:nvPicPr><p:cNvPr id=\"4\" name=\"Graphic 3\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>"
+                              "<p:blipFill><a:blip r:embed=\"rId2\"><a:extLst><a:ext uri=\"{96DAC541-7B7A-43D3-8B79-37D633B846F1}\">"
+                              "<asvg:svgBlip xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\" r:embed=\"rId3\"/>"
+                              "</a:ext></a:extLst></a:blip><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm>"
+                              "<a:off x=\"914400\" y=\"914400\"/><a:ext cx=\"952500\" cy=\"952500\"/></a:xfrm>"
+                              "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"),
+                              "ppt/slides/_rels/slide1.xml.rels",
+                              "<Relationships xmlns=\"r\"><Relationship Id=\"rId2\" Type=\"t/image\" Target=\"../media/image1.png\"/>"
+                              "<Relationship Id=\"rId3\" Type=\"t/image\" Target=\"../media/image2.svg\"/></Relationships>",
+                              "ppt/media/image1.png", "tests/data/rgba.png", "ppt/media/image2.svg", svg_doc, NULL);
+        int32_t k, svgs = 0, drawn = 0;
+
+        CHECK(pp != NULL);
+
+        for (k = 1; pp && k <= pd_doc_res_count(pp); k++) {
+            src = pd_doc_picture_source(pp, (pd_res_id)k);
+            drawn += src && pd_doc_resource(pp, src, &mime, &data, &len) == PD_OK && !strcmp(mime, "image/svg+xml");
+        }
+
+        CHECK(drawn == 1);     /* the SVG made a drawing */
+        CHECK(pp && count_draws(pp, PD_DRAW_PATH, 0) >= 4);     /* and it is what the slide draws: its shapes */
+
+        if (pp && pd_doc_export(pp, PD_CONV_PPTX, to_buf, &b) == PD_OK) {
+            unsigned char* part = pd_zip_get((const unsigned char*)b.p, b.n, "ppt/slides/slide1.xml", &len);
+            char name[64];
+
+            CHECK(part && strstr((char*)part, "<asvg:svgBlip"));
+            free(part);
+
+            for (k = 1; k <= 8; k++) {
+                snprintf(name, sizeof(name), "ppt/media/%simage%d.svg", k > 4 ? "pd" : "", k > 4 ? k - 4 : k);
+                part = pd_zip_get((const unsigned char*)b.p, b.n, name, &len);
+                svgs += part && len == sizeof(svg_doc) - 1 && !memcmp(part, svg_doc, len);
+                free(part);
+            }
+
+            CHECK(svgs == 1);   /* the SVG as it came */
+            CHECK(pd_doc_import(b.p, b.n, PD_CONV_PPTX, &x) == PD_OK && x);
+
+            for (k = 1, drawn = 0; x && k <= pd_doc_res_count(x); k++) {
+                src = pd_doc_picture_source(x, (pd_res_id)k);
+                drawn += src && pd_doc_resource(x, src, &mime, &data, &len) == PD_OK && !strcmp(mime, "image/svg+xml");
+            }
+
+            CHECK(drawn == 1);  /* and read back as the SVG */
+            pd_doc_free(x);
+            x = NULL;
+        } else {
+            CHECK(0);
+        }
+
+        free(b.p);
+        b.p = NULL;
+        b.n = 0;
+        pd_doc_free(pp);
+    }
+
+    /* what is not a picture is refused; an SVG with nothing to draw, too */
+    CHECK(pd_doc_add_picture(d, NULL, "hello", 5, &r) == PD_ERR_FORMAT);
+    CHECK(pd_doc_add_picture(d, "image/svg+xml", "<svg xmlns=\"http://www.w3.org/2000/svg\"/>", 40, &r) == PD_ERR_FORMAT);
+    pd_doc_free(d);
+    free(px);
+}
+
 static void test_latex_justified(void) {
     static const char tex[] =
         "\\documentclass{article}\\begin{document}\n"
@@ -12303,6 +12490,7 @@ int main(void) {
     test_latex_import();
     test_latex_bibtex();
     test_latex_justified();
+    test_svg();
     test_latex_indent();
     test_pptx_chart();
     test_pptx_ph_inherit();

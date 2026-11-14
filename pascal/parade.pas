@@ -1033,6 +1033,8 @@ function pd_doc_inline_at(doc: Ppd_doc; pos: pd_pos; out obj: pd_inline): pd_sta
 function pd_doc_control_at(doc: Ppd_doc; pos: pd_pos; out start, finish: pd_pos): pd_status; cdecl; PDEXT;
 function pd_doc_add_resource(doc: Ppd_doc; mime: PAnsiChar; data: Pointer; len: csize_t; out res: pd_res_id): pd_status; cdecl; PDEXT;
 function pd_doc_resource(doc: Ppd_doc; res: pd_res_id; mime: PPAnsiChar; data: PPointer; len: pcsize_t): pd_status; cdecl; PDEXT;
+function pd_doc_add_picture(doc: Ppd_doc; mime: PAnsiChar; data: Pointer; len: csize_t; out shown: pd_res_id): pd_status; cdecl; PDEXT;
+function pd_doc_picture_source(doc: Ppd_doc; res: pd_res_id): pd_res_id; cdecl; PDEXT;
 { an animated GIF: its screen, frames and loops (0 for ever, -1 none); frames first..first+count-1 as shown, RGBA
   (alpha not premultiplied), each one's delay in ms }
 function pd_gif_info(data: Pointer; len: csize_t; out width, height, frames, loops: Int32): pd_status; cdecl; PDEXT;

@@ -31,7 +31,7 @@ ulimit_cmd = $(if $(filter 0,$(MEMLIMIT_KB)),true,ulimit -v $(MEMLIMIT_KB))
 
 SRC     := src/pd_font.c src/pd_raster.c src/pd_svg.c src/pd_cff.c src/pd_unidata.c src/pd_text.c src/pd_bidi.c src/pd_shape.c src/pd_hyph.c src/pd_para.c src/pd_break.c src/pd_json.c src/pd_zlib.c src/pd_gif.c src/pd_latex_read.c src/pd_bibtex.c src/pd_doc.c src/pd_doc_io.c \
            src/pd_doc_layout.c src/pd_layout.c src/pd_pdf.c src/pd_jpeg.c src/pd_conv.c src/pd_markup.c src/pd_html.c \
-           src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c src/pd_pptx.c src/pd_pptx_write.c src/pd_xdoc.c src/pd_dgm.c src/pd_preset.c src/pd_chart.c src/pd_math.c src/pd_emf.c src/pd_omml.c \
+           src/pd_markdown.c src/pd_latex.c src/pd_rtf.c src/pd_docx.c src/pd_pptx.c src/pd_pptx_write.c src/pd_xdoc.c src/pd_dgm.c src/pd_preset.c src/pd_chart.c src/pd_math.c src/pd_emf.c src/pd_svgread.c src/pd_omml.c \
            src/pd_pdfr.c src/pd_pdfr_jpeg.c src/pd_pdfr_font.c src/pd_pdfr_res.c src/pd_pdfr_draw.c src/pd_pdfr_raster.c \
            src/pd_pdfr_edit.c src/pd_pdfr_jbig2.c
 ifeq ($(SYNC),yrs)

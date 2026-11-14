@@ -275,6 +275,16 @@ int pd_metafile_kind(const unsigned char* p, size_t n);
 /* an EMF or WMF picture played into a drawing resource (its bitmaps added as PNG
    resources), the original's resource src kept in it; 0 if there is nothing to draw */
 pd_res_id pd_metafile_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src);
+/* SVG (pd_svgread.c): whether bytes are one; its drawing description into o (1 if anything is drawn); a drawing
+   resource made from the SVG resource src, saved as made from it (0 if nothing of it can be drawn) */
+int pd_svg_is(const unsigned char* p, size_t n);
+int pd_svg_json(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src, pd_buf* o);
+pd_res_id pd_svg_drawing(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src);
+/* writing one back: the SVG a drawing was made from (0 none); a PNG of the drawing, for Office's blip beside it */
+pd_res_id pd_svg_source(const pd_doc* d, pd_res_id res);
+int pd_svg_fallback_png(const pd_doc* d, pd_res_id drawing, pd_buf* out);
+/* the a:blip of a picture: closed, or with the asvg:svgBlip extension naming svg_rid (NULL none) */
+void pd_put_blip(pd_buf* o, const char* rid, const char* svg_rid, const char* attrs);
 
 /* ------------------------------------------------------------------ */
 /* equations (pd_omml.c)                                              */

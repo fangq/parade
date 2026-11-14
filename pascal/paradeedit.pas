@@ -894,9 +894,11 @@ type
     procedure GetFontFamilies(List: TStrings);
 
     { ---- the Insert tab: objects at the caret (over the selection), one undo each ---- }
-    { a picture from a file (PNG, JPEG, GIF), at its own size or the text's width when wider; False when it
-      cannot be read }
+    { a picture from a file (PNG, JPEG, GIF, BMP, TIFF; SVG, EMF, WMF as drawings), at its own size or the text's
+      width when wider; False when it cannot be read }
     function InsertPicture(const FileName: string): Boolean;
+    { a picture's bytes (Mime '' to know it by them): PNG, JPEG, GIF, BMP, TIFF; SVG, EMF and WMF as drawings }
+    function InsertPictureData(const Mime: string; Data: Pointer; Len: SizeInt; const Alt: string): Boolean;
     { a link to URL around the selection, or Text (the URL when empty) inserted as a link }
     procedure InsertLink(const URL, AText: string);
     { a page (PD_BREAK_PAGE), column (PD_BREAK_COLUMN) break or a horizontal rule (PD_BREAK_RULE) at the caret }
@@ -1025,9 +1027,18 @@ type
     { the selection's two ends, in document order; False when there is none (only the caret) }
     function SelectionRange(out A, B: pd_pos): Boolean;
     function SelectedText: string;
+    { the selection as text, HTML, RTF and Parade's own; a picture alone also as a picture (its PNG, JPEG, GIF or
+      SVG, and a PNG of it) }
     procedure CopyToClipboard;
     procedure CutToClipboard;
+    { Parade's own, else a picture another program put there (the HTML beside it only that picture), picture files
+      a file manager copied, HTML, RTF, text }
     procedure PasteFromClipboard;
+    function PasteClipboardPicture: Boolean;
+    function PasteClipboardFiles: Boolean;
+    { the selection, when it is a picture and nothing else }
+    function SelectedPicture(out O: pd_inline): Boolean;
+    procedure AddPictureFormats(const O: pd_inline);
     { insert data of a format (PD_CONV_*) at the caret, replacing the selection; one undo step }
     procedure PasteData(Data: Pointer; Len: Integer; Format: Int32);
     { the selection in a format (PD_CONV_*) }
@@ -2444,6 +2455,111 @@ begin
     Clipboard.AddFormat(Fmt, Ss);
   finally
     Ss.Free;
+  end;
+end;
+
+{ a picture's bytes (PNG, JPEG, GIF, BMP, TIFF) as a PNG, through fcl-image; False if they cannot be read }
+function PictureToPng(const Mime: string; Src, Dst: TStream): Boolean;
+var
+  Img: TFPMemoryImage;
+  R: TFPCustomImageReader;
+  W: TFPWriterPNG;
+begin
+  Result := False;
+  if Pos('png', Mime) > 0 then
+    R := TFPReaderPNG.Create
+  else if Pos('jpeg', Mime) > 0 then
+    R := TFPReaderJPEG.Create
+  else if Pos('gif', Mime) > 0 then
+    R := TFPReaderGIF.Create
+  else if Pos('bmp', Mime) > 0 then
+    R := TFPReaderBMP.Create
+  else if Pos('tif', Mime) > 0 then
+    R := TFPReaderTiff.Create
+  else
+    Exit;
+  Img := TFPMemoryImage.Create(0, 0);
+  W := TFPWriterPNG.Create;
+  try
+    try
+      Src.Position := 0;
+      Img.LoadFromStream(Src, R);
+      W.UseAlpha := True;
+      Img.SaveToStream(Dst, W);
+      Result := Dst.Size > 0;
+    except
+      Result := False;
+    end;
+  finally
+    R.Free;
+    W.Free;
+    Img.Free;
+  end;
+end;
+
+{ whether HTML is a picture and nothing else (what a browser gives with a picture copied out of a page) }
+function HtmlIsJustPicture(const H: string): Boolean;
+var
+  I: Integer;
+  InTag: Boolean;
+  T: string;
+begin
+  Result := Pos('<img', LowerCase(H)) > 0;
+  if not Result then
+    Exit;
+  T := StringReplace(StringReplace(H, '&nbsp;', ' ', [rfReplaceAll]), #$C2#$A0, ' ', [rfReplaceAll]);
+  InTag := False;
+  for I := 1 to Length(T) do
+    if T[I] = '<' then
+      InTag := True
+    else if T[I] = '>' then
+      InTag := False
+    else if not InTag and not (T[I] in [' ', #9, #10, #13]) then
+    begin
+      { a fragment's header (Windows' Version:0.9 StartHTML:...) is not text either }
+      if Pos('StartFragment', T) = 0 then
+        Exit(False);
+    end;
+end;
+
+{ file:// addresses (a text/uri-list, a file manager's copied files) as local paths }
+function UriListPaths(const S: string): TStringArray;
+var
+  Lines: TStringArray;
+  L, P: string;
+  K, I: Integer;
+begin
+  Result := nil;
+  Lines := S.Split([#10]);
+  for K := 0 to High(Lines) do
+  begin
+    L := Trim(Lines[K]);
+    if Pos('file://', L) <> 1 then
+      Continue;
+    L := Copy(L, 8, MaxInt);
+    if (L <> '') and (L[1] <> '/') then
+      L := Copy(L, Pos('/', L), MaxInt);   { file://host/path }
+    P := '';
+    I := 1;
+    while I <= Length(L) do
+    begin   { %20 and the like }
+      if (L[I] = '%') and (I + 2 <= Length(L)) and (StrToIntDef('$' + Copy(L, I + 1, 2), -1) >= 0) then
+      begin
+        P := P + Chr(StrToInt('$' + Copy(L, I + 1, 2)));
+        Inc(I, 3);
+      end
+      else
+      begin
+        P := P + L[I];
+        Inc(I);
+      end;
+    end;
+    {$IFDEF WINDOWS}
+    if (Length(P) > 2) and (P[1] = '/') and (P[3] = ':') then
+      Delete(P, 1, 1);
+    {$ENDIF}
+    SetLength(Result, Length(Result) + 1);
+    Result[High(Result)] := P;
   end;
 end;
 
@@ -5514,10 +5630,7 @@ end;
 function TParadeEdit.InsertPicture(const FileName: string): Boolean;
 var
   Data: TMemoryStream;
-  Mime, Alt: string;
-  Res: pd_res_id;
-  O: pd_inline;
-  W, H, Room: pd_sp;
+  Mime: string;
 begin
   Result := False;
   if EditBlocked then
@@ -5526,6 +5639,10 @@ begin
     '.png': Mime := 'image/png';
     '.jpg', '.jpeg': Mime := 'image/jpeg';
     '.gif': Mime := 'image/gif';
+    '.bmp': Mime := 'image/bmp';
+    '.tif', '.tiff': Mime := 'image/tiff';
+    '.svg': Mime := 'image/svg+xml';
+    '.emf', '.wmf': Mime := '';     { known by its first bytes }
   else
     Exit;
   end;
@@ -5536,15 +5653,33 @@ begin
     except
       Exit;
     end;
-    if (Data.Size = 0) or (pd_doc_add_resource(FDoc, PAnsiChar(Mime), Data.Memory, Data.Size, Res) <> PD_OK) then
-      Exit;
+    Result := InsertPictureData(Mime, Data.Memory, Data.Size, ChangeFileExt(ExtractFileName(FileName), ''));
   finally
     Data.Free;
   end;
+end;
+
+{ a picture's bytes at the caret (or, a canvas selected, on it): PNG, JPEG, GIF, BMP, TIFF as they are; SVG
+  and metafiles as drawings made from them; Mime '' to know it by its bytes }
+function TParadeEdit.InsertPictureData(const Mime: string; Data: Pointer; Len: SizeInt; const Alt: string): Boolean;
+var
+  Res: pd_res_id;
+  O: pd_inline;
+  W, H, Room: pd_sp;
+  M: PAnsiChar;
+begin
+  Result := False;
+  if EditBlocked or (Data = nil) or (Len <= 0) then
+    Exit;
+  if Mime = '' then
+    M := nil
+  else
+    M := PAnsiChar(Mime);
+  if pd_doc_add_picture(FDoc, M, Data, Len, Res) <> PD_OK then
+    Exit;
   FillChar(O, SizeOf(O), 0);
   O.kind := PD_INLINE_IMAGE;
   O.resource := Res;
-  Alt := ChangeFileExt(ExtractFileName(FileName), '');
   O.alt := PAnsiChar(Alt);
   O.alt_len := Length(Alt);
   { its own size, 96 dpi; no wider than the text }
@@ -8107,6 +8242,7 @@ end;
 procedure TParadeEdit.CopyToClipboard;
 var
   Native, Html, Rtf: string;
+  Pic: pd_inline;
 begin
   if FShapeOn and (FShapeSid >= 0) then
   begin
@@ -8129,6 +8265,8 @@ begin
     AddClip(CF_Html, Html);
     {$ENDIF}
     AddClip(CF_Rtf, Rtf);
+    if SelectedPicture(Pic) then  { a picture alone: as a picture too, for an image editor or a chat to take }
+      AddPictureFormats(Pic);
   finally
     Clipboard.Close;
   end;
@@ -8153,6 +8291,83 @@ begin
   end;
 end;
 
+{ the selection, when it is one picture and nothing else: that picture }
+function TParadeEdit.SelectedPicture(out O: pd_inline): Boolean;
+var
+  A, B: pd_pos;
+begin
+  Result := False;
+  if not HasSelection then
+    Exit;
+  A := SelStart;
+  B := SelEnd;
+  Result := (A.block = B.block) and (B.offset - A.offset = 3) and (pd_doc_inline_at(FDoc, A, O) = PD_OK) and
+    (O.kind = PD_INLINE_IMAGE) and (O.resource <> 0);
+end;
+
+{ a picture as other programs take one: its own file (a PNG, JPEG, GIF; an SVG as it came), and a PNG of it }
+procedure TParadeEdit.AddPictureFormats(const O: pd_inline);
+var
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  M: string;
+  Src: pd_res_id;
+  Ms, Png: TMemoryStream;
+  W, H: pd_sp;
+  Sc: Int32;
+begin
+  if pd_doc_resource(FDoc, O.resource, @Mime, @Data, @Len) <> PD_OK then
+    Exit;
+  M := Mime;
+  Ms := TMemoryStream.Create;
+  Png := TMemoryStream.Create;
+  try
+    if M = 'application/vnd.parade.drawing+json' then
+    begin   { an SVG or a metafile drawn: the SVG as it came, and a picture of the drawing }
+      Src := pd_doc_picture_source(FDoc, O.resource);
+      if (Src <> 0) and (pd_doc_resource(FDoc, Src, @Mime, @Data, @Len) = PD_OK) and (StrComp(Mime, 'image/svg+xml') = 0) then
+      begin
+        Ms.WriteBuffer(Data^, Len);
+        Ms.Position := 0;
+        Clipboard.AddFormat(RegisterClipboardFormat('image/svg+xml'), Ms);
+      end;
+      W := O.width;
+      H := O.height;
+      if (W <= 0) or (H <= 0) then
+        pd_doc_image_display_size(FDoc, O, W, H);
+      Sc := 2 * 65536;    { two pixels a point; the longer side at most 4096 }
+      if (W > 0) and (Max(W, H) div 65536 * 2 > 4096) then
+        Sc := Round(4096 / (Max(W, H) / 65536) * 65536);
+      if pd_drawing_to_png(FDoc, O.resource, W, H, Sc, @WriteToStream, Png) <> PD_OK then
+        Png.Clear;
+    end
+    else if PictureMimeOk(M) then
+    begin
+      Ms.WriteBuffer(Data^, Len);
+      Ms.Position := 0;
+      if (M = 'image/png') or (M = 'image/jpeg') or (M = 'image/gif') then
+        Clipboard.AddFormat(RegisterClipboardFormat(M), Ms);
+      if M = 'image/png' then
+        Png.CopyFrom(Ms, 0)
+      else if not PictureToPng(M, Ms, Png) then
+        Png.Clear;
+    end;
+    if Png.Size > 0 then
+    begin
+      Png.Position := 0;
+      Clipboard.AddFormat(RegisterClipboardFormat('image/png'), Png);
+      {$IFDEF WINDOWS}
+      Png.Position := 0;
+      Clipboard.AddFormat(RegisterClipboardFormat('PNG'), Png);
+      {$ENDIF}
+    end;
+  finally
+    Png.Free;
+    Ms.Free;
+  end;
+end;
+
 procedure TParadeEdit.PasteData(Data: Pointer; Len: Integer; Format: Int32);
 var
   After: pd_pos;
@@ -8172,22 +8387,122 @@ begin
   Changed;
 end;
 
-{ the richest format on the clipboard: Parade's own, then HTML, RTF, plain text }
-procedure TParadeEdit.PasteFromClipboard;
+{ a picture on the clipboard (another program's: a screenshot, a browser's or an image editor's), inserted;
+  False if there is none }
+function TParadeEdit.PasteClipboardPicture: Boolean;
+const
+  Kinds: array[0..10] of string = ('image/svg+xml', 'image/png', 'PNG', 'public.png', 'image/jpeg', 'public.jpeg',
+    'image/gif', 'image/bmp', 'image/x-bmp', 'image/tiff', 'public.tiff');
+var
+  K: Integer;
+  F: TClipboardFormat;
+  Ms, Png: TMemoryStream;
+  Mime: string;
+  {$IFDEF WINDOWS}
+  Bmp: TBitmap;
+  Pn: TPortableNetworkGraphic;
+  {$ENDIF}
+begin
+  Result := False;
+  if EditBlocked or TextLocked then
+    Exit;
+  for K := Low(Kinds) to High(Kinds) do
+  begin
+    F := RegisterClipboardFormat(Kinds[K]);
+    if (F = 0) or not Clipboard.HasFormat(F) then
+      Continue;
+    Ms := TMemoryStream.Create;
+    Png := TMemoryStream.Create;
+    try
+      if not Clipboard.GetFormat(F, Ms) or (Ms.Size = 0) then
+        Continue;
+      Mime := Kinds[K];
+      if (Mime = 'PNG') or (Mime = 'public.png') then
+        Mime := 'image/png'
+      else if Mime = 'public.jpeg' then
+        Mime := 'image/jpeg';
+      if (Pos('bmp', Mime) > 0) or (Pos('tiff', Mime) > 0) then
+      begin   { kept as a PNG, a tenth of the size }
+        if PictureToPng(Mime, Ms, Png) and InsertPictureData('image/png', Png.Memory, Png.Size, '') then
+          Exit(True);
+        Continue;
+      end;
+      if InsertPictureData(Mime, Ms.Memory, Ms.Size, '') then
+        Exit(True);
+    finally
+      Png.Free;
+      Ms.Free;
+    end;
+  end;
+  {$IFDEF WINDOWS}
+  if Clipboard.HasFormat(PredefinedClipboardFormat(pcfBitmap)) then
+  begin   { a device-independent bitmap (Print Screen, Paint) }
+    Bmp := TBitmap.Create;
+    Pn := TPortableNetworkGraphic.Create;
+    Ms := TMemoryStream.Create;
+    try
+      try
+        Bmp.LoadFromClipboardFormat(PredefinedClipboardFormat(pcfBitmap));
+        Pn.Assign(Bmp);
+        Pn.SaveToStream(Ms);
+        Result := InsertPictureData('image/png', Ms.Memory, Ms.Size, '');
+      except
+        Result := False;
+      end;
+    finally
+      Ms.Free;
+      Pn.Free;
+      Bmp.Free;
+    end;
+  end;
+  {$ENDIF}
+end;
+
+{ picture files copied in a file manager (a text/uri-list of them), each inserted; False if none was a picture }
+function TParadeEdit.PasteClipboardFiles: Boolean;
 var
   S: string;
+  Paths: TStringArray;
+  K: Integer;
+begin
+  Result := False;
+  if EditBlocked or TextLocked then
+    Exit;
+  if not ReadClip(RegisterClipboardFormat('text/uri-list'), S) and
+     not ReadClip(RegisterClipboardFormat('x-special/gnome-copied-files'), S) then
+    Exit;
+  Paths := UriListPaths(S);
+  for K := 0 to High(Paths) do
+    if FileExists(Paths[K]) and InsertPicture(Paths[K]) then
+      Result := True;
+end;
+
+{ the richest format on the clipboard: Parade's own, then a picture (when the HTML beside it is only that
+  picture), picture files, HTML, RTF, plain text }
+procedure TParadeEdit.PasteFromClipboard;
+var
+  S, H: string;
+  HasHtml: Boolean;
 begin
   RegisterFormats;
   if ReadClip(CF_Shapes, S) then
     PutShapesPayload(S, 'Paste')
   else if ReadClip(CF_Parade, S) then
     PasteData(PAnsiChar(S), Length(S), PD_CONV_JDATA)
-  else if ReadClip(CF_Html, S) then
-    PasteData(PAnsiChar(S), Length(S), PD_CONV_HTML)
-  else if ReadClip(CF_Rtf, S) then
-    PasteData(PAnsiChar(S), Length(S), PD_CONV_RTF)
   else
-    InsertText(Clipboard.AsText);
+  begin
+    HasHtml := ReadClip(CF_Html, H);
+    if (not HasHtml or HtmlIsJustPicture(H)) and PasteClipboardPicture then
+      Exit;
+    if PasteClipboardFiles then
+      Exit;
+    if HasHtml then
+      PasteData(PAnsiChar(H), Length(H), PD_CONV_HTML)
+    else if ReadClip(CF_Rtf, S) then
+      PasteData(PAnsiChar(S), Length(S), PD_CONV_RTF)
+    else if not PasteClipboardPicture then
+      InsertText(Clipboard.AsText);
+  end;
 end;
 
 function TParadeEdit.StoryTopOf(B: pd_block_id): pd_block_id;

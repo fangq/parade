@@ -346,6 +346,7 @@ typedef struct {
     pd_res_id res;
     char name[32];
     char mime[64];
+    int png;                    /* a picture of the drawing res (one made from an SVG), for the blip beside the SVG */
 } dmedia;
 
 #define DX_PENDING 256         /* floats anchored in one paragraph, written */
@@ -748,7 +749,7 @@ static int dx_media(dxo* x, pd_res_id res, const char** rid_name) {
     size_t len;
 
     for (i = 0; i < x->nmedia; i++) {
-        if (x->media[i].res == res) {
+        if (x->media[i].res == res && !x->media[i].png) {
             *rid_name = x->media[i].name;
             return i;
         }
@@ -759,15 +760,92 @@ static int dx_media(dxo* x, pd_res_id res, const char** rid_name) {
     }
 
     x->media[x->nmedia].res = res;
+    x->media[x->nmedia].png = 0;
     snprintf(x->media[x->nmedia].mime, sizeof(x->media[0].mime), "%s", mime);
     snprintf(x->media[x->nmedia].name, sizeof(x->media[0].name), "image%d.%s", x->nmedia + 1,
              strstr(mime, "png") ? "png" : strstr(mime, "gif") ? "gif" : strstr(mime, "emf") ? "emf" :
              strstr(mime, "wmf") ? "wmf" : strstr(mime, "bmp") ? "bmp" : strstr(mime, "tiff") ? "tiff" :
-             strstr(mime, "webp") ? "webp" : "jpeg");
+             strstr(mime, "webp") ? "webp" : strstr(mime, "svg") ? "svg" : "jpeg");
     pb_printf(&x->rels, "<Relationship Id=\"rIdm%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
               "relationships/image\" Target=\"media/%s\"/>", x->nmedia + 1, x->media[x->nmedia].name);
     *rid_name = x->media[x->nmedia].name;
     return x->nmedia++;
+}
+
+/* a PNG of a drawing made from an SVG, as a part of its own (made when the package is written) */
+static int dx_media_png(dxo* x, pd_res_id drawing, const char** rid_name) {
+    int i;
+
+    for (i = 0; i < x->nmedia; i++) {
+        if (x->media[i].res == drawing && x->media[i].png) {
+            *rid_name = x->media[i].name;
+            return i;
+        }
+    }
+
+    if (x->nmedia >= 256) {
+        return -1;
+    }
+
+    x->media[x->nmedia].res = drawing;
+    x->media[x->nmedia].png = 1;
+    snprintf(x->media[x->nmedia].mime, sizeof(x->media[0].mime), "image/png");
+    snprintf(x->media[x->nmedia].name, sizeof(x->media[0].name), "image%d.png", x->nmedia + 1);
+    pb_printf(&x->rels, "<Relationship Id=\"rIdm%d\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/"
+              "relationships/image\" Target=\"media/%s\"/>", x->nmedia + 1, x->media[x->nmedia].name);
+    *rid_name = x->media[x->nmedia].name;
+    return x->nmedia++;
+}
+
+/* the part a picture is written as: a drawing made from a metafile, the metafile; from an SVG, the SVG */
+static pd_res_id dx_file_of(dxo* x, pd_res_id res) {
+    const char* m = "";
+    const void* cd = NULL;
+    size_t cn = 0;
+    pd_res_id svg = pd_svg_source(x->d, res);
+
+    if (svg) {
+        return svg;
+    }
+
+    if (pd_doc_resource(x->d, res, &m, &cd, &cn) == PD_OK && strcmp(m, PD_DRAWING_MIME) == 0) {
+        pj_doc* jd = pj_parse(cd, cn, 0, NULL);
+
+        res = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
+        pj_free(jd);
+    }
+
+    return res;
+}
+
+/* a picture's a:blip into out (cap bytes) and the index of the part it names: a drawing made from an SVG as a PNG
+   of it with the SVG beside it (asvg:svgBlip, which Office shows); -1 if it is none to write */
+static int dx_blip(dxo* x, pd_res_id res, char* out, size_t cap, const char** name) {
+    pd_res_id svg = pd_svg_source(x->d, res);
+    char a[24], b[24];
+    pd_buf t;
+    int m, sm = -1;
+    const char* sname;
+
+    if (svg) {
+        m = dx_media_png(x, res, name);
+        sm = m >= 0 ? dx_media(x, svg, &sname) : -1;
+    } else {
+        res = dx_file_of(x, res);
+        m = res ? dx_media(x, res, name) : -1;
+    }
+
+    if (m < 0) {
+        return -1;
+    }
+
+    snprintf(a, sizeof(a), "rIdm%d", m + 1);
+    snprintf(b, sizeof(b), "rIdm%d", sm + 1);
+    memset(&t, 0, sizeof(t));
+    pd_put_blip(&t, a, sm >= 0 ? b : NULL, NULL);
+    snprintf(out, cap, "%.*s", t.p ? (int)t.n : 0, t.p ? t.p : "");
+    pb_free(&t);
+    return m;
 }
 
 static void dx_block(dxo* x, pd_block_id id);
@@ -841,7 +919,7 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
     pd_res_id pic = ob->resource;
     int m;
     char wb[2048], vp[64];
-    char crop[96] = "";
+    char crop[96] = "", blip[400] = "";
 
     int chart = 0, wpc = 0;
 
@@ -878,11 +956,11 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
 
         if (src && !chart) {
             group = 0;
-            pic = src;
+            pic = pd_svg_source(x->d, ob->resource) ? ob->resource : src;   /* (an SVG's: as its picture and itself) */
         }
     }
 
-    m = group || chart ? 0 : dx_media(x, pic, &name);
+    m = group || chart ? 0 : dx_blip(x, pic, blip, sizeof(blip), &name);
     pd_sp iw, ih;
     long long cx, cy;
     size_t mark;
@@ -975,10 +1053,10 @@ static void dx_picture(dxo* x, const pd_inline* ob, const pd_float_props* fp) {
 
     pb_printf(o, "/>%s<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">"
               "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr>"
-              "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/>%s<a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
+              "<pic:blipFill>%s%s<a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
               "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
               "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData>"
-              "</a:graphic>%s</w:drawing></w:r>", fp ? "<wp:cNvGraphicFramePr/>" : "", x->docpr, name, m + 1, crop, cx, cy,
+              "</a:graphic>%s</w:drawing></w:r>", fp ? "<wp:cNvGraphicFramePr/>" : "", x->docpr, name, blip, crop, cx, cy,
               fp ? "</wp:anchor>" : "</wp:inline>");
 }
 
@@ -1008,14 +1086,12 @@ static void dx_txbx_picture(dxo* x, const pj_node* r) {
     size_t cn = 0;
     int m;
 
-    if (pd_doc_resource(x->d, cr, &cm, &cd, &cn) == PD_OK && strcmp(cm, PD_DRAWING_MIME) == 0) {
-        pj_doc* jd = pj_parse(cd, cn, 0, NULL);     /* a metafile: the metafile itself */
+    char blip[400];
 
-        cr = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
-        pj_free(jd);
-    }
-
-    m = cr ? dx_media(x, cr, &name) : -1;
+    (void)cm;
+    (void)cd;
+    (void)cn;
+    m = cr ? dx_blip(x, cr, blip, sizeof(blip), &name) : -1;    /* (a metafile: the metafile itself) */
 
     if (m < 0 || cx <= 0 || cy <= 0) {
         return;
@@ -1025,10 +1101,10 @@ static void dx_txbx_picture(dxo* x, const pj_node* r) {
     pb_printf(o, "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"%lld\" "
               "cy=\"%lld\"/><wp:docPr id=\"%d\" name=\"Picture %d\"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData "
               "uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" "
-              "name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed=\"rIdm%d\"/><a:stretch><a:fillRect/>"
+              "name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill>%s<a:stretch><a:fillRect/>"
               "</a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm>"
               "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>"
-              "</wp:inline></w:drawing></w:r>", cx, cy, x->docpr, x->docpr, x->docpr, name, m + 1, cx, cy);
+              "</wp:inline></w:drawing></w:r>", cx, cy, x->docpr, x->docpr, x->docpr, name, blip, cx, cy);
 }
 
 static void dx_txbx_table(dxo* x, const pj_node* tbl, int depth);
@@ -1278,7 +1354,9 @@ static void dx_kept_xml(dxo* x, const char* s, size_t n, const pj_node* rels, co
                 memcpy(rid, q + 1, (size_t)(e - q - 1));
                 rid[e - q - 1] = '\0';
                 r = rels ? pj_get(rels, rid) : NULL;
-                m = r ? dx_media(x, (pd_res_id)pj_int_or(r, 0), &name) : -1;
+                pd_res_id fr = r ? dx_file_of(x, (pd_res_id)pj_int_or(r, 0)) : 0;
+
+                m = fr ? dx_media(x, fr, &name) : -1;   /* (a drawing made from a file: the file) */
             }
 
             if (m >= 0) {
@@ -1419,14 +1497,12 @@ static void dx_vml_fallback(dxo* x, const void* data, size_t len, long long cx, 
             size_t cn = 0;
             int m;
 
-            if (pd_doc_resource(x->d, cr, &cm, &cd, &cn) == PD_OK && strcmp(cm, PD_DRAWING_MIME) == 0) {
-                pj_doc* jd = pj_parse(cd, cn, 0, NULL);    /* a metafile in the canvas: the metafile itself */
+            char blip[400];
 
-                cr = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
-                pj_free(jd);
-            }
-
-            m = cr ? dx_media(x, cr, &name) : -1;
+            (void)cm;
+            (void)cd;
+            (void)cn;
+            m = cr ? dx_blip(x, cr, blip, sizeof(blip), &name) : -1;    /* a metafile in the canvas: the metafile */
 
             if (m >= 0) {
                 pb_printf(o, "<v:rect style=\"%s\" filled=\"f\" stroked=\"f\"><v:imagedata r:id=\"rIdm%d\" o:title=\"\"/>"
@@ -1530,19 +1606,17 @@ static void dx_drawing_group(dxo* x, const void* data, size_t len, long long cx,
             size_t cn = 0;
             int m;
 
-            if (pd_doc_resource(x->d, cr, &cm, &cd, &cn) == PD_OK && strcmp(cm, PD_DRAWING_MIME) == 0) {
-                pj_doc* jd = pj_parse(cd, cn, 0, NULL);    /* a metafile in the group: the metafile itself */
+            char blip[400];
 
-                cr = jd ? (pd_res_id)pj_int_or(pj_get(pj_root(jd), "src"), 0) : 0;
-                pj_free(jd);
-            }
-
-            m = cr ? dx_media(x, cr, &name) : -1;
+            (void)cm;
+            (void)cd;
+            (void)cn;
+            m = cr ? dx_blip(x, cr, blip, sizeof(blip), &name) : -1;    /* a metafile in the group: the metafile */
 
             if (m >= 0) {
                 pb_printf(o, "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%d\" name=\"%s\"/><pic:cNvPicPr/></pic:nvPicPr>"
-                          "<pic:blipFill><a:blip r:embed=\"rIdm%d\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
-                          "<pic:spPr>%s<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>", id, name, m + 1,
+                          "<pic:blipFill>%s<a:stretch><a:fillRect/></a:stretch></pic:blipFill>"
+                          "<pic:spPr>%s<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>", id, name, blip,
                           xfrm);
             }
         } else if (pj_get(it, "shape")) {
@@ -5383,6 +5457,7 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
             "<Default Extension=\"bmp\" ContentType=\"image/bmp\"/>"
             "<Default Extension=\"tiff\" ContentType=\"image/tiff\"/>"
             "<Default Extension=\"webp\" ContentType=\"image/webp\"/>"
+            "<Default Extension=\"svg\" ContentType=\"image/svg+xml\"/>"
             "<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>"
             "<Default Extension=\"wmf\" ContentType=\"image/x-wmf\"/>"
             "<Default Extension=\"odttf\" ContentType=\"application/vnd.openxmlformats-officedocument.obfuscatedFont\"/>"
@@ -5699,7 +5774,18 @@ pd_status pd_docx_export_as(const pd_doc* d, pd_buf* out, int tmpl) {
         size_t len;
         char name[64];
 
-        if (pd_doc_resource(d, x->media[i].res, &mime, &data, &len) == PD_OK) {
+        if (x->media[i].png) {  /* a picture of a drawing made from an SVG */
+            pd_buf png;
+
+            memset(&png, 0, sizeof(png));
+            snprintf(name, sizeof(name), "word/media/%s", x->media[i].name);
+
+            if (pd_svg_fallback_png(d, x->media[i].res, &png)) {
+                zip_add(&z, name, png.p, png.n);
+            }
+
+            pb_free(&png);
+        } else if (pd_doc_resource(d, x->media[i].res, &mime, &data, &len) == PD_OK) {
             snprintf(name, sizeof(name), "word/media/%s", x->media[i].name);
             zip_add(&z, name, data, len);
         }
@@ -7510,6 +7596,7 @@ typedef struct {
     int link_depth[16], nlinks;
     /* drawings */
     char blip[64];
+    char svgblip[64];           /* its asvg:svgBlip: the SVG the picture is, the blip the picture shown without it */
     int32_t crop[4];            /* the picture's a:srcRect: l, t, r, b in 100000ths */
     long long cx, cy;
     int anchor, wrap, posh_align, in_posh, in_offset, in_align;   /* a floating drawing */
@@ -9016,7 +9103,8 @@ static pd_res_id dw_resource(dxi* X, const char* rid) {
         int meta = pd_metafile_kind(data, len);
         const unsigned char* u = (const unsigned char*)data;
         /* its type from its first bytes, else from its name (in any case: image36.GIF) */
-        const char* mime = meta == 1 ? "image/x-emf" : meta == 2 ? "image/x-wmf" :
+        int svg = !meta && pd_svg_is(data, len);
+        const char* mime = meta == 1 ? "image/x-emf" : meta == 2 ? "image/x-wmf" : svg ? "image/svg+xml" :
                            len >= 8 && !memcmp(u, "\x89PNG\r\n\x1a\n", 8) ? "image/png" :
                            len >= 6 && (!memcmp(u, "GIF87a", 6) || !memcmp(u, "GIF89a", 6)) ? "image/gif" :
                            len >= 3 && u[0] == 0xFF && u[1] == 0xD8 && u[2] == 0xFF ? "image/jpeg" :
@@ -9036,6 +9124,9 @@ static pd_res_id dw_resource(dxi* X, const char* rid) {
             pd_res_id dr = pd_metafile_drawing(X->b->d, data, len, res);
 
             res = dr ? dr : res;
+        } else if (res && svg) {    /* an SVG (Office's svgBlip): drawn as a drawing made from it; 0 if it cannot be,
+                                       so that the picture beside it is shown */
+            res = pd_svg_drawing(X->b->d, data, len, res);
         }
 
         free(data);
@@ -10118,7 +10209,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     double cg_xy[4096];             /* a polygon's points (its own space), NAN pairs between rings */
     long long cg_w = 0, cg_h = 0;
     int cg_n = 0, cg_closed = 0, k2;
-    char blip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
+    char blip[64] = "", svgblip[64] = "", geom[32] = "rect", v[300], anchor[8] = "t";
     int crop[4] = { 0, 0, 0, 0 };   /* a picture's srcRect: its sides cut off, in 100000ths */
     dw_cust* cg = (dw_cust*)calloc(1, sizeof(dw_cust));     /* a custom geometry's paths */
     uint32_t fill2 = 0, shd_clr = 0;    /* a gradient's last stop; a shadow's colour */
@@ -10128,6 +10219,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
     unsigned char patt_bits[8];         /* a pattern fill's bitmap, if it is one Office has (have_patt) */
     int in_bfill = 0, bf_tile = 0, bf_rect[4] = { 0, 0, 0, 0 }, bf_tl[6] = { 0, 0, 100000, 100000, 0, 0 };
     char bf_blip[64] = "";              /* a shape's picture fill: stretched into its fillRect, or tiled */
+    char bf_svg[64] = "";               /* its asvg:svgBlip */
     int have_patt = 0;
     double shd_dist = 0, shd_dir = 0;
     double shd_blur = 0, shd_k[4] = { 100000, 100000, 0, 0 };     /* a shadow's blur; its sx, sy, kx, ky */
@@ -10402,7 +10494,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             memset(&xf, 0, sizeof(xf));
             cam_prst[0] = '\0';
             cam_has_rot = in_camera = 0;
-            blip[0] = '\0';
+            blip[0] = svgblip[0] = '\0';
             memset(crop, 0, sizeof(crop));
             fill2 = shd_clr = 0;
             grad_kind = grad_ang = in_grad = in_shd = has_shd = 0;
@@ -10415,7 +10507,7 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             glow_rad = 0;
             ngst = grad_sc = have_patt = 0;
             in_bfill = bf_tile = 0;
-            bf_blip[0] = '\0';
+            bf_blip[0] = bf_svg[0] = '\0';
             memset(bf_rect, 0, sizeof(bf_rect));
             grad_path = grad_rws = 1;
             gft[0] = gft[1] = gft[2] = gft[3] = 50000;
@@ -10520,7 +10612,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
 
             if (kind == 1 && blip[0]) {
-                pd_res_id r = dw_resource(X, blip);
+                pd_res_id r = svgblip[0] ? dw_resource(X, svgblip) : 0;
+
+                r = r ? r : dw_resource(X, blip);   /* the SVG, else the picture shown without it */
 
                     int seen = 0, q;
 
@@ -10639,7 +10733,9 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
                 }
 
                 if (bf_blip[0] && have_fill && fill == 0x01FFFFFFu) {   /* a picture fill: the picture, cut to the shape */
-                    pd_res_id r = dw_resource(X, bf_blip);
+                    pd_res_id r = bf_svg[0] ? dw_resource(X, bf_svg) : 0;
+
+                    r = r ? r : dw_resource(X, bf_blip);
                     size_t fl = strlen(fx);
                     int seen = 0, q;
 
@@ -11706,6 +11802,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
         } else if (in_bfill && !strcmp(t, "blip") && open) {
             mu_attr(&g, "r:embed", bf_blip, sizeof(bf_blip));
+        } else if (in_bfill && !strcmp(t, "svgBlip") && open) {
+            mu_attr(&g, "r:embed", bf_svg, sizeof(bf_svg));
         } else if (in_bfill && !strcmp(t, "fillRect") && open) {
             static const char* sides[4] = { "l", "t", "r", "b" };
             int q;
@@ -11740,6 +11838,8 @@ static void dw_drawing_group(dw* w, pd_markup* m, int canvas) {
             }
         } else if (kind == 1 && !strcmp(t, "blip")) {
             mu_attr(&g, "r:embed", blip, sizeof(blip));
+        } else if (kind == 1 && !strcmp(t, "svgBlip")) {
+            mu_attr(&g, "r:embed", svgblip, sizeof(svgblip));
         } else if (!strcmp(t, "bodyPr")) {
             static const char* in[4] = { "lIns", "tIns", "rIns", "bIns" };
             int k;
@@ -11935,7 +12035,11 @@ static void dw_image(dw* w) {
     o.kind = PD_INLINE_IMAGE;
     o.width = (pd_sp)(w->cx * 65536 / 12700);
     o.height = (pd_sp)(w->cy * 65536 / 12700);
-    o.resource = w->drawing_res ? w->drawing_res : dw_resource(X, w->blip);
+    o.resource = w->drawing_res ? w->drawing_res : w->svgblip[0] ? dw_resource(X, w->svgblip) : 0;
+
+    if (!o.resource) {  /* (an SVG that cannot be drawn: the picture beside it) */
+        o.resource = dw_resource(X, w->blip);
+    }
 
     if (!o.resource) {
         return;
@@ -13815,7 +13919,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 dw_footnote(w, attr_int(&m, "w:id", -999), 1);
             } else if (strcmp(t, "drawing") == 0) {
                 w->in_drawing = m.type == MT_OPEN;
-                w->blip[0] = '\0';
+                w->blip[0] = w->svgblip[0] = '\0';
                 w->cx = w->cy = 0;
                 w->anchor = 0;
                 w->wrap = PD_WRAP_NONE;
@@ -13838,7 +13942,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
             } else if ((strcmp(t, "object") == 0 || strcmp(t, "pict") == 0) && m.type == MT_OPEN && !w->in_drawing) {
                 /* VML: an OLE object's preview picture (an equation, a chart), or an old-style picture */
                 w->in_vml = 1;
-                w->blip[0] = '\0';
+                w->blip[0] = w->svgblip[0] = '\0';
                 w->cx = w->cy = 0;
                 w->vml_style[0] = w->art[0] = w->art_font[0] = '\0';
                 w->vml_fill = 0;
@@ -13945,6 +14049,8 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
                 w->linked = 1;
             } else if (w->in_drawing && strcmp(t, "blip") == 0) {
                 mu_attr(&m, "r:embed", w->blip, sizeof(w->blip));
+            } else if (w->in_drawing && strcmp(t, "svgBlip") == 0) {
+                mu_attr(&m, "r:embed", w->svgblip, sizeof(w->svgblip));
             } else if (w->in_drawing && strcmp(t, "srcRect") == 0) {   /* the picture cropped */
                 static const char* const side[4] = { "l", "t", "r", "b" };
                 int k;
@@ -14355,7 +14461,7 @@ static void dw_parse(dxi* X, const char* xml, size_t n, int note) {
 
             w->tbx = NULL;
             w->in_vml = 0;
-            w->blip[0] = '\0';
+            w->blip[0] = w->svgblip[0] = '\0';
         } else if (strcmp(t, "drawing") == 0) {
             if (w->wrap < 0) {      /* wrapped: which side it is on */
                 w->wrap = w->wrap == -9 ? (w->posh_align >= 0 ? w->posh_align :

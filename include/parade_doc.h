@@ -662,6 +662,16 @@ PD_API pd_status pd_gif_each_frame(const void* data, size_t len, pd_gif_frame_fn
 PD_API pd_status pd_doc_add_resource(pd_doc* doc, const char* mime, const void* data, size_t len, pd_res_id* out);
 PD_API pd_status pd_doc_resource(const pd_doc* doc, pd_res_id res, const char** mime, const void** data,
                                  size_t* len);
+/**
+ * A picture added as the document shows it: PNG, JPEG, GIF, BMP, TIFF and WebP as they are; SVG and Windows
+ * metafiles (EMF, WMF) as a drawing made from them, saved as the file itself and made again on load. mime may be
+ * NULL (known by its first bytes). *shown is the resource an image inline refers to; PD_ERR_FORMAT if it is no
+ * picture Parade shows (an SVG with nothing it can draw).
+ */
+PD_API pd_status pd_doc_add_picture(pd_doc* doc, const char* mime, const void* data, size_t len, pd_res_id* shown);
+/** the file a drawing was made from (an SVG's or a metafile's resource), for a host that hands the picture on as
+    it came; 0 if res is no drawing made from one */
+PD_API pd_res_id pd_doc_picture_source(const pd_doc* doc, pd_res_id res);
 
 /* ------------------------------------------------------------------ */
 /* Floats, sections, tables                                           */

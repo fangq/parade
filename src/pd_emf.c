@@ -3852,7 +3852,8 @@ int pd_metafile_remake(pd_doc* d, pd_res_id r) {
     memset(&o, 0, sizeof(o));
     pd_doc_res_replay(d, lo, hi);
 
-    if (metafile_json(d, (const unsigned char*)data, len, src, &o)) {
+    if (mime && !strcmp(mime, "image/svg+xml") ? pd_svg_json(d, (const unsigned char*)data, len, src, &o) :
+            metafile_json(d, (const unsigned char*)data, len, src, &o)) {
         rc = pd_doc_res_fill(d, r, o.p, o.n);
     }
 
