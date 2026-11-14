@@ -434,6 +434,17 @@ type
     procedure PaintRotHandle(const P: TPoint);
     { a press on a handle of the text box being typed in: the box selected, and sized or turned by the drag }
     function TypingBoxHandle(X, Y: Integer): Boolean;
+    { a form field's own text box on a canvas page (none selected to type in): borderless, in the canvas's middle,
+      the caret in it; a step of undo begun (EndFieldBox ends it). False when there is no canvas }
+    function BeginFieldBox(const Kind: string): Boolean;
+    { the caret is in a text box made for a form field (BeginFieldBox's): the next field a box of its own }
+    function InFieldBox: Boolean;
+    procedure EndFieldBox;
+    { what a canvas page's own text holds besides its canvas (a form field put there before fields went into text
+      boxes): Backspace or Delete takes it out, a field whole; False when what is there is the canvas or nothing }
+    function DeleteStray(Forward: Boolean): Boolean;
+    { a press on a canvas page's own text, off its canvas, by something there besides the canvas: the caret there }
+    function StrayClick(X, Y: Integer): Boolean;
     { a press inside the text box being typed in but off its lines: the caret to its text's end; False otherwise }
     function TypingBoxInside(X, Y: Integer; Extend: Boolean): Boolean;
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
@@ -6284,6 +6295,7 @@ end;
 
 procedure TParadeEdit.InsertControl(const Kind: string; const Items: array of string);
 var
+  Boxed: Boolean;
   O: pd_inline;
   J: TJSONObject;
   L: TJSONArray;
@@ -6327,6 +6339,10 @@ begin
   finally
     J.Free;
   end;
+  { a canvas page (a slide) has no text of its own for it: a text box of its own, floating, the field in it }
+  Boxed := FCanvasPage and ((StoryTopOf(CaretPos.block) = 0) or InFieldBox);
+  if Boxed and not BeginFieldBox(Kind) then
+    Exit;
   pd_doc_begin_group(FDoc, 'Insert content control');
   DeleteSelection;
   P := CaretPos;
@@ -6341,6 +6357,8 @@ begin
   O.kind := PD_INLINE_CONTROL;      { no name: where it ends }
   pd_doc_insert_inline(FDoc, After, O, @After);
   pd_doc_end_group(FDoc);
+  if Boxed then
+    EndFieldBox;
   { the caret on its content, to type over (a text box) or click (the others) }
   pd_doc_marker_set(FDoc, FAnchor, PdPos(P.block, P.offset + 3));
   pd_doc_marker_set(FDoc, FCaret, PdPos(P.block, P.offset + 3 + UInt32(Length(Content))));
@@ -9011,6 +9029,11 @@ begin
   if TextLocked and FShapeOn and (FShapeSid < 0) and not (ssCtrl in Shift) and (FDrawKind = '') and
      (Length(FDrawPts) = 0) then
     Exit;     { the canvas page itself: not moved off, deleted or typed over }
+  if TextLocked and not FShapeOn and (Key in [VK_BACK, VK_DELETE]) and DeleteStray(Key = VK_DELETE) then
+  begin   { something besides the canvas in the page's own text: out }
+    Key := 0;
+    Exit;
+  end;
   if TextLocked and not FShapeOn and (Key in [VK_RETURN, VK_BACK, VK_DELETE, VK_TAB]) then
     Exit;
   if FShapeOn and (ssCtrl in Shift) then
@@ -15381,6 +15404,185 @@ begin
     Round((Y1 - Y0) * Emu), FlipH, FlipV, HexRGB(FShapeFillDef), HexRGB(FShapeLineDef)));
 end;
 
+function TParadeEdit.InFieldBox: Boolean;
+var
+  D: pd_pos;
+  Sid, E: Integer;
+  J: TJSONObject;
+  Xml: string;
+  Els: TXmlEls;
+begin
+  Result := False;
+  if FShapeOn or not CaretTextBox(D, Sid) or (Sid < 0) then
+    Exit;
+  J := DrawingJson(FDoc, D);
+  if J = nil then
+    Exit;
+  try
+    if (J.Find('xml') = nil) or (J.Find('xml').JSONType <> jtString) then
+      Exit;
+    Xml := J.Strings['xml'];
+  finally
+    J.Free;
+  end;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, Sid);
+  Result := (E >= 0) and (Pos('name="Form field ', Copy(Xml, Els[E].A, Els[E].B - Els[E].A)) > 0);
+end;
+
+function TParadeEdit.BeginFieldBox(const Kind: string): Boolean;
+const
+  Emu = 12700 / 65536;
+var
+  Pg: Int32;
+  X, Y, W, H, JW, JH, BW, BH, OY: Double;
+  Sh, Xml: string;
+  N, P, Sid: Integer;
+  D: pd_pos;
+begin
+  Result := False;
+  if not FShapeOn and CaretTextBox(D, Sid) then
+  begin   { in a field's box: out of it, its canvas selected }
+    FShapeOn := True;
+    FShapeAt := D;
+    FShapeSid := -1;
+    SetLength(FShapeMore, 0);
+    SetCaret(D, False);
+  end;
+  EnsureCanvas;
+  if FShapeOn and (FShapeSid >= 0) then
+    FShapeSid := -1;
+  if not FShapeOn or not CanvasSelected or not DrawingPlace(FShapeAt, Pg, X, Y, W, H, JW, JH) then
+    Exit;
+  if Kind = 'checkbox' then BW := 28 * PD_SP_PER_PT else BW := 200 * PD_SP_PER_PT;
+  BH := 24 * PD_SP_PER_PT;
+  BW := Min(BW, JW);
+  BH := Min(BH, JH);
+  N := 0;   { under the fields put in before, not over them }
+  if KeptXml(Xml) then
+  begin
+    P := Pos('name="Form field ', Xml);
+    while P > 0 do
+    begin
+      Inc(N);
+      P := PosEx('name="Form field ', Xml, P + 1);
+    end;
+  end;
+  OY := (JH - BH) / 2 + N * 30 * PD_SP_PER_PT;
+  if OY + BH > JH then
+    OY := Max(0, JH - BH - Frac(N * 30 * PD_SP_PER_PT / Max(1, JH)) * JH);
+  Sh := ShapeXml('textbox', Round((JW - BW) / 2 * Emu), Round(OY * Emu), Max(1, Round(BW * Emu)),
+    Max(1, Round(BH * Emu)), False, False, '', '');
+  Sh := StringReplace(Sh, '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="6350"><a:solidFill>' +
+    '<a:srgbClr val="000000"/></a:solidFill></a:ln>', '<a:noFill/><a:ln><a:noFill/></a:ln>', []);   { no box drawn }
+  Sh := StringReplace(Sh, 'name="Text Box %ID%"', 'name="Form field %ID%"', []);
+  PushShapeStep('Insert content control', FShapeAt);
+  Inc(FStepDepth);
+  pd_doc_begin_group(FDoc, 'Insert content control');
+  if not PutShapeXml(Sh, 'Insert content control') or (FShapeSid < 0) or
+     not EnterTextBox(FShapeSid, CaretPos, False, False) then
+  begin
+    EndFieldBox;
+    Exit;
+  end;
+  Result := True;
+end;
+
+procedure TParadeEdit.EndFieldBox;
+begin
+  pd_doc_end_group(FDoc);
+  Dec(FStepDepth);
+end;
+
+function TParadeEdit.DeleteStray(Forward: Boolean): Boolean;
+var
+  P, A, B, After: pd_pos;
+  T, Kind, Spec: string;
+  At, N: Integer;
+  O: pd_inline;
+  R: pd_range;
+begin
+  Result := False;
+  if not FCanvasPage or FShapeOn or HasSelection then
+    Exit;
+  P := CaretPos;
+  if (P.block = 0) or (StoryTopOf(P.block) <> 0) then
+    Exit;
+  T := ParaText(P.block);
+  if Forward then
+  begin
+    At := P.offset;
+    if At >= Length(T) then
+      Exit;
+  end
+  else
+  begin
+    if P.offset = 0 then
+      Exit;
+    At := P.offset - 1;
+    while (At > 0) and ((Ord(T[At + 1]) and $C0) = $80) do
+      Dec(At);
+  end;
+  if Copy(T, At + 1, 3) = #$EF#$BF#$BC then
+  begin
+    if pd_doc_inline_at(FDoc, PdPos(P.block, At), O) <> PD_OK then
+      Exit;
+    if O.kind = PD_INLINE_IMAGE then
+      Exit;     { the canvas (or a picture): kept }
+    N := 3;
+    if (O.kind = PD_INLINE_CONTROL) and ControlAt(PdPos(P.block, At + IfThen(O.name[0] <> #0, 3, 0)), Kind, Spec, A, B) then
+    begin   { a field: all of it, from its start to its end }
+      At := A.offset;
+      N := Integer(B.offset) - At;
+      if Copy(T, B.offset + 1, 3) = #$EF#$BF#$BC then
+        Inc(N, 3);
+    end;
+  end
+  else
+  begin
+    N := 1;
+    while (At + N < Length(T)) and ((Ord(T[At + N + 1]) and $C0) = $80) do
+      Inc(N);
+  end;
+  R.start := PdPos(P.block, At);
+  R.finish := PdPos(P.block, At + N);
+  pd_doc_begin_group(FDoc, 'Delete');
+  Result := pd_doc_delete(FDoc, R, @After) = PD_OK;
+  pd_doc_end_group(FDoc);
+  if Result then
+  begin
+    SetCaret(After, False);
+    Changed;
+  end;
+end;
+
+function TParadeEdit.StrayClick(X, Y: Integer): Boolean;
+var
+  P, D: pd_pos;
+  T: string;
+  Pg: Int32;
+  DX, DY, W, H, JW, JH: Double;
+  Pr: TPoint;
+begin
+  Result := False;
+  if not FCanvasPage or not PointToPos(X, Y, P) or (StoryTopOf(P.block) <> 0) then
+    Exit;
+  T := ParaText(P.block);
+  if (Length(T) <= 3) or not CanvasPagePos(D) then
+    Exit;     { only its canvas there }
+  if DrawingPlace(D, Pg, DX, DY, W, H, JW, JH) then
+  begin
+    Pr := Point(Round((X - PageLeft(Pg)) / PxPerSp), Round((Y - PageTop(Pg)) / PxPerSp));
+    if (PageAt(X, Y) = Pg) and (Pr.X >= DX) and (Pr.X <= DX + W) and (Pr.Y >= DY) and (Pr.Y <= DY + H) then
+      Exit;   { on the canvas: its own }
+  end;
+  if FShapeOn then
+    ClearShapeSelection;
+  SetCaret(P, False);
+  Invalidate;
+  Result := True;
+end;
+
 { a shape's DrawingML (its id %ID%; more shapes: %ID0%, %ID1%, ...) put last into the selected canvas, and
   selected (more shapes: each one at the canvas's top) }
 function TParadeEdit.PutShapeXml(const Sh: string; const Lbl: string): Boolean;
@@ -17793,6 +17995,11 @@ begin
   end;
   if (Button = mbLeft) and ShapeDragStart(X, Y) then
     Exit;     { the selected shape: moved, or resized by a handle }
+  if (Button = mbLeft) and (Shift * [ssShift, ssCtrl, ssDouble, ssTriple] = []) and StrayClick(X, Y) then
+  begin   { by something in a canvas page's own text besides its canvas: the caret there, to take it out }
+    FDragging := False;
+    Exit;
+  end;
   if (Button = mbLeft) and (not (ssShift in Shift) or (FShapeOn and (FShapeSid >= 0))) then
     for Page := 0 to PageCount - 1 do     { a drawing, or a shape of it: selected }
     begin
