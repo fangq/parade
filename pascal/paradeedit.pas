@@ -226,6 +226,9 @@ type
     FDragIdx: Integer;             { a drag of an adjustment or a point: which }
     FDragGeom: TParadeShapeGeom;   { the shape as the drag found it }
     FDragMap: TParadeDrawMap;
+    FCtlPending: Boolean;          { a press on a form field in a canvas's text box: its box moved by a drag, the
+                                     field (FCtlAt) acted on by a click }
+    FCtlAt: pd_pos;
     FTurnDrag: Boolean;            { the drag is of a turned shape: sized along its own sides (FTurnBox) }
     FTurnBox: array[0..3] of Double;   { its box as the drag would leave it: left, top, right, bottom in its own
                                          frame as the drag found it (drawing units from that frame's top left) }
@@ -447,6 +450,8 @@ type
     function StrayClick(X, Y: Integer): Boolean;
     { a press inside the text box being typed in but off its lines: the caret to its text's end; False otherwise }
     function TypingBoxInside(X, Y: Integer; Extend: Boolean): Boolean;
+    { a press on a form field (at P) in a text box of a canvas: the box selected, the press a move of it begun }
+    function ControlBoxDrag(const P: pd_pos; X, Y: Integer): Boolean;
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
     function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
     procedure PushShapeStep(const Lbl: string; const At: pd_pos);
@@ -4505,6 +4510,8 @@ begin
     Exit;
   Y0 := PageTop(Page) + Round((Base - Asc) * PxPerSp);
   Y1 := PageTop(Page) + Round((Base + Desc) * PxPerSp);
+  if (Y1 - Y0 > ClientHeight div 2) and (Y1 > 0) and (Y0 < ClientHeight) then
+    Exit;     { a line as tall as the view (a canvas page's canvas, selected): in view while any of it is }
   if Y0 < 0 then
     FScrollY := FScrollY + Y0 - 20
   else if Y1 > ClientHeight then
@@ -8344,7 +8351,32 @@ begin
 end;
 
 procedure TParadeEdit.SelectAll;
+var
+  Story, B, C: pd_block_id;
+  Info: pd_block_info;
 begin
+  Story := StoryTopOf(CaretPos.block);
+  if Story <> 0 then
+  begin   { typing in a text box (a shape's text, a note): all of its text, not the document's }
+    B := Story;
+    while (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.kind <> PD_BLOCK_PARAGRAPH) and (Info.child_count > 0) do
+    begin
+      C := pd_doc_child(FDoc, B, 0);
+      if C = 0 then Break;
+      B := C;
+    end;
+    pd_doc_marker_set(FDoc, FAnchor, PdPos(B, 0));
+    B := Story;
+    while (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.kind <> PD_BLOCK_PARAGRAPH) and (Info.child_count > 0) do
+    begin
+      C := pd_doc_child(FDoc, B, Info.child_count - 1);
+      if C = 0 then Break;
+      B := C;
+    end;
+    pd_doc_marker_set(FDoc, FCaret, PdPos(B, Length(ParaText(B))));
+    Invalidate;
+    Exit;
+  end;
   if TextLocked then
   begin   { the canvas page: every shape on it }
     FShapeOn := False;
@@ -8904,6 +8936,46 @@ end;
 
 { the text box the caret is in: its edge dashed, as Word shows the one being typed in -- where it is taken to be
   moved or sized }
+function TParadeEdit.ControlBoxDrag(const P: pd_pos; X, Y: Integer): Boolean;
+var
+  Kind, Spec: string;
+  A, B, D: pd_pos;
+  Story: pd_block_id;
+  Boxes: TParadeShapeBoxes;
+  I, Sid: Integer;
+begin
+  Result := False;
+  FCtlPending := False;
+  if FShapeOn or not ControlAt(P, Kind, Spec, A, B) then
+    Exit;
+  Story := StoryTopOf(P.block);
+  if (Story = 0) or not StoryDrawing(Story, D) then
+    Exit;
+  Sid := -1;
+  Boxes := DrawingShapes(D);
+  for I := 0 to High(Boxes) do
+    if Boxes[I].Story = Story then
+      Sid := Boxes[I].Sid;
+  if Sid < 0 then
+    Exit;
+  FShapeOn := True;
+  FShapeAt := D;
+  FShapeSid := Sid;
+  SetLength(FShapeMore, 0);
+  FNodeOn := False;
+  if CanvasSelected and ShapeDragStart(X, Y) and (FShapeDrag = 8) then
+  begin
+    SetCaret(D, False);
+    FCtlPending := True;
+    FCtlAt := P;
+    Invalidate;
+    Exit(True);
+  end;
+  FShapeDrag := -1;
+  FShapeOn := False;    { not a canvas's: the field as before }
+  SetCaret(P, False);
+end;
+
 function TParadeEdit.TypingBoxInside(X, Y: Integer; Extend: Boolean): Boolean;
 var
   D, P: pd_pos;
@@ -14401,9 +14473,8 @@ begin
   end;
   if Kind = 'textbox' then
     Exit('<wps:wsp><wps:cNvPr id="%ID%" name="Text Box %ID%"/><wps:cNvSpPr txBox="1"/><wps:spPr>' + Xf +
-      '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill>' +
-      '<a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="6350"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>' +
-      '</a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx>' +
+      '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>' +
+      '<wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx>' +
       StringReplace(Body, 'anchor="ctr"', 'anchor="t"', []) + '</wps:wsp>');
   Geom := Kind;
   case Kind of
@@ -18025,10 +18096,20 @@ begin
         Break;
       end;
     end;
+  if (Button = mbLeft) and FCanvasPage and not FShapeOn and PointToPos(X, Y, P) and (StoryTopOf(P.block) = 0) and
+     (Length(ParaText(P.block)) <= 3) then
+  begin   { a canvas page's own text (by its edge, off every shape): nothing to type there -- its canvas selected }
+    FDragging := False;
+    EnsureCanvas;
+    Invalidate;
+    Exit;
+  end;
   if (Button = mbLeft) and PointToPos(X, Y, P) then
   begin
     FHasDesiredX := False;
     SetCaret(P, ssShift in Shift);
+    if (Shift * [ssShift, ssCtrl, ssDouble] = []) and ControlBoxDrag(P, X, Y) then
+      Exit;     { a form field in a canvas's text box: a drag moves its box, a click (MouseUp) acts on it }
     if (Shift * [ssShift, ssCtrl, ssDouble] = []) and ClickControl(P, X, Y) then
       Exit;     { a check box ticked, a list or a calendar shown: not the start of a drag }
     FDragging := True;
@@ -18160,6 +18241,8 @@ begin
       ShapeDragMove(X, Y, Shift);     { where it was let go, though no move came before (a quick flick) }
     D := FShapeDrag;
     FShapeDrag := -1;
+    if D <> 8 then
+      FCtlPending := False;
     SetLength(FGuideX, 0);
     SetLength(FGuideY, 0);
     Moved := (Abs(X - FShapeFrom.X) > 2) or (Abs(Y - FShapeFrom.Y) > 2);
@@ -18250,6 +18333,13 @@ begin
       MoveShapes(FShapeNew[0] - FShapeOld[0], FShapeNew[1] - FShapeOld[1])   { all selected, together }
     else if Moved and FTurnDrag and (D in [0..7]) then
       ResizeTurned(FTurnBox[0], FTurnBox[1], FTurnBox[2], FTurnBox[3])     { turned: along its own sides }
+    else if not Moved and FCtlPending and (D = 8) then
+    begin   { a click, not a drag, on a form field in a canvas's text box: the field's (ticked, a list, a calendar) }
+      FCtlPending := False;
+      ClearShapeSelection;
+      SetCaret(FCtlAt, False);
+      ClickControl(FCtlAt, X, Y);
+    end
     else if Moved then     { moved: the shape takes its box }
       SetShapeBox(FShapeSid, Min(FShapeNew[0], FShapeNew[2]), Min(FShapeNew[1], FShapeNew[3]),
         Max(FShapeNew[0], FShapeNew[2]), Max(FShapeNew[1], FShapeNew[3]))
@@ -18264,6 +18354,7 @@ begin
           Break;
         end;
     end;
+    FCtlPending := False;
     Invalidate;
     Exit;
   end;
@@ -19101,7 +19192,9 @@ begin
   if R.Bottom > FBack.Height then R.Bottom := FBack.Height;
   if (R.Right > R.Left) and (R.Bottom > R.Top) then
     Canvas.CopyRect(R, FBack.Canvas, R);     { on the display's side: no pixels cross the connection }
-  if Focused and FCaretOn and CaretRect(R) and not FShapeOn then
+  if Focused and FCaretOn and CaretRect(R) and not FShapeOn and
+     not (TextLocked and (Length(ParaText(CaretPos.block)) <= 3)) then     { (a canvas page's own text, its canvas
+                                                                            only: no caret, as tall as the page) }
   begin
     Canvas.Brush.Style := bsSolid;
     Canvas.Brush.Color := clBlack;
