@@ -246,6 +246,7 @@ type
     FStepDepth: Integer;           { inside a shape edit: the edits it is made of are not steps of their own }
     FBlink: TTimer;
     FCaretOn: Boolean;
+    FCaretQ: array of TPoint;   { the caret on a turned line: its four corners (CaretRect sets it; empty upright) }
     FGlyphs: array of PGlyphBmp;   { open-addressing hash table by font, glyph, size and subpixel position }
     FGlyphCount: Integer;
     FPics: array of TLazIntfImage; { by resource id - 1: the picture, decoded once }
@@ -1665,6 +1666,28 @@ type
   end;
   TPtDArray = array of TPtD;
   TRings = array of TPtDArray;
+
+{ the caret on a line turned Rot (60000ths of a degree, clockwise) about its baseline point: its four corners,
+  in pixels, Wd wide along the line, from the line's ascent above it to its descent below }
+function TurnedCaret(OX, OY: Double; CX, CBase, CAsc, CDesc: pd_sp; Rot: Int32; S, Wd: Double): TPtDArray;
+var
+  Th, Cs, Sn, PX, PY: Double;
+begin
+  Th := Rot / 60000 * Pi / 180;
+  Cs := Cos(Th);
+  Sn := Sin(Th);
+  PX := OX + CX * S;
+  PY := OY + CBase * S;
+  SetLength(Result, 4);
+  Result[0].X := PX + CAsc * S * Sn;            { up the line's own frame: (Sn, -Cs) }
+  Result[0].Y := PY - CAsc * S * Cs;
+  Result[1].X := Result[0].X + Wd * Cs;         { along it: (Cs, Sn) }
+  Result[1].Y := Result[0].Y + Wd * Sn;
+  Result[3].X := PX - CDesc * S * Sn;
+  Result[3].Y := PY + CDesc * S * Cs;
+  Result[2].X := Result[3].X + Wd * Cs;
+  Result[2].Y := Result[3].Y + Wd * Sn;
+end;
 
 { a polygon filled with a colour, non-zero winding, edges smoothed: four rows
   of samples to a pixel, and each crossing counted to its fraction of a pixel }
@@ -18827,7 +18850,7 @@ var
   Q: pd_pos;
   G: PGlyphBmp;
   Pic: TLazIntfImage;
-  CPage, CPage2: Int32;
+  CPage, CPage2, CRot: Int32;
   CX, CBase, CAsc, CDesc, CX2, CBase2: pd_sp;
   CI: Int32;
   Cm: pd_comment;
@@ -19234,17 +19257,22 @@ begin
   end;
 
   if DrawCaret and (pd_layout_caret(FLayout, CaretPos, CPage, CX, CBase, CAsc, CDesc) = PD_OK) and (CPage = Page) then
-    FillRectImg(Img, OX + Round(CX * PxScale), OY + Round((CBase - CAsc) * PxScale), OX + Round(CX * PxScale) + 2,
-      OY + Round((CBase + CDesc) * PxScale), $00000000, 255);
+    if (pd_layout_caret_turn(FLayout, CaretPos, CRot) = PD_OK) and (CRot <> 0) then   { turned with its text }
+      FillPolygonImg(Img, TurnedCaret(OX, OY, CX, CBase, CAsc, CDesc, CRot, PxScale, 2), $FF000000)
+    else
+      FillRectImg(Img, OX + Round(CX * PxScale), OY + Round((CBase - CAsc) * PxScale), OX + Round(CX * PxScale) + 2,
+        OY + Round((CBase + CDesc) * PxScale), $00000000, 255);
 end;
 
 { the caret in client pixels, if it is on a page in view }
 function TParadeEdit.CaretRect(out R: TRect): Boolean;
 var
-  CPage: Int32;
+  CPage, CRot, I: Int32;
   CX, CBase, CAsc, CDesc: pd_sp;
   OX, OY: Integer;
+  Q: TPtDArray;
 begin
+  SetLength(FCaretQ, 0);
   Result := (FLayout <> nil) and (PageCount > 0) and
             (pd_layout_caret(FLayout, CaretPos, CPage, CX, CBase, CAsc, CDesc) = PD_OK) and (CPage < PageCount);
   if not Result then
@@ -19253,6 +19281,20 @@ begin
   OY := PageTop(CPage);
   R := Rect(OX + Round(CX * PxPerSp), OY + Round((CBase - CAsc) * PxPerSp), OX + Round(CX * PxPerSp) + 2,
     OY + Round((CBase + CDesc) * PxPerSp));
+  if (pd_layout_caret_turn(FLayout, CaretPos, CRot) = PD_OK) and (CRot <> 0) then
+  begin   { on a turned line: turned with it; R the box around it }
+    Q := TurnedCaret(OX, OY, CX, CBase, CAsc, CDesc, CRot, PxPerSp, 2);
+    SetLength(FCaretQ, 4);
+    R := Rect(High(Integer), High(Integer), Low(Integer), Low(Integer));
+    for I := 0 to 3 do
+    begin
+      FCaretQ[I] := Point(Round(Q[I].X), Round(Q[I].Y));
+      R.Left := Min(R.Left, Floor(Q[I].X) - 1);
+      R.Top := Min(R.Top, Floor(Q[I].Y) - 1);
+      R.Right := Max(R.Right, Ceil(Q[I].X) + 1);
+      R.Bottom := Max(R.Bottom, Ceil(Q[I].Y) + 1);
+    end;
+  end;
   Result := (R.Bottom > 0) and (R.Top < ClientHeight);
 end;
 
@@ -19568,7 +19610,15 @@ begin
   begin
     Canvas.Brush.Style := bsSolid;
     Canvas.Brush.Color := clBlack;
-    Canvas.FillRect(R);
+    if Length(FCaretQ) = 4 then
+    begin   { turned with its text }
+      Canvas.Pen.Style := psSolid;
+      Canvas.Pen.Color := clBlack;
+      Canvas.Pen.Width := 1;
+      Canvas.Polygon(FCaretQ);
+    end
+    else
+      Canvas.FillRect(R);
   end;
   PaintTextBoxFrame;
   PaintPlaceholderPrompts;

@@ -12066,6 +12066,19 @@ static void test_cell_text_dir(void) {
             CHECK(w[0].rotation == 5400000 && w[1].y > w[0].y + PD_PT(4) && w[1].x == w[0].x);
             CHECK(u[0].x > bx && u[0].x < bx + PD_PT(50) && w[0].x > bx + PD_PT(50) && w[0].x < bx + PD_PT(100));
             CHECK(u[0].y < by && w[0].y < by - PD_PT(20));      /* in the row, above the next paragraph */
+
+            {   /* the caret turned as the line it is on: up the cell, down it, upright below */
+                int32_t ru = -1, rw = -1, rb = -1, rx = -1, cp;
+                pd_sp cx, cb, ca, cd;
+
+                CHECK(pd_layout_caret_turn(L, at(find_para(d, "UPWARD"), 2), &ru) == PD_OK && ru == 16200000);
+                CHECK(pd_layout_caret_turn(L, at(find_para(d, "DOWNWARD"), 0), &rw) == PD_OK && rw == 5400000);
+                CHECK(pd_layout_caret_turn(L, at(find_para(d, "below"), 1), &rb) == PD_OK && rb == 0);
+                CHECK(pd_layout_caret_turn(L, at(9999, 0), &rx) != PD_OK && rx == 0);
+                /* the turned caret's point where its glyph's pen is: on the glyphs' column, between the two */
+                CHECK(pd_layout_caret(L, at(find_para(d, "UPWARD"), 1), &cp, &cx, &cb, &ca, &cd) == PD_OK &&
+                      labs(cx - u[0].x) < PD_PT(1) && cb <= u[0].y + PD_PT(1) && cb >= u[1].y - PD_PT(1));
+            }
             pd_layout_free(L);
         }
 

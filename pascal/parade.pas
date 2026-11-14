@@ -1152,6 +1152,7 @@ function pd_layout_page_cells(layout: Ppd_layout; page: Int32; buf: Ppd_cell_box
   out count: Int32): pd_status; cdecl; PDEXT;
 function pd_layout_hit_test(layout: Ppd_layout; page: Int32; x, y: pd_sp; out pos: pd_pos): pd_status; cdecl; PDEXT;
 function pd_layout_caret(layout: Ppd_layout; pos: pd_pos; out page: Int32; out x, baseline, ascent, descent: pd_sp): pd_status; cdecl; PDEXT;
+function pd_layout_caret_turn(layout: Ppd_layout; pos: pd_pos; out rot: Int32): pd_status; cdecl; PDEXT;
 { one step left (dir < 0) or right (dir > 0) as the line is shown; PD_ERR_RANGE at that end of it }
 function pd_layout_caret_step(layout: Ppd_layout; pos: pd_pos; dir: Int32; out res: pd_pos): pd_status; cdecl; PDEXT;
 

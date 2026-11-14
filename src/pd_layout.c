@@ -8468,8 +8468,8 @@ pd_status pd_layout_hit_test(const pd_layout* L, int32_t page, pd_sp x, pd_sp y,
     return PD_OK;
 }
 
-pd_status pd_layout_caret(const pd_layout* L, pd_pos pos, int32_t* page, pd_sp* x, pd_sp* baseline, pd_sp* ascent,
-                          pd_sp* descent) {
+static pd_status caret_at(const pd_layout* L, pd_pos pos, int32_t* page, pd_sp* x, pd_sp* baseline, pd_sp* ascent,
+                          pd_sp* descent, int32_t* rot) {
     int32_t pg, i, line = -1;
     pd_sp cx = 0, cb = 0;
     const pcache* c = NULL;
@@ -8532,12 +8532,32 @@ pd_status pd_layout_caret(const pd_layout* L, pd_pos pos, int32_t* page, pd_sp* 
                     *descent = ln.descent;
                 }
 
+                if (rot) {
+                    *rot = l->rot;
+                }
+
                 return PD_OK;
             }
         }
     }
 
     return c ? PD_ERR_STATE : PD_ERR_ARG;
+}
+
+pd_status pd_layout_caret(const pd_layout* L, pd_pos pos, int32_t* page, pd_sp* x, pd_sp* baseline, pd_sp* ascent,
+                          pd_sp* descent) {
+    return caret_at(L, pos, page, x, baseline, ascent, descent, NULL);
+}
+
+pd_status pd_layout_caret_turn(const pd_layout* L, pd_pos pos, int32_t* rot) {
+    int32_t r = 0;
+    pd_status st = caret_at(L, pos, NULL, NULL, NULL, NULL, NULL, &r);
+
+    if (rot) {
+        *rot = st == PD_OK ? r : 0;
+    }
+
+    return st;
 }
 
 pd_status pd_layout_caret_step(const pd_layout* L, pd_pos pos, int32_t dir, pd_pos* out) {
