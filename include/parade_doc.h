@@ -1317,6 +1317,16 @@ typedef int (*pd_writer)(void* user, const void* data, size_t len);
  * many were loaded.
  */
 typedef int (*pd_image_fetch)(void* user, const char* address, pd_writer write, void* sink);
+
+/**
+ * An SVG as shapes of a canvas, to edit one by one: one group (wpg:wgp) of DrawingML as a Word canvas holds it,
+ * written to fn, its size *width by *height (EMU in the XML; sp here) at its offset 0, 0. Paths are freeforms with
+ * their curves, fills (colours, gradients) and lines (widths, dashes, ends, corners); text is text boxes; pictures
+ * the SVG holds are added to doc and named r:embed="rIdPd<resource>" for the host to relate. Each shape's id is
+ * written %ID0%, %ID1%, ... PD_ERR_FORMAT when it holds nothing drawn; PD_ERR_ARG when it is no SVG.
+ */
+PD_API pd_status pd_svg_to_shapes(pd_doc* doc, const void* svg, size_t len, pd_writer fn, void* user, pd_sp* width,
+                                  pd_sp* height);
 PD_API int32_t pd_doc_load_images(pd_doc* doc, pd_image_fetch fetch, void* user);
 
 typedef enum {

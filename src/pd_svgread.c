@@ -87,6 +87,8 @@ typedef struct {
     double vw, vh;              /* the viewport, for percentages */
     long npts;
     int depth;
+    int dml;                    /* writing shapes (DrawingML, a canvas's) into o, not the drawing's items */
+    int nid;                    /* the shapes written: each one's id %IDn% */
 } sv_t;
 
 /* a coordinate as written: held within SV_FAR, 0 for what is no number (an overflow's infinity times zero) */
@@ -974,14 +976,50 @@ static int viewbox(double* m, const snode* x, double vx, double vy, double vw, d
 /* ------------------------------------------------------------------ */
 
 typedef struct {
+    char k;                     /* 'M' a ring's start, 'L' a line to, 'C' a cubic to */
+    int r;                      /* its ring */
+    double x[3], y[3];          /* the drawing's units: C its two controls and its end, else its point first */
+} oseg;
+
+typedef struct {
     double* p;                  /* x, y in the drawing's units */
     int n, cap;
     int* ring;                  /* where each ring starts */
-    int* closed;
+    int* closed;                /* 1 closed; | 2 its points turned the other way (evenodd_rings) */
     int nr, capr;
     double tol;                 /* flattening tolerance, drawing units */
     const double* m;
+    /* the path as it was given, its curves curves (keep: for shapes, whose curves stay curves) */
+    oseg* sg;
+    int nsg, capsg, keep, in_curve, pending;
 } outline;
+
+static void ol_seg(outline* O, char k, const double* xy, int npt) {
+    int i;
+
+    if (O->nsg >= O->capsg) {
+        int cap = O->capsg ? O->capsg * 2 : 32;
+        oseg* g = (oseg*)realloc(O->sg, (size_t)cap * sizeof(oseg));
+
+        if (!g) {
+            O->keep = 0;    /* (out of memory: the points only) */
+            return;
+        }
+
+        O->sg = g;
+        O->capsg = cap;
+    }
+
+    O->sg[O->nsg].k = k;
+    O->sg[O->nsg].r = O->nr > 0 ? O->nr - 1 : 0;
+
+    for (i = 0; i < npt; i++) {
+        O->sg[O->nsg].x[i] = xy[2 * i];
+        O->sg[O->nsg].y[i] = xy[2 * i + 1];
+    }
+
+    O->nsg++;
+}
 
 static int ol_pt(outline* O, double ux, double uy) {
     if (O->n >= O->cap) {
@@ -997,6 +1035,12 @@ static int ol_pt(outline* O, double ux, double uy) {
     }
 
     apply(O->m, ux, uy, &O->p[2 * O->n], &O->p[2 * O->n + 1]);
+
+    if (O->keep && !O->in_curve) {
+        ol_seg(O, O->pending || O->nsg == 0 ? 'M' : 'L', &O->p[2 * O->n], 1);
+        O->pending = 0;
+    }
+
     O->n++;
     return 0;
 }
@@ -1029,6 +1073,7 @@ static int ol_ring(outline* O) {
     O->ring[O->nr] = O->n;
     O->closed[O->nr] = 0;
     O->nr++;
+    O->pending = 1;
     return 0;
 }
 
@@ -1042,6 +1087,7 @@ static void ol_free(outline* O) {
     free(O->p);
     free(O->ring);
     free(O->closed);
+    free(O->sg);
 }
 
 /* segments a curve is drawn with: enough that no chord strays past the tolerance */
@@ -1056,17 +1102,37 @@ static void ol_cubic(outline* O, double x0, double y0, double x1, double y1, dou
     double l = hypot(x1 - x0, y1 - y0) + hypot(x2 - x1, y2 - y1) + hypot(x3 - x2, y3 - y2);
     int n = segs(O, l), i;
 
+    O->in_curve++;
+
     for (i = 1; i <= n; i++) {
         double t = (double)i / n, u = 1 - t;
 
         ol_pt(O, u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
               u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3);
     }
+
+    O->in_curve--;
+
+    if (O->keep && !O->in_curve) {
+        double c[6];
+
+        apply(O->m, x1, y1, &c[0], &c[1]);
+        apply(O->m, x2, y2, &c[2], &c[3]);
+        apply(O->m, x3, y3, &c[4], &c[5]);
+        ol_seg(O, 'C', c, 3);
+        O->pending = 0;
+    }
 }
 
 static void ol_quad(outline* O, double x0, double y0, double x1, double y1, double x2, double y2) {
     double l = hypot(x1 - x0, y1 - y0) + hypot(x2 - x1, y2 - y1);
     int n = segs(O, l), i;
+
+    if (O->keep) {  /* as the cubic it is */
+        ol_cubic(O, x0, y0, x0 + 2.0 / 3 * (x1 - x0), y0 + 2.0 / 3 * (y1 - y0), x2 + 2.0 / 3 * (x1 - x2),
+                 y2 + 2.0 / 3 * (y1 - y2), x2, y2);
+        return;
+    }
 
     for (i = 1; i <= n; i++) {
         double t = (double)i / n, u = 1 - t;
@@ -1116,6 +1182,28 @@ static void ol_arc(outline* O, double x0, double y0, double rx, double ry, doubl
         dt += 2 * SV_PI;
     } else if (!sweep && dt > 0) {
         dt -= 2 * SV_PI;
+    }
+
+    if (O->keep) {  /* cubics, a quarter turn at most each */
+        int np = (int)ceil(fabs(dt) / (SV_PI / 2) - 1e-9);
+        double ta = t1, px = x0, py = y0;
+
+        np = np < 1 ? 1 : np > 8 ? 8 : np;
+
+        for (i = 1; i <= np; i++) {
+            double tb = t1 + dt * i / np, k = 4.0 / 3 * tan((tb - ta) / 4);
+            double ex = i == np ? x : c * rx * cos(tb) - s * ry * sin(tb) + cx;
+            double ey = i == np ? y : s * rx * cos(tb) + c * ry * sin(tb) + cy;
+            double dax = -c * rx * sin(ta) - s * ry * cos(ta), day = -s * rx * sin(ta) + c * ry * cos(ta);
+            double dbx = -c * rx * sin(tb) - s * ry * cos(tb), dby = -s * rx * sin(tb) + c * ry * cos(tb);
+
+            ol_cubic(O, px, py, px + k * dax, py + k * day, ex - k * dbx, ey - k * dby, ex, ey);
+            px = ex;
+            py = ey;
+            ta = tb;
+        }
+
+        return;
     }
 
     n = segs(O, fabs(dt) * (rx > ry ? rx : ry));
@@ -1369,6 +1457,8 @@ static void evenodd_rings(outline* O) {
         if ((area > 0) != (depth % 2 == 0)) {   /* reversed */
             int i, j;
 
+            O->closed[r] ^= 2;
+
             for (i = a, j = b - 1; i < j; i++, j--) {
                 double tx = O->p[2 * i], ty = O->p[2 * i + 1];
 
@@ -1386,7 +1476,7 @@ static void evenodd_rings(outline* O) {
 /* ------------------------------------------------------------------ */
 
 static void sep(sv_t* S) {
-    if (!S->first) {
+    if (!S->first && !S->dml) {
         pb_putc(S->o, ',');
     }
 
@@ -1492,9 +1582,19 @@ static int grad_attr(const sv_t* S, int g, const char* name, char* buf, size_t c
 }
 
 /* a gradient fill ("gk" and the rest) for a shape whose outline spans bbox (drawing units); 0 if none written */
-static int put_gradient(sv_t* S, int g, const sstate* st, const double* bb, double op) {
-    double pos[16], q[16];
-    uint32_t col[16];
+typedef struct {
+    int kind;                   /* 0 one colour (solid), 1 linear (ang), 2 radial (out from fl, ft of the box) */
+    uint32_t solid;
+    int n;
+    double q[17];
+    uint32_t col[17];
+    double ang, fl, ft;
+} sgrad;
+
+/* a gradient's stops along the shape's box, the way the layout (and DrawingML) runs them; 0 for none */
+static int gradient_of(sv_t* S, int g, const sstate* st, const double* bb, double op, sgrad* G) {
+    double pos[16], *q = G->q;
+    uint32_t* col = G->col;
     int n = stops(S, g, pos, col, 16), k, user, radial = !strcmp(S->nd[g].tag, "radialGradient");
     char b[160];
     double gt[6] = { 1, 0, 0, 1, 0, 0 }, m[6];
@@ -1508,8 +1608,11 @@ static int put_gradient(sv_t* S, int g, const sstate* st, const double* bb, doub
         col[k] = with_alpha(col[k], op);
     }
 
+    G->n = n;
+
     if (n == 1) {
-        pb_printf(S->o, ",\"fill\":%u", (unsigned)col[0]);
+        G->kind = 0;
+        G->solid = col[0];
         return 1;
     }
 
@@ -1549,7 +1652,8 @@ static int put_gradient(sv_t* S, int g, const sstate* st, const double* bb, doub
         l = hypot(ux, uy);
 
         if (l < 1e-9) {
-            pb_printf(S->o, ",\"fill\":%u", (unsigned)col[n - 1]);
+            G->kind = 0;
+            G->solid = col[n - 1];
             return 1;
         }
 
@@ -1572,8 +1676,8 @@ static int put_gradient(sv_t* S, int g, const sstate* st, const double* bb, doub
 
         ang = atan2(uy, ux) * 180 / SV_PI;
         ang = ang < 0 ? ang + 360 : ang;
-        pb_printf(S->o, ",\"fill\":%u,\"gk\":1,\"f2\":%u,\"ga\":%d", (unsigned)col[0], (unsigned)col[n - 1],
-                  (int)(far(ang * 60000) % 21600000));
+        G->kind = 1;
+        G->ang = ang;
     } else {
         double cx, cy, r, ocx, ocy, R = 0, rr, ex, ey;
         double refw = user ? S->vw : 1, refh = user ? S->vh : 1, refd = user ? hypot(S->vw, S->vh) / sqrt(2) : 1;
@@ -1601,22 +1705,53 @@ static int put_gradient(sv_t* S, int g, const sstate* st, const double* bb, doub
 
             fl = fl < 0 ? 0 : fl > 1 ? 1 : fl;
             ft = ft < 0 ? 0 : ft > 1 ? 1 : ft;
-            pb_printf(S->o, ",\"fill\":%u,\"gk\":2,\"gp\":1,\"f2\":%u,\"gft\":[%d,%d,%d,%d]", (unsigned)col[0],
-                      (unsigned)col[n - 1], (int)far(fl * 100000), (int)far(ft * 100000),
-                      (int)far((1 - fl) * 100000), (int)far((1 - ft) * 100000));
+            G->kind = 2;
+            G->fl = fl;
+            G->ft = ft;
         }
+    }
+
+    for (k = 0; k < n; k++) {
+        q[k] = q[k] < 0 ? 0 : q[k] > 1 ? 1 : q[k];
+    }
+
+    if (q[n - 1] < 1) {     /* past the last stop the colour holds: a stop at 1 for it */
+        q[n] = 1;
+        col[n] = col[n - 1];
+        G->n = n + 1;
+    }
+
+    return 1;
+}
+
+static int put_gradient(sv_t* S, int g, const sstate* st, const double* bb, double op) {
+    sgrad G;
+    int k;
+
+    memset(&G, 0, sizeof(G));
+
+    if (!gradient_of(S, g, st, bb, op, &G)) {
+        return 0;
+    }
+
+    if (G.kind == 0) {
+        pb_printf(S->o, ",\"fill\":%u", (unsigned)G.solid);
+        return 1;
+    }
+
+    if (G.kind == 1) {
+        pb_printf(S->o, ",\"fill\":%u,\"gk\":1,\"f2\":%u,\"ga\":%d", (unsigned)G.col[0], (unsigned)G.col[G.n - 1],
+                  (int)(far(G.ang * 60000) % 21600000));
+    } else {
+        pb_printf(S->o, ",\"fill\":%u,\"gk\":2,\"gp\":1,\"f2\":%u,\"gft\":[%d,%d,%d,%d]", (unsigned)G.col[0],
+                  (unsigned)G.col[G.n - 1], (int)far(G.fl * 100000), (int)far(G.ft * 100000),
+                  (int)far((1 - G.fl) * 100000), (int)far((1 - G.ft) * 100000));
     }
 
     pb_puts(S->o, ",\"gs\":[");
 
-    for (k = 0; k < n; k++) {   /* past the last stop the colour holds: a stop at 1 for it */
-        double v = q[k] < 0 ? 0 : q[k] > 1 ? 1 : q[k];
-
-        pb_printf(S->o, "%s%d,%u", k ? "," : "", (int)far(v * 100000), (unsigned)col[k]);
-    }
-
-    if (q[n - 1] < 1) {
-        pb_printf(S->o, ",100000,%u", (unsigned)col[n - 1]);
+    for (k = 0; k < G.n; k++) {
+        pb_printf(S->o, "%s%d,%u", k ? "," : "", (int)far(G.q[k] * 100000), (unsigned)G.col[k]);
     }
 
     pb_putc(S->o, ']');
@@ -1669,45 +1804,63 @@ static void put_points(sv_t* S, const outline* O, int r0, int r1) {
     }
 }
 
+/* a stroke's dashes: lengths, dash first, in 100000ths of its width (pairs); 0 for a solid line */
+static int dash_of(sv_t* S, const sstate* st, long* out) {
+    const char* p = st->dash, *e;
+    double v[8];
+    int n = 0, k, sum = 0;
+
+    if (!st->dash[0] || !strcmp(st->dash, "none") || st->sw <= 0) {
+        return 0;
+    }
+
+    while (n < 8 && num(p, &e, &v[n])) {
+        if (*e == '%') {
+            v[n] *= S->vw / 100;
+            e++;
+        }
+
+        n++;
+        p = e;
+    }
+
+    if (n % 2 == 1 && n <= 4) {     /* an odd count: said twice */
+        for (k = 0; k < n; k++) {
+            v[n + k] = v[k];
+        }
+
+        n *= 2;
+    }
+
+    n &= ~1;
+
+    for (k = 0; k < n; k++) {
+        sum += v[k] > 0;
+    }
+
+    if (n < 2 || sum == 0) {
+        return 0;
+    }
+
+    for (k = 0; k < n; k++) {
+        out[k] = far(v[k] / st->sw * 100000);
+    }
+
+    return n;
+}
+
 static void put_stroke_style(sv_t* S, const sstate* st, double lw) {
-    if (st->dash[0] && strcmp(st->dash, "none") != 0 && st->sw > 0) {
-        const char* p = st->dash, *e;
-        double v[8];
-        int n = 0, k, sum = 0;
+    long d[8];
+    int n = dash_of(S, st, d), k;
 
-        while (n < 8 && num(p, &e, &v[n])) {
-            if (*e == '%') {
-                v[n] *= S->vw / 100;
-                e++;
-            }
-
-            n++;
-            p = e;
-        }
-
-        if (n % 2 == 1 && n <= 4) {     /* an odd count: said twice */
-            for (k = 0; k < n; k++) {
-                v[n + k] = v[k];
-            }
-
-            n *= 2;
-        }
-
-        n &= ~1;
+    if (n) {
+        pb_puts(S->o, ",\"dash\":[");
 
         for (k = 0; k < n; k++) {
-            sum += v[k] > 0;
+            pb_printf(S->o, "%s%ld", k ? "," : "", d[k]);
         }
 
-        if (n >= 2 && sum > 0) {
-            pb_puts(S->o, ",\"dash\":[");
-
-            for (k = 0; k < n; k++) {
-                pb_printf(S->o, "%s%ld", k ? "," : "", far(v[k] / st->sw * 100000));
-            }
-
-            pb_putc(S->o, ']');
-        }
+        pb_putc(S->o, ']');
     }
 
     (void)lw;
@@ -1717,6 +1870,205 @@ static void put_stroke_style(sv_t* S, const sstate* st, double lw) {
     }
 
     pb_printf(S->o, ",\"join\":%d", st->join);
+}
+
+/* ---- shapes: DrawingML, as a Word canvas holds them (EMU; ids %IDn%, as PutShapeXml numbers them) ---- */
+
+static long long emu(double sp) {
+    double v = sp * 12700.0 / 65536;
+
+    return v > 2e12 ? (long long)2e12 : v < -2e12 ? (long long)-2e12 : v != v ? 0 : (long long)floor(v + 0.5);
+}
+
+static void xesc(pd_buf* o, const char* s, size_t n) {
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+
+        if (c == '<') {
+            pb_puts(o, "&lt;");
+        } else if (c == '>') {
+            pb_puts(o, "&gt;");
+        } else if (c == '&') {
+            pb_puts(o, "&amp;");
+        } else if (c == '"') {
+            pb_puts(o, "&quot;");
+        } else if (c >= 0x20 || c == '\t') {
+            pb_putc(o, (char)c);
+        }
+    }
+}
+
+static void dml_colour(pd_buf* o, uint32_t c) {
+    unsigned a = c >> 24;
+
+    pb_printf(o, "<a:srgbClr val=\"%06X\"", (unsigned)(c & 0xFFFFFFu));
+
+    if (a < 255) {
+        pb_printf(o, "><a:alpha val=\"%u\"/></a:srgbClr>", a * 100000u / 255);
+    } else {
+        pb_puts(o, "/>");
+    }
+}
+
+static void dml_pt(pd_buf* o, double x, double y, double ox, double oy) {
+    pb_printf(o, "<a:pt x=\"%lld\" y=\"%lld\"/>", emu(x - ox), emu(y - oy));
+}
+
+/* a shape's outline as a freeform: its rings, curves as curves; filled and stroked as it is */
+static void dml_shape(sv_t* S, const outline* O, const sstate* st, int closed_shape, uint32_t fc, int gfill,
+                      uint32_t lc, double lw, const double* bb) {
+    pd_buf* o = S->o;
+    double x0 = 1e300, y0 = 1e300, x1 = -1e300, y1 = -1e300;
+    int i, r, id = S->nid++;
+    long long cx, cy;
+
+    for (i = 0; i < O->nsg; i++) {
+        int k, np = O->sg[i].k == 'C' ? 3 : 1;
+
+        for (k = 0; k < np; k++) {
+            x0 = O->sg[i].x[k] < x0 ? O->sg[i].x[k] : x0;
+            y0 = O->sg[i].y[k] < y0 ? O->sg[i].y[k] : y0;
+            x1 = O->sg[i].x[k] > x1 ? O->sg[i].x[k] : x1;
+            y1 = O->sg[i].y[k] > y1 ? O->sg[i].y[k] : y1;
+        }
+    }
+
+    if (x1 < x0) {
+        return;
+    }
+
+    cx = emu(x1 - x0);
+    cy = emu(y1 - y0);
+    cx = cx < 1 ? 1 : cx;
+    cy = cy < 1 ? 1 : cy;
+    pb_printf(o, "<wps:wsp><wps:cNvPr id=\"%%ID%d%%\" name=\"Freeform %%ID%d%%\"/><wps:cNvSpPr/><wps:spPr>"
+              "<a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:custGeom><a:avLst/>"
+              "<a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l=\"l\" t=\"t\" r=\"r\" b=\"b\"/><a:pathLst><a:path w=\"%lld\" "
+              "h=\"%lld\"%s%s>", id, id, emu(x0), emu(y0), cx, cy, cx, cy, fc ? "" : " fill=\"none\"",
+              lc ? "" : " stroke=\"0\"");
+
+    for (r = 0, i = 0; r < O->nr; r++) {
+        int a = i, b, j, closed = (O->closed[r] & 1) || closed_shape;
+
+        while (i < O->nsg && O->sg[i].r == r) {
+            i++;
+        }
+
+        b = i;
+
+        if (b - a < 2 || O->sg[a].k != 'M') {
+            continue;
+        }
+
+        if (!(O->closed[r] & 2)) {
+            for (j = a; j < b; j++) {
+                const oseg* g = &O->sg[j];
+
+                if (g->k == 'C') {
+                    pb_puts(o, "<a:cubicBezTo>");
+                    dml_pt(o, g->x[0], g->y[0], x0, y0);
+                    dml_pt(o, g->x[1], g->y[1], x0, y0);
+                    dml_pt(o, g->x[2], g->y[2], x0, y0);
+                    pb_puts(o, "</a:cubicBezTo>");
+                } else {
+                    pb_puts(o, g->k == 'M' ? "<a:moveTo>" : "<a:lnTo>");
+                    dml_pt(o, g->x[0], g->y[0], x0, y0);
+                    pb_puts(o, g->k == 'M' ? "</a:moveTo>" : "</a:lnTo>");
+                }
+            }
+        } else {    /* turned the other way (its holes so under either rule of filling) */
+            const oseg* e = &O->sg[b - 1];
+
+            pb_puts(o, "<a:moveTo>");
+            dml_pt(o, e->k == 'C' ? e->x[2] : e->x[0], e->k == 'C' ? e->y[2] : e->y[0], x0, y0);
+            pb_puts(o, "</a:moveTo>");
+
+            for (j = b - 1; j > a; j--) {
+                const oseg* g = &O->sg[j], *pv = &O->sg[j - 1];
+                double sx = pv->k == 'C' ? pv->x[2] : pv->x[0], sy = pv->k == 'C' ? pv->y[2] : pv->y[0];
+
+                if (g->k == 'C') {
+                    pb_puts(o, "<a:cubicBezTo>");
+                    dml_pt(o, g->x[1], g->y[1], x0, y0);
+                    dml_pt(o, g->x[0], g->y[0], x0, y0);
+                    dml_pt(o, sx, sy, x0, y0);
+                    pb_puts(o, "</a:cubicBezTo>");
+                } else {
+                    pb_puts(o, "<a:lnTo>");
+                    dml_pt(o, sx, sy, x0, y0);
+                    pb_puts(o, "</a:lnTo>");
+                }
+            }
+        }
+
+        if (closed) {
+            pb_puts(o, "<a:close/>");
+        }
+    }
+
+    pb_puts(o, "</a:path></a:pathLst></a:custGeom>");
+
+    if (!fc) {
+        pb_puts(o, "<a:noFill/>");
+    } else {
+        sgrad G;
+
+        memset(&G, 0, sizeof(G));
+
+        if (gfill >= 0 && gradient_of(S, gfill, st, bb, st->fill_op * st->opacity, &G) && G.kind) {
+            pb_puts(o, "<a:gradFill rotWithShape=\"1\"><a:gsLst>");
+
+            for (i = 0; i < G.n; i++) {
+                pb_printf(o, "<a:gs pos=\"%d\">", (int)far(G.q[i] * 100000));
+                dml_colour(o, G.col[i]);
+                pb_puts(o, "</a:gs>");
+            }
+
+            if (G.kind == 1) {
+                pb_printf(o, "</a:gsLst><a:lin ang=\"%d\" scaled=\"0\"/></a:gradFill>",
+                          (int)(far(G.ang * 60000) % 21600000));
+            } else {
+                pb_printf(o, "</a:gsLst><a:path path=\"circle\"><a:fillToRect l=\"%d\" t=\"%d\" r=\"%d\" b=\"%d\"/>"
+                          "</a:path></a:gradFill>", (int)far(G.fl * 100000), (int)far(G.ft * 100000),
+                          (int)far((1 - G.fl) * 100000), (int)far((1 - G.ft) * 100000));
+            }
+        } else {
+            pb_puts(o, "<a:solidFill>");
+            dml_colour(o, gfill >= 0 && G.n ? G.solid : fc);
+            pb_puts(o, "</a:solidFill>");
+        }
+    }
+
+    if (lc) {
+        long d[8];
+        int n = dash_of(S, st, d);
+
+        pb_printf(o, "<a:ln w=\"%lld\"%s><a:solidFill>", emu(lw < 1 ? 1 : lw), st->cap == PD_CAP_ROUND ? " cap=\"rnd\"" :
+                  st->cap == PD_CAP_SQUARE ? " cap=\"sq\"" : "");
+        dml_colour(o, lc);
+        pb_puts(o, "</a:solidFill>");
+
+        if (n) {
+            pb_puts(o, "<a:custDash>");
+
+            for (i = 0; i + 1 < n; i += 2) {
+                pb_printf(o, "<a:ds d=\"%ld\" sp=\"%ld\"/>", d[i], d[i + 1]);
+            }
+
+            pb_puts(o, "</a:custDash>");
+        }
+
+        pb_puts(o, st->join == PD_JOIN_BEVEL ? "<a:bevel/>" : st->join == PD_JOIN_MITER ? "<a:miter lim=\"800000\"/>" :
+                "<a:round/>");
+        pb_puts(o, "</a:ln>");
+    } else {
+        pb_puts(o, "<a:ln><a:noFill/></a:ln>");
+    }
+
+    pb_puts(o, "</wps:spPr><wps:bodyPr/></wps:wsp>");
+    S->first = 0;
 }
 
 /* a shape's outline drawn: filled, stroked, or both */
@@ -1758,6 +2110,15 @@ static void draw_outline(sv_t* S, outline* O, const sstate* st, int closed_shape
         } else {
             anyopen = 1;
         }
+    }
+
+    if (S->dml) {   /* one shape, filled and stroked */
+        if (fc && st->evenodd) {
+            evenodd_rings(O);
+        }
+
+        dml_shape(S, O, st, closed_shape, fc, gfill, lc, lw, bb);
+        return;
     }
 
     if (fc) {
@@ -1967,6 +2328,14 @@ static void ellipse_outline(outline* O, double cx, double cy, double rx, double 
     n = n < 16 ? 16 : n > 256 ? 256 : n;
     ol_ring(O);
 
+    if (O->keep) {  /* two half turns: its curves */
+        ol_pt(O, cx + rx, cy);
+        ol_arc(O, cx + rx, cy, rx, ry, 0, 0, 1, cx - rx, cy);
+        ol_arc(O, cx - rx, cy, rx, ry, 0, 0, 1, cx + rx, cy);
+        ol_close(O);
+        return;
+    }
+
     for (i = 0; i < n; i++) {
         double t = 2 * SV_PI * i / n;
 
@@ -2018,6 +2387,61 @@ static void text_of(sv_t* S, int k, pd_buf* out, int preserve) {
     }
 }
 
+/* a label as a text box of its own, no fill, no line, sized to its text (an estimate: Word sizes it again
+   as it lays it out), its baseline's start (or middle, or end) at the point, turned about it */
+static void dml_text(sv_t* S, const sstate* st, double ox, double oy, double rot, double sz, uint32_t c, const char* s,
+                     size_t n) {
+    pd_buf* o = S->o;
+    size_t i, nch = 0;
+    double w, h, bx, by, mx, my, a = rot * SV_PI / 180;
+    int id = S->nid++;
+    long hp = (long)floor(sz / 65536 * 2 + 0.5);
+
+    for (i = 0; i < n; i++) {
+        nch += ((unsigned char)s[i] & 0xC0) != 0x80;
+    }
+
+    w = sz * (0.56 * (double)nch + 0.3);
+    h = sz * 1.25;
+    bx = st->anchor == 1 ? ox - w / 2 : st->anchor == 2 ? ox - w : ox;
+    by = oy - sz * 0.95;    /* its line's top: an ascent above the baseline */
+    mx = bx + w / 2 - ox;   /* its middle turned about the point: where the box goes, turned about its middle */
+    my = by + h / 2 - oy;
+    bx = ox + mx * cos(a) - my * sin(a) - w / 2;
+    by = oy + mx * sin(a) + my * cos(a) - h / 2;
+    hp = hp < 2 ? 2 : hp > 3276 ? 3276 : hp;
+    pb_printf(o, "<wps:wsp><wps:cNvPr id=\"%%ID%d%%\" name=\"Text Box %%ID%d%%\"/><wps:cNvSpPr txBox=\"1\"/><wps:spPr>"
+              "<a:xfrm", id, id);
+
+    if (fabs(rot) > 0.5) {
+        pb_printf(o, " rot=\"%d\"", (int)(far((rot < 0 ? rot + 360 : rot) * 60000) % 21600000));
+    }
+
+    pb_printf(o, "><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/></a:xfrm><a:prstGeom prst=\"rect\">"
+              "<a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent><w:p>"
+              "<w:pPr><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/><w:jc w:val=\"%s\"/>"
+              "</w:pPr><w:r><w:rPr>", emu(bx), emu(by), emu(w), emu(h),
+              st->anchor == 1 ? "center" : st->anchor == 2 ? "right" : "left");
+
+    if (st->family[0]) {
+        pb_puts(o, "<w:rFonts w:ascii=\"");
+        xesc(o, st->family, strlen(st->family));
+        pb_puts(o, "\" w:hAnsi=\"");
+        xesc(o, st->family, strlen(st->family));
+        pb_puts(o, "\" w:cs=\"");
+        xesc(o, st->family, strlen(st->family));
+        pb_puts(o, "\"/>");
+    }
+
+    pb_printf(o, "%s%s<w:color w:val=\"%06X\"/><w:sz w:val=\"%ld\"/><w:szCs w:val=\"%ld\"/></w:rPr>"
+              "<w:t xml:space=\"preserve\">", st->weight >= 600 ? "<w:b/>" : "", st->italic ? "<w:i/>" : "",
+              (unsigned)(c & 0xFFFFFFu), hp, hp);
+    xesc(o, s, n);
+    pb_puts(o, "</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr rot=\"0\" vert=\"horz\" wrap=\"none\" "
+            "lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" anchor=\"t\" anchorCtr=\"0\"><a:noAutofit/></wps:bodyPr></wps:wsp>");
+    S->first = 0;
+}
+
 static void put_label(sv_t* S, const sstate* st, double x, double y, const char* s, size_t n) {
     double ox, oy, ex, ey, rot, sz = st->fsize * scale_of(st->m);
     int gr = -1;
@@ -2050,6 +2474,12 @@ static void put_label(sv_t* S, const sstate* st, double x, double y, const char*
     apply(st->m, x, y, &ox, &oy);
     apply(st->m, x + 100, y, &ex, &ey);
     rot = atan2(ey - oy, ex - ox) * 180 / SV_PI;
+
+    if (S->dml) {
+        dml_text(S, st, ox, oy, rot, sz, c, s, n);
+        return;
+    }
+
     sep(S);
     pb_puts(S->o, "{\"label\":");
     json_str(S->o, s, n);
@@ -2185,6 +2615,21 @@ static void image_el(sv_t* S, int k, const sstate* st) {
 
         apply(st->m, ix, iy, &ax, &ay);
         apply(st->m, ix + iw, iy + ih, &bx, &by);
+
+        if (S->dml) {   /* a picture of the canvas, by an id of Parade's own the host relates to res */
+            int id = S->nid++;
+
+            pb_printf(S->o, "<pic:pic><pic:nvPicPr><pic:cNvPr id=\"%%ID%d%%\" name=\"Picture %%ID%d%%\"/><pic:cNvPicPr/>"
+                      "</pic:nvPicPr><pic:blipFill><a:blip r:embed=\"rIdPd%d\"/><a:stretch><a:fillRect/></a:stretch>"
+                      "</pic:blipFill><pic:spPr><a:xfrm><a:off x=\"%lld\" y=\"%lld\"/><a:ext cx=\"%lld\" cy=\"%lld\"/>"
+                      "</a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>", id, id, (int)res,
+                      emu(ax < bx ? ax : bx), emu(ay < by ? ay : by), emu(fabs(bx - ax)) < 1 ? 1 : emu(fabs(bx - ax)),
+                      emu(fabs(by - ay)) < 1 ? 1 : emu(fabs(by - ay)));
+            S->first = 0;
+            free(data);
+            return;
+        }
+
         sep(S);
         pb_printf(S->o, "{\"img\":%d,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld}", (int)res, far(ax < bx ? ax : bx),
                   far(ay < by ? ay : by), far(fabs(bx - ax)), far(fabs(by - ay)));
@@ -2304,6 +2749,7 @@ static void element(sv_t* S, int k, const sstate* parent) {
         memset(&O, 0, sizeof(O));
         O.m = st.m;
         O.tol = 0.15 * 65536;   /* a fifth of a pixel at 96 dpi */
+        O.keep = S->dml;
 
         if (!strcmp(t, "path")) {
             size_t n = 0;
@@ -2400,7 +2846,51 @@ int pd_svg_is(const unsigned char* p, size_t n) {
 }
 
 /* the drawing description of an SVG into o: {"w", "h", "src", "items": [...]}; 1 if anything was drawn */
+static int svg_run(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src, pd_buf* o, int dml, double* ow,
+                   double* oh);
+
 int pd_svg_json(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src, pd_buf* o) {
+    return svg_run(d, p, n, src, o, 0, NULL, NULL);
+}
+
+pd_status pd_svg_to_shapes(pd_doc* d, const void* svg, size_t len, pd_writer fn, void* user, pd_sp* width,
+                           pd_sp* height) {
+    pd_buf o;
+    double w = 0, h = 0;
+    pd_status st = PD_ERR_FORMAT;
+
+    if (width) {
+        *width = 0;
+    }
+
+    if (height) {
+        *height = 0;
+    }
+
+    if (!d || !svg || !fn || !pd_svg_is((const unsigned char*)svg, len)) {
+        return PD_ERR_ARG;
+    }
+
+    memset(&o, 0, sizeof(o));
+
+    if (svg_run(d, (const unsigned char*)svg, len, 0, &o, 1, &w, &h)) {
+        st = o.err ? PD_ERR_NOMEM : fn(user, o.p, o.n) ? PD_ERR_IO : PD_OK;
+
+        if (width) {
+            *width = (pd_sp)far(w);
+        }
+
+        if (height) {
+            *height = (pd_sp)far(h);
+        }
+    }
+
+    pb_free(&o);
+    return st;
+}
+
+static int svg_run(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src, pd_buf* o, int dml, double* ow,
+                   double* oh) {
     sv_t S;
     int root, k, ok = 0;
     sstate st;
@@ -2413,6 +2903,7 @@ int pd_svg_json(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src, pd_b
     S.n = n;
     S.o = o;
     S.first = 1;
+    S.dml = dml;
 
     if ((root = build_tree(&S)) < 0) {
         free(S.nd);
@@ -2485,10 +2976,22 @@ int pd_svg_json(pd_doc* d, const unsigned char* p, size_t n, pd_res_id src, pd_b
             S.vh = bh;
         }
 
-        pb_printf(o, "{\"w\":%ld,\"h\":%ld,\"src\":%d,\"kind\":\"svg\",\"items\":[", far(w * SP_PER_PX),
-                  far(h * SP_PER_PX), (int)src);
-        children(&S, root, &rs);
-        pb_puts(o, "]}");
+        if (dml) {  /* one group, as big as the picture, its shapes in the picture's units (EMU) */
+            long long gw = emu(w * SP_PER_PX), gh = emu(h * SP_PER_PX);
+
+            pb_printf(o, "<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"%lld\" "
+                      "cy=\"%lld\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"%lld\" cy=\"%lld\"/></a:xfrm></wpg:grpSpPr>",
+                      gw, gh, gw, gh);
+            children(&S, root, &rs);
+            pb_puts(o, "</wpg:wgp>");
+            *ow = w * SP_PER_PX;
+            *oh = h * SP_PER_PX;
+        } else {
+            pb_printf(o, "{\"w\":%ld,\"h\":%ld,\"src\":%d,\"kind\":\"svg\",\"items\":[", far(w * SP_PER_PX),
+                      far(h * SP_PER_PX), (int)src);
+            children(&S, root, &rs);
+            pb_puts(o, "]}");
+        }
     }
 
     ok = !o->err && !S.first;

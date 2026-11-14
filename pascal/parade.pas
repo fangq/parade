@@ -1160,8 +1160,12 @@ function pd_layout_write_pdf(layout: Ppd_layout; options: Ppd_pdf_options; fn: p
 function pd_layout_write_pdf_show(layout: Ppd_layout; options: Ppd_pdf_options; show: Ppd_pdf_show; fn: pd_writer;
   user: Pointer): pd_status; cdecl; PDEXT;
 function pd_layout_write_svg(layout: Ppd_layout; page: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
+function pd_layout_write_svg_part(layout: Ppd_layout; page: Int32; x, y, w, h: pd_sp; shapes: PInt32;
+  nshapes: Int32; fn: pd_writer; user: Pointer): pd_status; cdecl; PDEXT;
 function pd_drawing_to_svg(doc: Ppd_doc; res: pd_res_id; width, height: pd_sp; fn: pd_writer;
   user: Pointer): pd_status; cdecl; PDEXT;
+function pd_svg_to_shapes(doc: Ppd_doc; svg: Pointer; len: csize_t; fn: pd_writer; user: Pointer;
+  out width, height: pd_sp): pd_status; cdecl; PDEXT;
 function pd_drawing_render(doc: Ppd_doc; res: pd_res_id; width, height: pd_sp; scale: Int32; rgba: PByte;
   w, h, stride: Int32): pd_status; cdecl; PDEXT;
 function pd_drawing_to_png(doc: Ppd_doc; res: pd_res_id; width, height: pd_sp; scale: Int32; fn: pd_writer;

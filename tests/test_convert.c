@@ -5720,6 +5720,230 @@ static void test_pptx_text_pictures(void) {
     }
 }
 
+/* an SVG as shapes of a canvas: one group, curves as curves, gradients, dashes, a hole, text boxes, its pictures;
+   the canvas made of them drawn as the picture of the SVG is */
+static const char svg_shapes_doc[] =
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" viewBox=\"0 0 100 100\">"
+    "<defs><linearGradient id=\"g\" x1=\"0\" x2=\"1\"><stop offset=\"0\" stop-color=\"#f00\"/>"
+    "<stop offset=\"1\" stop-color=\"#00f\"/></linearGradient></defs>"
+    "<rect x=\"0\" y=\"0\" width=\"100\" height=\"30\" fill=\"url(#g)\"/>"
+    "<circle cx=\"25\" cy=\"65\" r=\"20\" fill=\"#0a0\" stroke=\"#000\" stroke-width=\"2\" stroke-dasharray=\"4 2\"/>"
+    "<path fill-rule=\"evenodd\" fill=\"#c60\" d=\"M55 45h40v40h-40z M65 55h20v20h-20z\"/>"
+    "</svg>";
+
+static int svg_shapes_png_ok(const char* xml, const pd_doc* d) {
+    const char* r = strstr(xml, "r:embed=\"rIdPd");
+    const char* mime;
+    const void* data;
+    size_t len;
+
+    return r && pd_doc_resource(d, (pd_res_id)atoi(r + 14), &mime, &data, &len) == PD_OK && !strcmp(mime, "image/png");
+}
+
+/* the canvas holding a group of shapes (its ids numbered, its pictures related): its drawing, 0 none */
+static pd_res_id svg_shapes_canvas(pd_doc* d, const char* group, pd_sp w, pd_sp h) {
+    buf_t x = { NULL, 0 }, j = { NULL, 0 };
+    char t[96];
+    const char* q;
+    int k = 0;
+    pd_res_id r0 = 0, r = 0;
+
+    to_buf(&x, "<wpc:wpc><wpc:bg/><wpc:whole/>", 30);
+
+    for (q = group; *q; ) {     /* %IDn%: n + 2 */
+        if (q[0] == '%' && !strncmp(q, "%ID", 3) && isdigit((unsigned char)q[3])) {
+            const char* e = q + 3;
+
+            while (isdigit((unsigned char)*e)) {
+                e++;
+            }
+
+            snprintf(t, sizeof(t), "%d", atoi(q + 3) + 2);
+            to_buf(&x, t, strlen(t));
+            q = *e == '%' ? e + 1 : e;
+        } else {
+            to_buf(&x, q, 1);
+            q++;
+        }
+    }
+
+    to_buf(&x, "</wpc:wpc>", 10);
+    snprintf(t, sizeof(t), "{\"w\":%d,\"h\":%d,\"items\":[],\"kind\":\"wpc\",\"rels\":{", (int)w, (int)h);
+    to_buf(&j, t, strlen(t));
+
+    for (q = x.p; (q = strstr(q, "rIdPd")) != NULL; q += 5) {
+        snprintf(t, sizeof(t), "%s\"rIdPd%d\":%d", k++ ? "," : "", atoi(q + 5), atoi(q + 5));
+        to_buf(&j, t, strlen(t));
+    }
+
+    to_buf(&j, "},\"xml\":\"", 9);
+
+    for (q = x.p; *q; q++) {
+        if (*q == '"' || *q == '\\') {
+            to_buf(&j, "\\", 1);
+        }
+
+        to_buf(&j, q, 1);
+    }
+
+    to_buf(&j, "\"}", 2);
+
+    if (pd_doc_add_resource(d, "application/vnd.parade.drawing+json", j.p, j.n, &r0) != PD_OK ||
+            pd_docx_drawing_rebuild(d, r0, x.p, x.n, &r) != PD_OK) {
+        r = 0;
+    }
+
+    free(x.p);
+    free(j.p);
+    return r;
+}
+
+static void test_svg_shapes(void) {
+    pd_doc* d = NULL;
+    buf_t b = { NULL, 0 };
+    pd_sp w = 0, h = 0;
+    pd_res_id pic = 0, cv;
+    uint8_t* pa = (uint8_t*)calloc(100 * 100, 4), *pb = (uint8_t*)calloc(100 * 100, 4);
+    double se = 0;
+    int k, n = 0;
+    const char* c;
+
+    pd_doc_new(&d);
+    CHECK(pd_svg_to_shapes(d, svg_shapes_doc, sizeof(svg_shapes_doc) - 1, to_buf, &b, &w, &h) == PD_OK && b.p);
+    CHECK(w == PD_PT(75) && h == PD_PT(75));    /* 100 px */
+    CHECK(b.p && !strncmp(b.p, "<wpg:wgp>", 9) && strstr(b.p, "<a:chExt cx=\"952500\" cy=\"952500\"/>"));
+
+    for (c = b.p ? b.p : ""; (c = strstr(c, "<wps:wsp>")) != NULL; c++) {
+        n++;
+    }
+
+    CHECK(n == 3);      /* one shape each */
+    CHECK(b.p && strstr(b.p, "<a:cubicBezTo>"));     /* the circle's curves, curves */
+    CHECK(b.p && strstr(b.p, "<a:gradFill") && strstr(b.p, "<a:lin ang=\"0\""));
+    CHECK(b.p && strstr(b.p, "<a:custDash><a:ds d=\"200000\" sp=\"100000\"/></a:custDash>"));     /* 4 2 of width 2 */
+    CHECK(b.p && strstr(b.p, "%ID0%") && strstr(b.p, "%ID2%") && !strstr(b.p, "%ID3%"));
+
+    /* drawn: the canvas as the SVG's picture is (the hole a hole, under either rule of filling) */
+    CHECK(pd_doc_add_picture(d, NULL, svg_shapes_doc, sizeof(svg_shapes_doc) - 1, &pic) == PD_OK);
+    cv = b.p ? svg_shapes_canvas(d, b.p, w, h) : 0;
+    CHECK(cv != 0);
+
+    if (cv && pic && pd_drawing_render(d, pic, w, h, 65536 * 4 / 3, pa, 100, 100, 400) == PD_OK &&
+            pd_drawing_render(d, cv, w, h, 65536 * 4 / 3, pb, 100, 100, 400) == PD_OK) {
+        for (k = 0; k < 100 * 100 * 4; k++) {
+            double e = (double)pa[k] - pb[k];
+
+            se += e * e;
+        }
+
+        CHECK(sqrt(se / (100 * 100 * 4)) < 255 * 0.03);   /* within 3% */
+        CHECK(pb[(65 * 100 + 75) * 4 + 3] == 0 && pb[(50 * 100 + 60) * 4 + 3] > 200);     /* the hole; the ring */
+        CHECK(pb[(15 * 100 + 5) * 4 + 0] > 200 && pb[(15 * 100 + 95) * 4 + 2] > 200);      /* red to blue */
+    } else {
+        CHECK(0);
+    }
+
+    if (cv && have_layout_font() && strstr(b.p, "</wpg:grpSpPr>")) {
+        /* part of the page as SVG: the shapes asked for (the group's shapes, out of it: each one top-level), the box
+           its viewport */
+        pd_block_id p = pd_doc_child(d, pd_doc_child(d, pd_doc_root(d), 0), 0);
+        pd_inline o;
+        const char* from = strstr(b.p, "</wpg:grpSpPr>") + 14;
+        size_t il = strlen(from) - strlen("</wpg:wgp>");
+        char* inner = (char*)malloc(il + 1);
+
+        memcpy(inner, from, il);
+        inner[il] = '\0';
+        cv = svg_shapes_canvas(d, inner, w, h);
+        free(inner);
+        pd_layout* L = NULL;
+        int32_t pg = -1, one[1] = { 3 };    /* the circle (%ID1%, numbered 3) */
+        pd_sp cx = 0, base = 0, asc = 0, desc = 0;
+        buf_t v = { NULL, 0 };
+        char want[96];
+
+        memset(&o, 0, sizeof(o));
+        o.kind = PD_INLINE_IMAGE;
+        o.resource = cv;
+        o.width = w;
+        o.height = h;
+        pd_doc_insert_inline(d, at(p, 0), &o, NULL);
+        pd_doc_set_font_resolver(d, layout_resolver, NULL);
+        CHECK(pd_layout_new(d, &L) == PD_OK && pd_layout_update(L, NULL) == PD_OK &&
+              pd_layout_caret(L, at(p, 0), &pg, &cx, &base, &asc, &desc) == PD_OK);
+        CHECK(L && pd_layout_write_svg_part(L, 0, cx, base - h, w, h, one, 1, to_buf, &v) == PD_OK && v.p);
+        snprintf(want, sizeof(want), "viewBox=\"%g %g 75 75\"", cx / 65536.0, (base - h) / 65536.0);
+        CHECK(v.p && strstr(v.p, want));
+        CHECK(v.p && strstr(v.p, "fill=\"#00aa00\"") && !strstr(v.p, "#cc6600"));   /* the circle, not the square */
+        free(v.p);
+        v.p = NULL;
+        v.n = 0;
+        /* the box round it: the circle, r 20 px (15 pt) at 25, 65 px, its 2 px line half out */
+        snprintf(want, sizeof(want), "viewBox=\"%g %g 31.5 31.5\"", cx / 65536.0 + 3.0, (base - h) / 65536.0 + 33.0);
+        CHECK(L && pd_layout_write_svg_part(L, 0, 0, 0, 0, 0, one, 1, to_buf, &v) == PD_OK && v.p);
+        CHECK(v.p && strstr(v.p, want));
+        free(v.p);
+        v.p = NULL;
+        v.n = 0;
+        CHECK(L && pd_layout_write_svg_part(L, 0, cx, base - h, w, h, NULL, 0, to_buf, &v) == PD_OK && v.p &&
+              strstr(v.p, "#00aa00") && strstr(v.p, "#cc6600"));     /* all in the box */
+        free(v.p);
+        pd_layout_free(L);
+    }
+
+    free(b.p);
+    b.p = NULL;
+    b.n = 0;
+
+    {   /* text: a text box, its words escaped; a picture the SVG holds: added, named for the host */
+        static const char tx[] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"50\">"
+                                 "<text x=\"100\" y=\"30\" font-size=\"20\" text-anchor=\"middle\" font-weight=\"bold\">"
+                                 "Hi &amp; bye</text><image x=\"0\" y=\"0\" width=\"10\" height=\"10\" "
+                                 "href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+                                 "2mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==\"/></svg>";
+
+        CHECK(pd_svg_to_shapes(d, tx, sizeof(tx) - 1, to_buf, &b, &w, &h) == PD_OK && b.p);
+        CHECK(b.p && strstr(b.p, "txBox=\"1\"") && strstr(b.p, ">Hi &amp; bye</w:t>") && strstr(b.p, "<w:b/>") &&
+              strstr(b.p, "<w:jc w:val=\"center\"/>") && strstr(b.p, "<w:sz w:val=\"30\"/>"));   /* 20 px: 15 pt */
+        CHECK(b.p && svg_shapes_png_ok(b.p, d));
+
+        if (b.p && have_layout_font()) {
+            pd_doc* t = NULL;
+            pd_res_id r;
+            pd_inline o;
+            pd_block_id p;
+
+            pd_doc_new(&t);
+            buf_t scrap = { NULL, 0 };
+
+            pd_svg_to_shapes(t, tx, sizeof(tx) - 1, to_buf, &scrap, &w, &h);    /* (its picture in t) */
+            free(scrap.p);
+            r = svg_shapes_canvas(t, b.p, w, h);
+            p = pd_doc_child(t, pd_doc_child(t, pd_doc_root(t), 0), 0);
+            memset(&o, 0, sizeof(o));
+            o.kind = PD_INLINE_IMAGE;
+            o.resource = r;
+            o.width = w;
+            o.height = h;
+            CHECK(r && pd_doc_insert_inline(t, at(p, 0), &o, NULL) == PD_OK);
+            CHECK(count_draws(t, PD_DRAW_GLYPH, 0) == 6);   /* its words (H i & b y e), laid out in the canvas */
+            CHECK(count_draws(t, PD_DRAW_IMAGE, 0) == 1);   /* and its picture */
+            pd_doc_free(t);
+        }
+
+        free(b.p);
+        b.p = NULL;
+        b.n = 0;
+    }
+
+    CHECK(pd_svg_to_shapes(d, "<p>no</p>", 9, to_buf, &b, &w, &h) == PD_ERR_ARG);
+    CHECK(pd_svg_to_shapes(d, "<svg xmlns=\"http://www.w3.org/2000/svg\"/>", 41, to_buf, &b, &w, &h) == PD_ERR_FORMAT);
+    free(b.p);
+    free(pa);
+    free(pb);
+    pd_doc_free(d);
+}
+
 static void test_svg(void) {
     pd_doc* d = NULL, *x = NULL;
     pd_res_id r = 0, src;
@@ -12631,6 +12855,7 @@ int main(void) {
     test_latex_justified();
     test_svg();
     test_pptx_text_pictures();
+    test_svg_shapes();
     test_latex_indent();
     test_pptx_chart();
     test_pptx_ph_inherit();

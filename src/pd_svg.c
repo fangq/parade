@@ -445,7 +445,8 @@ static void sv_image(svgw* S, const pd_draw* a) {
 }
 
 /* items as an SVG document w by h points, into o */
-static void sv_doc(const pd_doc* d, const pd_draw* it, int32_t n, pd_sp w, pd_sp h, pd_buf* o, int standalone) {
+static void sv_doc(const pd_doc* d, const pd_draw* it, int32_t n, pd_sp x0, pd_sp y0, pd_sp w, pd_sp h, pd_buf* o,
+                   int standalone) {
     svgw S;
     int32_t i;
 
@@ -462,7 +463,11 @@ static void sv_doc(const pd_doc* d, const pd_draw* it, int32_t n, pd_sp w, pd_sp
     sv_num(o, w);
     pb_puts(o, "pt\" height=\"");
     sv_num(o, h);
-    pb_puts(o, "pt\" viewBox=\"0 0 ");
+    pb_puts(o, "pt\" viewBox=\"");
+    sv_num(o, x0);
+    pb_putc(o, ' ');
+    sv_num(o, y0);
+    pb_putc(o, ' ');
     sv_num(o, w);
     pb_putc(o, ' ');
     sv_num(o, h);
@@ -514,9 +519,94 @@ pd_status pd_layout_write_svg(const pd_layout* layout, int32_t page, pd_writer f
 
     pd_layout_page_items(layout, page, it, n, &n);
     memset(&o, 0, sizeof(o));
-    sv_doc(pd_layout_doc(layout), it, n, pi.width, pi.height, &o, 1);
+    sv_doc(pd_layout_doc(layout), it, n, 0, 0, pi.width, pi.height, &o, 1);
     free(it);
     st = o.err ? PD_ERR_NOMEM : pb_flush(&o, fn, user);
+    pb_free(&o);
+    return st;
+}
+
+pd_status pd_layout_write_svg_part(const pd_layout* layout, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
+                                   const int32_t* shapes, int32_t nshapes, pd_writer fn, void* user) {
+    pd_draw* it;
+    int32_t n = 0, i, k, m = 0;
+    pd_buf o;
+    pd_status st;
+
+    int fit = w <= 0 || h <= 0;
+    pd_sp fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0;
+
+    if (!layout || !fn || (fit && nshapes <= 0) || (nshapes > 0 && !shapes) ||
+            pd_layout_page_items(layout, page, NULL, 0, &n) != PD_OK) {
+        return PD_ERR_ARG;
+    }
+
+    if (!(it = (pd_draw*)malloc(((size_t)n + 1) * sizeof(pd_draw)))) {
+        return PD_ERR_NOMEM;
+    }
+
+    pd_layout_page_items(layout, page, it, n, &n);
+
+    for (i = 0; i < n; i++) {   /* what is drawn for those shapes, in the box */
+        pd_sp bx0, by0, bx1, by1;
+        int want = nshapes <= 0;
+
+        for (k = 0; k < nshapes && !want; k++) {
+            want = it[i].shape == shapes[k];
+        }
+
+        pd_draw_bounds(&it[i], &bx0, &by0, &bx1, &by1);
+
+        if (want && (fit || (bx1 >= x && by1 >= y && bx0 <= x + w && by0 <= y + h)) && it[i].kind != PD_DRAW_LINK) {
+            if (fit && it[i].kind == PD_DRAW_PATH && it[i].points && it[i].npoints > 0) {
+                /* a path's own points, its line round them (not the room a redraw leaves for its corners) */
+                int32_t q;
+                pd_sp pad = it[i].line_width;
+
+                bx0 = by0 = INT32_MAX;
+                bx1 = by1 = INT32_MIN;
+
+                for (q = 0; q < it[i].npoints; q++) {
+                    pd_sp px = it[i].points[2 * q], py = it[i].points[2 * q + 1];
+
+                    if (px == PD_PATH_BREAK || px == PD_PATH_CUBIC) {
+                        continue;
+                    }
+
+                    bx0 = px < bx0 ? px : bx0;
+                    by0 = py < by0 ? py : by0;
+                    bx1 = px > bx1 ? px : bx1;
+                    by1 = py > by1 ? py : by1;
+                }
+
+                bx0 -= pad / 2;
+                by0 -= pad / 2;
+                bx1 += pad / 2;
+                by1 += pad / 2;
+            }
+
+            if (fit) {  /* the box: round all of it */
+                fx0 = m == 0 || bx0 < fx0 ? bx0 : fx0;
+                fy0 = m == 0 || by0 < fy0 ? by0 : fy0;
+                fx1 = m == 0 || bx1 > fx1 ? bx1 : fx1;
+                fy1 = m == 0 || by1 > fy1 ? by1 : fy1;
+            }
+
+            it[m++] = it[i];
+        }
+    }
+
+    if (fit) {
+        x = fx0;
+        y = fy0;
+        w = fx1 - fx0 > 0 ? fx1 - fx0 : 1;
+        h = fy1 - fy0 > 0 ? fy1 - fy0 : 1;
+    }
+
+    memset(&o, 0, sizeof(o));
+    sv_doc(pd_layout_doc(layout), it, m, x, y, w, h, &o, 1);
+    free(it);
+    st = o.err ? PD_ERR_NOMEM : m == 0 ? PD_ERR_RANGE : pb_flush(&o, fn, user);
     pb_free(&o);
     return st;
 }
@@ -529,7 +619,7 @@ int pd_drawing_svg_buf(const pd_doc* doc, pd_res_id res, pd_sp w, pd_sp h, pd_bu
         return 0;
     }
 
-    sv_doc(doc, l.d, l.n, w, h, o, 0);
+    sv_doc(doc, l.d, l.n, 0, 0, w, h, o, 0);
     pd_drawlist_free(&l);
     return 1;
 }
@@ -548,7 +638,7 @@ pd_status pd_drawing_to_svg(const pd_doc* doc, pd_res_id res, pd_sp width, pd_sp
     }
 
     memset(&o, 0, sizeof(o));
-    sv_doc(doc, l.d, l.n, width, height, &o, 1);
+    sv_doc(doc, l.d, l.n, 0, 0, width, height, &o, 1);
     pd_drawlist_free(&l);
     st = o.err ? PD_ERR_NOMEM : pb_flush(&o, fn, user);
     pb_free(&o);

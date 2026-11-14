@@ -297,6 +297,11 @@ PD_API pd_status pd_drawing_to_png(const pd_doc* doc, pd_res_id res, pd_sp width
  * rasterizer.
  */
 PD_API pd_status pd_layout_write_svg(const pd_layout* layout, int32_t page, pd_writer fn, void* user);
+/** part of a page as SVG: what is drawn for the drawing shapes of those ids (pd_draw.shape: a drawing's top-level
+    shapes, their text too) within the box x, y, w, h of the page, the box its viewport; nshapes 0: all that is in
+    the box; w or h 0: the box round what is drawn for those shapes (nshapes > 0). PD_ERR_RANGE when nothing is */
+PD_API pd_status pd_layout_write_svg_part(const pd_layout* layout, int32_t page, pd_sp x, pd_sp y, pd_sp w, pd_sp h,
+                                          const int32_t* shapes, int32_t nshapes, pd_writer fn, void* user);
 
 /** a drawing resource (application/vnd.parade.drawing+json) as SVG, width by height; PD_ERR_ARG if it is none.
     Its text boxes' stories, laid out with the page, are not in it */
