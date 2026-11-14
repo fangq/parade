@@ -434,6 +434,8 @@ type
     procedure PaintRotHandle(const P: TPoint);
     { a press on a handle of the text box being typed in: the box selected, and sized or turned by the drag }
     function TypingBoxHandle(X, Y: Integer): Boolean;
+    { a press inside the text box being typed in but off its lines: the caret to its text's end; False otherwise }
+    function TypingBoxInside(X, Y: Integer; Extend: Boolean): Boolean;
     function ReplaceDrawing(const P: pd_pos; const Json: string; const Lbl: string): Boolean;
     function ReplaceDrawingRes(const P: pd_pos; R: pd_res_id; const Lbl: string): Boolean;
     procedure PushShapeStep(const Lbl: string; const At: pd_pos);
@@ -8884,6 +8886,44 @@ end;
 
 { the text box the caret is in: its edge dashed, as Word shows the one being typed in -- where it is taken to be
   moved or sized }
+function TParadeEdit.TypingBoxInside(X, Y: Integer; Extend: Boolean): Boolean;
+var
+  D, P: pd_pos;
+  Sid, K, I: Integer;
+  Story, B, C: pd_block_id;
+  Info: pd_block_info;
+begin
+  Result := False;
+  if FShapeOn or not CaretTextBox(D, Sid) or (Sid < 0) then
+    Exit;
+  Story := StoryTopOf(CaretPos.block);
+  if Story = 0 then
+    Exit;
+  FShapeOn := True;     { (its frame, as a selected shape's: turned, its inside) }
+  FShapeAt := D;
+  FShapeSid := Sid;
+  SetLength(FShapeMore, 0);
+  K := ShapeHandleAt(X, Y, I);
+  FShapeOn := False;
+  if K <> 8 then
+    Exit;     { outside it: the click as any other }
+  if PointToPos(X, Y, P) and (StoryTopOf(P.block) = Story) then
+    Exit;     { on its text: placed there, as any click in text }
+  B := Story;   { its last paragraph's end }
+  while (pd_doc_block_info(FDoc, B, Info) = PD_OK) and (Info.kind <> PD_BLOCK_PARAGRAPH) and (Info.child_count > 0) do
+  begin
+    C := pd_doc_child(FDoc, B, Info.child_count - 1);
+    if C = 0 then
+      Break;
+    B := C;
+  end;
+  if (pd_doc_block_info(FDoc, B, Info) <> PD_OK) or (Info.kind <> PD_BLOCK_PARAGRAPH) then
+    Exit;
+  SetCaret(PdPos(B, Length(ParaText(B))), Extend);
+  Invalidate;
+  Result := True;
+end;
+
 function TParadeEdit.TypingBoxHandle(X, Y: Integer): Boolean;
 var
   D: pd_pos;
@@ -14235,10 +14275,27 @@ function TParadeEdit.InsertShape(const Kind: string): Boolean;
 var
   Pg: Int32;
   X, Y, W, H, JW, JH: Double;
+  D, Was: pd_pos;
+  Sid: Integer;
 begin
   Result := False;
   if EditBlocked or (Kind = '') then
     Exit;
+  if not FShapeOn and CaretTextBox(D, Sid) then
+  begin   { typing in a canvas's text box: the shape into that canvas (a Word text box's text: as before) }
+    Was := CaretPos;
+    FShapeOn := True;
+    FShapeAt := D;
+    FShapeSid := -1;
+    SetLength(FShapeMore, 0);
+    if CanvasSelected then
+      SetCaret(D, False)
+    else
+    begin
+      FShapeOn := False;
+      SetCaret(Was, False);
+    end;
+  end;
   EnsureCanvas;
   if FShapeOn and (FShapeSid >= 0) then
     FShapeSid := -1;    { into the drawing the shape is in }
@@ -17720,6 +17777,11 @@ begin
   FLabelOn := False;
   if (Button = mbLeft) and (Shift * [ssShift, ssCtrl, ssDouble, ssTriple] = []) and TypingBoxHandle(X, Y) then
     Exit;     { a handle of the text box being typed in: sized or turned }
+  if (Button = mbLeft) and (Shift * [ssCtrl, ssTriple] = []) and TypingBoxInside(X, Y, ssShift in Shift) then
+  begin   { inside the text box being typed in, off its lines: the caret at its text's end (the click kept to it) }
+    FDragging := False;
+    Exit;
+  end;
   { a bullet or a number: its list's labels at that level, as Word selects them -- before the shape selected is
     taken for a move (a slide's canvas is selected while its text is edited, and a bullet is inside a text box,
     away from the handles on its edge) }
@@ -17887,6 +17949,8 @@ begin
   end;
   if FShapeDrag >= 0 then
   begin
+    if FShapeDrag in [0..12] then
+      ShapeDragMove(X, Y, Shift);     { where it was let go, though no move came before (a quick flick) }
     D := FShapeDrag;
     FShapeDrag := -1;
     SetLength(FGuideX, 0);
