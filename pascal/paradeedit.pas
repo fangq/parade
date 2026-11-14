@@ -648,6 +648,13 @@ type
     function SelectedSvg(out Svg: RawByteString): Boolean;
     { the selected picture made from an SVG made the SVG's shapes, a group in its place and size; one step of undo }
     function ConvertToShapes: Boolean;
+    { the selected shape's text (a text box's, or a shape's own): its story; 0 when it has none (or is a slide
+      layout's, not the slide's) }
+    function SelectedTextStory: pd_block_id;
+    { the selected shape's text as shapes (pd_layout_text_shapes: its letters' outlines, a freeform a line and colour,
+      grouped, over it); the shape kept under them when it has a fill or a line of its own, else gone; one step of
+      undo }
+    function ConvertTextToShapes: Boolean;
     { the selected shapes taken out of their drawing at once: one step of undo }
     function DeleteShapes: Boolean;
     { whether the clipboard has shapes copied from a drawing }
@@ -15074,6 +15081,112 @@ begin
     pd_doc_end_group(FDoc);
     Dec(FStepDepth);
   end;
+end;
+
+function TParadeEdit.SelectedTextStory: pd_block_id;
+var
+  Boxes: TParadeShapeBoxes;
+  I: Integer;
+begin
+  Result := 0;
+  if not FShapeOn or (FShapeSid < 0) or (Length(FShapeMore) > 0) or InheritedShape(FShapeAt, FShapeSid) then
+    Exit;
+  Boxes := DrawingShapes(FShapeAt);
+  for I := 0 to High(Boxes) do
+    if Boxes[I].Sid = FShapeSid then
+      Exit(Boxes[I].Story);
+end;
+
+{ a shape's own look in its XML (Part): a fill or a line of its own, or a theme's (wps:style) }
+function ShapeHasLook(const Part: string): Boolean;
+var
+  A, B, R: Integer;
+  Pr: string;
+begin
+  A := Pos('<wps:spPr', Part);
+  B := Pos('</wps:spPr>', Part);
+  Result := False;
+  if (A > 0) and (B > A) then
+  begin
+    Pr := Copy(Part, A, B - A);
+    R := Pos('<a:ln', Pr);
+    Result := (Pos('<a:solidFill', Copy(Pr, 1, IfThen(R > 0, R, MaxInt))) > 0) or (Pos('<a:gradFill', Pr) > 0) or
+      (Pos('<a:pattFill', Pr) > 0) or (Pos('<a:blipFill', Pr) > 0) or
+      ((R > 0) and (Pos('<a:noFill/>', Copy(Pr, R, MaxInt)) = 0) and
+       ((Pos('<a:solidFill', Copy(Pr, R, MaxInt)) > 0) or (Pos('<a:gradFill', Copy(Pr, R, MaxInt)) > 0)));
+  end;
+  if not Result and (Pos('<wps:style>', Part) > 0) then
+    Result := (Pos('<a:fillRef idx="0"', Part) = 0) or (Pos('<a:lnRef idx="0"', Part) = 0);
+end;
+
+function TParadeEdit.ConvertTextToShapes: Boolean;
+var
+  Story: pd_block_id;
+  M: TParadeDrawMap;
+  Ms: TMemoryStream;
+  Sh, Xml, Part: string;
+  Els: TXmlEls;
+  E, T, P, L, Id, K, InsAt, A, N: Integer;
+  Kq: Double;
+begin
+  Result := False;
+  if EditBlocked or not CanvasSelected then
+    Exit;
+  Story := SelectedTextStory;
+  if (Story = 0) or not DrawMap(M) or (M.KX <= 0) then
+    Exit;
+  Kq := 1 / (M.KX * EmuD);    { page sp to the canvas's EMU }
+  Ms := TMemoryStream.Create;
+  try
+    if (pd_layout_text_shapes(FLayout, M.Pg, Story, Round(M.X), Round(M.Y), Kq, Kq, @WriteToStream, Ms) <> PD_OK) or
+       (Ms.Size = 0) then
+      Exit;
+    SetString(Sh, PAnsiChar(Ms.Memory), Ms.Size);
+  finally
+    Ms.Free;
+  end;
+  if not KeptXml(Xml) then     { (its text boxes marked whose story each is: the others keep theirs) }
+    Exit;
+  Els := XmlElements(Xml);
+  E := SidElement(Els, FShapeSid);
+  if E < 0 then
+    Exit;
+  T := E;     { the canvas's child it is in: the shapes go over that }
+  while (Els[T].Parent >= 0) and (Els[Els[T].Parent].Name <> 'wpc:wpc') do
+    T := Els[T].Parent;
+  Id := 1;    { ids none of the drawing's shapes has }
+  P := Pos('id="', Xml);
+  while P > 0 do
+  begin
+    L := PosEx('"', Xml, P + 4);
+    if L > 0 then
+      Id := Max(Id, StrToIntDef(Copy(Xml, P + 4, L - P - 4), 0) + 1);
+    P := PosEx('id="', Xml, P + 4);
+  end;
+  K := 0;
+  while Pos('%ID' + IntToStr(K) + '%', Sh) > 0 do
+  begin
+    Sh := StringReplace(Sh, '%ID' + IntToStr(K) + '%', IntToStr(Id + K), [rfReplaceAll]);
+    Inc(K);
+  end;
+  InsAt := Els[T].B;
+  Insert(Sh, Xml, InsAt);     { (after it: what follows changes no place before) }
+  Part := Copy(Xml, Els[E].A, Els[E].B - Els[E].A);
+  if ShapeHasLook(Part) then
+  begin   { its fill, its line kept: its text gone from it }
+    A := Pos('<wps:txbx>', Part);
+    N := Pos('</wps:txbx>', Part);
+    if (A = 0) or (N < A) then
+      Exit;
+    Delete(Xml, Els[E].A + A - 1, N + Length('</wps:txbx>') - A);
+    Dec(InsAt, N + Length('</wps:txbx>') - A);
+  end
+  else
+  begin   { only its text: it all gone }
+    Delete(Xml, Els[E].A, Els[E].B - Els[E].A);
+    Dec(InsAt, Els[E].B - Els[E].A);
+  end;
+  Result := ApplyKeptXml(Xml, 'Convert text to shapes', SidAt(XmlElements(Xml), InsAt));
 end;
 
 function TParadeEdit.AddConnector(const Kind: string; X1, Y1, X2, Y2: Double; StartSid: Integer;
