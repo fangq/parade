@@ -1209,6 +1209,13 @@ function pd_pptx_slide_timing(doc: Ppd_doc; section: pd_block_id; buf: PAnsiChar
 { set it (the same form; nil/0 or an empty <pd:tail> leaves none): a new resource, not an undo step }
 function pd_pptx_set_slide_timing(doc: Ppd_doc; section: pd_block_id; xml: PAnsiChar; len: Int32): pd_status;
   cdecl; PDEXT;
+{ a new slide's canvas on a layout the presentation came with ('ppt/slideLayouts/slideLayout2.xml'): its
+  placeholders empty, formatted as the layout says; a drawing resource of doc }
+function pd_pptx_layout_slide(doc: Ppd_doc; layout: PAnsiChar; out res: pd_res_id): pd_status; cdecl; PDEXT;
+{ the layout a slide made since was put on (PD_ERR_RANGE: none chosen); set it, for the PowerPoint export }
+function pd_pptx_slide_layout(doc: Ppd_doc; section: pd_block_id; buf: PAnsiChar; cap: Int32): pd_status;
+  cdecl; PDEXT;
+function pd_pptx_set_slide_layout(doc: Ppd_doc; section: pd_block_id; layout: PAnsiChar): pd_status; cdecl; PDEXT;
 
 { helpers }
 function PT(v: Double): pd_sp; inline;

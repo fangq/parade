@@ -433,6 +433,7 @@ type
     procedure PaintTextBoxFrame;
     procedure PaintPlaceholderPrompts;
     function KeptPartData(const AName: string): string;
+    function KeptPartNames: TStringArray;
     procedure PaintSizeHandles(L, T, R, B: Integer);
     procedure PaintRotHandle(const P: TPoint);
     { a press on a handle of the text box being typed in: the box selected, and sized or turned by the drag }
@@ -819,8 +820,22 @@ type
     function NewLayoutSlide(After: Integer): Boolean;
     { the slide's placeholders back where its layout has them, their text kept (PowerPoint's Reset) }
     function ResetSlide(Index: Integer): Boolean;
-    { the layout part the slide is on (ppt/slideLayouts/...), as the presentation came; '' none known }
+    { the layout part the slide is on (ppt/slideLayouts/...), as the presentation came or New Slide chose; '' none
+      known }
     function SlideLayoutPath(Index: Integer): string;
+    { the layouts the presentation came with, in the order their parts are numbered: each one's name (its cSld's,
+      "Title and Content"), part and type (title, obj, titleOnly, blank, ...); none for a deck not read from
+      PowerPoint's }
+    function SlideLayouts(out Names, Paths, Types: TStringArray): Integer;
+    { and the design each is of: its master's theme's name ("Office Theme"), the layouts by master, in the order the
+      masters' parts are numbered }
+    function SlideLayoutsByMaster(out Names, Paths, Types, Designs: TStringArray): Integer;
+    { PowerPoint's New Slide on a layout: after slide After, the layout's placeholders empty, formatted as it says,
+      with its master's and its own shapes; one step }
+    function NewSlideOnLayout(After: Integer; const Layout: string): Boolean;
+    { the layout PowerPoint puts the slide after this one on: after a Title Slide, Title and Content (the first
+      layout of type obj); '' the same layout as this one's }
+    function NextSlideLayout(Index: Integer): string;
     { the placeholders of the slide's layout, placed where the layout or its master has them; False when the layout
       is not known (a presentation not read from PowerPoint's) }
     function LayoutPlaceholders(Index: Integer; out Phs: TParadeLayoutPhs): Boolean;
@@ -13057,6 +13072,7 @@ var
   Map, Key, L: string;
   Lines: TStringList;
   I, K: Integer;
+  Chosen: array[0..511] of AnsiChar;
 begin
   Result := '';
   Map := KeptPartData('map');
@@ -13067,6 +13083,9 @@ begin
     Lines.Text := Map;
     for K := Index downto 0 do
     begin
+      Chosen[0] := #0;   { a slide New Slide put on a layout: that one }
+      if (pd_pptx_slide_layout(FDoc, SlideSection(K), @Chosen[0], SizeOf(Chosen)) = PD_OK) and (Chosen[0] <> #0) then
+        Exit(StrPas(PAnsiChar(@Chosen[0])));
       Key := IntToStr(SlideSection(K)) + #9;
       for I := 0 to Lines.Count - 1 do
       begin
@@ -13084,6 +13103,294 @@ begin
   finally
     Lines.Free;
   end;
+end;
+
+{ the names of the parts the PowerPoint reader kept, as KeptPartData finds them }
+function TParadeEdit.KeptPartNames: TStringArray;
+var
+  R: pd_res_id;
+  Mime: PAnsiChar;
+  Data: Pointer;
+  Len: csize_t;
+  P, E, Z, K, N: PtrUInt;
+  Nm: string;
+  B: PByte;
+  C: Integer;
+begin
+  Result := nil;
+  C := 0;
+  R := 1;
+  while (R < 100000) and (pd_doc_resource(FDoc, R, @Mime, @Data, @Len) = PD_OK) do
+  begin
+    if StrComp(Mime, 'application/vnd.parade.pptx-kept-parts') = 0 then
+    begin
+      B := PByte(Data);
+      P := 0;
+      while P < Len do
+      begin   { name NUL content-type NUL source NUL extra NUL length(4) bytes }
+        Z := P;
+        while (Z < Len) and (B[Z] <> 0) do Inc(Z);
+        SetString(Nm, PAnsiChar(@B[P]), Z - P);
+        E := Z + 1;
+        for K := 1 to 3 do
+        begin
+          while (E < Len) and (B[E] <> 0) do Inc(E);
+          Inc(E);
+        end;
+        if E + 4 > Len then
+          Exit;
+        N := B[E] or (B[E + 1] shl 8) or (B[E + 2] shl 16) or (PtrUInt(B[E + 3]) shl 24);
+        Inc(E, 4);
+        if E + N > Len then
+          Exit;
+        SetLength(Result, C + 1);
+        Result[C] := Nm;
+        Inc(C);
+        P := E + N;
+      end;
+      Exit;
+    end;
+    Inc(R);
+  end;
+end;
+
+function TParadeEdit.SlideLayouts(out Names, Paths, Types: TStringArray): Integer;
+var
+  All: TStringArray;
+  I, J, N, Q, E: Integer;
+  Xml, T, Nm: string;
+
+  function NumOf(const Path: string): Integer;   { slideLayout12.xml: 12 }
+  var
+    K: Integer;
+  begin
+    K := Length(Path) - 4;
+    while (K > 0) and (Path[K] in ['0'..'9']) do
+      Dec(K);
+    Result := StrToIntDef(Copy(Path, K + 1, Length(Path) - 4 - K), MaxInt);
+  end;
+
+begin
+  Names := nil;
+  Paths := nil;
+  Types := nil;
+  N := 0;
+  All := KeptPartNames;
+  for I := 0 to High(All) do
+    if (Pos('slideLayouts/', All[I]) > 0) and (Pos('_rels/', All[I]) = 0) and
+       (LowerCase(ExtractFileExt(All[I])) = '.xml') then
+    begin
+      Xml := KeptPartData(All[I]);
+      Nm := '';
+      Q := Pos('<p:cSld name="', Xml);
+      if Q > 0 then
+      begin
+        E := PosEx('"', Xml, Q + 14);
+        Nm := StringReplace(StringReplace(StringReplace(StringReplace(Copy(Xml, Q + 14, E - Q - 14), '&quot;', '"',
+          [rfReplaceAll]), '&lt;', '<', [rfReplaceAll]), '&gt;', '>', [rfReplaceAll]), '&amp;', '&', [rfReplaceAll]);
+      end;
+      T := '';
+      Q := Pos('<p:sldLayout', Xml);
+      if Q > 0 then
+      begin
+        E := PosEx('>', Xml, Q);
+        J := PosEx(' type="', Copy(Xml, Q, E - Q));
+        if J > 0 then
+          T := Copy(Xml, Q + J + 6, PosEx('"', Xml, Q + J + 6) - (Q + J + 6));
+      end;
+      if Nm = '' then
+        Nm := ChangeFileExt(ExtractFileName(All[I]), '');
+      { in place by the number of its part }
+      SetLength(Names, N + 1);
+      SetLength(Paths, N + 1);
+      SetLength(Types, N + 1);
+      J := N;
+      while (J > 0) and (NumOf(Paths[J - 1]) > NumOf(All[I])) do
+      begin
+        Names[J] := Names[J - 1];
+        Paths[J] := Paths[J - 1];
+        Types[J] := Types[J - 1];
+        Dec(J);
+      end;
+      Names[J] := Nm;
+      Paths[J] := All[I];
+      Types[J] := T;
+      Inc(N);
+    end;
+  Result := N;
+end;
+
+function TParadeEdit.SlideLayoutsByMaster(out Names, Paths, Types, Designs: TStringArray): Integer;
+var
+  N0, P0, T0: TStringArray;
+  Mst: array of string;
+  MNum: array of Integer;
+  I, J, Q, E: Integer;
+  Rels, Target, Th, ThName, Dir: string;
+
+  function Resolve(const Base, Rel: string): string;   { ../slideMasters/x.xml from ppt/slideLayouts/ }
+  begin
+    Result := ExpandFileName('/' + ExtractFilePath(Base) + Rel);
+    Delete(Result, 1, 1);
+  end;
+
+  function NumOf(const Path: string): Integer;
+  var
+    K: Integer;
+  begin
+    K := Length(Path) - 4;
+    while (K > 0) and (Path[K] in ['0'..'9']) do
+      Dec(K);
+    Result := StrToIntDef(Copy(Path, K + 1, Length(Path) - 4 - K), MaxInt);
+  end;
+
+  { the first relationship's target of a part whose type or target names Kind }
+  function RelTarget(const Part, Kind: string): string;
+  var
+    R, Tag: string;
+    A, B: Integer;
+  begin
+    Result := '';
+    R := KeptPartData(ExtractFilePath(Part) + '_rels/' + ExtractFileName(Part) + '.rels');
+    A := Pos('<Relationship ', R);
+    while A > 0 do
+    begin
+      B := PosEx('>', R, A);
+      if B = 0 then
+        Exit;
+      Tag := Copy(R, A, B - A);
+      if Pos(Kind, Tag) > 0 then
+      begin
+        A := Pos('Target="', Tag);
+        if A > 0 then
+        begin
+          Result := Copy(Tag, A + 8, MaxInt);
+          Result := Copy(Result, 1, Pos('"', Result) - 1);
+          Exit;
+        end;
+      end;
+      A := PosEx('<Relationship ', R, B);
+    end;
+  end;
+
+begin
+  Result := SlideLayouts(N0, P0, T0);
+  SetLength(Mst, Result);
+  SetLength(MNum, Result);
+  SetLength(Designs, Result);
+  for I := 0 to Result - 1 do
+  begin
+    Target := RelTarget(P0[I], 'slideMaster');
+    if Target <> '' then
+      Mst[I] := Resolve(P0[I], Target)
+    else
+      Mst[I] := '';
+    MNum[I] := NumOf(Mst[I]);
+    { its master's theme's name }
+    ThName := '';
+    if Mst[I] <> '' then
+    begin
+      Target := RelTarget(Mst[I], 'theme');
+      if Target <> '' then
+      begin
+        Th := KeptPartData(Resolve(Mst[I], Target));
+        Q := Pos('<a:theme ', Th);
+        if Q > 0 then
+        begin
+          E := PosEx('>', Th, Q);
+          J := PosEx(' name="', Copy(Th, Q, E - Q));
+          if J > 0 then
+            ThName := Copy(Th, Q + J + 6, PosEx('"', Th, Q + J + 6) - (Q + J + 6));
+        end;
+      end;
+      if ThName = '' then
+        ThName := ChangeFileExt(ExtractFileName(Mst[I]), '');
+    end;
+    Designs[I] := ThName;
+  end;
+  { by master, then as they were (by their part's number): a stable insertion sort }
+  Names := Copy(N0);
+  Paths := Copy(P0);
+  Types := Copy(T0);
+  for I := 1 to Result - 1 do
+  begin
+    J := I;
+    while (J > 0) and (MNum[J - 1] > MNum[J]) do
+    begin
+      Dir := Names[J]; Names[J] := Names[J - 1]; Names[J - 1] := Dir;
+      Dir := Paths[J]; Paths[J] := Paths[J - 1]; Paths[J - 1] := Dir;
+      Dir := Types[J]; Types[J] := Types[J - 1]; Types[J - 1] := Dir;
+      Dir := Designs[J]; Designs[J] := Designs[J - 1]; Designs[J - 1] := Dir;
+      Q := MNum[J]; MNum[J] := MNum[J - 1]; MNum[J - 1] := Q;
+      Dec(J);
+    end;
+  end;
+end;
+
+function TParadeEdit.NextSlideLayout(Index: Integer): string;
+var
+  Names, Paths, Types, Designs: TStringArray;
+  I, Cur: Integer;
+begin
+  Result := '';
+  if SlideLayouts(Names, Paths, Types) = 0 then
+    Exit;
+  Cur := -1;
+  for I := 0 to High(Paths) do
+    if Paths[I] = SlideLayoutPath(Index) then
+      Cur := I;
+  if (Cur < 0) or (Types[Cur] <> 'title') then
+    Exit;
+  if SlideLayoutsByMaster(Names, Paths, Types, Designs) = 0 then
+    Exit;
+  Cur := -1;
+  for I := 0 to High(Paths) do
+    if Paths[I] = SlideLayoutPath(Index) then
+      Cur := I;
+  for I := 0 to High(Types) do    { its own design's first, as PowerPoint picks it }
+    if (Types[I] = 'obj') and (Cur >= 0) and (Designs[I] = Designs[Cur]) then
+      Exit(Paths[I]);
+  for I := 0 to High(Types) do
+    if Types[I] = 'obj' then
+      Exit(Paths[I]);
+end;
+
+function TParadeEdit.NewSlideOnLayout(After: Integer; const Layout: string): Boolean;
+var
+  Src, Sec: pd_block_id;
+  Sp: pd_section_props;
+  R: pd_res_id;
+  P: pd_pos;
+begin
+  Result := False;
+  if EditBlocked or not FCanvasPage or (After < -1) or (After >= SlideCount) or (Layout = '') then
+    Exit;
+  Src := pd_doc_child(FDoc, pd_doc_root(FDoc), Max(0, After));
+  if pd_doc_section_props(FDoc, Src, Sp) <> PD_OK then
+    Exit;
+  R := 0;
+  if (pd_pptx_layout_slide(FDoc, PAnsiChar(Layout), R) <> PD_OK) or (R = 0) then
+    Exit;
+  PushShapeStep('New slide', FShapeAt);
+  pd_doc_begin_group(FDoc, 'New slide');
+  try
+    if pd_doc_insert_block(FDoc, pd_doc_root(FDoc), After + 1, PD_BLOCK_SECTION, Sec) <> PD_OK then
+      Exit;
+    Sp.notes := 0;      { its own notes, none yet; no animations; shown }
+    Sp.timing := 0;
+    Sp.hidden := 0;
+    pd_doc_set_section_props(FDoc, Sec, Sp);
+    Result := PutPageCanvas(Sec, R);
+    if Result then
+      pd_pptx_set_slide_layout(FDoc, Sec, PAnsiChar(Layout));
+  finally
+    pd_doc_end_group(FDoc);
+  end;
+  Changed;
+  if Result then
+    GoToSlide(After + 1);
+  if Result and SectionCanvas(FDoc, Sec, P) then
+    FShapeAt := P;
 end;
 
 { the placeholders of a layout's or a master's XML, with where they are when they say so }
