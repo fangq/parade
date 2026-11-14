@@ -18482,6 +18482,7 @@ type
     Y, X0, X1, LineEnd: pd_sp;
     Off: Int64;
     LastSel: Boolean;
+    Rot: Int32;   { a turned shape's text: Y, X0, X1 and LineEnd in its own frame, turned back by Rot about the origin }
   end;
 
 procedure TParadeEdit.PaintPage(Img: TLazIntfImage; Page, OX, OY: Integer; PxScale: Double; DrawCaret: Boolean;
@@ -18515,15 +18516,40 @@ var
   procedure Highlight(const A, B: pd_pos; Col: UInt32; Alpha: Integer; ThroughEnd: Boolean);
   var
     I, K: Integer;
+    IX, IY: pd_sp;
+    R: Int32;
+    Th, Cs, Sn, U, V: Double;
+    Quad: TPtDArray;
+
+    { a point of the text's own frame on the screen }
+    procedure Corner(J: Integer; U0, V0: Double);
+    begin
+      Quad[J].X := OX + (U0 * Cs - V0 * Sn) * PxScale;
+      Quad[J].Y := OY + (U0 * Sn + V0 * Cs) * PxScale;
+    end;
+
   begin
     NB := 0;
     SetLength(Bands, 0);
     for I := 0 to N - 1 do
       if ((Items[I].kind = PD_DRAW_GLYPH) or (Items[I].kind = PD_DRAW_IMAGE)) and (Items[I].region in [0, 3, 4, 5]) then
       begin
+        { a turned shape's glyph: its pen turned back, so a line's glyphs share a Y and run along X }
+        R := 0;
+        if Items[I].kind = PD_DRAW_GLYPH then
+          R := Items[I].rotation;
+        IX := Items[I].x;
+        IY := Items[I].y;
+        if R <> 0 then
+        begin
+          Th := R / 60000 * Pi / 180;
+          IX := Round(Items[I].x * Cos(Th) + Items[I].y * Sin(Th));
+          IY := Round(Items[I].y * Cos(Th) - Items[I].x * Sin(Th));
+        end;
         { the band of this line: the last one, or a new one }
         K := NB - 1;
-        while (K >= 0) and ((Bands[K].Block <> Items[I].block) or (Bands[K].Y <> Items[I].y)) do
+        while (K >= 0) and ((Bands[K].Block <> Items[I].block) or (Bands[K].Rot <> R) or
+          ((R = 0) and (Bands[K].Y <> IY)) or ((R <> 0) and (Abs(Bands[K].Y - IY) > PD_SP_PER_PT div 4))) do
           Dec(K);
         if K < 0 then
         begin
@@ -18532,26 +18558,27 @@ var
           K := NB;
           Inc(NB);
           Bands[K].Block := Items[I].block;
-          Bands[K].Y := Items[I].y;
+          Bands[K].Y := IY;
           Bands[K].X0 := High(pd_sp);
           Bands[K].X1 := Low(pd_sp);
           Bands[K].LineEnd := Low(pd_sp);
           Bands[K].Off := -1;
           Bands[K].LastSel := False;
+          Bands[K].Rot := R;
         end;
-        if Items[I].x + Items[I].w > Bands[K].LineEnd then
-          Bands[K].LineEnd := Items[I].x + Items[I].w;
+        if IX + Items[I].w > Bands[K].LineEnd then
+          Bands[K].LineEnd := IX + Items[I].w;
         Q := PdPos(Items[I].block, Items[I].offset);
         Bands[K].LastSel := (Compare(Q, A) >= 0) and (Compare(Q, B) < 0);
         if Bands[K].LastSel then
         begin
-          if Items[I].x < Bands[K].X0 then
+          if IX < Bands[K].X0 then
           begin
-            Bands[K].X0 := Items[I].x;
+            Bands[K].X0 := IX;
             Bands[K].Off := Items[I].offset;
           end;
-          if Items[I].x + Items[I].w > Bands[K].X1 then
-            Bands[K].X1 := Items[I].x + Items[I].w;
+          if IX + Items[I].w > Bands[K].X1 then
+            Bands[K].X1 := IX + Items[I].w;
         end;
       end;
     for K := 0 to NB - 1 do
@@ -18567,8 +18594,23 @@ var
           end;
           if LastSel and ThroughEnd then   { its last character is selected: the selection goes on, through the line's end }
             X1 := LineEnd + Round(4 / PxScale);
-          FillRectImg(Img, OX + Floor0(X0 * PxScale), OY + Round((Y - CAsc) * PxScale), OX + Round(X1 * PxScale),
-            OY + Round((Y + CDesc) * PxScale), Col, Alpha);
+          if Rot = 0 then
+            FillRectImg(Img, OX + Floor0(X0 * PxScale), OY + Round((Y - CAsc) * PxScale), OX + Round(X1 * PxScale),
+              OY + Round((Y + CDesc) * PxScale), Col, Alpha)
+          else
+          begin   { turned with its text: the band in the text's frame, its corners turned onto the page }
+            Th := Rot / 60000 * Pi / 180;
+            Cs := Cos(Th);
+            Sn := Sin(Th);
+            SetLength(Quad, 4);
+            U := X0;
+            V := Y;
+            Corner(0, U, V - CAsc);
+            Corner(1, X1, V - CAsc);
+            Corner(2, X1, V + CDesc);
+            Corner(3, U, V + CDesc);
+            FillPolygonImg(Img, Quad, (Col and $FFFFFF) or (UInt32(Alpha and $FF) shl 24));
+          end;
         end;
   end;
 
