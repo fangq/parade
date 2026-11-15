@@ -24,11 +24,12 @@ uses
 {$ELSE}
   {$LINKLIB parade}
   {$IFDEF WINDOWS}
-  { a library built by MinGW gcc: its C runtime, the helpers it calls and libgcc's,
-    found beside libparade.a (led's Makefile copies them there from gcc) }
+  { a library built by MinGW gcc: its C runtime, the helpers it calls, libgcc's and
+    its kernel32 imports, found beside libparade.a (led's Makefile copies them there from gcc) }
   {$LINKLIB mingwex}
   {$LINKLIB msvcrt}
   {$LINKLIB gcc}
+  {$LINKLIB kernel32}  { the imports zlibmt's threads and the run-time zlib lookup make }
   {$ELSE}
   {$LINKLIB m}
   {$IFDEF LINUX}
