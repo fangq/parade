@@ -6,7 +6,7 @@
   against the C compiler's.
 
   Linking: by default the static library is linked (-Fl<dir of libparade.a>,
-  plus libc and libm); define PARADE_DYNAMIC to load libparade.so/.dll. }
+  plus libc and libm, or MinGW's runtime on Windows); define PARADE_DYNAMIC to load libparade.so/.dll. }
 
 unit parade;
 
@@ -23,12 +23,20 @@ uses
   {$DEFINE PDEXT := external 'parade'}
 {$ELSE}
   {$LINKLIB parade}
+  {$IFDEF WINDOWS}
+  { a library built by MinGW gcc: its C runtime, the helpers it calls and libgcc's,
+    found beside libparade.a (led's Makefile copies them there from gcc) }
+  {$LINKLIB mingwex}
+  {$LINKLIB msvcrt}
+  {$LINKLIB gcc}
+  {$ELSE}
   {$LINKLIB m}
   {$IFDEF LINUX}
   {$LINKLIB pthread}   { zlibmt's threads, and the system zlib opened at run time }
   {$LINKLIB dl}
   {$ENDIF}
   {$LINKLIB c}
+  {$ENDIF}
   {$DEFINE PDEXT := external}
 {$ENDIF}
 
