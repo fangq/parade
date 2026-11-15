@@ -6,7 +6,9 @@
   against the C compiler's.
 
   Linking: by default the static library is linked (-Fl<dir of libparade.a>,
-  plus libc and libm, or MinGW's runtime on Windows); define PARADE_DYNAMIC to load libparade.so/.dll. }
+  plus libc and libm); define PARADE_DYNAMIC to load libparade.so/.dll.  On
+  Windows it is always parade.dll (make build/parade.dll): FPC's own linker
+  stops with an internal error on MinGW gcc's objects. }
 
 unit parade;
 
@@ -19,25 +21,17 @@ interface
 uses
   ctypes;
 
+{$IFDEF WINDOWS}{$DEFINE PARADE_DYNAMIC}{$ENDIF}  { parade.dll: see the note at the top of parade.pas }
 {$IFDEF PARADE_DYNAMIC}
   {$DEFINE PDEXT := external 'parade'}
 {$ELSE}
   {$LINKLIB parade}
-  {$IFDEF WINDOWS}
-  { a library built by MinGW gcc: its C runtime, the helpers it calls, libgcc's and
-    its kernel32 imports, found beside libparade.a (led's Makefile copies them there from gcc) }
-  {$LINKLIB mingwex}
-  {$LINKLIB msvcrt}
-  {$LINKLIB gcc}
-  {$LINKLIB kernel32}  { the imports zlibmt's threads and the run-time zlib lookup make }
-  {$ELSE}
   {$LINKLIB m}
   {$IFDEF LINUX}
   {$LINKLIB pthread}   { zlibmt's threads, and the system zlib opened at run time }
   {$LINKLIB dl}
   {$ENDIF}
   {$LINKLIB c}
-  {$ENDIF}
   {$DEFINE PDEXT := external}
 {$ENDIF}
 

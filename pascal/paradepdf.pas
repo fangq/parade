@@ -17,6 +17,7 @@ interface
 uses
   ctypes, parade;
 
+{$IFDEF WINDOWS}{$DEFINE PARADE_DYNAMIC}{$ENDIF}  { parade.dll: see the note at the top of parade.pas }
 {$IFDEF PARADE_DYNAMIC}
   {$DEFINE PDEXT := external 'parade'}
 {$ELSE}

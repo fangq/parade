@@ -62,6 +62,11 @@ $(LIB): $(OBJ)
 $(SO): $(OBJ)
 	$(CC) -shared -o $@ $^ $(LDLIBS)
 
+# Windows: the library as a DLL, which parade.pas loads there (FPC's own linker cannot take MinGW
+# gcc's objects); libgcc linked in, so it needs only what Windows has
+$(BUILD)/parade.dll: $(OBJ)
+	$(CC) -shared -static-libgcc -o $@ $^ $(LDLIBS)
+
 $(BUILD)/test_%: tests/test_%.c $(LIB)
 	$(CC) $(PD_CFLAGS) $(CFLAGS) $< $(LIB) -o $@ $(LDLIBS)
 
